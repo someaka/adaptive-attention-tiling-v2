@@ -157,6 +157,55 @@ class AlgorithmOptimizer:
         self.loop_opt = LoopOptimizer() if enable_loop_opt else None
         self.numerical_opt = NumericalOptimizer() if enable_numerical_opt else None
         self.metrics: List[AlgorithmMetrics] = []
+        self.operations: Dict[str, Callable] = {}
+        self.optimization_level = "O0"
+    
+    def register_fast_path(self, name: str, implementation: Callable, condition: Callable[..., bool]) -> None:
+        """Register a fast path implementation."""
+        if self.fast_path:
+            self.fast_path.register_fast_path(name, condition, implementation)
+    
+    def register_operation(self, name: str, operation: Callable) -> None:
+        """Register an operation for optimization."""
+        self.operations[name] = self.optimize_algorithm(operation)
+    
+    def optimize_operation(self, operation_name: str, *args, **kwargs) -> Any:
+        """Execute an optimized operation."""
+        if operation_name not in self.operations:
+            raise ValueError(f"Operation {operation_name} not registered")
+        return self.operations[operation_name](*args, **kwargs)
+    
+    def set_optimization_level(self, level: str) -> None:
+        """Set the optimization level (O0-O3)."""
+        if level not in ["O0", "O1", "O2", "O3"]:
+            raise ValueError("Optimization level must be one of: O0, O1, O2, O3")
+        self.optimization_level = level
+        
+        # Configure optimizations based on level
+        if level == "O0":
+            self.enable_profiling = False
+            self.fast_path = None
+            self.branch_opt = None
+            self.loop_opt = None
+            self.numerical_opt = None
+        elif level == "O1":
+            self.enable_profiling = True
+            self.fast_path = FastPathOptimizer()
+            self.branch_opt = None
+            self.loop_opt = None
+            self.numerical_opt = None
+        elif level == "O2":
+            self.enable_profiling = True
+            self.fast_path = FastPathOptimizer()
+            self.branch_opt = BranchOptimizer()
+            self.loop_opt = LoopOptimizer()
+            self.numerical_opt = None
+        else:  # O3
+            self.enable_profiling = True
+            self.fast_path = FastPathOptimizer()
+            self.branch_opt = BranchOptimizer()
+            self.loop_opt = LoopOptimizer()
+            self.numerical_opt = NumericalOptimizer()
     
     def optimize_algorithm(self, func: Callable) -> Callable:
         """Apply all optimization strategies to an algorithm."""
@@ -203,8 +252,6 @@ class AlgorithmOptimizer:
     def clear_metrics(self) -> None:
         """Clear collected metrics."""
         self.metrics.clear()
-        if self.fast_path:
-            self.fast_path.path_stats.clear()
         if self.branch_opt:
             self.branch_opt.branch_stats.clear()
         if self.loop_opt:

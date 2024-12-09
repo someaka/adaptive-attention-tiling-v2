@@ -94,7 +94,7 @@ class MemoryManager:
     """Manages memory optimization strategies."""
     
     def __init__(self,
-                 pool_size: int = 1024 * 1024 * 1024,
+                 pool_size: int = 1024 * 1024 * 1024,  # 1GB default
                  enable_monitoring: bool = True):
         self.pool = MemoryPool(max_size=pool_size)
         self.cache_optimizer = CacheOptimizer()
@@ -103,63 +103,71 @@ class MemoryManager:
 
     def create_pool(self, size: int) -> MemoryPool:
         """Create a new memory pool with specified size."""
-        return MemoryPool(max_size=size)
+        self.pool = MemoryPool(max_size=size)
+        return self.pool
 
     def clear_metrics(self) -> None:
         """Clear collected metrics."""
         self.stats.clear()
+        self.pool.stats.clear()
+        self.cache_optimizer.stats.clear()
 
     def optimize_tensor(self, 
                        tensor: torch.Tensor,
                        access_pattern: str = "sequential") -> torch.Tensor:
         """Optimize tensor for memory efficiency."""
-        # Get tensor from pool
-        optimized = self.pool.acquire(tensor.shape, tensor.dtype)
-        optimized.copy_(tensor)
+        # Ensure contiguous memory layout
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        # Apply cache optimization based on access pattern
+        if access_pattern == "sequential":
+            tensor = self.cache_optimizer.optimize_layout(tensor)
         
-        # Optimize layout
-        optimized = self.cache_optimizer.optimize_layout(optimized)
+        # Track memory stats if monitoring is enabled
+        if self.enable_monitoring:
+            allocation_size = tensor.numel() * tensor.element_size()
+            self.stats.append(MemoryStats(
+                allocation_size=allocation_size,
+                pool_hits=self.pool.stats['pool_hits'],
+                cache_hits=self.cache_optimizer.stats['hits'],
+                fragmentation=self._calculate_fragmentation(),
+                access_pattern=access_pattern
+            ))
         
-        # Record stats
-        self.stats.append(MemoryStats(
-            allocation_size=tensor.numel() * tensor.element_size(),
-            pool_hits=self.pool.stats['pool_hits'],
-            cache_hits=self.cache_optimizer.stats['hits'],
-            fragmentation=self._calculate_fragmentation(),
-            access_pattern=access_pattern
-        ))
-        
-        return optimized
-    
+        return tensor
+
     def release_tensor(self, tensor: torch.Tensor) -> None:
         """Release tensor back to pool."""
-        self.pool.release(tensor)
-    
+        if tensor.is_contiguous():
+            self.pool.release(tensor)
+        else:
+            self.pool.release(tensor.contiguous())
+
     def _calculate_fragmentation(self) -> float:
         """Calculate memory fragmentation ratio."""
-        total_allocated = sum(t.numel() * t.element_size() 
-                            for pools in self.pool.pools.values()
-                            for t in pools)
-        return 1.0 - (total_allocated / self.pool.current_size 
-                     if self.pool.current_size > 0 else 1.0)
-    
-    def get_memory_stats(self) -> Dict[str, Union[int, float]]:
-        """Get memory usage statistics."""
-        process = psutil.Process()
-        memory_info = process.memory_info()
+        total_allocated = sum(tensor.numel() * tensor.element_size() 
+                            for tensors in self.pool.pools.values() 
+                            for tensor in tensors)
+        if total_allocated == 0:
+            return 0.0
         
-        return {
-            'rss': memory_info.rss,
-            'vms': memory_info.vms,
-            'pool_size': self.pool.current_size,
-            'pool_hits': self.pool.stats['pool_hits'],
-            'pool_misses': self.pool.stats['pool_misses'],
-            'cache_hits': self.cache_optimizer.stats['hits'],
-            'fragmentation': self._calculate_fragmentation()
-        }
-    
+        # Calculate fragmentation as ratio of non-contiguous memory
+        fragmented = sum(tensor.numel() * tensor.element_size()
+                        for tensors in self.pool.pools.values()
+                        for tensor in tensors
+                        if not tensor.is_contiguous())
+        return fragmented / total_allocated
+
+    def get_memory_stats(self) -> List[MemoryStats]:
+        """Get memory usage statistics."""
+        return self.stats
+
     def clear_stats(self) -> None:
         """Clear collected statistics."""
-        self.stats.clear()
-        self.pool.stats.clear()
-        self.cache_optimizer.stats.clear()
+        self.clear_metrics()
+
+    def allocate(self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Allocate a tensor from the memory pool."""
+        tensor = self.pool.acquire(shape, dtype)
+        return self.optimize_tensor(tensor)
