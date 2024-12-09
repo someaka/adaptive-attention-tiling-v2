@@ -1,0 +1,51 @@
+[MASTER]
+# Add the src directory to the Python path
+init-hook='import sys; sys.path.append("./src")'
+
+# Use multiple processes to speed up Pylint
+jobs=0
+
+# List of plugins to load
+load-plugins=
+
+# Allow loading modules/packages from outside the project directory
+ignore=CVS,venv,.venv
+
+[MESSAGES CONTROL]
+# Disable specific warnings that are handled by ruff or are project-specific
+disable=C0111,  # missing-docstring - handled by ruff (D*)
+        C0103,  # invalid-name - handled by ruff (N*)
+        R0903,  # too-few-public-methods
+        W0511,  # fixme
+        R0913,  # too-many-arguments
+        R0914,  # too-many-locals
+        W0212,  # protected-access - we use this for internal class communication
+        R0902,  # too-many-instance-attributes - our classes need these
+        C0303,  # trailing-whitespace - handled by ruff
+        W0611,  # unused-import - handled by ruff (F*)
+        C0411,  # wrong-import-order - handled by ruff (I*)
+        R0917,  # too-many-positional-arguments - we use kwargs
+        C0301   # line-too-long - handled by ruff (E501)
+
+[FORMAT]
+# Maximum number of characters on a single line - matches ruff/black
+max-line-length=100
+
+[BASIC]
+# Regular expression which should only match function or class names
+function-rgx=[a-z_][a-z0-9_]{2,50}$
+class-rgx=[A-Z_][a-zA-Z0-9_]+$
+
+# Good variable names
+good-names=i,j,k,ex,Run,_,x,y,z,w,h,n,m,f,v,F
+
+[REPORTS]
+# Set the output format
+output-format=text
+
+# Include a brief explanation of each error
+msg-template={path}:{line}: [{msg_id}({symbol}), {obj}] {msg}
+
+[SIMILARITIES]
+# Minimum lines number of a similarity
+min-similarity-lines=7

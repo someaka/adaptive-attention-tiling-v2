@@ -1,0 +1,54 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Bindings for input/output buffers
+layout(set = 0, binding = 0) buffer PatternBuffer {
+    float pattern[];
+};
+
+layout(set = 0, binding = 1) buffer FlowBuffer {
+    float flow[];
+};
+
+layout(set = 0, binding = 2) buffer OutputBuffer {
+    float output[];
+};
+
+// Push constants for dynamic parameters
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint pattern_size;
+    float evolution_rate;
+    float stability_factor;
+} params;
+
+// Helper function for pattern evolution
+float evolve_pattern(float pattern_value, float flow_value) {
+    float energy = pattern_value * pattern_value;
+    float damping = exp(-energy * params.stability_factor);
+    return pattern_value + flow_value * damping * params.evolution_rate;
+}
+
+void main() {
+    // Get global position
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint batch_idx = gl_GlobalInvocationID.z;
+    
+    // Check bounds
+    if (x >= params.pattern_size || y >= params.pattern_size || 
+        batch_idx >= params.batch_size) {
+        return;
+    }
+    
+    // Calculate linear indices
+    uint idx = (batch_idx * params.pattern_size + y) * params.pattern_size + x;
+    
+    // Evolve pattern
+    float pattern_value = pattern[idx];
+    float flow_value = flow[idx];
+    
+    // Update pattern with evolution
+    output[idx] = clamp(evolve_pattern(pattern_value, flow_value), -1.0, 1.0);
+}

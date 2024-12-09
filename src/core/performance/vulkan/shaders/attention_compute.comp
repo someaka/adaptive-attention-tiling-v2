@@ -1,0 +1,72 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Bindings for input/output buffers
+layout(set = 0, binding = 0) buffer QueryBuffer {
+    float query[];
+};
+
+layout(set = 0, binding = 1) buffer KeyBuffer {
+    float key[];
+};
+
+layout(set = 0, binding = 2) buffer ValueBuffer {
+    float value[];
+};
+
+layout(set = 0, binding = 3) buffer OutputBuffer {
+    float output[];
+};
+
+// Push constants for dynamic parameters
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint seq_length;
+    uint head_size;
+    float scale;
+} params;
+
+// Helper function for matrix multiplication
+float dot_product(uint row, uint col, uint stride) {
+    float sum = 0.0;
+    for (uint i = 0; i < params.head_size; i++) {
+        sum += query[row * stride + i] * key[col * stride + i];
+    }
+    return sum;
+}
+
+void main() {
+    // Get global position
+    uint row = gl_GlobalInvocationID.x;
+    uint col = gl_GlobalInvocationID.y;
+    uint batch_idx = gl_GlobalInvocationID.z;
+    
+    // Check bounds
+    if (row >= params.seq_length || col >= params.seq_length || 
+        batch_idx >= params.batch_size) {
+        return;
+    }
+    
+    // Compute attention scores
+    float score = dot_product(row, col, params.head_size) * params.scale;
+    
+    // Apply softmax
+    float max_score = -1.0/0.0;  // negative infinity
+    for (uint i = 0; i < params.seq_length; i++) {
+        float curr_score = dot_product(row, i, params.head_size) * params.scale;
+        max_score = max(max_score, curr_score);
+    }
+    
+    float sum = 0.0;
+    for (uint i = 0; i < params.seq_length; i++) {
+        float curr_score = dot_product(row, i, params.head_size) * params.scale;
+        sum += exp(curr_score - max_score);
+    }
+    
+    float attention = exp(score - max_score) / sum;
+    
+    // Compute output
+    uint out_idx = (batch_idx * params.seq_length + row) * params.seq_length + col;
+    output[out_idx] = attention;
+}

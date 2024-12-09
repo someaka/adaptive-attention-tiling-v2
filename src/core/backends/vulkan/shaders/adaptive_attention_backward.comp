@@ -1,0 +1,159 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_atomic_float : require
+
+#include "shader_common.glsl"
+
+layout(local_size_x = 256) in;
+
+// Input/output buffers
+layout(set = 0, binding = 0) buffer GradOutput {
+    PRECISION grad_output[];
+};
+
+layout(set = 0, binding = 1) buffer Queries {
+    PRECISION queries[];
+};
+
+layout(set = 0, binding = 2) buffer Keys {
+    PRECISION keys[];
+};
+
+layout(set = 0, binding = 3) buffer Values {
+    PRECISION values[];
+};
+
+layout(set = 0, binding = 4) buffer GradQueries {
+    PRECISION grad_queries[];
+};
+
+layout(set = 0, binding = 5) buffer GradKeys {
+    PRECISION grad_keys[];
+};
+
+layout(set = 0, binding = 6) buffer GradValues {
+    PRECISION grad_values[];
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint seq_len;
+    uint num_heads;
+    uint head_dim;
+    uint tile_size;
+    float resolution;
+    float density_threshold;
+} pc;
+
+shared PRECISION tile_cache[32][32];
+shared PRECISION grad_cache[32][32];
+
+// Compute gradient scaling based on resolution and density
+PRECISION compute_grad_scale(uint tile_idx, uint head_idx) {
+    uint base_idx = (tile_idx * pc.tile_size) + (head_idx * pc.seq_len * pc.head_dim);
+    PRECISION density = compute_density(tile_idx, head_idx);
+    
+    // Scale gradients based on information density and resolution
+    float scale = 1.0 + (1.0 - min(density / pc.density_threshold, 1.0)) 
+                     * (1.0 / pc.resolution - 1.0);
+                     
+    // Apply gradient correction for adaptive computation
+    return 1.0 / scale;
+}
+
+void process_gradient_tile(uint tile_idx, uint head_idx) {
+    uint local_idx = gl_LocalInvocationID.x;
+    uint global_idx = gl_GlobalInvocationID.x;
+    
+    // Base indices for tensors
+    uint q_offset = tile_idx * pc.tile_size + head_idx * pc.seq_len * pc.head_dim;
+    uint k_offset = head_idx * pc.seq_len * pc.head_dim;
+    uint v_offset = head_idx * pc.seq_len * pc.head_dim;
+    
+    // Get gradient scaling factor
+    PRECISION grad_scale = compute_grad_scale(tile_idx, head_idx);
+    
+    // Load gradients and queries into shared memory
+    if (local_idx < pc.tile_size) {
+        for (uint i = 0; i < pc.head_dim; i += VECTOR_WIDTH) {
+            VEC_TYPE grad = vector_load(grad_output, q_offset + local_idx * pc.head_dim + i);
+            VEC_TYPE q = vector_load(queries, q_offset + local_idx * pc.head_dim + i);
+            
+            vector_store(grad_cache[local_idx], i, grad);
+            vector_store(tile_cache[local_idx], i, q);
+        }
+    }
+    barrier();
+    
+    // Process gradients with adaptive resolution
+    PRECISION scale = 1.0 / sqrt(float(pc.head_dim));
+    uint adaptive_size = uint(float(pc.tile_size) * grad_scale);
+    uint step = max(1u, uint(float(adaptive_size) / float(pc.tile_size)));
+    
+    for (uint i = 0; i < adaptive_size; i += step) {
+        // Load key and value vectors
+        VEC_TYPE k, v;
+        if (i + local_idx < adaptive_size) {
+            k = vector_load(keys, k_offset + i * pc.head_dim);
+            v = vector_load(values, v_offset + i * pc.head_dim);
+        }
+        
+        // Compute attention scores
+        PRECISION score = 0.0;
+        for (uint j = 0; j < pc.head_dim; j += VECTOR_WIDTH) {
+            VEC_TYPE q = vector_load(tile_cache[local_idx], j);
+            score += dot(q, k) * scale;
+        }
+        
+        // Apply softmax gradient
+        score = exp(score);
+        
+        // Compute gradients
+        VEC_TYPE grad_q = VEC_TYPE(0.0);
+        VEC_TYPE grad_k = VEC_TYPE(0.0);
+        VEC_TYPE grad_v = VEC_TYPE(0.0);
+        
+        for (uint j = 0; j < pc.head_dim; j += VECTOR_WIDTH) {
+            VEC_TYPE grad = vector_load(grad_cache[local_idx], j);
+            VEC_TYPE q = vector_load(tile_cache[local_idx], j);
+            
+            // Gradient computations
+            grad_q += k * (grad * v).x * scale;
+            grad_k += q * (grad * v).x * scale;
+            grad_v += grad * score;
+        }
+        
+        // Store gradients with atomic adds
+        uint grad_idx = q_offset + local_idx * pc.head_dim;
+        
+        // Scale gradients by resolution factor
+        grad_q *= VEC_TYPE(grad_scale);
+        grad_k *= VEC_TYPE(grad_scale);
+        grad_v *= VEC_TYPE(grad_scale);
+        
+        atomicAdd(grad_queries[grad_idx], grad_q.x);
+        atomicAdd(grad_queries[grad_idx + 1], grad_q.y);
+        atomicAdd(grad_queries[grad_idx + 2], grad_q.z);
+        atomicAdd(grad_queries[grad_idx + 3], grad_q.w);
+        
+        atomicAdd(grad_keys[k_offset + i * pc.head_dim], grad_k.x);
+        atomicAdd(grad_keys[k_offset + i * pc.head_dim + 1], grad_k.y);
+        atomicAdd(grad_keys[k_offset + i * pc.head_dim + 2], grad_k.z);
+        atomicAdd(grad_keys[k_offset + i * pc.head_dim + 3], grad_k.w);
+        
+        atomicAdd(grad_values[v_offset + i * pc.head_dim], grad_v.x);
+        atomicAdd(grad_values[v_offset + i * pc.head_dim + 1], grad_v.y);
+        atomicAdd(grad_values[v_offset + i * pc.head_dim + 2], grad_v.z);
+        atomicAdd(grad_values[v_offset + i * pc.head_dim + 3], grad_v.w);
+    }
+}
+
+void main() {
+    uint global_idx = gl_GlobalInvocationID.x;
+    uint head_idx = global_idx / (pc.seq_len / pc.tile_size);
+    uint tile_idx = global_idx % (pc.seq_len / pc.tile_size);
+    
+    if (head_idx >= pc.num_heads) return;
+    
+    process_gradient_tile(tile_idx, head_idx);
+}

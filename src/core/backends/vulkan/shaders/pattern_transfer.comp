@@ -1,0 +1,157 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_atomic_float : require
+
+#include "shader_common.glsl"
+
+layout(local_size_x = 256) in;
+
+// Input/output buffers
+layout(set = 0, binding = 0) buffer LayerStates {
+    PRECISION layer_states[];  // [num_layers][batch, heads, seq_len, dim]
+};
+
+layout(set = 0, binding = 1) buffer PatternLibrary {
+    PRECISION patterns[];  // [num_patterns][pattern_dim]
+};
+
+layout(set = 0, binding = 2) buffer TransferMatrix {
+    PRECISION transfer_weights[];  // Pattern transfer coefficients
+};
+
+layout(set = 0, binding = 3) buffer LayerGraph {
+    PRECISION layer_edges[];  // Cross-layer information flow
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint num_layers;
+    uint num_patterns;
+    uint seq_len;
+    uint head_dim;
+    float transfer_threshold;
+    float adaptation_rate;
+} pc;
+
+shared PRECISION pattern_strengths[32][32];  // [layer][pattern]
+shared PRECISION transfer_cache[32][32];     // Transfer coefficient cache
+
+// Compute pattern activation in layer
+PRECISION compute_pattern_activation(uint layer_idx, uint pattern_idx) {
+    uint local_idx = gl_LocalInvocationID.x;
+    PRECISION activation = 0.0;
+    
+    if (local_idx < pc.seq_len) {
+        // Load pattern and layer state
+        VEC_TYPE pattern = vector_load(patterns, pattern_idx * pc.head_dim);
+        VEC_TYPE state = vector_load(layer_states, 
+            layer_idx * pc.seq_len * pc.head_dim + local_idx * pc.head_dim);
+        
+        // Compute similarity
+        activation = dot(pattern, state) / (length(pattern) * length(state) + 1e-6);
+    }
+    
+    return reduce_max_subgroup(activation);
+}
+
+// Update transfer coefficients
+void update_transfer_weights(uint src_layer, uint dst_layer) {
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    if (local_idx >= pc.num_patterns) return;
+    
+    // Get pattern activations
+    PRECISION src_activation = pattern_strengths[src_layer][local_idx];
+    PRECISION dst_activation = pattern_strengths[dst_layer][local_idx];
+    
+    // Compute transfer strength
+    PRECISION transfer = src_activation * dst_activation;
+    
+    if (transfer > pc.transfer_threshold) {
+        // Update transfer coefficient
+        uint weight_idx = (src_layer * pc.num_layers + dst_layer) * 
+                         pc.num_patterns + local_idx;
+        
+        PRECISION current_weight = transfer_weights[weight_idx];
+        PRECISION new_weight = current_weight + 
+            pc.adaptation_rate * (transfer - current_weight);
+        
+        transfer_weights[weight_idx] = new_weight;
+    }
+}
+
+// Transfer patterns between layers
+void transfer_patterns(uint src_layer, uint dst_layer) {
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    if (local_idx >= pc.seq_len) return;
+    
+    // Load source patterns
+    VEC_TYPE dst_state = vector_load(layer_states,
+        dst_layer * pc.seq_len * pc.head_dim + local_idx * pc.head_dim);
+    
+    VEC_TYPE transferred = VEC_TYPE(0.0);
+    
+    for (uint pattern_idx = 0; pattern_idx < pc.num_patterns; pattern_idx++) {
+        uint weight_idx = (src_layer * pc.num_layers + dst_layer) * 
+                         pc.num_patterns + pattern_idx;
+        PRECISION weight = transfer_weights[weight_idx];
+        
+        if (weight > pc.transfer_threshold) {
+            VEC_TYPE pattern = vector_load(patterns, pattern_idx * pc.head_dim);
+            transferred += pattern * weight;
+        }
+    }
+    
+    // Update destination state with transferred patterns
+    vector_store(layer_states,
+        dst_layer * pc.seq_len * pc.head_dim + local_idx * pc.head_dim,
+        normalize(dst_state + transferred));
+}
+
+// Update layer connectivity graph
+void update_layer_graph(uint src_layer) {
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    if (local_idx >= pc.num_layers || local_idx == src_layer) return;
+    
+    // Compute total transfer strength
+    PRECISION total_transfer = 0.0;
+    for (uint pattern_idx = 0; pattern_idx < pc.num_patterns; pattern_idx++) {
+        uint weight_idx = (src_layer * pc.num_layers + local_idx) * 
+                         pc.num_patterns + pattern_idx;
+        total_transfer += transfer_weights[weight_idx];
+    }
+    
+    // Update layer graph
+    layer_edges[src_layer * pc.num_layers + local_idx] = 
+        total_transfer / float(pc.num_patterns);
+}
+
+void main() {
+    uint global_idx = gl_GlobalInvocationID.x;
+    uint layer_idx = global_idx % pc.num_layers;
+    
+    if (layer_idx >= pc.num_layers) return;
+    
+    // Compute pattern activations for current layer
+    for (uint pattern_idx = 0; pattern_idx < pc.num_patterns; pattern_idx++) {
+        pattern_strengths[layer_idx][pattern_idx] = 
+            compute_pattern_activation(layer_idx, pattern_idx);
+    }
+    barrier();
+    
+    // Update transfer weights and perform pattern transfer
+    for (uint other_layer = 0; other_layer < pc.num_layers; other_layer++) {
+        if (other_layer != layer_idx) {
+            update_transfer_weights(layer_idx, other_layer);
+            barrier();
+            
+            transfer_patterns(layer_idx, other_layer);
+            barrier();
+        }
+    }
+    
+    // Update layer connectivity
+    update_layer_graph(layer_idx);
+}
