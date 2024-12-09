@@ -6,7 +6,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "torch",
-        "numpy",
+        "numpy<2.0.0",  # Pin numpy to 1.x for torch compatibility
         "pytest",
         "mlflow",
         "matplotlib",
