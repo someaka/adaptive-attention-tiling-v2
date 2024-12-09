@@ -1,5 +1,5 @@
 """
-Test file for tests/test_core/test_patterns/test_cohomology.py
+Test file for tests/test_core/test_patterns/test_refraction.py
 TODO: Implement tests
 """
 import pytest

@@ -32,14 +32,58 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from src.core.common.enums import ResolutionStrategy
-from src.core.tiling.components.config import CONFIG
-from src.core.tiling.base.attention_tile import AttentionTile
-from src.core.tiling.components.state_manager import StateManager
-from src.core.metrics.advanced_metrics import AdvancedMetricsAnalyzer
-from src.core.tiling.components.load_balancer import LoadBalancer, LoadState
+from ..common.enums import ResolutionStrategy
+from .config import CONFIG
+from .base import AttentionTile
+from .state_manager import StateManager
+from ..metrics.advanced_metrics import AdvancedMetricsAnalyzer
 
 logger = logging.getLogger(__name__)
+
+class LoadProfile:
+    """Profile of computational load for a tile."""
+    
+    def __init__(self, compute: float, memory: float, io: float):
+        self.compute = compute
+        self.memory = memory
+        self.io = io
+        
+    def total(self) -> float:
+        """Get total load."""
+        return self.compute + self.memory + self.io
+        
+    def weighted(self, compute_weight: float = 1.0, 
+                memory_weight: float = 1.0,
+                io_weight: float = 1.0) -> float:
+        """Get weighted load."""
+        return (self.compute * compute_weight + 
+                self.memory * memory_weight +
+                self.io * io_weight)
+
+class LoadBalancer:
+    """Balances computational load across tiles."""
+    
+    def __init__(self, num_tiles: int):
+        self.num_tiles = num_tiles
+        self.loads = [LoadProfile(0, 0, 0) for _ in range(num_tiles)]
+        
+    def update_load(self, tile_idx: int, load: LoadProfile):
+        """Update load for a tile."""
+        self.loads[tile_idx] = load
+        
+    def get_load(self, tile_idx: int) -> LoadProfile:
+        """Get load for a tile."""
+        return self.loads[tile_idx]
+        
+    def balance(self) -> List[int]:
+        """Balance loads across tiles.
+        
+        Returns indices for redistributing tiles.
+        """
+        total_loads = [load.total() for load in self.loads]
+        sorted_idxs = sorted(range(len(total_loads)), 
+                           key=lambda k: total_loads[k])
+        return sorted_idxs
 
 class QuantumMotivicTile(nn.Module):
     """Attention tile based on quantum motivic principles."""
@@ -210,20 +254,20 @@ class QuantumMotivicTile(nn.Module):
             "adelic_norm": self._metrics["adelic_norm"],
         }
 
-    def optimize_resources(self, profile: ResourceProfile) -> None:
+    def optimize_resources(self, profile: LoadProfile) -> None:
         """Optimize resources using height theory.
 
         Args:
-            profile: Resource profile for optimization
+            profile: Load profile for optimization
         """
         # Get current height
         height = self._metrics["motive_height"]
 
         # Optimize based on height theory
-        if height > profile.compute_limit:
+        if height > profile.compute:
             # Reduce resolution based on height
-            new_resolution = self.resolution * (profile.compute_limit / height)
-            self.resolution = max(profile.min_resolution, new_resolution)
+            new_resolution = self.resolution * (profile.compute / height)
+            self.resolution = max(CONFIG.MIN_RESOLUTION, new_resolution)
 
     def _compute_information_density(self) -> float:
         """Compute information density using quantum structure."""

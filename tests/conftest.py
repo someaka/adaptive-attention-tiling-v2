@@ -207,10 +207,12 @@ def pytest_unconfigure(config: Any) -> None:
     """
     # Log test session summary
     if config.option.verbose > 0:
+        passed = len(config.pluginmanager.get_plugin("terminalreporter").stats.get("passed", []))
+        failed = len(config.pluginmanager.get_plugin("terminalreporter").stats.get("failed", []))
         logger.info(
             "Test session finished with %d passed, %d failed",
-            config.pluginmanager.get_plugin("terminalreporter").stats.get("passed", 0),
-            config.pluginmanager.get_plugin("terminalreporter").stats.get("failed", 0),
+            passed,
+            failed,
         )
     else:
         logger.info("Test session finished")

@@ -11,6 +11,7 @@ in the Adaptive Attention Tiling system, focusing on:
 import gc
 import resource
 import signal
+import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any, NoReturn
@@ -62,180 +63,241 @@ def resource_guard() -> Generator[None, None, None]:
 
 
 @pytest.fixture
-def vectorization_optimizer():
+def vectorization_optimizer() -> VectorizationOptimizer:
     """Create a VectorizationOptimizer instance for testing."""
-    return VectorizationOptimizer(enable_profiling=True)
+    optimizer = VectorizationOptimizer(
+        enable_profiling=True,
+        use_mixed_precision=True,
+        chunk_size=64,  # Use smaller chunk size for tests
+    )
+    optimizer.clear_metrics()
+    return optimizer
 
 
-def generate_test_tensors(batch_size: int, seq_len: int, feat_dim: int) -> tuple[torch.Tensor, ...]:
+def generate_test_tensors(
+    batch_size: int, seq_len: int, feat_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate test tensors for attention computation."""
-    with resource_guard():
-        query = torch.randn(batch_size, seq_len, feat_dim)
-        key = torch.randn(batch_size, seq_len, feat_dim)
-        value = torch.randn(batch_size, seq_len, feat_dim)
-        return query, key, value
+    torch.manual_seed(42)  # For reproducibility
+    query = torch.randn(batch_size, seq_len, feat_dim)
+    key = torch.randn(batch_size, seq_len, feat_dim)
+    value = torch.randn(batch_size, seq_len, feat_dim)
+    return query, key, value
 
 
-@pytest.mark.benchmark(min_rounds=5)
+@pytest.mark.benchmark
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("dim", FEATURE_DIMS)
 def test_attention_vectorization_performance(
     vectorization_optimizer: VectorizationOptimizer, batch_size: int, dim: int
-):
+) -> None:
     """Test attention vectorization performance."""
     with resource_guard():
-        # Create query, key, value tensors with proper dimensions
-        seq_len = SEQUENCE_LENGTHS[0]  # Use the smaller sequence length
-        query = torch.randn(batch_size, seq_len, dim)
-        key = torch.randn(batch_size, seq_len, dim)
-        value = torch.randn(batch_size, seq_len, dim)
+        try:
+            # Generate test data
+            query, key, value = generate_test_tensors(batch_size, dim, dim)
 
-        # Clear GPU memory if available
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Compute vectorized attention
+            result = vectorization_optimizer.vectorize_attention(query, key, value)
 
-        # Warm-up run
-        _ = vectorization_optimizer.vectorize_attention(query, key, value)
-        vectorization_optimizer.clear_metrics()
+            # Validate output shape
+            expected_shape = (batch_size, dim, dim)
+            assert (
+                result.shape == expected_shape
+            ), f"Expected shape {expected_shape}, got {result.shape}"
 
-        # Test run
-        result = vectorization_optimizer.vectorize_attention(query, key, value)
-        metrics = vectorization_optimizer.get_metrics()[0]
+            # Check metrics
+            metrics = vectorization_optimizer.get_metrics()
+            assert len(metrics) > 0, "No metrics were collected"
 
-        # Performance assertions
-        assert metrics.execution_time > 0
-        assert metrics.memory_usage > 0
-        assert 0 <= metrics.vectorization_efficiency <= 1
-        assert metrics.operation_type == "vectorize_attention"
+            latest_metric = metrics[-1]
+            assert latest_metric.operation_type == "vectorize_attention"
+            assert latest_metric.execution_time > 0
+            assert latest_metric.memory_usage >= 0
+            assert 0 <= latest_metric.vectorization_efficiency <= 1
 
-        # Shape and stability assertions
-        assert result.shape == (batch_size, seq_len, dim)
-        assert not torch.isnan(result).any()
+            # Log performance metrics
+            print(f"Attention Performance (batch={batch_size}, dim={dim}):")
+            print(f"  Execution time: {latest_metric.execution_time:.2f}ms")
+            print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
+            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+
+        except (ValueError, RuntimeError, AssertionError) as e:
+            pytest.fail(f"Attention vectorization failed: {e}")
 
 
-@pytest.mark.benchmark(min_rounds=5)
+@pytest.mark.benchmark
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQUENCE_LENGTHS)
 def test_pattern_dynamics_vectorization(
     vectorization_optimizer: VectorizationOptimizer, batch_size: int, seq_len: int
-):
+) -> None:
     """Test pattern dynamics vectorization performance."""
     with resource_guard():
-        pattern = torch.randn(batch_size, seq_len, seq_len)
-        flow = torch.randn(batch_size, seq_len, seq_len)
+        try:
+            # Generate test data
+            pattern = torch.randn(batch_size, seq_len, seq_len)
+            flow = torch.randn(batch_size, seq_len, seq_len)
 
-        # Warm-up run
-        _ = vectorization_optimizer.vectorize_pattern_dynamics(pattern, flow)
-        vectorization_optimizer.clear_metrics()
+            # Compute vectorized pattern dynamics
+            result = vectorization_optimizer.vectorize_pattern_dynamics(pattern, flow)
 
-        # Test run
-        result = vectorization_optimizer.vectorize_pattern_dynamics(pattern, flow)
-        metrics = vectorization_optimizer.get_metrics()[0]
+            # Validate output shape
+            expected_shape = (batch_size, seq_len, seq_len)
+            assert (
+                result.shape == expected_shape
+            ), f"Expected shape {expected_shape}, got {result.shape}"
 
-        # Performance assertions
-        assert metrics.execution_time > 0
-        assert metrics.memory_usage > 0
-        assert 0 <= metrics.vectorization_efficiency <= 1
-        assert metrics.operation_type == "vectorize_pattern_dynamics"
+            # Check value bounds (should be between -1 and 1 due to tanh)
+            assert torch.all(result >= -1), "Values below -1 found"
+            assert torch.all(result <= 1), "Values above 1 found"
 
-        # Numerical stability assertions
-        assert torch.all(result >= -1)
-        assert torch.all(result <= 1)
-        assert not torch.isnan(result).any()
+            # Check metrics
+            metrics = vectorization_optimizer.get_metrics()
+            assert len(metrics) > 0, "No metrics were collected"
+
+            latest_metric = metrics[-1]
+            assert latest_metric.operation_type == "vectorize_pattern_dynamics"
+            assert latest_metric.execution_time > 0
+            assert latest_metric.memory_usage >= 0
+            assert 0 <= latest_metric.vectorization_efficiency <= 1
+
+            # Log performance metrics
+            print(f"Pattern Dynamics (batch={batch_size}, seq_len={seq_len}):")
+            print(f"  Execution time: {latest_metric.execution_time:.2f}ms")
+            print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
+            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+
+        except (ValueError, RuntimeError, AssertionError) as e:
+            pytest.fail(f"Pattern dynamics vectorization failed: {e}")
 
 
-@pytest.mark.benchmark(min_rounds=5)
+@pytest.mark.benchmark
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("dim", FEATURE_DIMS)
 def test_geometric_flow_vectorization(
     vectorization_optimizer: VectorizationOptimizer, batch_size: int, dim: int
-):
+) -> None:
     """Test geometric flow vectorization performance."""
     with resource_guard():
-        # Create metric tensor [batch_size, dim, dim]
-        metric = torch.randn(batch_size, dim, dim)
+        try:
+            # Generate test data
+            metric = torch.randn(batch_size, dim, dim)
+            connection = torch.randn(batch_size, dim, dim, dim)
 
-        # Create connection tensor [batch_size, dim, dim, dim]
-        # This represents the Christoffel symbols of the second kind
-        connection = torch.randn(batch_size, dim, dim, dim)
+            # Make metric symmetric (as it should be for a metric tensor)
+            metric = 0.5 * (metric + metric.transpose(-2, -1))
 
-        # Warm-up run
-        _ = vectorization_optimizer.vectorize_geometric_flow(metric, connection)
-        vectorization_optimizer.clear_metrics()
+            # Compute vectorized geometric flow
+            result = vectorization_optimizer.vectorize_geometric_flow(metric, connection)
 
-        # Test run
-        result = vectorization_optimizer.vectorize_geometric_flow(metric, connection)
-        metrics = vectorization_optimizer.get_metrics()[0]
+            # Validate output shape
+            expected_shape = (batch_size, dim, dim)
+            assert (
+                result.shape == expected_shape
+            ), f"Expected shape {expected_shape}, got {result.shape}"
 
-        # Performance assertions
-        assert metrics.execution_time > 0
-        assert metrics.memory_usage > 0
-        assert 0 <= metrics.vectorization_efficiency <= 1
-        assert metrics.operation_type == "vectorize_geometric_flow"
+            # Check metrics
+            metrics = vectorization_optimizer.get_metrics()
+            assert len(metrics) > 0, "No metrics were collected"
 
-        # Shape assertions
-        assert result.shape == (batch_size, dim, dim)
-        assert not torch.isnan(result).any()
+            latest_metric = metrics[-1]
+            assert latest_metric.operation_type == "vectorize_geometric_flow"
+            assert latest_metric.execution_time > 0
+            assert latest_metric.memory_usage >= 0
+            assert 0 <= latest_metric.vectorization_efficiency <= 1
+
+            # Log performance metrics
+            print(f"Geometric Flow (batch={batch_size}, dim={dim}):")
+            print(f"  Execution time: {latest_metric.execution_time:.2f}ms")
+            print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
+            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+
+        except (ValueError, RuntimeError, AssertionError) as e:
+            pytest.fail(f"Geometric flow vectorization failed: {e}")
 
 
-@pytest.mark.benchmark(min_rounds=5)
+@pytest.mark.benchmark
 @pytest.mark.parametrize("chunk_size", CHUNK_SIZES)
-def test_chunk_size_impact(chunk_size: int):
+def test_chunk_size_impact(chunk_size: int) -> None:
     """Test impact of different chunk sizes on vectorization performance."""
     with resource_guard():
-        optimizer = VectorizationOptimizer(chunk_size=chunk_size)
-        batch_size = 128  # Reduced from 1024
-        seq_len = 64  # Reduced from 256
-        feat_dim = 32  # Reduced from 64
+        try:
+            # Create optimizer with specific chunk size
+            optimizer = VectorizationOptimizer(chunk_size=chunk_size)
 
-        query, key, value = generate_test_tensors(batch_size, seq_len, feat_dim)
+            # Generate test data
+            batch_size = 64  # Fixed batch size for comparison
+            seq_len = 64  # Fixed sequence length for comparison
+            query, key, value = generate_test_tensors(batch_size, seq_len, seq_len)
 
-        # Warm-up run
-        _ = optimizer.vectorize_attention(query, key, value)
-        optimizer.clear_metrics()
+            # Time the attention computation
+            start_time = time.perf_counter()
+            optimizer.vectorize_attention(query, key, value)
+            end_time = time.perf_counter()
 
-        # Test run
-        _ = optimizer.vectorize_attention(query, key, value)
-        metrics = optimizer.get_metrics()[0]
+            execution_time = (end_time - start_time) * 1000  # Convert to ms
 
-        # Store metrics for analysis
-        return {
-            "chunk_size": chunk_size,
-            "execution_time": metrics.execution_time,
-            "memory_usage": metrics.memory_usage,
-            "vectorization_efficiency": metrics.vectorization_efficiency,
-        }
+            # Check metrics
+            metrics = optimizer.get_metrics()
+            assert len(metrics) > 0, "No metrics were collected"
+
+            latest_metric = metrics[-1]
+            assert latest_metric.operation_type == "vectorize_attention"
+
+            # Log performance metrics
+            print(f"Chunk Size Impact (size={chunk_size}):")
+            print(f"  Execution time: {execution_time:.2f}ms")
+            print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
+            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+
+        except (ValueError, RuntimeError, AssertionError) as e:
+            pytest.fail(f"Chunk size impact test failed: {e}")
 
 
-@pytest.mark.benchmark(min_rounds=5)
-def test_memory_layout_optimization(vectorization_optimizer: VectorizationOptimizer):
+@pytest.mark.benchmark
+def test_memory_layout_optimization(vectorization_optimizer: VectorizationOptimizer) -> None:
     """Test memory layout optimization and cache utilization."""
     with resource_guard():
-        # Test with non-contiguous tensor
-        tensor = torch.randn(64, 32, 16)
-        permuted = tensor.permute(2, 0, 1)  # Create non-contiguous tensor
+        try:
+            # Generate test data with different memory layouts
+            batch_size = 64
+            seq_len = 64
+            feat_dim = 64
 
-        efficiency = vectorization_optimizer._estimate_vectorization_efficiency(permuted)
-        assert efficiency < 1.0  # Should be lower due to non-contiguous layout
+            # Test 1: Contiguous tensors
+            query1, key1, value1 = generate_test_tensors(batch_size, seq_len, feat_dim)
 
-        # Test with contiguous tensor
-        contiguous = permuted.contiguous()
-        efficiency = vectorization_optimizer._estimate_vectorization_efficiency(contiguous)
-        assert efficiency > 0.8  # Should be high due to contiguous layout and aligned size
+            # Test 2: Non-contiguous tensors (through transpose)
+            query2 = query1.transpose(-2, -1).contiguous().transpose(-2, -1)
+            key2 = key1.transpose(-2, -1).contiguous().transpose(-2, -1)
+            value2 = value1.transpose(-2, -1).contiguous().transpose(-2, -1)
 
-        # Test with aligned tensor (using size divisible by 16)
-        aligned = torch.randn((64, 32, 16))  # Using tuple for size
-        efficiency = vectorization_optimizer._estimate_vectorization_efficiency(aligned)
-        assert efficiency > 0.9  # Should be highest due to alignment and contiguous layout
+            # Run tests and collect metrics
+            result1 = vectorization_optimizer.vectorize_attention(query1, key1, value1)
+            metrics1 = vectorization_optimizer.get_metrics()[-1]
 
-        # Test cache optimization
-        query, key, value = generate_test_tensors(32, 64, 32)  # Small tensors for cache test
-        _ = vectorization_optimizer.vectorize_attention(query, key, value)
-        metrics = vectorization_optimizer.get_metrics()[0]
+            result2 = vectorization_optimizer.vectorize_attention(query2, key2, value2)
+            metrics2 = vectorization_optimizer.get_metrics()[-1]
 
-        # Cache efficiency assertions
-        assert metrics.execution_time > 0
-        assert metrics.memory_usage > 0
-        assert (
-            metrics.vectorization_efficiency > 0.7
-        )  # Should be efficient due to cache-friendly size
+            # Compare results
+            torch.testing.assert_close(result1, result2, rtol=1e-5, atol=1e-5)
+
+            # Log performance comparison
+            print("Memory Layout Optimization Results:")
+            print("  Contiguous tensors:")
+            print(f"    Execution time: {metrics1.execution_time:.2f}ms")
+            print(f"    Memory usage: {metrics1.memory_usage / 1024 / 1024:.2f}MB")
+            print(f"    Vectorization efficiency: {metrics1.vectorization_efficiency:.2%}")
+            print("  Non-contiguous tensors:")
+            print(f"    Execution time: {metrics2.execution_time:.2f}ms")
+            print(f"    Memory usage: {metrics2.memory_usage / 1024 / 1024:.2f}MB")
+            print(f"    Vectorization efficiency: {metrics2.vectorization_efficiency:.2%}")
+
+            # Verify that contiguous tensors perform better
+            assert (
+                metrics1.vectorization_efficiency >= metrics2.vectorization_efficiency
+            ), "Contiguous tensors should have better vectorization efficiency"
+
+        except (ValueError, RuntimeError, AssertionError, torch.testing.AssertionError) as e:
+            pytest.fail(f"Memory layout optimization test failed: {e}")

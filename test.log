@@ -1,47 +1,175 @@
-2024-12-09 04:55:39,637 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
-2024-12-09 04:55:39,664 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
-2024-12-09 04:55:39,694 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
-2024-12-09 04:55:39,723 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
-2024-12-09 04:55:39,750 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
-2024-12-09 04:55:39,776 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
-2024-12-09 04:55:39,805 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
-2024-12-09 04:55:39,864 - tests.conftest - INFO - Collected 5 test items
-2024-12-09 04:55:39,864 - tests.conftest - DEBUG - Test item: test_buffer_allocation
-2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_data_transfer
-2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_memory_tracking
-2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_error_handling
-2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
-2024-12-09 04:55:39,866 - tests.conftest - INFO - Setting up test: test_buffer_allocation
-2024-12-09 04:55:39,868 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:55:39.868581+00:00
-2024-12-09 04:55:39,917 - test_memory_management - INFO - Successfully allocated buffer with tuple size
-2024-12-09 04:55:39,917 - test_memory_management - INFO - Successfully allocated buffer with byte size
-2024-12-09 04:55:39,917 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
-2024-12-09 04:55:39,918 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
-2024-12-09 04:55:39,985 - tests.conftest - INFO - Setting up test: test_data_transfer
-2024-12-09 04:55:40,012 - test_memory_management - INFO - Successfully transferred data to device
-2024-12-09 04:55:40,013 - test_memory_management - INFO - Successfully transferred data back to host
-2024-12-09 04:55:40,013 - test_memory_management - DEBUG - Data verification passed. Original sum: 48.671846, Transferred sum: 48.671846
-2024-12-09 04:55:40,013 - tests.conftest - INFO - Tearing down test: test_data_transfer
-2024-12-09 04:55:40,077 - tests.conftest - INFO - Setting up test: test_memory_tracking
-2024-12-09 04:55:40,094 - test_memory_management - INFO - Initial allocated memory: 0
-2024-12-09 04:55:40,095 - test_memory_management - INFO - Allocated buffer of size (100, 100)
-2024-12-09 04:55:40,095 - test_memory_management - INFO - Allocated buffer of size (200, 200)
-2024-12-09 04:55:40,096 - test_memory_management - INFO - Allocated buffer of size (300, 300)
-2024-12-09 04:55:40,096 - test_memory_management - INFO - Final allocated memory: 560000
-2024-12-09 04:55:40,096 - test_memory_management - INFO - Peak memory usage: 560000
-2024-12-09 04:55:40,096 - test_memory_management - INFO - Fragmentation ratio: 0.571429
-2024-12-09 04:55:40,096 - test_memory_management - INFO - Successfully freed all buffers
-2024-12-09 04:55:40,096 - test_memory_management - INFO - Memory after cleanup: 0
-2024-12-09 04:55:40,097 - tests.conftest - INFO - Tearing down test: test_memory_tracking
-2024-12-09 04:55:40,171 - tests.conftest - INFO - Setting up test: test_error_handling
-2024-12-09 04:55:40,190 - tests.conftest - INFO - Tearing down test: test_error_handling
-2024-12-09 04:55:40,268 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
-2024-12-09 04:55:40,292 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
-2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
-2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
-2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
-2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
-2024-12-09 04:55:40,293 - test_memory_management - INFO - Final memory after pool test: 20000000
-2024-12-09 04:55:40,294 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
-2024-12-09 04:55:40,372 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.503618
-2024-12-09 04:55:40,372 - test_memory_management - INFO - ================================================================================
+2024-12-09 12:33:10,276 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 12:33:10,301 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 12:33:10,328 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/core/attention/__init__.py
+2024-12-09 12:33:10,354 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/core/backends/cpu/__init__.py
+2024-12-09 12:33:10,378 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/core/backends/vulkan/__init__.py
+2024-12-09 12:33:10,405 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/core/tiling/optimization/__init__.py
+2024-12-09 12:33:10,430 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/core/tiling/strategies/__init__.py
+2024-12-09 12:33:10,455 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/integration/end_to_end/__init__.py
+2024-12-09 12:33:10,479 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/integration/performance/__init__.py
+2024-12-09 12:33:10,504 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/metrics/attention/__init__.py
+2024-12-09 12:33:10,528 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/metrics/tiling/__init__.py
+2024-12-09 12:33:10,554 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 12:33:10,579 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmark/runner.py
+2024-12-09 12:33:10,591 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmark/runner.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmark/runner.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,592 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmark/runner.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmark/runner.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmark/runner.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,625 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmarks/test_vulkan.py
+2024-12-09 12:33:10,637 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmarks/test_vulkan.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmarks/test_vulkan.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,637 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmarks/test_vulkan.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmarks/test_vulkan.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/benchmarks/test_vulkan.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,669 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/cpu/__init__.py
+2024-12-09 12:33:10,695 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/cpu/test_algorithms.py
+2024-12-09 12:33:10,720 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/cpu/test_memory.py
+2024-12-09 12:33:10,745 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/cpu/test_memory_management.py
+2024-12-09 12:33:10,769 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/cpu/test_vectorization.py
+2024-12-09 12:33:10,834 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 12:33:10,859 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 12:33:10,900 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_crystal/test_scale.py
+2024-12-09 12:33:10,917 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_crystal/test_scale.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_crystal/test_scale.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,918 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_crystal/test_scale.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_crystal/test_scale.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_crystal/test_scale.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,949 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_patterns/test_fiber_bundle.py
+2024-12-09 12:33:10,963 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_patterns/test_fiber_bundle.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_patterns/test_fiber_bundle.py']' returned non-zero exit status 1.
+2024-12-09 12:33:10,963 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_patterns/test_fiber_bundle.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_patterns/test_fiber_bundle.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_patterns/test_fiber_bundle.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,004 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_quantum/test_state_space.py
+2024-12-09 12:33:11,028 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_quantum/test_state_space.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_quantum/test_state_space.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,028 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_quantum/test_state_space.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_quantum/test_state_space.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_core/test_quantum/test_state_space.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,059 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_quantum_geometric_attention.py
+2024-12-09 12:33:11,074 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_quantum_geometric_attention.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_quantum_geometric_attention.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,074 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_quantum_geometric_attention.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_quantum_geometric_attention.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_quantum_geometric_attention.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,103 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_flow/test_hamiltonian.py
+2024-12-09 12:33:11,121 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_flow/test_hamiltonian.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_flow/test_hamiltonian.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,121 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_flow/test_hamiltonian.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_flow/test_hamiltonian.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_flow/test_hamiltonian.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,217 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_validation/test_framework.py
+2024-12-09 12:33:11,231 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_validation/test_framework.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_validation/test_framework.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,231 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_validation/test_framework.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_validation/test_framework.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 302, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_validation/test_framework.py']' returned non-zero exit status 1.
+2024-12-09 12:33:11,261 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/unit/utils/__init__.py
+2024-12-09 12:33:11,285 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/unit/utils/test_helpers.py
+2024-12-09 12:33:11,311 - tests.conftest - INFO - Collected 0 test items
+2024-12-09 12:33:11,362 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed

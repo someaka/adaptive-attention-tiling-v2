@@ -9,19 +9,16 @@ Tests cover:
 5. Canonical transformations
 """
 
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
-from typing import Tuple, List, Callable
-from scipy.integrate import solve_ivp
 
 from src.neural.flow.hamiltonian import (
-    HamiltonianSystem,
-    PhaseSpace,
     CanonicalTransform,
-    PoissonStructure
+    HamiltonianSystem,
 )
-from src.utils.test_helpers import assert_symplectic_properties
+
 
 class TestHamiltonianSystem:
     @pytest.fixture
@@ -39,7 +36,7 @@ class TestHamiltonianSystem:
         """Create a test Hamiltonian system."""
         return HamiltonianSystem(
             dim=phase_dim,
-            integrator='symplectic',
+            integrator="symplectic",
             order=4
         )
 
@@ -48,14 +45,14 @@ class TestHamiltonianSystem:
         # Create test phase space points
         state = torch.randn(batch_size, phase_dim // 2)  # Position
         momentum = torch.randn(batch_size, phase_dim // 2)  # Momentum
-        
+
         # Compute Hamiltonian (e.g., harmonic oscillator)
         energy = hamiltonian_system.compute_hamiltonian(state, momentum)
-        
+
         # Test energy properties
         assert energy.shape == (batch_size,), "Energy should be scalar per batch"
         assert torch.all(energy >= 0), "Energy should be non-negative"
-        
+
         # Test scaling properties
         scaled_state = 2 * state
         scaled_momentum = 2 * momentum
@@ -65,7 +62,7 @@ class TestHamiltonianSystem:
         assert torch.allclose(
             scaled_energy, 4 * energy, rtol=1e-4
         ), "Energy should scale quadratically"
-        
+
         # Test separable Hamiltonian structure
         kinetic = hamiltonian_system.compute_kinetic(momentum)
         potential = hamiltonian_system.compute_potential(state)
@@ -79,38 +76,38 @@ class TestHamiltonianSystem:
         # Create test phase space point
         state = torch.randn(phase_dim // 2)
         momentum = torch.randn(phase_dim // 2)
-        
+
         # Compute equations of motion
         dstate_dt, dmomentum_dt = hamiltonian_system.hamilton_equations(
             state, momentum
         )
-        
+
         # Test equation properties
         assert dstate_dt.shape == state.shape, "State evolution should preserve shape"
         assert dmomentum_dt.shape == momentum.shape, "Momentum evolution should preserve shape"
-        
+
         # Test canonical relations
         def test_canonical_relations(q, p):
             """Test canonical Hamilton equations."""
             dq_dt, dp_dt = hamiltonian_system.hamilton_equations(q, p)
             H = hamiltonian_system.compute_hamiltonian(q, p)
-            
+
             # ∂H/∂p = dq/dt, -∂H/∂q = dp/dt
             dH_dp = torch.autograd.grad(H.sum(), p, create_graph=True)[0]
             dH_dq = torch.autograd.grad(H.sum(), q, create_graph=True)[0]
-            
+
             return (torch.allclose(dq_dt, dH_dp, rtol=1e-4) and
                    torch.allclose(dp_dt, -dH_dq, rtol=1e-4))
-                   
+
         assert test_canonical_relations(state, momentum), \
             "Should satisfy canonical relations"
-            
+
         # Test time evolution
         trajectory = hamiltonian_system.evolve_trajectory(
             state, momentum, time_span=[0, 1], steps=100
         )
         assert len(trajectory) > 0, "Should compute trajectory"
-        
+
         # Test energy conservation
         energies = [
             hamiltonian_system.compute_hamiltonian(s, p)
@@ -127,26 +124,26 @@ class TestHamiltonianSystem:
         # Create test vectors
         v1 = torch.randn(phase_dim)
         v2 = torch.randn(phase_dim)
-        
+
         # Compute symplectic form
         omega = hamiltonian_system.symplectic_form(v1, v2)
-        
+
         # Test antisymmetry
         omega_reverse = hamiltonian_system.symplectic_form(v2, v1)
         assert torch.allclose(
             omega, -omega_reverse, rtol=1e-5
         ), "Symplectic form should be antisymmetric"
-        
+
         # Test non-degeneracy
-        def test_non_degeneracy(v):
+        def test_non_degeneracy(v) -> bool:
             """Test if vector pairs with zero symplectic product."""
             return not torch.all(
                 torch.abs(hamiltonian_system.symplectic_form(v, v2)) < 1e-5
                 for v2 in torch.randn(10, phase_dim)
             )
-            
+
         assert test_non_degeneracy(v1), "Symplectic form should be non-degenerate"
-        
+
         # Test Jacobi identity
         def test_jacobi_identity(v1, v2, v3):
             """Test Jacobi identity for Poisson bracket."""
@@ -159,13 +156,13 @@ class TestHamiltonianSystem:
             bracket31 = hamiltonian_system.poisson_bracket(
                 lambda x: x @ v3, lambda x: x @ v1
             )
-            
+
             x = torch.randn(phase_dim)
-            sum_cyclic = (bracket12(x) @ v3 + 
-                         bracket23(x) @ v1 + 
+            sum_cyclic = (bracket12(x) @ v3 +
+                         bracket23(x) @ v1 +
                          bracket31(x) @ v2)
             return torch.abs(sum_cyclic) < 1e-4
-            
+
         v3 = torch.randn(phase_dim)
         assert test_jacobi_identity(v1, v2, v3), "Should satisfy Jacobi identity"
 
@@ -175,17 +172,17 @@ class TestHamiltonianSystem:
         def f(x): return torch.sum(x**2)
         def g(x): return torch.prod(torch.cos(x))
         def h(x): return torch.sum(torch.exp(-x**2))
-        
+
         # Test point
         x = torch.randn(phase_dim)
-        
+
         # Test antisymmetry
         bracket_fg = hamiltonian_system.poisson_bracket(f, g)(x)
         bracket_gf = hamiltonian_system.poisson_bracket(g, f)(x)
         assert torch.allclose(
             bracket_fg, -bracket_gf, rtol=1e-4
         ), "Poisson bracket should be antisymmetric"
-        
+
         # Test Leibniz rule
         def test_leibniz(f, g, h, x):
             """Test Leibniz rule for Poisson bracket."""
@@ -193,21 +190,24 @@ class TestHamiltonianSystem:
             bracket_fg = hamiltonian_system.poisson_bracket(f, g)(x) * h(x)
             bracket_fh = hamiltonian_system.poisson_bracket(f, h)(x) * g(x)
             return torch.allclose(bracket_fgh, bracket_fg + bracket_fh, rtol=1e-4)
-            
+
         assert test_leibniz(f, g, h, x), "Should satisfy Leibniz rule"
-        
+
         # Test Jacobi identity
         def test_poisson_jacobi(f, g, h, x):
             """Test Jacobi identity for Poisson bracket."""
-            bracket_fg = lambda x: hamiltonian_system.poisson_bracket(f, g)(x)
-            bracket_gh = lambda x: hamiltonian_system.poisson_bracket(g, h)(x)
-            bracket_hf = lambda x: hamiltonian_system.poisson_bracket(h, f)(x)
-            
+            def bracket_fg(x):
+                return hamiltonian_system.poisson_bracket(f, g)(x)
+            def bracket_gh(x):
+                return hamiltonian_system.poisson_bracket(g, h)(x)
+            def bracket_hf(x):
+                return hamiltonian_system.poisson_bracket(h, f)(x)
+
             sum_cyclic = (hamiltonian_system.poisson_bracket(f, bracket_gh)(x) +
                          hamiltonian_system.poisson_bracket(g, bracket_hf)(x) +
                          hamiltonian_system.poisson_bracket(h, bracket_fg)(x))
             return torch.abs(sum_cyclic) < 1e-4
-            
+
         assert test_poisson_jacobi(f, g, h, x), "Should satisfy Jacobi identity"
 
     def test_canonical_transformations(self, hamiltonian_system, phase_dim):
@@ -219,9 +219,9 @@ class TestHamiltonianSystem:
             Q = q * torch.cos(theta) - p * torch.sin(theta)
             P = q * torch.sin(theta) + p * torch.cos(theta)
             return Q, P
-            
+
         transform = CanonicalTransform(canonical_map)
-        
+
         # Test symplectic property
         def test_symplectic_preservation(q, p):
             """Test if transformation preserves symplectic form."""
@@ -233,12 +233,12 @@ class TestHamiltonianSystem:
                 torch.cat([Q, P]), torch.cat([Q, P])
             )
             return torch.allclose(omega_old, omega_new, rtol=1e-4)
-            
+
         q = torch.randn(phase_dim // 2)
         p = torch.randn(phase_dim // 2)
         assert test_symplectic_preservation(q, p), \
             "Should preserve symplectic form"
-            
+
         # Test energy conservation
         H_before = hamiltonian_system.compute_hamiltonian(q, p)
         Q, P = transform(q, p)
@@ -246,7 +246,7 @@ class TestHamiltonianSystem:
         assert torch.allclose(
             H_before, H_after, rtol=1e-4
         ), "Should preserve energy"
-        
+
         # Test canonical equations in new coordinates
         dQ_dt, dP_dt = hamiltonian_system.hamilton_equations(Q, P)
         assert test_canonical_relations(Q, P), \
@@ -258,7 +258,7 @@ class TestHamiltonianSystem:
         """Test energy conservation in Hamiltonian dynamics."""
         # Initialize phase space point
         state = hamiltonian_system.initialize_state(batch_size, phase_dim)
-        
+
         # Test Hamiltonian computation
         def test_hamiltonian():
             """Test Hamiltonian function properties."""
@@ -268,9 +268,9 @@ class TestHamiltonianSystem:
             if hamiltonian_system.is_mechanical:
                 assert torch.all(H >= 0), "Mechanical energy should be positive"
             return H
-            
-        H = test_hamiltonian()
-        
+
+        test_hamiltonian()
+
         # Test Hamilton's equations
         def test_equations_of_motion():
             """Test Hamilton's equations."""
@@ -282,9 +282,9 @@ class TestHamiltonianSystem:
                 dH, omega @ hamiltonian_system.compute_gradient(state)
             ), "Should satisfy Hamilton's equations"
             return dH
-            
-        dH = test_equations_of_motion()
-        
+
+        test_equations_of_motion()
+
         # Test energy conservation
         def test_conservation(state, time=10.0):
             """Test energy conservation along flow."""
@@ -300,8 +300,8 @@ class TestHamiltonianSystem:
                 for e in energies
             ), "Energy should be conserved"
             return trajectory
-            
-        trajectory = test_conservation(state)
+
+        test_conservation(state)
 
     def test_symplectic_structure(
         self, hamiltonian_system, batch_size, phase_dim
@@ -319,23 +319,26 @@ class TestHamiltonianSystem:
             assert torch.matrix_rank(omega) == omega.shape[-1], \
                 "Should be non-degenerate"
             return omega
-            
-        omega = test_symplectic_form()
-        
+
+        test_symplectic_form()
+
         # Test Poisson bracket
-        def test_poisson_bracket():
+        def test_poisson_bracket() -> None:
             """Test Poisson bracket properties."""
-            f = lambda x: hamiltonian_system.compute_observable(x, 'f')
-            g = lambda x: hamiltonian_system.compute_observable(x, 'g')
-            h = lambda x: hamiltonian_system.compute_observable(x, 'h')
+            def f(x):
+                return hamiltonian_system.compute_observable(x, "f")
+            def g(x):
+                return hamiltonian_system.compute_observable(x, "g")
+            def h(x):
+                return hamiltonian_system.compute_observable(x, "h")
             state = hamiltonian_system.initialize_state(batch_size, phase_dim)
-            
+
             # Test antisymmetry
             assert torch.allclose(
                 hamiltonian_system.poisson_bracket(f, g)(state),
                 -hamiltonian_system.poisson_bracket(g, f)(state)
             ), "Poisson bracket should be antisymmetric"
-            
+
             # Test Jacobi identity
             jacobi = (
                 hamiltonian_system.poisson_bracket(
@@ -351,9 +354,9 @@ class TestHamiltonianSystem:
             assert torch.allclose(
                 jacobi, torch.zeros_like(jacobi)
             ), "Should satisfy Jacobi identity"
-            
+
         test_poisson_bracket()
-        
+
         # Test symplectic integration
         def test_symplectic_integration():
             """Test symplectic integrator properties."""
@@ -368,8 +371,8 @@ class TestHamiltonianSystem:
                     flow_map
                 ), "Flow should preserve symplectic form"
             return trajectory
-            
-        symplectic_trajectory = test_symplectic_integration()
+
+        test_symplectic_integration()
 
     def test_canonical_transformations(
         self, hamiltonian_system, batch_size, phase_dim
@@ -386,26 +389,26 @@ class TestHamiltonianSystem:
             F3 = hamiltonian_system.get_generating_function(3)
             # Type 4 (p, P)
             F4 = hamiltonian_system.get_generating_function(4)
-            
+
             # Test canonical relations
             state = hamiltonian_system.initialize_state(batch_size, phase_dim)
             for F in [F1, F2, F3, F4]:
                 transform = hamiltonian_system.compute_canonical_transform(F)
-                new_state = transform(state)
+                transform(state)
                 assert hamiltonian_system.is_canonical(
                     transform
                 ), "Transform should be canonical"
             return F1, F2, F3, F4
-            
+
         F1, F2, F3, F4 = test_generating_functions()
-        
+
         # Test canonical invariants
-        def test_invariants():
+        def test_invariants() -> None:
             """Test invariance of canonical quantities."""
             state = hamiltonian_system.initialize_state(batch_size, phase_dim)
             transform = hamiltonian_system.get_canonical_transform()
             new_state = transform(state)
-            
+
             # Test Poincaré integral invariants
             for k in range(1, phase_dim//2 + 1):
                 old_invariant = hamiltonian_system.compute_poincare_invariant(
@@ -417,33 +420,33 @@ class TestHamiltonianSystem:
                 assert torch.allclose(
                     old_invariant, new_invariant, rtol=1e-3
                 ), f"Should preserve {k}-form"
-                
+
             # Test action variables
             old_actions = hamiltonian_system.compute_action_variables(state)
             new_actions = hamiltonian_system.compute_action_variables(new_state)
             assert torch.allclose(
                 old_actions, new_actions, rtol=1e-3
             ), "Should preserve actions"
-            
+
         test_invariants()
-        
+
         # Test canonical perturbation theory
-        def test_perturbation():
+        def test_perturbation() -> None:
             """Test canonical perturbation methods."""
             H0 = hamiltonian_system.get_unperturbed_hamiltonian()
             V = hamiltonian_system.get_perturbation()
-            
+
             # Test averaging principle
             avg_H = hamiltonian_system.compute_averaged_hamiltonian(H0, V)
             assert avg_H is not None, "Should compute average"
-            
+
             # Test normal form
             normal_form = hamiltonian_system.compute_normal_form(H0, V)
             assert normal_form is not None, "Should compute normal form"
-            
+
             # Test KAM tori
             if hamiltonian_system.is_integrable(H0):
                 tori = hamiltonian_system.find_kam_tori(H0, V)
                 assert len(tori) > 0, "Should find KAM tori"
-                
+
         test_perturbation()
