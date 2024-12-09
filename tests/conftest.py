@@ -1,6 +1,8 @@
 """Global pytest configuration and fixtures for testing."""
 
 import gc
+import logging
+import os
 import random
 import resource
 import signal
@@ -8,12 +10,21 @@ import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Optional
 
 import black
 import numpy as np
 import pytest
 import torch
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("test.log", mode="w")],
+)
+
+logger = logging.getLogger(__name__)
 
 # Resource limits
 MAX_MEMORY_GB = 4  # Maximum memory limit in GB
@@ -125,57 +136,199 @@ def _run_black_format(file_path: Path, content: str) -> str:
 
 
 def _run_ruff_commands(ruff_path: Path, file_path: Path) -> None:
-    """Run ruff commands in sequence."""
-    file_str = str(file_path.resolve())
-    commands = [
-        ["check", "--fix", "--unsafe-fixes"],
-        ["format"],
-        ["check"],
-    ]
+    """Run ruff commands on a file.
 
-    for args in commands:
-        result = subprocess.run(
-            [str(ruff_path), *args, file_str],
-            capture_output=True,
-            text=True,
-            check=False,
+    Args:
+        ruff_path: Path to ruff executable
+        file_path: File to run ruff on
+    """
+    logger.info("Running ruff commands on %s", file_path)
+    file_str = str(file_path)
+    commands = [["check", "--fix", "--unsafe-fixes"], ["format"], ["check"]]
+
+    try:
+        for command in commands:
+            result = subprocess.run(
+                [str(ruff_path), *command, file_str], capture_output=True, text=True, check=True
+            )
+            if result.stderr:
+                pytest.fail(f"Ruff {command[0]} failed for {file_path}:\n{result.stderr}")
+    except subprocess.CalledProcessError as e:
+        logger.exception("Failed to run ruff command %s: %s", command, str(e))
+        raise
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Modify test items before test run.
+
+    Args:
+        items: List of test items to modify
+    """
+    logger.info("Collected %d test items", len(items))
+    for item in items:
+        logger.debug("Test item: %s", item.name)
+
+
+def pytest_configure(config: Any) -> None:
+    """Configure pytest.
+
+    Args:
+        config: Pytest config object
+    """
+    # Configure logging based on verbosity
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    log_level = logging.DEBUG if config.option.verbose > 0 else logging.INFO
+
+    # Add console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(log_format))
+
+    # Add file handler
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "test.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(log_format))
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+
+def pytest_unconfigure(config: Any) -> None:
+    """Clean up after pytest run.
+
+    Args:
+        config: Pytest config object
+    """
+    # Log test session summary
+    if config.option.verbose > 0:
+        logger.info(
+            "Test session finished with %d passed, %d failed",
+            config.pluginmanager.get_plugin("terminalreporter").stats.get("passed", 0),
+            config.pluginmanager.get_plugin("terminalreporter").stats.get("failed", 0),
         )
-        # Skip "no files to check" case only for the fix command
-        if result.returncode != 0 and (
-            args != ["check", "--fix", "--unsafe-fixes"]
-            or "no files to check" not in result.stderr.lower()
-        ):
-            command_name = args[0] if args else "unknown"
-            pytest.fail(f"Ruff {command_name} failed for {file_path}:\n{result.stderr}")
+    else:
+        logger.info("Test session finished")
 
 
-def pytest_collect_file(parent: pytest.File, file_path: Path) -> pytest.Item | None:  # noqa: ARG001
-    """Format Python files and check style with black and ruff during test collection."""
-    if not str(file_path).endswith(".py"):
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Set up before each test.
+
+    Args:
+        item: Test item being run
+    """
+    logger.info("Setting up test: %s", item.name)
+
+
+def pytest_runtest_teardown(item: pytest.Item) -> None:
+    """Clean up after each test.
+
+    Args:
+        item: Test item that was run
+    """
+    logger.info("Tearing down test: %s", item.name)
+
+
+@pytest.fixture(scope="session")
+def root_dir() -> Path:
+    """Get root directory of project.
+
+    Returns:
+        Path to project root directory
+    """
+    return Path(__file__).parent.parent
+
+
+@pytest.fixture(scope="session")
+def ruff_path(root_dir: Path) -> Path:
+    """Get path to ruff executable.
+
+    Args:
+        root_dir: Project root directory
+
+    Returns:
+        Path to ruff executable
+
+    Raises:
+        FileNotFoundError: If ruff executable not found
+    """
+    venv_dir = root_dir / ".venv"
+    if not venv_dir.exists():
+        venv_dir = root_dir / "venv"
+
+    ruff = venv_dir / "Scripts" / "ruff.exe" if os.name == "nt" else venv_dir / "bin" / "ruff"
+
+    if not ruff.exists():
+        msg = f"Could not find ruff at {ruff}"
+        raise FileNotFoundError(msg)
+
+    return ruff
+
+
+def pytest_collect_file(file_path: Path, parent: Any) -> Optional[pytest.Item]:
+    """Process file before collection.
+
+    Args:
+        file_path: Path to file being collected
+        parent: Parent collector
+
+    Returns:
+        None if file should be skipped
+    """
+    if file_path.suffix != ".py":
         return None
 
-    # Skip files in .venv directory
-    if ".venv" in str(file_path):
-        return None
-
-    # Get project root directory
-    root_dir = Path(__file__).parent.parent
-
-    # Only process files under the project root
     try:
-        file_path.relative_to(root_dir)
-    except ValueError:
-        return None
+        # Get project root directory
+        root_dir = Path(__file__).parent.parent
 
-    try:
-        ruff_path = _find_ruff_executable()
-        content = file_path.read_text()
-        content = _run_black_format(file_path, content)
+        # Try both .venv and venv directories
+        ruff_path = root_dir / ".venv" / "bin" / "ruff"
+        if not ruff_path.exists():
+            ruff_path = root_dir / "venv" / "bin" / "ruff"
+
+        if not ruff_path.exists():
+            logger.error("Could not find ruff executable in %s", root_dir)
+            return None
+
+        # Run ruff commands and collect file if parent is a test module
         _run_ruff_commands(ruff_path, file_path)
-    except (subprocess.CalledProcessError, OSError) as e:
-        pytest.fail(f"Command failed for {file_path}: {e}")
+        if parent.name.startswith("test_"):
+            return parent.collect_file(file_path)
+
+    except Exception as e:
+        logger.exception("Error processing %s: %s", file_path, str(e))
+        raise
 
     return None
+
+
+@pytest.fixture(autouse=True)
+def setup_logging(request: pytest.FixtureRequest) -> None:
+    """Set up logging for each test.
+
+    Args:
+        request: Pytest request object
+    """
+    logger = logging.getLogger(request.node.name)
+    logger.setLevel(logging.INFO)
+
+    # Add test-specific log file
+    log_file = Path("logs") / f"{request.node.name}.log"
+    handler = logging.FileHandler(log_file, mode="w")
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+
+    yield logger
+
+    # Clean up
+    handler.close()
+    logger.removeHandler(handler)
 
 
 @pytest.fixture(scope="session")

@@ -1,0 +1,555 @@
+2024-12-09 04:40:11,485 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:40:11,515 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:40:11,532 - tests.conftest - ERROR - Ruff check failed for /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py:
+2024-12-09 04:40:11,532 - tests.conftest - ERROR - stdout:
+tests/conftest.py:177:9: PERF203 `try`-`except` within a loop incurs performance overhead
+    |
+175 |                   pytest.fail(f"Ruff {command[0]} failed for {file_path}:\n{result.stderr}")
+176 |   
+177 |           except subprocess.CalledProcessError as e:
+    |  _________^
+178 | |             logger.exception("Failed to run ruff command %s: %s", command, str(e))
+179 | |             raise
+    | |_________________^ PERF203
+    |
+
+tests/conftest.py:193:22: ARG001 Unused function argument: `config`
+    |
+193 | def pytest_configure(config: Any) -> None:
+    |                      ^^^^^^ ARG001
+194 |     """Configure pytest.
+    |
+
+tests/conftest.py:223:24: ARG001 Unused function argument: `config`
+    |
+223 | def pytest_unconfigure(config: Any) -> None:
+    |                        ^^^^^^ ARG001
+224 |     """Clean up after pytest run.
+    |
+
+tests/conftest.py:286:42: ARG001 Unused function argument: `parent`
+    |
+286 | def pytest_collect_file(file_path: Path, parent: Any) -> Optional[pytest.Item]:
+    |                                          ^^^^^^ ARG001
+287 |     """Process file before collection.
+    |
+
+Found 27 errors (23 fixed, 4 remaining).
+
+2024-12-09 04:40:11,560 - tests.conftest - INFO - Test session finished
+2024-12-09 04:40:44,393 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:40:44,429 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:40:44,481 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:40:44,514 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:40:44,542 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:40:44,560 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 158, in _run_ruff_commands
+    raise
+          
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+2024-12-09 04:40:44,561 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+2024-12-09 04:40:44,606 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-09 04:41:32,332 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:41:32,357 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:41:32,387 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:41:32,421 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:41:32,455 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:41:32,494 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:41:32,524 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:41:32,613 - tests.conftest - INFO - Collected 0 test items
+2024-12-09 04:41:32,675 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-09 04:44:49,857 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:44:49,884 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:44:49,912 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:44:49,939 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:44:49,964 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:44:49,976 - tests.conftest - ERROR - Failed to run ruff command ['check', '--fix', '--unsafe-fixes']: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+2024-12-09 04:44:49,977 - tests.conftest - ERROR - Error processing /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 300, in pytest_collect_file
+    _run_ruff_commands(ruff_path, file_path)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py", line 151, in _run_ruff_commands
+    result = subprocess.run(
+             ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/bin/ruff', 'check', '--fix', '--unsafe-fixes', '/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py']' returned non-zero exit status 1.
+2024-12-09 04:44:50,011 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-09 04:45:31,437 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:45:31,463 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:45:31,489 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:45:31,513 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:45:31,546 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:45:31,585 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:45:31,614 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:45:31,697 - tests.conftest - INFO - Collected 0 test items
+2024-12-09 04:45:31,753 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-09 04:46:05,701 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:46:05,726 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:46:05,755 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:46:05,782 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:46:05,809 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:46:05,836 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:46:05,861 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:46:05,995 - tests.conftest - INFO - Collected 0 test items
+2024-12-09 04:46:06,050 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-09 04:47:23,435 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:47:23,460 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:47:23,487 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:47:23,513 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:47:23,535 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:47:23,559 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:47:23,584 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:47:23,642 - tests.conftest - INFO - Collected 0 test items
+2024-12-09 04:47:23,696 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-09 04:48:18,525 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:48:18,553 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:48:18,583 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:48:18,610 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:48:18,636 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:48:18,662 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:48:18,688 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:48:18,742 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:48:18,742 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:48:18,742 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:48:18,742 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:48:18,743 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:48:18,743 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:48:18,743 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:48:18,888 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:48:18.888416+00:00
+2024-12-09 04:48:18,966 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:48:18,966 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:48:18,966 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:48:18,967 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:48:48,580 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:48:48,605 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:48:48,635 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:48:48,664 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:48:48,691 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:48:48,717 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:48:48,754 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:48:48,836 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:48:48,837 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:48:48,837 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:48:48,837 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:48:48,837 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:48:48,838 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:48:48,839 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:48:48,845 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:48:48.845112+00:00
+2024-12-09 04:48:48,909 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:48:48,909 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:48:48,909 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:48:48,910 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:49:20,603 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:49:20,627 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:49:20,657 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:49:20,685 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:49:20,712 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:49:20,739 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:49:20,768 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:49:20,832 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:49:20,832 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:49:20,833 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:49:20,833 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:49:20,833 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:49:20,833 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:49:20,834 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:49:20,837 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:49:20.837045+00:00
+2024-12-09 04:49:20,896 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:49:20,896 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:49:20,896 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:49:20,897 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:49:20,975 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:49:20,995 - test_memory_management - ERROR - Data transfer failed: Failed to transfer data to device: initializer for ctype 'struct VkDeviceMemory_T *' must be a pointer to same type, not cdata 'struct VkBuffer_T *'
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 181, in transfer_to_device
+    data = vk.vkMapMemory(self._device, buffer, 0, memory_size, 0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 22556, in vkMapMemory
+    result = _callApi(lib.vkMapMemory, device,memory,offset,size,flags,ppData)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 11024, in _callApi
+    return fn(*fn_args)
+           ^^^^^^^^^^^^
+TypeError: initializer for ctype 'struct VkDeviceMemory_T *' must be a pointer to same type, not cdata 'struct VkBuffer_T *'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py", line 72, in test_data_transfer
+    device_buffer = memory_manager.transfer_to_device(test_data)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 192, in transfer_to_device
+    raise VulkanMemoryError(f"Failed to transfer data to device: {e}")
+src.core.performance.vulkan.memory_management.VulkanMemoryError: Failed to transfer data to device: initializer for ctype 'struct VkDeviceMemory_T *' must be a pointer to same type, not cdata 'struct VkBuffer_T *'
+2024-12-09 04:49:21,412 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:49:21,489 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:49:21,507 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:49:21,507 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:49:21,508 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:49:21,509 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:49:21,509 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:49:21,509 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:49:21,509 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:49:21,509 - test_memory_management - INFO - Successfully freed all buffers
+2024-12-09 04:49:21,509 - test_memory_management - INFO - Memory after cleanup: 0
+2024-12-09 04:49:21,510 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:49:21,587 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:49:21,608 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:49:21,685 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:49:21,710 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:49:21,711 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:49:21,712 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:49:21,713 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:49:21,714 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:49:21,714 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:49:21,714 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:49:21,790 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.953694
+2024-12-09 04:49:21,791 - test_memory_management - INFO - ================================================================================
+2024-12-09 04:49:58,600 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:49:58,625 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:49:58,654 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:49:58,681 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:49:58,704 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:49:58,729 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:49:58,756 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:49:58,818 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:49:58,818 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:49:58,818 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:49:58,818 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:49:58,818 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:49:58,818 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:49:58,819 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:49:58,821 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:49:58.821973+00:00
+2024-12-09 04:49:58,874 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:49:58,874 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:49:58,874 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:49:58,875 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:49:58,959 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:49:58,976 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:51:28,506 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:51:28,530 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:51:28,556 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:51:28,583 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:51:28,606 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:51:28,630 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:51:28,653 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:51:28,704 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:51:28,704 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:51:28,704 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:51:28,704 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:51:28,705 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:51:28,705 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:51:28,705 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:51:28,707 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:51:28.707809+00:00
+2024-12-09 04:51:28,758 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:51:28,758 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:51:28,758 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:51:28,758 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:51:28,834 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:51:28,851 - test_memory_management - ERROR - Data transfer failed: Failed to transfer data to device: initializer for ctype 'struct VkDeviceMemory_T *' must be a pointer to same type, not cdata 'struct VkBuffer_T *'
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 179, in transfer_to_device
+    data = vk.vkMapMemory(self._device, buffer, 0, host_array.nbytes, 0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 22556, in vkMapMemory
+    result = _callApi(lib.vkMapMemory, device,memory,offset,size,flags,ppData)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 11024, in _callApi
+    return fn(*fn_args)
+           ^^^^^^^^^^^^
+TypeError: initializer for ctype 'struct VkDeviceMemory_T *' must be a pointer to same type, not cdata 'struct VkBuffer_T *'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py", line 72, in test_data_transfer
+    device_buffer = memory_manager.transfer_to_device(test_data)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 193, in transfer_to_device
+    raise VulkanMemoryError(f"Failed to transfer data to device: {e}")
+src.core.performance.vulkan.memory_management.VulkanMemoryError: Failed to transfer data to device: initializer for ctype 'struct VkDeviceMemory_T *' must be a pointer to same type, not cdata 'struct VkBuffer_T *'
+2024-12-09 04:51:29,205 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:51:29,275 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:51:29,294 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:51:29,294 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:51:29,294 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:51:29,295 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:51:29,295 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:51:29,295 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:51:29,295 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:51:29,295 - test_memory_management - INFO - Successfully freed all buffers
+2024-12-09 04:51:29,295 - test_memory_management - INFO - Memory after cleanup: 0
+2024-12-09 04:51:29,296 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:51:29,363 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:51:29,383 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:51:29,452 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:51:29,472 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:51:29,472 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:51:29,473 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:51:29,473 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:51:29,473 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:51:29,473 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:51:29,474 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:51:29,542 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.834446
+2024-12-09 04:51:29,542 - test_memory_management - INFO - ================================================================================
+2024-12-09 04:52:20,570 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:52:20,595 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:52:20,624 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:52:20,652 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:52:20,677 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:52:20,704 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:52:20,728 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:52:20,783 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:52:20,783 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:52:20,783 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:52:20,783 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:52:20,783 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:52:20,783 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:52:20,784 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:52:20,787 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:52:20.787089+00:00
+2024-12-09 04:52:20,836 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:52:20,836 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:52:20,836 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:52:20,837 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:52:20,901 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:52:20,920 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:52:20,921 - test_memory_management - ERROR - Data transfer failed: Failed to transfer data from device: module 'vulkan' has no attribute 'vkGetBufferMemoryBinding'
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 217, in transfer_to_host
+    memory = vk.vkGetBufferMemoryBinding(self._device, memory_info)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'vulkan' has no attribute 'vkGetBufferMemoryBinding'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py", line 77, in test_data_transfer
+    host_data = memory_manager.transfer_to_host(device_buffer, test_data.shape, test_data.dtype)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 233, in transfer_to_host
+    raise VulkanMemoryError(f"Failed to transfer data from device: {e}")
+src.core.performance.vulkan.memory_management.VulkanMemoryError: Failed to transfer data from device: module 'vulkan' has no attribute 'vkGetBufferMemoryBinding'
+2024-12-09 04:52:20,938 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:52:21,018 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:52:21,035 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:52:21,036 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:52:21,036 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:52:21,036 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:52:21,036 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:52:21,036 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:52:21,037 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:52:21,037 - test_memory_management - INFO - Successfully freed all buffers
+2024-12-09 04:52:21,037 - test_memory_management - INFO - Memory after cleanup: 560000
+2024-12-09 04:52:21,037 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:52:21,116 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:52:21,135 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:52:21,211 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:52:21,229 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:52:21,230 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:52:21,230 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:52:21,231 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:52:21,231 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:52:21,231 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:52:21,232 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:52:21,308 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.521309
+2024-12-09 04:52:21,308 - test_memory_management - INFO - ================================================================================
+2024-12-09 04:53:00,638 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:53:00,665 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:53:00,695 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:53:00,724 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:53:00,751 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:53:00,777 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:53:00,806 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:53:00,863 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:53:00,863 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:53:00,863 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:53:00,863 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:53:00,863 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:53:00,864 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:53:00,864 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:53:00,867 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:53:00.867164+00:00
+2024-12-09 04:53:00,908 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:53:00,909 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:53:00,909 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:53:00,909 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:53:00,989 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:53:01,007 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:53:48,640 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:53:48,668 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:53:48,720 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:53:48,754 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:53:48,785 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:53:48,816 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:53:48,844 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:53:48,898 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:53:48,898 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:53:48,898 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:53:48,898 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:53:48,898 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:53:48,898 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:53:48,899 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:53:48,901 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:53:48.901950+00:00
+2024-12-09 04:53:48,951 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:53:48,951 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:53:48,951 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:53:48,952 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:53:49,017 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:53:49,038 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:53:49,042 - test_memory_management - INFO - Successfully transferred data back to host
+2024-12-09 04:53:49,042 - test_memory_management - DEBUG - Data verification passed. Original sum: 48.671846, Transferred sum: 48.671846
+2024-12-09 04:53:49,043 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:53:49,117 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:53:49,135 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:53:49,136 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:53:49,136 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:53:49,136 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:53:49,136 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:53:49,136 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:53:49,136 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:53:49,137 - test_memory_management - ERROR - Memory tracking test failed: Failed to free buffer: array item of unknown size: 'struct VkBuffer_T'
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 267, in free_buffer
+    vk.vkDestroyBuffer(self._device, buffer, None)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 11856, in vkDestroyBuffer
+    result = _callApi(lib.vkDestroyBuffer, device,buffer,pAllocator)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 11023, in _callApi
+    fn_args = [_auto_handle(i, j) for i, j in zip(args, ffi.typeof(fn).args)]
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 11017, in _auto_handle
+    ptr, _ = _cast_ptr(x, _type)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 96, in _cast_ptr3
+    return _cast_ptr2(x, _type)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/.venv/lib/python3.12/site-packages/vulkan/_vulkan.py", line 83, in _cast_ptr2
+    ret = ffi.new(_type.item.cname+'[]', x)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: array item of unknown size: 'struct VkBuffer_T'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py", line 114, in test_memory_tracking
+    memory_manager.free_buffer(buffer)
+  File "/home/d/Desktop/AAT/adaptive-attention-tiling-v2/src/core/performance/vulkan/memory_management.py", line 270, in free_buffer
+    raise VulkanMemoryError(f"Failed to free buffer: {e}")
+src.core.performance.vulkan.memory_management.VulkanMemoryError: Failed to free buffer: array item of unknown size: 'struct VkBuffer_T'
+2024-12-09 04:53:49,802 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:53:49,876 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:53:49,897 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:53:49,975 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:53:49,994 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:53:49,995 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:53:49,995 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:53:49,995 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:53:49,995 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:53:49,995 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:53:49,996 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:53:50,068 - test_memory_management - INFO - Completed test session. Duration: 0:00:01.166449
+2024-12-09 04:53:50,068 - test_memory_management - INFO - ================================================================================
+2024-12-09 04:54:50,626 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:54:50,653 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:54:50,684 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:54:50,713 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:54:50,741 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:54:50,772 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:54:50,803 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:54:50,869 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:54:50,870 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:54:50,870 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:54:50,870 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:54:50,870 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:54:50,870 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:54:50,871 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:54:50,873 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:54:50.873710+00:00
+2024-12-09 04:54:50,927 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:54:50,927 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:54:50,928 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:54:50,928 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:54:50,998 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:54:51,019 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:54:51,019 - test_memory_management - INFO - Successfully transferred data back to host
+2024-12-09 04:54:51,019 - test_memory_management - DEBUG - Data verification passed. Original sum: 48.671846, Transferred sum: 48.671846
+2024-12-09 04:54:51,020 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:54:51,094 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:54:51,121 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:54:51,122 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:54:51,122 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:54:51,122 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:54:51,123 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:54:51,123 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:54:51,123 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:54:51,123 - test_memory_management - INFO - Successfully freed all buffers
+2024-12-09 04:54:51,123 - test_memory_management - INFO - Memory after cleanup: 0
+2024-12-09 04:54:51,124 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:54:51,204 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:54:51,232 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:54:51,308 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:54:51,327 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:54:51,327 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:54:51,327 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:54:51,328 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:54:51,328 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:54:51,328 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:54:51,329 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:54:51,405 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.532151
+2024-12-09 04:54:51,406 - test_memory_management - INFO - ================================================================================
+2024-12-09 04:55:39,637 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:55:39,664 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:55:39,694 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:55:39,723 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:55:39,750 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:55:39,776 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:55:39,805 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:55:39,864 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:55:39,864 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:55:39,866 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:55:39,868 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:55:39.868581+00:00
+2024-12-09 04:55:39,917 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:55:39,917 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:55:39,917 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:55:39,918 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:55:39,985 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:55:40,012 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:55:40,013 - test_memory_management - INFO - Successfully transferred data back to host
+2024-12-09 04:55:40,013 - test_memory_management - DEBUG - Data verification passed. Original sum: 48.671846, Transferred sum: 48.671846
+2024-12-09 04:55:40,013 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:55:40,077 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:55:40,094 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:55:40,095 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:55:40,095 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Successfully freed all buffers
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Memory after cleanup: 0
+2024-12-09 04:55:40,097 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:55:40,171 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:55:40,190 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:55:40,268 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:55:40,292 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:55:40,294 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:55:40,372 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.503618
+2024-12-09 04:55:40,372 - test_memory_management - INFO - ================================================================================

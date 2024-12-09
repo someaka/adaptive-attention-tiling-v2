@@ -1,0 +1,47 @@
+2024-12-09 04:55:39,637 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/__init__.py
+2024-12-09 04:55:39,664 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/conftest.py
+2024-12-09 04:55:39,694 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/__init__.py
+2024-12-09 04:55:39,723 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_compute.py
+2024-12-09 04:55:39,750 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_memory_management.py
+2024-12-09 04:55:39,776 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_shaders.py
+2024-12-09 04:55:39,805 - tests.conftest - INFO - Running ruff commands on /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/performance/vulkan/test_sync.py
+2024-12-09 04:55:39,864 - tests.conftest - INFO - Collected 5 test items
+2024-12-09 04:55:39,864 - tests.conftest - DEBUG - Test item: test_buffer_allocation
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_data_transfer
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_memory_tracking
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_error_handling
+2024-12-09 04:55:39,865 - tests.conftest - DEBUG - Test item: test_buffer_pool_cleanup
+2024-12-09 04:55:39,866 - tests.conftest - INFO - Setting up test: test_buffer_allocation
+2024-12-09 04:55:39,868 - test_memory_management - INFO - Starting Vulkan memory management test session at 2024-12-09 03:55:39.868581+00:00
+2024-12-09 04:55:39,917 - test_memory_management - INFO - Successfully allocated buffer with tuple size
+2024-12-09 04:55:39,917 - test_memory_management - INFO - Successfully allocated buffer with byte size
+2024-12-09 04:55:39,917 - test_memory_management - INFO - Memory stats - Allocated: 41024, Peak: 41024
+2024-12-09 04:55:39,918 - tests.conftest - INFO - Tearing down test: test_buffer_allocation
+2024-12-09 04:55:39,985 - tests.conftest - INFO - Setting up test: test_data_transfer
+2024-12-09 04:55:40,012 - test_memory_management - INFO - Successfully transferred data to device
+2024-12-09 04:55:40,013 - test_memory_management - INFO - Successfully transferred data back to host
+2024-12-09 04:55:40,013 - test_memory_management - DEBUG - Data verification passed. Original sum: 48.671846, Transferred sum: 48.671846
+2024-12-09 04:55:40,013 - tests.conftest - INFO - Tearing down test: test_data_transfer
+2024-12-09 04:55:40,077 - tests.conftest - INFO - Setting up test: test_memory_tracking
+2024-12-09 04:55:40,094 - test_memory_management - INFO - Initial allocated memory: 0
+2024-12-09 04:55:40,095 - test_memory_management - INFO - Allocated buffer of size (100, 100)
+2024-12-09 04:55:40,095 - test_memory_management - INFO - Allocated buffer of size (200, 200)
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Allocated buffer of size (300, 300)
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Final allocated memory: 560000
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Peak memory usage: 560000
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Fragmentation ratio: 0.571429
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Successfully freed all buffers
+2024-12-09 04:55:40,096 - test_memory_management - INFO - Memory after cleanup: 0
+2024-12-09 04:55:40,097 - tests.conftest - INFO - Tearing down test: test_memory_tracking
+2024-12-09 04:55:40,171 - tests.conftest - INFO - Setting up test: test_error_handling
+2024-12-09 04:55:40,190 - tests.conftest - INFO - Tearing down test: test_error_handling
+2024-12-09 04:55:40,268 - tests.conftest - INFO - Setting up test: test_buffer_pool_cleanup
+2024-12-09 04:55:40,292 - test_memory_management - INFO - Allocated large buffer, current memory: 4000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 8000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 12000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 16000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Allocated large buffer, current memory: 20000000
+2024-12-09 04:55:40,293 - test_memory_management - INFO - Final memory after pool test: 20000000
+2024-12-09 04:55:40,294 - tests.conftest - INFO - Tearing down test: test_buffer_pool_cleanup
+2024-12-09 04:55:40,372 - test_memory_management - INFO - Completed test session. Duration: 0:00:00.503618
+2024-12-09 04:55:40,372 - test_memory_management - INFO - ================================================================================
