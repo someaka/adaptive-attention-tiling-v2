@@ -2,4 +2,4 @@
 
 from ..tiling.advanced_metrics import InformationDensityAnalyzer
 
-__all__ = ['InformationDensityAnalyzer']
+__all__ = ["InformationDensityAnalyzer"]

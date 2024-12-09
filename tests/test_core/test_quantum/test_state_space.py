@@ -14,7 +14,6 @@ Tests cover:
 10. Advanced entanglement measures
 """
 
-
 import numpy as np
 import pytest
 import torch
@@ -36,10 +35,7 @@ class TestQuantumStateSpace:
     @pytest.fixture
     def quantum_space(self, hilbert_dim):
         """Create a test quantum state space."""
-        return QuantumStateSpace(
-            dimension=hilbert_dim,
-            metric_type="Fubini-Study"
-        )
+        return QuantumStateSpace(dimension=hilbert_dim, metric_type="Fubini-Study")
 
     def test_state_preparation(self, quantum_space, hilbert_dim, batch_size):
         """Test quantum state preparation from classical data."""
@@ -61,7 +57,9 @@ class TestQuantumStateSpace:
         ), "Output should be a QuantumState instance"
 
         # Test batch shape
-        assert quantum_state.shape[0] == batch_size, "Batch dimension should be preserved"
+        assert (
+            quantum_state.shape[0] == batch_size
+        ), "Batch dimension should be preserved"
 
     def test_state_evolution(self, quantum_space, hilbert_dim):
         """Test unitary evolution of quantum states."""
@@ -69,7 +67,9 @@ class TestQuantumStateSpace:
         initial_state = quantum_space.prepare_state(torch.randn(hilbert_dim * 2))
 
         # Create test Hamiltonian (Hermitian matrix)
-        H = torch.randn(hilbert_dim, hilbert_dim) + 1j * torch.randn(hilbert_dim, hilbert_dim)
+        H = torch.randn(hilbert_dim, hilbert_dim) + 1j * torch.randn(
+            hilbert_dim, hilbert_dim
+        )
         H = H + H.conj().T  # Make Hermitian
 
         # Evolve state
@@ -113,8 +113,7 @@ class TestQuantumStateSpace:
         """Test von Neumann entropy computation."""
         # Create mixed state density matrix
         pure_states = [
-            quantum_space.prepare_state(torch.randn(hilbert_dim * 2))
-            for _ in range(3)
+            quantum_space.prepare_state(torch.randn(hilbert_dim * 2)) for _ in range(3)
         ]
         weights = torch.softmax(torch.randn(3), dim=0)
         mixed_state = sum(w * p.density_matrix() for w, p in zip(weights, pure_states))
@@ -141,7 +140,7 @@ class TestQuantumStateSpace:
         # Test Fubini-Study metric
         distance = quantum_space.fubini_study_distance(state1, state2)
         assert distance >= 0, "Distance must be non-negative"
-        assert distance <= np.pi/2, "Maximum distance in CP^n is π/2"
+        assert distance <= np.pi / 2, "Maximum distance in CP^n is π/2"
 
         # Test parallel transport
         tangent = quantum_space.quantum_tangent_vector(state1)
@@ -155,15 +154,13 @@ class TestQuantumStateSpace:
     def test_entanglement(self, quantum_space):
         """Test entanglement measures."""
         # Create Bell state (maximally entangled)
-        bell_state = (
-            torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex64) / np.sqrt(2)
-        )
+        bell_state = torch.tensor(
+            [1.0, 0.0, 0.0, 1.0], dtype=torch.complex64
+        ) / np.sqrt(2)
         bell_density = bell_state.outer(bell_state)
 
         # Create separable state
-        separable_state = torch.tensor(
-            [1.0, 0.0, 0.0, 0.0], dtype=torch.complex64
-        )
+        separable_state = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.complex64)
         separable_density = separable_state.outer(separable_state)
 
         # Test entanglement entropy
@@ -204,7 +201,7 @@ class TestQuantumStateSpace:
         assert torch.allclose(
             torch.trace(final_state.density_matrix()),
             torch.tensor(1.0, dtype=torch.complex64),
-            rtol=1e-5
+            rtol=1e-5,
         ), "Quantum channel must preserve trace"
 
     def test_state_tomography(self, quantum_space, hilbert_dim):
@@ -221,7 +218,7 @@ class TestQuantumStateSpace:
         measurements = {
             "X": quantum_space.measure_observable(true_state, pauli_x),
             "Y": quantum_space.measure_observable(true_state, pauli_y),
-            "Z": quantum_space.measure_observable(true_state, pauli_z)
+            "Z": quantum_space.measure_observable(true_state, pauli_z),
         }
 
         # Reconstruct state
@@ -258,13 +255,14 @@ class TestQuantumStateSpace:
 
     def test_geometric_phase(self, quantum_space, hilbert_dim):
         """Test geometric (Berry) phase computation."""
+
         # Create cyclic evolution path
         def hamiltonian(t):
             theta = 2 * np.pi * t
-            return torch.tensor([
-                [np.cos(theta), np.sin(theta)],
-                [np.sin(theta), -np.cos(theta)]
-            ], dtype=torch.complex64)
+            return torch.tensor(
+                [[np.cos(theta), np.sin(theta)], [np.sin(theta), -np.cos(theta)]],
+                dtype=torch.complex64,
+            )
 
         # Initial state
         initial_state = quantum_space.prepare_state(
@@ -280,39 +278,29 @@ class TestQuantumStateSpace:
         # Test phase is real and matches theoretical value
         assert torch.abs(berry_phase.imag) < 1e-5, "Berry phase should be real"
         assert torch.allclose(
-            berry_phase.real,
-            torch.tensor(np.pi),
-            rtol=1e-2
+            berry_phase.real, torch.tensor(np.pi), rtol=1e-2
         ), "Berry phase should match theoretical value"
 
     def test_advanced_entanglement(self, quantum_space):
         """Test advanced entanglement measures."""
         # Create various entangled states
-        bell_plus = torch.tensor(
-            [1.0, 0.0, 0.0, 1.0], dtype=torch.complex64
-        ) / np.sqrt(2)
+        bell_plus = torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex64) / np.sqrt(
+            2
+        )
         bell_minus = torch.tensor(
             [1.0, 0.0, 0.0, -1.0], dtype=torch.complex64
         ) / np.sqrt(2)
 
         # Test concurrence
-        concurrence_plus = quantum_space.compute_concurrence(
-            bell_plus.outer(bell_plus)
-        )
+        concurrence_plus = quantum_space.compute_concurrence(bell_plus.outer(bell_plus))
         assert torch.allclose(
-            concurrence_plus,
-            torch.tensor(1.0),
-            rtol=1e-5
+            concurrence_plus, torch.tensor(1.0), rtol=1e-5
         ), "Bell state should have maximum concurrence"
 
         # Test negativity
-        negativity_plus = quantum_space.compute_negativity(
-            bell_plus.outer(bell_plus)
-        )
+        negativity_plus = quantum_space.compute_negativity(bell_plus.outer(bell_plus))
         assert torch.allclose(
-            negativity_plus,
-            torch.tensor(0.5),
-            rtol=1e-5
+            negativity_plus, torch.tensor(0.5), rtol=1e-5
         ), "Bell state should have expected negativity"
 
         # Test entanglement witnesses

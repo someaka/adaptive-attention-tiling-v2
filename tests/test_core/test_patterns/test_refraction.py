@@ -2,7 +2,8 @@
 Test file for tests/test_core/test_patterns/test_refraction.py
 TODO: Implement tests
 """
-import pytest
+
+
 
 def test_placeholder():
     """Placeholder test - implement actual tests."""

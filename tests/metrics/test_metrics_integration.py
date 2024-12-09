@@ -70,7 +70,9 @@ class TestMetricsIntegration:
 
         # Metrics should reflect the change
         assert len(attention_tile._metrics["resolution_history"]) >= 2
-        assert new_metrics["cer"] != initial_metrics["cer"]  # CER should change with resolution
+        assert (
+            new_metrics["cer"] != initial_metrics["cer"]
+        )  # CER should change with resolution
 
     def test_metrics_with_neighbors(self, attention_tile, input_tensor):
         """Test metrics with neighboring tiles."""
@@ -117,7 +119,9 @@ class TestMetricsIntegration:
     def test_load_balancing_metrics(self, attention_tile, input_tensor):
         """Test metrics during load balancing."""
         # Create neighbors with different loads
-        neighbors = [AttentionTile(size=16, resolution=r, hidden_dim=32) for r in [0.8, 1.0, 0.6]]
+        neighbors = [
+            AttentionTile(size=16, resolution=r, hidden_dim=32) for r in [0.8, 1.0, 0.6]
+        ]
         for n in neighbors:
             attention_tile.add_neighbor(n)
 

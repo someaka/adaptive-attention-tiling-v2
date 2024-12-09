@@ -15,8 +15,8 @@ layout(set = 0, binding = 2) buffer ValueBuffer {
     float value[];
 };
 
-layout(set = 0, binding = 3) buffer OutputBuffer {
-    float output[];
+layout(set = 0, binding = 3) buffer OutBuffer {
+    float out_data[];
 };
 
 // Push constants for dynamic parameters
@@ -68,5 +68,5 @@ void main() {
     
     // Compute output
     uint out_idx = (batch_idx * params.seq_length + row) * params.seq_length + col;
-    output[out_idx] = attention;
+    out_data[out_idx] = attention;
 }

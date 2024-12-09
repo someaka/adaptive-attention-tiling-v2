@@ -38,8 +38,12 @@ def test_parameter_manager_initialization() -> None:
         assert param.device == torch.device("cpu")  # Default device
 
     # Check specific parameter initializations
-    assert torch.allclose(manager.parameters["resolution_bounds"], torch.tensor([0.1, 1.0]))
-    assert torch.allclose(manager.parameters["resolution_momentum"], torch.tensor([0.5]))
+    assert torch.allclose(
+        manager.parameters["resolution_bounds"], torch.tensor([0.1, 1.0])
+    )
+    assert torch.allclose(
+        manager.parameters["resolution_momentum"], torch.tensor([0.5])
+    )
 
 
 def test_parameter_constraints() -> None:

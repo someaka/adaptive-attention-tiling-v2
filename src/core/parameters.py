@@ -3,6 +3,6 @@
 from .tiling.config import AdaptiveParameterManager, ParameterMonitor
 
 __all__ = [
-    'AdaptiveParameterManager',
-    'ParameterMonitor',
+    "AdaptiveParameterManager",
+    "ParameterMonitor",
 ]

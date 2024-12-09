@@ -3,7 +3,7 @@
 from ..backends.base import AttentionTile, ResolutionStrategy, ResourceProfile
 
 __all__ = [
-    'AttentionTile',
-    'ResolutionStrategy',
-    'ResourceProfile',
+    "AttentionTile",
+    "ResolutionStrategy",
+    "ResourceProfile",
 ]

@@ -26,13 +26,13 @@
 
 // Memory access patterns
 struct MemoryBarrier {
-    void barrier() {
+    void barrier {
         memoryBarrierShared();
         groupMemoryBarrier();
         barrier();
     }
     
-    void compute() {
+    void compute {
         memoryBarrierShared();
         groupMemoryBarrier();
     }

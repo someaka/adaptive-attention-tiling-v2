@@ -6,7 +6,6 @@ import os
 import random
 import resource
 import signal
-import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -149,7 +148,10 @@ def _run_ruff_commands(ruff_path: Path, file_path: Path) -> None:
     try:
         for command in commands:
             result = subprocess.run(
-                [str(ruff_path), *command, file_str], capture_output=True, text=True, check=True
+                [str(ruff_path), *command, file_str],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             if result.stderr:
                 pytest.fail(f"Ruff {command[0]} failed for {file_path}:\n{result.stderr}")
@@ -272,42 +274,18 @@ def ruff_path(root_dir: Path) -> Path:
     return ruff
 
 
+@pytest.hookimpl
 def pytest_collect_file(file_path: Path, parent: Any) -> Optional[pytest.Item]:
-    """Process file before collection.
-
-    Args:
-        file_path: Path to file being collected
-        parent: Parent collector
-
-    Returns:
-        None if file should be skipped
-    """
+    """Process file before collection."""
     if file_path.suffix != ".py":
         return None
 
-    try:
-        # Get project root directory
-        root_dir = Path(__file__).parent.parent
+    # Only process test files
+    if not str(file_path).endswith("_test.py") and not str(file_path).startswith("test_"):
+        return None
 
-        # Try both .venv and venv directories
-        ruff_path = root_dir / ".venv" / "bin" / "ruff"
-        if not ruff_path.exists():
-            ruff_path = root_dir / "venv" / "bin" / "ruff"
-
-        if not ruff_path.exists():
-            logger.error("Could not find ruff executable in %s", root_dir)
-            return None
-
-        # Run ruff commands and collect file if parent is a test module
-        _run_ruff_commands(ruff_path, file_path)
-        if parent.name.startswith("test_"):
-            return parent.collect_file(file_path)
-
-    except Exception as e:
-        logger.exception("Error processing %s: %s", file_path, str(e))
-        raise
-
-    return None
+    # Let pytest handle the actual collection
+    return parent.session.collect_file(file_path, parent)
 
 
 @pytest.fixture(autouse=True)

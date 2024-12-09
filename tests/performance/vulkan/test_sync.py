@@ -73,8 +73,12 @@ class TestVulkanSync:
             for _ in range(self.iterations):
                 start = time.time()
                 semaphore = self.sync.create_binary_semaphore()
-                self.sync.queue_submit(data, wait_semaphore=None, signal_semaphore=semaphore)
-                self.sync.queue_submit(data, wait_semaphore=semaphore, signal_semaphore=None)
+                self.sync.queue_submit(
+                    data, wait_semaphore=None, signal_semaphore=semaphore
+                )
+                self.sync.queue_submit(
+                    data, wait_semaphore=semaphore, signal_semaphore=None
+                )
                 self.sync.wait_idle()
                 times.append(time.time() - start)
                 self.sync.destroy_semaphore(semaphore)
@@ -174,8 +178,12 @@ class TestVulkanSync:
             print(f"Pipeline barriers: {pipeline_barrier_time:.4f}s")
 
             # Calculate overhead
-            memory_overhead = (memory_barrier_time - no_barrier_time) / no_barrier_time * 100
-            pipeline_overhead = (pipeline_barrier_time - no_barrier_time) / no_barrier_time * 100
+            memory_overhead = (
+                (memory_barrier_time - no_barrier_time) / no_barrier_time * 100
+            )
+            pipeline_overhead = (
+                (pipeline_barrier_time - no_barrier_time) / no_barrier_time * 100
+            )
 
             print(f"Memory barrier overhead: {memory_overhead:.1f}%")
             print(f"Pipeline barrier overhead: {pipeline_overhead:.1f}%")
@@ -210,7 +218,9 @@ class TestVulkanSync:
             print(f"Multi queue time: {multi_queue_time:.4f}s")
 
             # Calculate overhead
-            sync_overhead = (multi_queue_time - single_queue_time) / single_queue_time * 100
+            sync_overhead = (
+                (multi_queue_time - single_queue_time) / single_queue_time * 100
+            )
             print(f"Queue sync overhead: {sync_overhead:.1f}%")
 
             assert sync_overhead < 100, "Queue synchronization overhead too high"

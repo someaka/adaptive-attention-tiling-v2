@@ -173,7 +173,9 @@ def test_load_balancing(load_balancer: LoadBalancer) -> None:
 
     # Verify adjustment direction and magnitude for normal case
     assert adjustment < 0  # Should decrease load since current is higher
-    assert abs(adjustment) <= load_balancer.max_adjustment  # Should respect max adjustment
+    assert (
+        abs(adjustment) <= load_balancer.max_adjustment
+    )  # Should respect max adjustment
     assert metrics["status"] == "decreasing"
 
     # Test 2: Extreme case
@@ -231,7 +233,9 @@ def test_load_balancing(load_balancer: LoadBalancer) -> None:
 
     # For perfectly balanced case
     assert abs(adjustment_balanced) < 1e-6  # Should be very close to zero
-    assert abs(metrics_balanced["load_imbalance"]) < 1e-6  # Should be very close to zero
+    assert (
+        abs(metrics_balanced["load_imbalance"]) < 1e-6
+    )  # Should be very close to zero
     assert metrics_balanced["avg_load"] == balanced.compute_cost  # Average should match
     assert metrics_balanced["local_load"] == balanced.compute_cost  # Local should match
 
@@ -316,7 +320,9 @@ def test_load_balancer_extreme_cases(load_balancer: LoadBalancer) -> None:
 
     # For perfectly balanced case
     assert abs(adjustment_balanced) < 1e-6  # Should be very close to zero
-    assert abs(metrics_balanced["load_imbalance"]) < 1e-6  # Should be very close to zero
+    assert (
+        abs(metrics_balanced["load_imbalance"]) < 1e-6
+    )  # Should be very close to zero
     assert metrics_balanced["avg_load"] == balanced.compute_cost  # Average should match
     assert metrics_balanced["local_load"] == balanced.compute_cost  # Local should match
 

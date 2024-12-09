@@ -82,7 +82,9 @@ class SyntheticDataGenerator:
         sequence = torch.zeros(sequence_length, dtype=torch.long)
         for i in range(num_regions_default):
             start = i * region_size
-            end = start + region_size if i < num_regions_default - 1 else sequence_length
+            end = (
+                start + region_size if i < num_regions_default - 1 else sequence_length
+            )
 
             # Alternate between constant and varying regions
             if i % min_values == 0:
@@ -112,7 +114,9 @@ class SyntheticDataGenerator:
 
         for i in range(num_regions_default):
             start = i * region_size
-            end = start + region_size if i < num_regions_default - 1 else sequence_length
+            end = (
+                start + region_size if i < num_regions_default - 1 else sequence_length
+            )
 
             # Alternate between patterns
             if i % min_values == 0:
@@ -316,7 +320,9 @@ def generate_mixed_sequence(
     sequence = torch.zeros(batch_size, sequence_length, dtype=torch.long)
 
     # First third: constant values
-    sequence[:, :third] = torch.randint(0, num_values, (batch_size, 1)).expand(-1, third)
+    sequence[:, :third] = torch.randint(0, num_values, (batch_size, 1)).expand(
+        -1, third
+    )
 
     # Middle third: random values
     sequence[:, third : 2 * third] = torch.randint(0, num_values, (batch_size, third))

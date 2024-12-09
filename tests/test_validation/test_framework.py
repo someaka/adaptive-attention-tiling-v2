@@ -8,7 +8,6 @@ Tests cover:
 4. Integration tests
 """
 
-
 import pytest
 import torch
 
@@ -48,13 +47,14 @@ class TestValidationFramework:
         return ValidationFramework(
             geometric_validator=GeometricValidator(),
             quantum_validator=QuantumValidator(),
-            pattern_validator=PatternValidator()
+            pattern_validator=PatternValidator(),
         )
 
     def test_geometric_validation(
         self, framework: ValidationFramework, batch_size: int, manifold_dim: int
     ):
         """Test geometric validation methods."""
+
         # Test metric validation
         def test_metric():
             """Test metric validation methods."""
@@ -67,9 +67,7 @@ class TestValidationFramework:
             ), "Metric should be positive definite"
 
             # Test smoothness
-            assert framework.validate_smoothness(
-                metric
-            ), "Metric should be smooth"
+            assert framework.validate_smoothness(metric), "Metric should be smooth"
 
             # Test compatibility
             connection = framework.get_test_connection()
@@ -126,9 +124,7 @@ class TestValidationFramework:
 
             # Test completeness
             if framework.is_complete():
-                assert framework.validate_completeness(
-                    geodesic
-                ), "Should be complete"
+                assert framework.validate_completeness(geodesic), "Should be complete"
 
             return geodesic
 
@@ -138,6 +134,7 @@ class TestValidationFramework:
         self, framework: ValidationFramework, batch_size: int, state_dim: int
     ):
         """Test quantum validation methods."""
+
         # Test state validation
         def test_states():
             """Test quantum state validation."""
@@ -145,9 +142,7 @@ class TestValidationFramework:
             state = framework.get_test_state()
 
             # Test normalization
-            assert framework.validate_normalization(
-                state
-            ), "State should be normalized"
+            assert framework.validate_normalization(state), "State should be normalized"
 
             # Test uncertainty relations
             assert framework.validate_uncertainty_relations(
@@ -173,20 +168,14 @@ class TestValidationFramework:
             U = framework.get_test_unitary()
 
             # Test hermiticity
-            assert framework.validate_hermiticity(
-                H
-            ), "Should be Hermitian"
+            assert framework.validate_hermiticity(H), "Should be Hermitian"
 
             # Test unitarity
-            assert framework.validate_unitarity(
-                U
-            ), "Should be unitary"
+            assert framework.validate_unitarity(U), "Should be unitary"
 
             # Test group properties
             if framework.has_group_structure():
-                assert framework.validate_group_axioms(
-                    U
-                ), "Should satisfy group axioms"
+                assert framework.validate_group_axioms(U), "Should satisfy group axioms"
 
             return H, U
 
@@ -222,6 +211,7 @@ class TestValidationFramework:
         self, framework: ValidationFramework, batch_size: int, pattern_dim: int
     ):
         """Test pattern validation methods."""
+
         # Test pattern formation
         def test_formation():
             """Test pattern formation validation."""
@@ -303,8 +293,9 @@ class TestValidationFramework:
 
         test_bifurcations()
 
-    def test_quantum_validation(self, framework: ValidationFramework,
-                              batch_size: int, dim: int):
+    def test_quantum_validation(
+        self, framework: ValidationFramework, batch_size: int, dim: int
+    ):
         """Test quantum validation components."""
         # Create test quantum state
         state = torch.randn(batch_size, dim, dtype=torch.complex64)
@@ -322,9 +313,7 @@ class TestValidationFramework:
         hamiltonian = hamiltonian + hamiltonian.conj().T  # Make Hermitian
         evolution = framework.evolve_quantum_state(state, hamiltonian)
         evol_result = framework.validate_quantum_evolution(
-            initial_state=state,
-            final_state=evolution,
-            hamiltonian=hamiltonian
+            initial_state=state, final_state=evolution, hamiltonian=hamiltonian
         )
         assert isinstance(evol_result, ValidationResult)
         assert "unitarity" in evol_result.metrics
@@ -335,15 +324,15 @@ class TestValidationFramework:
         for obs in observables:
             obs += obs.conj().T  # Make Hermitian
         meas_result = framework.validate_quantum_measurement(
-            state=state,
-            observables=observables
+            state=state, observables=observables
         )
         assert isinstance(meas_result, ValidationResult)
         assert "expectation_bounds" in meas_result.metrics
         assert "uncertainty_relations" in meas_result.metrics
 
-    def test_pattern_validation(self, framework: ValidationFramework,
-                              batch_size: int, dim: int):
+    def test_pattern_validation(
+        self, framework: ValidationFramework, batch_size: int, dim: int
+    ):
         """Test pattern validation components."""
         # Create test pattern configuration
         pattern = torch.randn(batch_size, dim)
@@ -363,15 +352,15 @@ class TestValidationFramework:
         # Test stability validation
         perturbation = 0.01 * torch.randn_like(pattern)
         stab_result = framework.validate_pattern_stability(
-            pattern=pattern,
-            perturbation=perturbation
+            pattern=pattern, perturbation=perturbation
         )
         assert isinstance(stab_result, ValidationResult)
         assert "linear_stability" in stab_result.metrics
         assert "nonlinear_stability" in stab_result.metrics
 
-    def test_integrated_validation(self, framework: ValidationFramework,
-                                 batch_size: int, dim: int):
+    def test_integrated_validation(
+        self, framework: ValidationFramework, batch_size: int, dim: int
+    ):
         """Test integrated validation workflow."""
         # Create test configuration
         metric = torch.randn(batch_size, dim, dim)
@@ -382,9 +371,7 @@ class TestValidationFramework:
 
         # Run integrated validation
         result = framework.validate_all(
-            metric=metric,
-            quantum_state=state,
-            pattern=pattern
+            metric=metric, quantum_state=state, pattern=pattern
         )
 
         # Test result structure
@@ -419,7 +406,7 @@ class TestValidationFramework:
             framework.validate_all(
                 metric=torch.ones(2, 3, 3),
                 quantum_state=torch.ones(2, 4),
-                pattern=torch.ones(2, 5)
+                pattern=torch.ones(2, 5),
             )
 
     def test_validation_metrics(self):
@@ -427,28 +414,24 @@ class TestValidationFramework:
         # Create test metrics
         metrics = ValidationMetrics(
             overall_score=0.85,
-            component_scores={
-                "geometric": 0.9,
-                "quantum": 0.8,
-                "pattern": 0.85
-            },
+            component_scores={"geometric": 0.9, "quantum": 0.8, "pattern": 0.85},
             detailed_metrics={
                 "geometric": {
                     "positive_definite": True,
                     "symmetry": True,
-                    "curvature_bounds": 0.95
+                    "curvature_bounds": 0.95,
                 },
                 "quantum": {
                     "normalization": True,
                     "unitarity": 0.85,
-                    "energy_conservation": 0.75
+                    "energy_conservation": 0.75,
                 },
                 "pattern": {
                     "spatial_coherence": 0.8,
                     "temporal_stability": 0.9,
-                    "symmetry": 0.85
-                }
-            }
+                    "symmetry": 0.85,
+                },
+            },
         )
 
         # Test metric properties
@@ -466,12 +449,8 @@ class TestValidationFramework:
         # Test metric comparison
         other_metrics = ValidationMetrics(
             overall_score=0.75,
-            component_scores={
-                "geometric": 0.8,
-                "quantum": 0.7,
-                "pattern": 0.75
-            },
-            detailed_metrics={}
+            component_scores={"geometric": 0.8, "quantum": 0.7, "pattern": 0.75},
+            detailed_metrics={},
         )
         assert metrics > other_metrics
         assert metrics >= other_metrics
@@ -481,5 +460,7 @@ class TestValidationFramework:
         combined = ValidationMetrics.aggregate([metrics, other_metrics])
         assert isinstance(combined, ValidationMetrics)
         assert combined.overall_score == pytest.approx(0.8, rel=1e-2)
-        assert all(name in combined.component_scores
-                  for name in ["geometric", "quantum", "pattern"])
+        assert all(
+            name in combined.component_scores
+            for name in ["geometric", "quantum", "pattern"]
+        )

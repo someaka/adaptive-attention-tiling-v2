@@ -2,4 +2,4 @@
 
 from ..backends.base import ResolutionStrategy
 
-__all__ = ['ResolutionStrategy']
+__all__ = ["ResolutionStrategy"]

@@ -11,7 +11,6 @@ Tests cover:
 7. Associated bundles
 """
 
-
 import numpy as np
 import pytest
 import torch
@@ -46,7 +45,7 @@ class TestFiberBundle:
         assert torch.allclose(
             fiber_bundle.bundle_projection(fiber_bundle.bundle_projection(total_space)),
             fiber_bundle.bundle_projection(total_space),
-            rtol=1e-5
+            rtol=1e-5,
         ), "Projection should be idempotent"
 
     def test_local_trivialization(self, fiber_bundle):
@@ -60,7 +59,9 @@ class TestFiberBundle:
 
         # Test compatibility
         reconstructed = fiber_bundle.reconstruct_from_charts(local_chart, fiber_chart)
-        assert torch.allclose(point, reconstructed, rtol=1e-5), "Charts should allow faithful reconstruction"
+        assert torch.allclose(
+            point, reconstructed, rtol=1e-5
+        ), "Charts should allow faithful reconstruction"
 
     def test_connection_form(self, fiber_bundle):
         """Test connection form properties."""
@@ -78,7 +79,7 @@ class TestFiberBundle:
     def test_parallel_transport(self, fiber_bundle):
         """Test parallel transport along paths."""
         # Create a circular path
-        t = torch.linspace(0, 2*np.pi, 100)
+        t = torch.linspace(0, 2 * np.pi, 100)
         path = torch.stack([torch.cos(t), torch.sin(t)], dim=1)
 
         # Create a section to transport
@@ -95,11 +96,12 @@ class TestFiberBundle:
 
     def test_holonomy_group(self, fiber_bundle):
         """Test holonomy group computation and properties."""
+
         # Generate a family of loops
         def generate_loop(t: torch.Tensor, radius: float = 1.0) -> torch.Tensor:
             return radius * torch.stack([torch.cos(t), torch.sin(t)], dim=1)
 
-        t = torch.linspace(0, 2*np.pi, 100)
+        t = torch.linspace(0, 2 * np.pi, 100)
         loops = [generate_loop(t, r) for r in [0.5, 1.0, 1.5]]
 
         # Compute holonomy for each loop
@@ -113,9 +115,7 @@ class TestFiberBundle:
         # Test holonomy group properties
         holonomy_group = fiber_bundle.compute_holonomy_group(holonomies)
         assert torch.allclose(
-            holonomy_group.determinant(),
-            torch.ones(1),
-            rtol=1e-5
+            holonomy_group.determinant(), torch.ones(1), rtol=1e-5
         ), "Holonomy group should preserve orientation"
 
         # Test holonomy algebra
@@ -123,7 +123,7 @@ class TestFiberBundle:
         assert torch.allclose(
             holonomy_algebra + holonomy_algebra.transpose(-1, -2),
             torch.zeros_like(holonomy_algebra),
-            rtol=1e-5
+            rtol=1e-5,
         ), "Holonomy algebra should be anti-symmetric"
 
     def test_principal_bundle(self, fiber_bundle, structure_group):
@@ -142,7 +142,7 @@ class TestFiberBundle:
         assert torch.allclose(
             transformed_connection,
             structure_group.inverse() @ connection @ structure_group,
-            rtol=1e-5
+            rtol=1e-5,
         ), "Connection should be equivariant"
 
         # Test structure group orbit
@@ -153,9 +153,7 @@ class TestFiberBundle:
     def test_associated_bundles(self, fiber_bundle, structure_group):
         """Test associated bundle constructions."""
         # Create associated vector bundle
-        vector_bundle = fiber_bundle.construct_associated_bundle(
-            representation_dim=2
-        )
+        vector_bundle = fiber_bundle.construct_associated_bundle(representation_dim=2)
         assert hasattr(vector_bundle, "transition_functions")
 
         # Test induced connection
@@ -167,7 +165,7 @@ class TestFiberBundle:
         assert induced_connection.shape[-2:] == (2, 2)
 
         # Test parallel transport in associated bundle
-        t = torch.linspace(0, 2*np.pi, 100)
+        t = torch.linspace(0, 2 * np.pi, 100)
         path = torch.stack([torch.cos(t), torch.sin(t)], dim=1)
         initial_vector = torch.randn(2)
         transported = vector_bundle.parallel_transport(initial_vector, path)
@@ -185,7 +183,7 @@ class TestFiberBundle:
         assert torch.allclose(
             horizontal @ total_metric @ vertical.transpose(-1, -2),
             torch.zeros_like(horizontal),
-            rtol=1e-5
+            rtol=1e-5,
         ), "Horizontal and vertical spaces should be orthogonal"
 
         # Test metric compatibility with connection
@@ -193,23 +191,24 @@ class TestFiberBundle:
         assert torch.allclose(
             connection_metric @ connection_metric.transpose(-1, -2),
             torch.eye(connection_metric.shape[-1]),
-            rtol=1e-5
+            rtol=1e-5,
         ), "Connection metric should be orthogonal"
 
-    def test_bundle_structure(
-        self, fiber_bundle, base_manifold, fiber_dim
-    ):
+    def test_bundle_structure(self, fiber_bundle, base_manifold, fiber_dim):
         """Test fundamental fiber bundle structure."""
+
         # Test total space structure
         def test_total_space():
             """Test properties of total space."""
             total_space = fiber_bundle.get_total_space()
-            assert total_space.dim == base_manifold.dim + fiber_dim, \
-                "Total space dimension should be sum"
+            assert (
+                total_space.dim == base_manifold.dim + fiber_dim
+            ), "Total space dimension should be sum"
             # Test fiber projection
             projection = fiber_bundle.get_projection()
-            assert projection(total_space).dim == base_manifold.dim, \
-                "Projection should map to base"
+            assert (
+                projection(total_space).dim == base_manifold.dim
+            ), "Projection should map to base"
             return total_space, projection
 
         total_space, projection = test_total_space()
@@ -230,9 +229,7 @@ class TestFiberBundle:
 
             # Test transition functions
             chart2 = fiber_bundle.get_overlapping_chart(chart)
-            transition = fiber_bundle.get_transition_function(
-                chart, chart2
-            )
+            transition = fiber_bundle.get_transition_function(chart, chart2)
             assert fiber_bundle.is_smooth_transition(
                 transition
             ), "Transition should be smooth"
@@ -245,28 +242,22 @@ class TestFiberBundle:
         def test_sections():
             """Test properties of bundle sections."""
             section = fiber_bundle.get_local_section()
-            assert fiber_bundle.is_section(
-                section
-            ), "Should be valid section"
+            assert fiber_bundle.is_section(section), "Should be valid section"
 
             # Test smoothness
-            assert fiber_bundle.is_smooth_section(
-                section
-            ), "Section should be smooth"
+            assert fiber_bundle.is_smooth_section(section), "Section should be smooth"
 
             # Test section space
             section_space = fiber_bundle.get_section_space()
-            assert section in section_space, \
-                "Section should be in section space"
+            assert section in section_space, "Section should be in section space"
 
             return section, section_space
 
         section, section_space = test_sections()
 
-    def test_connection_forms(
-        self, fiber_bundle, base_manifold, fiber_dim
-    ):
+    def test_connection_forms(self, fiber_bundle, base_manifold, fiber_dim):
         """Test connection forms and horizontal distribution."""
+
         # Test connection form
         def test_connection():
             """Test properties of connection form."""
@@ -275,9 +266,8 @@ class TestFiberBundle:
             # Test vertical space annihilation
             vertical = fiber_bundle.get_vertical_space()
             assert all(
-                torch.allclose(
-                    omega(v), torch.zeros_like(omega(v))
-                ) for v in vertical.basis
+                torch.allclose(omega(v), torch.zeros_like(omega(v)))
+                for v in vertical.basis
             ), "Should annihilate vertical vectors"
 
             # Test equivariance
@@ -285,7 +275,7 @@ class TestFiberBundle:
             Ad_g = fiber_bundle.get_adjoint_action(g)
             assert torch.allclose(
                 omega(fiber_bundle.group_action(g, vertical.basis[0])),
-                Ad_g @ omega(vertical.basis[0])
+                Ad_g @ omega(vertical.basis[0]),
             ), "Should be equivariant"
 
             return omega
@@ -301,14 +291,11 @@ class TestFiberBundle:
             V = fiber_bundle.get_vertical_space()
             direct_sum = fiber_bundle.direct_sum(H, V)
             assert torch.allclose(
-                direct_sum.dim,
-                fiber_bundle.get_total_space().dim
+                direct_sum.dim, fiber_bundle.get_total_space().dim
             ), "Should be complementary"
 
             # Test parallelism
-            assert fiber_bundle.is_parallel_distribution(
-                H
-            ), "Should be parallel"
+            assert fiber_bundle.is_parallel_distribution(H), "Should be parallel"
 
             return H
 
@@ -321,9 +308,7 @@ class TestFiberBundle:
 
             # Test Cartan structure equation
             d_omega = fiber_bundle.exterior_derivative(omega)
-            bracket_term = fiber_bundle.wedge_product(
-                omega, omega
-            )
+            bracket_term = fiber_bundle.wedge_product(omega, omega)
             assert torch.allclose(
                 Omega, d_omega + 0.5 * bracket_term
             ), "Should satisfy structure equation"
@@ -338,10 +323,9 @@ class TestFiberBundle:
 
         test_curvature()
 
-    def test_parallel_transport(
-        self, fiber_bundle, base_manifold, fiber_dim
-    ):
+    def test_parallel_transport(self, fiber_bundle, base_manifold, fiber_dim):
         """Test parallel transport and holonomy."""
+
         # Initialize path
         def get_test_path():
             """Get closed path in base manifold."""
@@ -356,15 +340,12 @@ class TestFiberBundle:
             point = fiber_bundle.get_fiber_point()
 
             # Transport along path
-            transported = fiber_bundle.parallel_transport(
-                point, path
-            )
+            transported = fiber_bundle.parallel_transport(point, path)
 
             # Test horizontality
             velocity = fiber_bundle.compute_velocity(transported)
             assert all(
-                fiber_bundle.is_horizontal(v)
-                for v in velocity
+                fiber_bundle.is_horizontal(v) for v in velocity
             ), "Transport should be horizontal"
 
             return transported
@@ -389,8 +370,7 @@ class TestFiberBundle:
                 base_manifold.concatenate_paths(path, path2)
             )
             assert torch.allclose(
-                concat_hol,
-                fiber_bundle.group_product(hol, hol2)
+                concat_hol, fiber_bundle.group_product(hol, hol2)
             ), "Should respect concatenation"
 
             return hol
@@ -408,8 +388,7 @@ class TestFiberBundle:
                 # Holonomy algebra should be generated by curvature
                 curvature_algebra = fiber_bundle.generate_curvature_algebra()
                 assert fiber_bundle.is_subalgebra(
-                    fiber_bundle.holonomy_algebra(),
-                    curvature_algebra
+                    fiber_bundle.holonomy_algebra(), curvature_algebra
                 ), "Should satisfy Ambrose-Singer"
 
             # Test reduction principle

@@ -2,4 +2,4 @@
 
 from ...backends.vulkan.tensor_ops import VulkanCompute
 
-__all__ = ['VulkanCompute']
+__all__ = ["VulkanCompute"]

@@ -8,6 +8,8 @@ in the Adaptive Attention Tiling system, focusing on:
 4. Resource management
 """
 
+import os
+import subprocess
 import pytest
 import torch
 
@@ -19,17 +21,47 @@ MATRIX_SIZES = [(256, 256), (1024, 1024), (4096, 4096)]
 BATCH_SIZES = [1, 8, 32]
 SHADER_TYPES = ["pattern", "flow", "attention"]
 
+# Shader paths
+SHADER_DIR = os.path.join("src", "core", "performance", "vulkan", "shaders")
+SHADER_PATHS = {
+    "pattern": os.path.join(SHADER_DIR, "pattern_compute.comp"),
+    "flow": os.path.join(SHADER_DIR, "flow_compute.comp"),
+    "attention": os.path.join(SHADER_DIR, "attention_compute.comp")
+}
+
+def compile_shader(shader_path: str) -> str:
+    """Compile GLSL shader to SPIR-V."""
+    spv_path = shader_path + ".spv"
+    
+    # Only recompile if source is newer than SPIR-V
+    if os.path.exists(spv_path):
+        src_time = os.path.getmtime(shader_path)
+        spv_time = os.path.getmtime(spv_path)
+        if src_time <= spv_time:
+            return spv_path
+
+    result = subprocess.run(
+        ["glslc", shader_path, "-o", spv_path],
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Shader compilation failed: {result.stderr}")
+    
+    return spv_path
 
 @pytest.fixture
 def vulkan_compute():
     """Create a VulkanCompute instance for testing."""
+    # Ensure all shaders are compiled
+    for shader_path in SHADER_PATHS.values():
+        compile_shader(shader_path)
     return VulkanCompute(enable_profiling=True)
-
 
 def generate_test_data(size: tuple[int, int], batch_size: int) -> torch.Tensor:
     """Generate test data for compute operations."""
     return torch.randn(batch_size, *size)
-
 
 @pytest.mark.parametrize("shader_type", SHADER_TYPES)
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
@@ -37,7 +69,12 @@ def test_shader_compilation(
     vulkan_compute: VulkanCompute, shader_type: str, matrix_size: tuple[int, int]
 ):
     """Test shader compilation performance and efficiency."""
-    # Compile shader
+    # Ensure shader is compiled
+    shader_path = SHADER_PATHS[shader_type]
+    spv_path = compile_shader(shader_path)
+    assert os.path.exists(spv_path), f"SPIR-V shader {spv_path} not found"
+
+    # Test shader loading and compilation
     start_time = torch.cuda.Event(enable_timing=True)
     end_time = torch.cuda.Event(enable_timing=True)
 
@@ -63,7 +100,9 @@ def test_shader_compilation(
 @pytest.mark.parametrize("workgroup_size", WORKGROUP_SIZES)
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
 def test_workgroup_optimization(
-    vulkan_compute: VulkanCompute, workgroup_size: tuple[int, int], matrix_size: tuple[int, int]
+    vulkan_compute: VulkanCompute,
+    workgroup_size: tuple[int, int],
+    matrix_size: tuple[int, int],
 ):
     """Test impact of different workgroup sizes on performance."""
     data = generate_test_data(matrix_size, batch_size=1)

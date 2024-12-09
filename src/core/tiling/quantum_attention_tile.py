@@ -24,66 +24,68 @@ Key components:
 from __future__ import annotations
 
 import logging
-import time
-from typing import Any, Dict, List, Optional, Tuple
+import math
+from typing import Any, Dict, List, Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import math
+from torch import nn
 
-from ..common.enums import ResolutionStrategy
 from .config import CONFIG
-from .base import AttentionTile
-from .state_manager import StateManager
-from ..metrics.advanced_metrics import AdvancedMetricsAnalyzer
 
 logger = logging.getLogger(__name__)
 
+
 class LoadProfile:
     """Profile of computational load for a tile."""
-    
+
     def __init__(self, compute: float, memory: float, io: float):
         self.compute = compute
         self.memory = memory
         self.io = io
-        
+
     def total(self) -> float:
         """Get total load."""
         return self.compute + self.memory + self.io
-        
-    def weighted(self, compute_weight: float = 1.0, 
-                memory_weight: float = 1.0,
-                io_weight: float = 1.0) -> float:
+
+    def weighted(
+        self,
+        compute_weight: float = 1.0,
+        memory_weight: float = 1.0,
+        io_weight: float = 1.0,
+    ) -> float:
         """Get weighted load."""
-        return (self.compute * compute_weight + 
-                self.memory * memory_weight +
-                self.io * io_weight)
+        return (
+            self.compute * compute_weight
+            + self.memory * memory_weight
+            + self.io * io_weight
+        )
+
 
 class LoadBalancer:
     """Balances computational load across tiles."""
-    
+
     def __init__(self, num_tiles: int):
         self.num_tiles = num_tiles
         self.loads = [LoadProfile(0, 0, 0) for _ in range(num_tiles)]
-        
+
     def update_load(self, tile_idx: int, load: LoadProfile):
         """Update load for a tile."""
         self.loads[tile_idx] = load
-        
+
     def get_load(self, tile_idx: int) -> LoadProfile:
         """Get load for a tile."""
         return self.loads[tile_idx]
-        
+
     def balance(self) -> List[int]:
         """Balance loads across tiles.
-        
+
         Returns indices for redistributing tiles.
         """
         total_loads = [load.total() for load in self.loads]
-        sorted_idxs = sorted(range(len(total_loads)), 
-                           key=lambda k: total_loads[k])
+        sorted_idxs = sorted(range(len(total_loads)), key=lambda k: total_loads[k])
         return sorted_idxs
+
 
 class QuantumMotivicTile(nn.Module):
     """Attention tile based on quantum motivic principles."""
@@ -96,34 +98,34 @@ class QuantumMotivicTile(nn.Module):
         dropout: float = 0.1,
         resolution: float = 1.0,
         cohomology_dim: int = 8,  # Dimension of cohomological structure
-        motive_rank: int = 4,     # Rank of quantum motive
+        motive_rank: int = 4,  # Rank of quantum motive
     ) -> None:
         """Initialize quantum motivic attention tile."""
         super(QuantumMotivicTile, self).__init__()
-        
+
         # Base attention parameters
         self.size = size
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.dropout = dropout
         self.resolution = resolution
-        
+
         # Quantum motivic structure
         self.cohomology_dim = cohomology_dim
         self.motive_rank = motive_rank
-        
+
         # Initialize attention layers
         self.query = nn.Linear(hidden_dim, hidden_dim)
         self.key = nn.Linear(hidden_dim, hidden_dim)
         self.value = nn.Linear(hidden_dim, hidden_dim)
         self.output = nn.Linear(hidden_dim, hidden_dim)
         self.dropout_layer = nn.Dropout(dropout)
-        
+
         # Initialize quantum structure
         self.cohomology_proj = nn.Linear(hidden_dim, cohomology_dim * motive_rank)
         self.field_proj = nn.Linear(hidden_dim, hidden_dim)
         self.height_proj = nn.Linear(cohomology_dim * motive_rank, 1)
-        
+
         # Initialize metrics
         self._metrics = {
             "cohomology_class": torch.zeros(cohomology_dim),
@@ -142,19 +144,17 @@ class QuantumMotivicTile(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass applying quantum motivic attention.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, hidden_dim)
-            
+
         Returns:
             Processed tensor with quantum structure
         """
         return self._apply_attention(x)
 
     def _apply_attention(
-        self,
-        x: torch.Tensor,
-        state: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, state: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Apply quantum motivic attention.
 
@@ -179,7 +179,9 @@ class QuantumMotivicTile(nn.Module):
         value = value.transpose(1, 2)
 
         # Compute attention scores
-        attention_weights = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
+        attention_weights = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(
+            head_dim
+        )
         attention_weights = F.softmax(attention_weights, dim=-1)
         attention_weights = self.dropout_layer(attention_weights)
 
@@ -193,23 +195,37 @@ class QuantumMotivicTile(nn.Module):
 
         # Compute cohomology class
         cohomology = self.cohomology_proj(attention_output)
-        cohomology = cohomology.view(batch_size * seq_len, self.motive_rank, self.cohomology_dim)
+        cohomology = cohomology.view(
+            batch_size * seq_len, self.motive_rank, self.cohomology_dim
+        )
 
         # Apply quantum field structure
-        field = self.field_proj(attention_output)  # Shape: (batch_size, seq_len, hidden_dim)
+        field = self.field_proj(
+            attention_output
+        )  # Shape: (batch_size, seq_len, hidden_dim)
         field_flat = field.view(batch_size * seq_len, self.hidden_dim)
-        
+
         # Compute scaling factor
-        scaling = torch.sigmoid(cohomology.mean(dim=1))  # Shape: (batch_size * seq_len, cohomology_dim)
-        scaling = F.linear(scaling, torch.ones(self.hidden_dim, self.cohomology_dim, device=x.device))
-        
+        scaling = torch.sigmoid(
+            cohomology.mean(dim=1)
+        )  # Shape: (batch_size * seq_len, cohomology_dim)
+        scaling = F.linear(
+            scaling, torch.ones(self.hidden_dim, self.cohomology_dim, device=x.device)
+        )
+
         # Apply scaling and reshape
         field = (field_flat * scaling).view(batch_size, seq_len, self.hidden_dim)
 
         # Store metrics
         with torch.no_grad():
-            self._metrics["cohomology_class"] = cohomology.mean(dim=(0,1)).detach()
-            self._metrics["motive_height"] = self.height_proj(cohomology.view(-1, self.cohomology_dim * self.motive_rank)).mean().item()
+            self._metrics["cohomology_class"] = cohomology.mean(dim=(0, 1)).detach()
+            self._metrics["motive_height"] = (
+                self.height_proj(
+                    cohomology.view(-1, self.cohomology_dim * self.motive_rank)
+                )
+                .mean()
+                .item()
+            )
             self._update_quantum_metrics(field)
 
         return field
@@ -280,10 +296,8 @@ class QuantumMotivicTile(nn.Module):
         l_value = self._metrics["l_function_value"]
 
         # Combine metrics for density
-        density = (
-            0.4 * height +
-            0.3 * entropy +
-            0.3 * l_value
-        ) / (height + entropy + l_value)
+        density = (0.4 * height + 0.3 * entropy + 0.3 * l_value) / (
+            height + entropy + l_value
+        )
 
         return max(CONFIG.MIN_DENSITY, min(CONFIG.MAX_DENSITY, float(density)))

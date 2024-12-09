@@ -6,7 +6,6 @@ This module provides comprehensive benchmarks for Vulkan operations including:
 3. Lifecycle analysis and optimization
 """
 
-
 import pytest
 import torch
 
@@ -29,7 +28,7 @@ class TestVulkanBenchmarks:
         """Benchmark memory pool allocation efficiency."""
         for size in self.sizes:
             # Test different pool configurations
-            pool_sizes = [size*4, size*8, size*16]  # KB
+            pool_sizes = [size * 4, size * 8, size * 16]  # KB
 
             for pool_size in pool_sizes:
                 self.memory.create_pool(pool_size)
@@ -60,7 +59,7 @@ class TestVulkanBenchmarks:
                     pool_size=pool_size,
                     allocation_size=size,
                     allocation_time=alloc_time,
-                    fragmentation=fragmentation
+                    fragmentation=fragmentation,
                 )
 
                 self.memory.destroy_pool()
@@ -69,7 +68,7 @@ class TestVulkanBenchmarks:
         """Analyze memory fragmentation patterns."""
         for size in self.sizes:
             # Create mixed-size allocations
-            allocation_sizes = [size//4, size//2, size]
+            allocation_sizes = [size // 4, size // 2, size]
             allocations = []
 
             # Initial allocations
@@ -100,7 +99,7 @@ class TestVulkanBenchmarks:
                 initial_fragmentation=fragmentation_points[0],
                 peak_fragmentation=max(fragmentation_points),
                 defrag_time=defrag_time,
-                final_fragmentation=self.memory.get_fragmentation()
+                final_fragmentation=self.memory.get_fragmentation(),
             )
 
     def test_resource_lifecycle(self):
@@ -145,7 +144,7 @@ class TestVulkanBenchmarks:
                     size=size,
                     creation_time=creation_times[i],
                     destruction_time=destruction_times[i],
-                    total_time=creation_times[i] + destruction_times[i]
+                    total_time=creation_times[i] + destruction_times[i],
                 )
 
     def test_memory_operations(self):
@@ -182,5 +181,5 @@ class TestVulkanBenchmarks:
                 size=size,
                 h2d_time=h2d_time,
                 d2h_time=d2h_time,
-                bandwidth=size * size * 4 / (h2d_time + d2h_time)  # bytes/ms
+                bandwidth=size * size * 4 / (h2d_time + d2h_time),  # bytes/ms
             )

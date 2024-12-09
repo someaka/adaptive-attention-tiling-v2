@@ -8,7 +8,9 @@ import pytest
 from src.core.performance.vulkan.memory_management import VulkanMemoryManager
 
 
-def setup_pattern_data(batch_size: int, pattern_size: int) -> tuple[np.ndarray, np.ndarray]:
+def setup_pattern_data(
+    batch_size: int, pattern_size: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Create pattern and flow test data.
 
     Args:
@@ -24,7 +26,9 @@ def setup_pattern_data(batch_size: int, pattern_size: int) -> tuple[np.ndarray, 
     return pattern, flow
 
 
-def setup_flow_data(batch_size: int, manifold_dim: int) -> tuple[np.ndarray, np.ndarray]:
+def setup_flow_data(
+    batch_size: int, manifold_dim: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Create metric and connection test data.
 
     Args:
@@ -188,7 +192,9 @@ class TestVulkanShaders:
             times_batch.append(time.time() - start)
 
         print("\nBatch Processing Efficiency")
-        for batch_size, t_single, t_batch in zip(self.batch_sizes, times_single, times_batch):
+        for batch_size, t_single, t_batch in zip(
+            self.batch_sizes, times_single, times_batch
+        ):
             print(f"Batch size {batch_size}:")
             print(f"  Single: {t_single:.4f}s")
             print(f"  Batch:  {t_batch:.4f}s")

@@ -120,7 +120,9 @@ def test_attention_vectorization_performance(
             print(f"Attention Performance (batch={batch_size}, dim={dim}):")
             print(f"  Execution time: {latest_metric.execution_time:.2f}ms")
             print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
-            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+            print(
+                f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}"
+            )
 
         except (ValueError, RuntimeError, AssertionError) as e:
             pytest.fail(f"Attention vectorization failed: {e}")
@@ -166,7 +168,9 @@ def test_pattern_dynamics_vectorization(
             print(f"Pattern Dynamics (batch={batch_size}, seq_len={seq_len}):")
             print(f"  Execution time: {latest_metric.execution_time:.2f}ms")
             print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
-            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+            print(
+                f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}"
+            )
 
         except (ValueError, RuntimeError, AssertionError) as e:
             pytest.fail(f"Pattern dynamics vectorization failed: {e}")
@@ -189,7 +193,9 @@ def test_geometric_flow_vectorization(
             metric = 0.5 * (metric + metric.transpose(-2, -1))
 
             # Compute vectorized geometric flow
-            result = vectorization_optimizer.vectorize_geometric_flow(metric, connection)
+            result = vectorization_optimizer.vectorize_geometric_flow(
+                metric, connection
+            )
 
             # Validate output shape
             expected_shape = (batch_size, dim, dim)
@@ -211,7 +217,9 @@ def test_geometric_flow_vectorization(
             print(f"Geometric Flow (batch={batch_size}, dim={dim}):")
             print(f"  Execution time: {latest_metric.execution_time:.2f}ms")
             print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
-            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+            print(
+                f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}"
+            )
 
         except (ValueError, RuntimeError, AssertionError) as e:
             pytest.fail(f"Geometric flow vectorization failed: {e}")
@@ -249,14 +257,18 @@ def test_chunk_size_impact(chunk_size: int) -> None:
             print(f"Chunk Size Impact (size={chunk_size}):")
             print(f"  Execution time: {execution_time:.2f}ms")
             print(f"  Memory usage: {latest_metric.memory_usage / 1024 / 1024:.2f}MB")
-            print(f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}")
+            print(
+                f"  Vectorization efficiency: {latest_metric.vectorization_efficiency:.2%}"
+            )
 
         except (ValueError, RuntimeError, AssertionError) as e:
             pytest.fail(f"Chunk size impact test failed: {e}")
 
 
 @pytest.mark.benchmark
-def test_memory_layout_optimization(vectorization_optimizer: VectorizationOptimizer) -> None:
+def test_memory_layout_optimization(
+    vectorization_optimizer: VectorizationOptimizer,
+) -> None:
     """Test memory layout optimization and cache utilization."""
     with resource_guard():
         try:
@@ -288,16 +300,25 @@ def test_memory_layout_optimization(vectorization_optimizer: VectorizationOptimi
             print("  Contiguous tensors:")
             print(f"    Execution time: {metrics1.execution_time:.2f}ms")
             print(f"    Memory usage: {metrics1.memory_usage / 1024 / 1024:.2f}MB")
-            print(f"    Vectorization efficiency: {metrics1.vectorization_efficiency:.2%}")
+            print(
+                f"    Vectorization efficiency: {metrics1.vectorization_efficiency:.2%}"
+            )
             print("  Non-contiguous tensors:")
             print(f"    Execution time: {metrics2.execution_time:.2f}ms")
             print(f"    Memory usage: {metrics2.memory_usage / 1024 / 1024:.2f}MB")
-            print(f"    Vectorization efficiency: {metrics2.vectorization_efficiency:.2%}")
+            print(
+                f"    Vectorization efficiency: {metrics2.vectorization_efficiency:.2%}"
+            )
 
             # Verify that contiguous tensors perform better
             assert (
                 metrics1.vectorization_efficiency >= metrics2.vectorization_efficiency
             ), "Contiguous tensors should have better vectorization efficiency"
 
-        except (ValueError, RuntimeError, AssertionError, torch.testing.AssertionError) as e:
+        except (
+            ValueError,
+            RuntimeError,
+            AssertionError,
+            torch.testing.AssertionError,
+        ) as e:
             pytest.fail(f"Memory layout optimization test failed: {e}")

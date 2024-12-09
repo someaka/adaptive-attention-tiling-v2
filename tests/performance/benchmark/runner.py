@@ -18,14 +18,14 @@ def run_performance_tests(
     results_dir: str,
     pattern: Optional[str] = None,
     history_length: int = 100,
-    alert_threshold: float = 0.2
+    alert_threshold: float = 0.2,
 ) -> None:
     """Run performance tests with monitoring."""
     # Initialize benchmark monitor
     monitor = BenchmarkMonitor(
         results_dir=results_dir,
         history_length=history_length,
-        alert_threshold=alert_threshold
+        alert_threshold=alert_threshold,
     )
 
     # Prepare pytest arguments
@@ -62,35 +62,35 @@ def run_performance_tests(
     for test_name in report:
         monitor.plot_trends(test_name)
 
+
 def main():
     """Main entry point for the test runner."""
-    parser = argparse.ArgumentParser(description="Run performance tests with monitoring")
+    parser = argparse.ArgumentParser(
+        description="Run performance tests with monitoring"
+    )
     parser.add_argument(
         "--tests",
         nargs="+",
         default=["tests/performance/cpu", "tests/performance/vulkan"],
-        help="Paths to test directories or files"
+        help="Paths to test directories or files",
     )
     parser.add_argument(
         "--results-dir",
         default="benchmark_results",
-        help="Directory to store benchmark results"
+        help="Directory to store benchmark results",
     )
-    parser.add_argument(
-        "--pattern",
-        help="Pattern to filter test names"
-    )
+    parser.add_argument("--pattern", help="Pattern to filter test names")
     parser.add_argument(
         "--history-length",
         type=int,
         default=100,
-        help="Number of historical results to keep"
+        help="Number of historical results to keep",
     )
     parser.add_argument(
         "--alert-threshold",
         type=float,
         default=0.2,
-        help="Z-score threshold for regression alerts"
+        help="Z-score threshold for regression alerts",
     )
 
     args = parser.parse_args()
@@ -107,8 +107,9 @@ def main():
         results_dir=args.results_dir,
         pattern=args.pattern,
         history_length=args.history_length,
-        alert_threshold=args.alert_threshold
+        alert_threshold=args.alert_threshold,
     )
+
 
 if __name__ == "__main__":
     main()

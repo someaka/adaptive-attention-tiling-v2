@@ -7,60 +7,56 @@ This module implements crystalline structures for attention patterns:
 - Bloch functions and symmetries
 """
 
-import torch
-import torch.nn as nn
-from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
 import numpy as np
-from .state_space import QuantumState, HilbertSpace
-from .path_integral import Path, ActionFunctional
+import torch
+from torch import nn
+
+from .state_space import HilbertSpace, QuantumState
+
 
 @dataclass
 class LatticeVector:
     """Represents a lattice vector in the crystal."""
+
     components: torch.Tensor  # Vector components
-    basis_type: str          # Direct or reciprocal
+    basis_type: str  # Direct or reciprocal
     index: Tuple[int, ...]  # Miller indices
+
 
 class BravaisLattice:
     """Implementation of Bravais lattice structure."""
-    
-    def __init__(
-        self,
-        dim: int,
-        lattice_type: str = 'cubic'
-    ):
+
+    def __init__(self, dim: int, lattice_type: str = "cubic"):
         self.dim = dim
         self.lattice_type = lattice_type
-        
+
         # Initialize lattice vectors
         self.direct_vectors = self._initialize_direct_lattice()
         self.reciprocal_vectors = self._compute_reciprocal_lattice()
-        
+
         # Symmetry operations
         self.symmetries = self._initialize_symmetries()
-    
+
     def _initialize_direct_lattice(self) -> torch.Tensor:
         """Initialize direct lattice vectors."""
-        if self.lattice_type == 'cubic':
+        if self.lattice_type == "cubic":
             return torch.eye(self.dim)
-        elif self.lattice_type == 'hexagonal' and self.dim == 2:
-            return torch.tensor([
-                [1.0, 0.0],
-                [0.5, np.sqrt(3)/2]
-            ])
-        else:
-            raise ValueError(f"Unsupported lattice type: {self.lattice_type}")
-    
+        if self.lattice_type == "hexagonal" and self.dim == 2:
+            return torch.tensor([[1.0, 0.0], [0.5, np.sqrt(3) / 2]])
+        raise ValueError(f"Unsupported lattice type: {self.lattice_type}")
+
     def _compute_reciprocal_lattice(self) -> torch.Tensor:
         """Compute reciprocal lattice vectors."""
         return 2 * np.pi * torch.inverse(self.direct_vectors).t()
-    
+
     def _initialize_symmetries(self) -> List[torch.Tensor]:
         """Initialize symmetry operations."""
         symmetries = [torch.eye(self.dim)]  # Identity
-        
-        if self.lattice_type == 'cubic':
+
+        if self.lattice_type == "cubic":
             # Add rotations and reflections
             for i in range(self.dim):
                 for j in range(self.dim):
@@ -71,153 +67,134 @@ class BravaisLattice:
                         rotation[i, j] = 1
                         rotation[j, i] = -1
                         symmetries.append(rotation)
-        
+
         return symmetries
+
 
 class BrillouinZone:
     """Brillouin zone and band structure computation."""
-    
-    def __init__(
-        self,
-        lattice: BravaisLattice,
-        num_bands: int = 4
-    ):
+
+    def __init__(self, lattice: BravaisLattice, num_bands: int = 4):
         self.lattice = lattice
         self.num_bands = num_bands
-        
+
         # Band structure
         self.band_hamiltonian = self._initialize_band_hamiltonian()
-        
+
         # High symmetry points
         self.high_symmetry_points = self._get_high_symmetry_points()
-    
+
     def _initialize_band_hamiltonian(self) -> nn.Module:
         """Initialize band structure Hamiltonian."""
         return nn.Sequential(
             nn.Linear(self.lattice.dim, self.num_bands * 2),
             nn.ReLU(),
-            nn.Linear(self.num_bands * 2, self.num_bands)
+            nn.Linear(self.num_bands * 2, self.num_bands),
         )
-    
+
     def _get_high_symmetry_points(self) -> Dict[str, torch.Tensor]:
         """Get high symmetry points in k-space."""
-        if self.lattice.lattice_type == 'cubic':
+        if self.lattice.lattice_type == "cubic":
             return {
-                'Γ': torch.zeros(self.lattice.dim),
-                'X': torch.tensor([np.pi, 0, 0])[:self.lattice.dim],
-                'M': torch.tensor([np.pi, np.pi, 0])[:self.lattice.dim],
-                'R': torch.tensor([np.pi, np.pi, np.pi])[:self.lattice.dim]
+                "Γ": torch.zeros(self.lattice.dim),
+                "X": torch.tensor([np.pi, 0, 0])[: self.lattice.dim],
+                "M": torch.tensor([np.pi, np.pi, 0])[: self.lattice.dim],
+                "R": torch.tensor([np.pi, np.pi, np.pi])[: self.lattice.dim],
             }
-        elif self.lattice.lattice_type == 'hexagonal' and self.lattice.dim == 2:
+        if self.lattice.lattice_type == "hexagonal" and self.lattice.dim == 2:
             return {
-                'Γ': torch.zeros(2),
-                'K': torch.tensor([2*np.pi/3, 2*np.pi/3]),
-                'M': torch.tensor([np.pi, 0])
+                "Γ": torch.zeros(2),
+                "K": torch.tensor([2 * np.pi / 3, 2 * np.pi / 3]),
+                "M": torch.tensor([np.pi, 0]),
             }
         return {}
-    
-    def compute_band_structure(
-        self,
-        k_points: torch.Tensor
-    ) -> torch.Tensor:
+
+    def compute_band_structure(self, k_points: torch.Tensor) -> torch.Tensor:
         """Compute band structure at given k-points."""
         return self.band_hamiltonian(k_points)
 
+
 class BlochFunction:
     """Implementation of Bloch functions for the crystal."""
-    
-    def __init__(
-        self,
-        lattice: BravaisLattice,
-        hilbert_space: HilbertSpace
-    ):
+
+    def __init__(self, lattice: BravaisLattice, hilbert_space: HilbertSpace):
         self.lattice = lattice
         self.hilbert_space = hilbert_space
-        
+
         # Bloch function parameters
         self.cell_function = nn.Sequential(
             nn.Linear(lattice.dim, hilbert_space.dim),
             nn.ReLU(),
-            nn.Linear(hilbert_space.dim, hilbert_space.dim)
+            nn.Linear(hilbert_space.dim, hilbert_space.dim),
         )
-    
+
     def compute_bloch_function(
-        self,
-        k_point: torch.Tensor,
-        position: torch.Tensor
+        self, k_point: torch.Tensor, position: torch.Tensor
     ) -> QuantumState:
         """Compute Bloch function at given k-point and position."""
         # Cell-periodic part
         u_k = self.cell_function(position)
-        
+
         # Plane wave part
         phase = torch.exp(1j * torch.sum(k_point * position))
-        
+
         # Combine parts
         psi = u_k * phase
-        
+
         return QuantumState(
             amplitudes=psi,
             basis_labels=self.hilbert_space.basis_states,
-            phase=torch.angle(phase)
+            phase=torch.angle(phase),
         )
-    
+
     def compute_momentum(
-        self,
-        state: QuantumState,
-        k_point: torch.Tensor
+        self, state: QuantumState, k_point: torch.Tensor
     ) -> torch.Tensor:
         """Compute crystal momentum of state."""
-        return -1j * torch.autograd.grad(
-            state.amplitudes.sum(),
-            k_point,
-            create_graph=True
-        )[0]
+        return (
+            -1j
+            * torch.autograd.grad(state.amplitudes.sum(), k_point, create_graph=True)[0]
+        )
+
 
 class CrystalSymmetry:
     """Handle crystal symmetries and transformations."""
-    
+
     def __init__(self, lattice: BravaisLattice):
         self.lattice = lattice
         self.point_group = self._generate_point_group()
         self.space_group = self._generate_space_group()
-    
+
     def _generate_point_group(self) -> List[torch.Tensor]:
         """Generate point group operations."""
         return self.lattice.symmetries
-    
+
     def _generate_space_group(self) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """Generate space group operations (rotation + translation)."""
         space_group = []
         translations = torch.eye(self.lattice.dim)
-        
+
         for rotation in self.point_group:
             for t in [torch.zeros(self.lattice.dim), translations]:
                 space_group.append((rotation, t))
-        
+
         return space_group
-    
+
     def apply_symmetry(
-        self,
-        state: QuantumState,
-        symmetry_op: Tuple[torch.Tensor, torch.Tensor]
+        self, state: QuantumState, symmetry_op: Tuple[torch.Tensor, torch.Tensor]
     ) -> QuantumState:
         """Apply symmetry operation to quantum state."""
         rotation, translation = symmetry_op
-        
+
         # Transform amplitudes
-        new_amplitudes = torch.einsum(
-            'ij,j->i',
-            rotation,
-            state.amplitudes
-        )
-        
+        new_amplitudes = torch.einsum("ij,j->i", rotation, state.amplitudes)
+
         # Apply translation phase
         phase = torch.exp(1j * torch.sum(translation * state.amplitudes))
         new_amplitudes = new_amplitudes * phase
-        
+
         return QuantumState(
             amplitudes=new_amplitudes,
             basis_labels=state.basis_labels,
-            phase=state.phase + torch.angle(phase)
+            phase=state.phase + torch.angle(phase),
         )

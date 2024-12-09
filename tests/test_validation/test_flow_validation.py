@@ -8,7 +8,6 @@ Tests cover:
 4. Singularity detection
 """
 
-
 import pytest
 import torch
 
@@ -39,20 +38,25 @@ class TestFlowValidation:
         return FlowValidator(
             energy_threshold=1e-6,
             monotonicity_threshold=1e-4,
-            singularity_threshold=1.0
+            singularity_threshold=1.0,
         )
 
-    def test_energy_conservation(self, validator: FlowValidator,
-                               batch_size: int, dim: int):
+    def test_energy_conservation(
+        self, validator: FlowValidator, batch_size: int, dim: int
+    ):
         """Test energy conservation in flows."""
+
         # Generate test flow
         def generate_flow(t: torch.Tensor) -> torch.Tensor:
             """Generate conservative flow."""
             omega = torch.randn(batch_size)
-            return torch.stack([
-                torch.cos(omega.unsqueeze(-1) * t),
-                torch.sin(omega.unsqueeze(-1) * t)
-            ], dim=-1)
+            return torch.stack(
+                [
+                    torch.cos(omega.unsqueeze(-1) * t),
+                    torch.sin(omega.unsqueeze(-1) * t),
+                ],
+                dim=-1,
+            )
 
         # Generate time points
         t = torch.linspace(0, 10, 100)
@@ -79,9 +83,11 @@ class TestFlowValidation:
         result = validator.validate_energy_conservation(flow_nc)
         assert not result.is_valid
 
-    def test_flow_monotonicity(self, validator: FlowValidator,
-                             batch_size: int, dim: int):
+    def test_flow_monotonicity(
+        self, validator: FlowValidator, batch_size: int, dim: int
+    ):
         """Test flow monotonicity properties."""
+
         # Generate monotonic flow
         def generate_monotonic_flow(t: torch.Tensor) -> torch.Tensor:
             """Generate monotonically decreasing flow."""
@@ -111,10 +117,11 @@ class TestFlowValidation:
         result = validator.validate_monotonicity(flow_nm)
         assert not result.is_valid
 
-    def test_long_time_existence(self, validator: FlowValidator,
-                               batch_size: int, dim: int,
-                               time_steps: int):
+    def test_long_time_existence(
+        self, validator: FlowValidator, batch_size: int, dim: int, time_steps: int
+    ):
         """Test long-time existence properties."""
+
         # Generate long-time flow
         def generate_stable_flow(t: torch.Tensor) -> torch.Tensor:
             """Generate stable long-time flow."""
@@ -144,8 +151,9 @@ class TestFlowValidation:
         result = validator.validate_long_time_existence(flow_bu)
         assert not result.is_valid
 
-    def test_singularity_detection(self, validator: FlowValidator,
-                                 batch_size: int, dim: int):
+    def test_singularity_detection(
+        self, validator: FlowValidator, batch_size: int, dim: int
+    ):
         """Test singularity detection in flows."""
         # Create singularity detector
         detector = SingularityDetector(threshold=validator.singularity_threshold)
@@ -178,8 +186,7 @@ class TestFlowValidation:
         assert "singularity_count" in result.metrics
         assert "singularity_strength" in result.metrics
 
-    def test_flow_properties(self, validator: FlowValidator,
-                           batch_size: int, dim: int):
+    def test_flow_properties(self, validator: FlowValidator, batch_size: int, dim: int):
         """Test flow property computations."""
         # Generate test flow
         t = torch.linspace(0, 10, 100)
@@ -203,8 +210,9 @@ class TestFlowValidation:
         assert properties.velocity.shape == flow.shape
         assert properties.acceleration.shape == flow.shape
 
-    def test_flow_decomposition(self, validator: FlowValidator,
-                              batch_size: int, dim: int):
+    def test_flow_decomposition(
+        self, validator: FlowValidator, batch_size: int, dim: int
+    ):
         """Test flow decomposition methods."""
         # Generate test flow
         t = torch.linspace(0, 10, 100)
@@ -226,9 +234,9 @@ class TestFlowValidation:
             properties = validator.compute_flow_properties(component)
             assert isinstance(properties, FlowProperties)
 
-    def test_validation_integration(self, validator: FlowValidator,
-                                  batch_size: int, dim: int,
-                                  time_steps: int):
+    def test_validation_integration(
+        self, validator: FlowValidator, batch_size: int, dim: int, time_steps: int
+    ):
         """Test integrated flow validation."""
         # Generate test flow
         t = torch.linspace(0, 10, time_steps)

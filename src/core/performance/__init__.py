@@ -8,4 +8,4 @@ This module provides tools and utilities for optimizing performance:
 
 from .cpu_optimizer import CPUOptimizer, PerformanceMetrics
 
-__all__ = ['CPUOptimizer', 'PerformanceMetrics']
+__all__ = ["CPUOptimizer", "PerformanceMetrics"]

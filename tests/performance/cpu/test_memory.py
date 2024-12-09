@@ -80,13 +80,17 @@ def generate_allocation_pattern(pattern: str, size: int, block_size: int) -> lis
         rng.shuffle(blocks)
         return blocks
     # interleaved
-    return [i // 2 if i % 2 == 0 else num_blocks - 1 - i // 2 for i in range(num_blocks)]
+    return [
+        i // 2 if i % 2 == 0 else num_blocks - 1 - i // 2 for i in range(num_blocks)
+    ]
 
 
 @pytest.mark.benchmark(min_rounds=5)
 @pytest.mark.parametrize("pool_size", POOL_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-def test_memory_pool_efficiency(memory_manager: MemoryManager, pool_size: int, block_size: int):
+def test_memory_pool_efficiency(
+    memory_manager: MemoryManager, pool_size: int, block_size: int
+):
     """Test memory pool allocation and deallocation efficiency."""
     with resource_guard():
         # Initialize pool
@@ -120,14 +124,18 @@ def test_memory_pool_efficiency(memory_manager: MemoryManager, pool_size: int, b
 @pytest.mark.benchmark(min_rounds=5)
 @pytest.mark.parametrize("pattern", ALLOCATION_PATTERNS)
 @pytest.mark.parametrize("pool_size", POOL_SIZES)
-def test_allocation_pattern_impact(memory_manager: MemoryManager, pattern: str, pool_size: int):
+def test_allocation_pattern_impact(
+    memory_manager: MemoryManager, pattern: str, pool_size: int
+):
     """Test impact of different allocation patterns on memory performance."""
     with resource_guard():
         block_size = 32  # Fixed block size for pattern testing
         pool = memory_manager.create_pool(pool_size)
 
         # Generate allocation pattern
-        allocation_sequence = generate_allocation_pattern(pattern, pool_size, block_size)
+        allocation_sequence = generate_allocation_pattern(
+            pattern, pool_size, block_size
+        )
 
         # Allocate blocks according to pattern
         blocks = [None] * len(allocation_sequence)
@@ -139,7 +147,9 @@ def test_allocation_pattern_impact(memory_manager: MemoryManager, pattern: str, 
 
         # Pattern-specific assertions
         if pattern == "sequential":
-            assert metrics.fragmentation < 0.1  # Sequential should have minimal fragmentation
+            assert (
+                metrics.fragmentation < 0.1
+            )  # Sequential should have minimal fragmentation
         elif pattern == "random":
             # Random might have more fragmentation but should still be manageable
             assert metrics.fragmentation < 0.3
@@ -208,7 +218,9 @@ def test_memory_bandwidth():
                 start_time.record()
                 end_time.record()
                 torch.cuda.synchronize()
-                elapsed_time = start_time.elapsed_time(end_time) / 1000  # Convert to seconds
+                elapsed_time = (
+                    start_time.elapsed_time(end_time) / 1000
+                )  # Convert to seconds
             else:
                 elapsed_time = end_time - start_time
 

@@ -14,7 +14,6 @@ Tests cover:
 10. Entanglement scaling
 """
 
-
 import numpy as np
 import pytest
 import torch
@@ -45,7 +44,7 @@ class TestScaleCohomology:
             dim=space_dim,
             scale_min=scale_range[0],
             scale_max=scale_range[1],
-            num_scales=num_scales
+            num_scales=num_scales,
         )
 
     def test_scale_connection(self, scale_system, space_dim):
@@ -57,8 +56,10 @@ class TestScaleCohomology:
         connection = scale_system.scale_connection(scale1, scale2)
 
         # Test connection properties
-        assert connection.shape == (space_dim, space_dim), \
-            "Connection should be matrix-valued"
+        assert connection.shape == (
+            space_dim,
+            space_dim,
+        ), "Connection should be matrix-valued"
 
         # Test compatibility condition
         def test_compatibility(s1, s2, s3):
@@ -69,8 +70,9 @@ class TestScaleCohomology:
             return torch.allclose(c13, c23 @ c12, rtol=1e-4)
 
         scale3 = torch.tensor(4.0)
-        assert test_compatibility(scale1, scale2, scale3), \
-            "Connection should satisfy compatibility"
+        assert test_compatibility(
+            scale1, scale2, scale3
+        ), "Connection should satisfy compatibility"
 
         # Test infinitesimal generator
         def test_infinitesimal(scale, epsilon):
@@ -80,11 +82,13 @@ class TestScaleCohomology:
             expected = torch.eye(space_dim) + epsilon * generator
             return torch.allclose(connection, expected, rtol=1e-3)
 
-        assert test_infinitesimal(scale1, 1e-3), \
-            "Connection should have correct infinitesimal form"
+        assert test_infinitesimal(
+            scale1, 1e-3
+        ), "Connection should have correct infinitesimal form"
 
     def test_renormalization_flow(self, scale_system):
         """Test renormalization group flow properties."""
+
         # Create test observable
         def test_observable(x: torch.Tensor) -> torch.Tensor:
             return torch.sum(x**2)
@@ -103,9 +107,7 @@ class TestScaleCohomology:
             flow_t2 = flow.evolve(t2)
             flow_sum = flow.evolve(t1 + t2)
             return torch.allclose(
-                flow_sum.observable,
-                flow_t2.apply(flow_t1.observable),
-                rtol=1e-4
+                flow_sum.observable, flow_t2.apply(flow_t1.observable), rtol=1e-4
             )
 
         assert test_semigroup(0.5, 0.5), "Flow should satisfy semigroup property"
@@ -120,6 +122,7 @@ class TestScaleCohomology:
 
     def test_fixed_points(self, scale_system):
         """Test fixed point analysis."""
+
         # Create test flow
         def beta_function(x):
             """Simple β-function with known fixed point."""
@@ -134,8 +137,11 @@ class TestScaleCohomology:
         # Test stability
         for fp in fixed_points:
             stability = scale_system.fixed_point_stability(fp, beta_function)
-            assert stability in ["stable", "unstable", "marginal"], \
-                "Should classify fixed point stability"
+            assert stability in [
+                "stable",
+                "unstable",
+                "marginal",
+            ], "Should classify fixed point stability"
 
         # Test critical exponents
         critical_exps = scale_system.critical_exponents(fixed_points[0], beta_function)
@@ -147,16 +153,17 @@ class TestScaleCohomology:
             return beta_function(x) + 0.1 * x**3
 
         perturbed_fps = scale_system.fixed_points(perturbed_beta)
-        perturbed_exps = scale_system.critical_exponents(perturbed_fps[0], perturbed_beta)
+        perturbed_exps = scale_system.critical_exponents(
+            perturbed_fps[0], perturbed_beta
+        )
 
         assert torch.allclose(
-            torch.tensor(critical_exps),
-            torch.tensor(perturbed_exps),
-            rtol=1e-2
+            torch.tensor(critical_exps), torch.tensor(perturbed_exps), rtol=1e-2
         ), "Critical exponents should be universal"
 
     def test_anomaly_polynomial(self, scale_system):
         """Test anomaly polynomial computation."""
+
         # Create test symmetry
         def symmetry_action(x):
             """Simple U(1) symmetry."""
@@ -178,8 +185,10 @@ class TestScaleCohomology:
 
         def g1(x):
             return torch.exp(1j * x)
+
         def g2(x):
             return torch.exp(2j * x)
+
         assert test_consistency(g1, g2), "Anomaly should satisfy consistency"
 
     def test_scale_invariants(self, scale_system):
@@ -209,8 +218,10 @@ class TestScaleCohomology:
             # Test product is also invariant
             def product_inv(x):
                 return invariants[0](x) * invariants[1](x)
-            assert test_invariance(product_inv, 2.0), \
-                "Product of invariants should be invariant"
+
+            assert test_invariance(
+                product_inv, 2.0
+            ), "Product of invariants should be invariant"
 
         # Test completeness
         def test_completeness(structure):
@@ -218,11 +229,11 @@ class TestScaleCohomology:
             values = torch.tensor([inv(structure) for inv in invariants])
             return len(values) >= scale_system.minimal_invariant_number()
 
-        assert test_completeness(structure), \
-            "Should find complete set of invariants"
+        assert test_completeness(structure), "Should find complete set of invariants"
 
     def test_callan_symanzik(self, scale_system, space_dim):
         """Test Callan-Symanzik equation properties."""
+
         # Create test correlation function
         def correlation(x1, x2, coupling):
             """Simple two-point correlation function."""
@@ -231,12 +242,12 @@ class TestScaleCohomology:
         # Define beta function
         def beta(g):
             """Simple beta function."""
-            return -g**2
+            return -(g**2)
 
         # Define anomalous dimension
         def gamma(g):
             """Anomalous dimension."""
-            return g**2 / (4 * np.pi)**2
+            return g**2 / (4 * np.pi) ** 2
 
         # Test points
         x1 = torch.zeros(space_dim)
@@ -257,16 +268,16 @@ class TestScaleCohomology:
             scaled_corr = correlation(lambda_ * x1, lambda_ * x2, g)
             dim = scale_system.scaling_dimension(correlation)
             return torch.allclose(
-                scaled_corr,
-                correlation(x1, x2, g) * lambda_**(-dim),
-                rtol=1e-3
+                scaled_corr, correlation(x1, x2, g) * lambda_ ** (-dim), rtol=1e-3
             )
 
-        assert test_scaling(torch.tensor(2.0)), \
-            "Correlation should have correct scaling"
+        assert test_scaling(
+            torch.tensor(2.0)
+        ), "Correlation should have correct scaling"
 
     def test_operator_expansion(self, scale_system):
         """Test operator product expansion."""
+
         # Create test operators
         def op1(x):
             """First operator."""
@@ -274,7 +285,7 @@ class TestScaleCohomology:
 
         def op2(x):
             """Second operator."""
-            return torch.exp(-x**2)
+            return torch.exp(-(x**2))
 
         # Compute OPE
         ope = scale_system.operator_product_expansion(op1, op2)
@@ -292,12 +303,10 @@ class TestScaleCohomology:
         def test_associativity(op_a, op_b, op_c):
             """Test OPE associativity."""
             ope1 = scale_system.operator_product_expansion(
-                lambda x: scale_system.operator_product_expansion(op_a, op_b)(x),
-                op_c
+                lambda x: scale_system.operator_product_expansion(op_a, op_b)(x), op_c
             )
             ope2 = scale_system.operator_product_expansion(
-                op_a,
-                lambda x: scale_system.operator_product_expansion(op_b, op_c)(x)
+                op_a, lambda x: scale_system.operator_product_expansion(op_b, op_c)(x)
             )
             return all(
                 torch.allclose(c1, c2, rtol=1e-3)
@@ -307,8 +316,7 @@ class TestScaleCohomology:
         def op3(x):
             return x**2
 
-        assert test_associativity(op1, op2, op3), \
-            "OPE should be associative"
+        assert test_associativity(op1, op2, op3), "OPE should be associative"
 
     def test_conformal_symmetry(self, scale_system, space_dim):
         """Test conformal symmetry properties."""
@@ -331,22 +339,20 @@ class TestScaleCohomology:
             )
             return torch.allclose(angle1, angle2, rtol=1e-3)
 
-        assert test_special_conformal(torch.ones(space_dim)), \
-            "Special conformal transformation should preserve angles"
+        assert test_special_conformal(
+            torch.ones(space_dim)
+        ), "Special conformal transformation should preserve angles"
 
         # Test primary fields
         def test_primary_scaling(field, dimension):
             """Test primary field scaling."""
             lambda_ = torch.tensor(2.0)
             transformed = scale_system.transform_primary(field, lambda_, dimension)
-            return torch.allclose(
-                transformed,
-                field * lambda_**dimension,
-                rtol=1e-3
-            )
+            return torch.allclose(transformed, field * lambda_**dimension, rtol=1e-3)
 
-        assert test_primary_scaling(field, dim=1.0), \
-            "Primary fields should transform correctly"
+        assert test_primary_scaling(
+            field, dim=1.0
+        ), "Primary fields should transform correctly"
 
         # Test conformal blocks
         blocks = scale_system.conformal_blocks(field)
@@ -360,8 +366,9 @@ class TestScaleCohomology:
 
         # Test radial evolution
         bulk_field = scale_system.holographic_lift(boundary_field, radial_coordinate)
-        assert bulk_field.shape[0] == len(radial_coordinate), \
-            "Bulk field should extend along radial direction"
+        assert bulk_field.shape[0] == len(
+            radial_coordinate
+        ), "Bulk field should extend along radial direction"
 
         # Test UV/IR connection
         def test_uv_ir_connection(field):
@@ -369,12 +376,9 @@ class TestScaleCohomology:
             uv_data = scale_system.extract_uv_data(field)
             ir_data = scale_system.extract_ir_data(field)
             reconstructed = scale_system.reconstruct_from_ir(ir_data)
-            return torch.allclose(
-                uv_data, reconstructed, rtol=1e-2
-            )
+            return torch.allclose(uv_data, reconstructed, rtol=1e-2)
 
-        assert test_uv_ir_connection(bulk_field), \
-            "Should satisfy UV/IR connection"
+        assert test_uv_ir_connection(bulk_field), "Should satisfy UV/IR connection"
 
         # Test holographic c-theorem
         c_function = scale_system.compute_c_function(bulk_field, radial_coordinate)
@@ -421,13 +425,10 @@ class TestScaleCohomology:
             I23 = scale_system.mutual_information(state, regions[1], regions[2])
             return I12 + I13 + I23 >= 0
 
-        test_regions = [
-            torch.ones(4, 4),
-            torch.ones(4, 4),
-            torch.ones(4, 4)
-        ]
-        assert test_mutual_info_monogamy(test_regions), \
-            "Should satisfy mutual information monogamy"
+        test_regions = [torch.ones(4, 4), torch.ones(4, 4), torch.ones(4, 4)]
+        assert test_mutual_info_monogamy(
+            test_regions
+        ), "Should satisfy mutual information monogamy"
 
         # Test critical scaling
         if hasattr(scale_system, "is_critical"):

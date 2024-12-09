@@ -1,8 +1,11 @@
 """Common constants."""
 
+import os
+
 # Memory constants
 MEMORY_ALIGNMENT = 256  # bytes
 PAGE_SIZE = 4096  # bytes
+DEFAULT_BUFFER_BLOCK_SIZE = 1024 * 1024  # 1 MB
 
 # Compute constants
 WARP_SIZE = 32
@@ -28,3 +31,6 @@ TILE_SIZE_INCREMENT = 32
 MAX_SHARED_MEMORY = 48 * 1024  # 48 KB
 MAX_REGISTERS_PER_THREAD = 255
 MAX_THREADS_PER_BLOCK = 1024
+
+# Shader paths
+SHADER_DIR = os.path.join("src", "core", "performance", "vulkan", "shaders")

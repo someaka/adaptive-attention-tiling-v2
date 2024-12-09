@@ -106,7 +106,9 @@ def test_attention_tile_neighbor_management() -> None:
 
 def test_state_management() -> None:
     """Test state compression, expansion, and transfer."""
-    tile1 = AttentionTile(size=32, hidden_dim=128, resolution=0.5)  # Start with lower resolution
+    tile1 = AttentionTile(
+        size=32, hidden_dim=128, resolution=0.5
+    )  # Start with lower resolution
     AttentionTile(size=32, hidden_dim=128, resolution=0.5)
 
     # Create sample state
@@ -146,13 +148,17 @@ def test_advanced_resolution_adaptation() -> None:
 
     for strategy, (metric, expected) in strategies.items():
         # Reset tile and adapter state
-        tile = AttentionTile(size=32, hidden_dim=128, resolution=0.5)  # Create fresh tile
+        tile = AttentionTile(
+            size=32, hidden_dim=128, resolution=0.5
+        )  # Create fresh tile
         tile.adapt_resolution(metric, strategy=strategy, momentum=0.0, hysteresis=0.0)
 
         if strategy == ResolutionStrategy.THRESHOLD:
             assert tile.resolution == expected, f"Failed for strategy {strategy}"
         else:
-            assert abs(tile.resolution - expected) < 0.2, f"Failed for strategy {strategy}"
+            assert (
+                abs(tile.resolution - expected) < 0.2
+            ), f"Failed for strategy {strategy}"
 
     # Test hysteresis
     history = []
@@ -160,7 +166,9 @@ def test_advanced_resolution_adaptation() -> None:
     for _ in range(10):
         # Oscillating input with high hysteresis to dampen changes
         metric = 0.7 if len(history) % 2 == 0 else 0.3
-        tile.adapt_resolution(metric, strategy=ResolutionStrategy.LINEAR, hysteresis=0.5)
+        tile.adapt_resolution(
+            metric, strategy=ResolutionStrategy.LINEAR, hysteresis=0.5
+        )
         history.append(tile.resolution)
 
     # Check that changes are minimal due to high hysteresis
@@ -278,7 +286,9 @@ def test_cross_tile_optimization() -> None:
     """
     # Set up tiles with different information densities
     num_tiles = 5
-    tiles = [AttentionTile(size=32, hidden_dim=128, resolution=1.0) for _ in range(num_tiles)]
+    tiles = [
+        AttentionTile(size=32, hidden_dim=128, resolution=1.0) for _ in range(num_tiles)
+    ]
     # More gradual density variation
     density_factors = [0.6, 0.7, 0.8, 0.9, 1.0]
     base_inputs = torch.randn(1, 32, 64)
@@ -333,7 +343,9 @@ def test_cross_tile_optimization() -> None:
         assert load <= max_t, f"Load {load} above maximum threshold {max_t}"
 
     # Verify load distribution relative to information density
-    weighted_loads = [load / density for load, density in zip(final_loads, density_factors)]
+    weighted_loads = [
+        load / density for load, density in zip(final_loads, density_factors)
+    ]
     max_weighted_diff = max(weighted_loads) - min(weighted_loads)
     # Allow more variation in density-weighted loads
     assert (
@@ -652,7 +664,9 @@ def test_load_balancing_edge_cases() -> None:
     assert base_metrics["compute_cost"] < initial_load  # Base load should decrease
 
     # Case 2: All neighbors at max capacity
-    neighbors_max = [AttentionTile(size=32, hidden_dim=128, resolution=1.0) for _ in range(3)]
+    neighbors_max = [
+        AttentionTile(size=32, hidden_dim=128, resolution=1.0) for _ in range(3)
+    ]
     for n in neighbors_max:
         n.update_metrics({"compute_cost": 0.9})
     base_tile.update_metrics({"compute_cost": 0.3})
@@ -660,7 +674,9 @@ def test_load_balancing_edge_cases() -> None:
     assert base_tile.get_metrics()["compute_cost"] > 0.3
 
     # Case 3: All neighbors at min capacity
-    neighbors_min = [AttentionTile(size=32, hidden_dim=128, resolution=1.0) for _ in range(3)]
+    neighbors_min = [
+        AttentionTile(size=32, hidden_dim=128, resolution=1.0) for _ in range(3)
+    ]
     for n in neighbors_min:
         n.update_metrics({"compute_cost": 0.1})
     base_tile.update_metrics({"compute_cost": 0.9})

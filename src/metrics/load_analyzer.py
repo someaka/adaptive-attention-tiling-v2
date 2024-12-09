@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 MIN_VARIANCE_SAMPLES = 2
 CONVERGENCE_WINDOW = 5
 
+
 class LoadBalanceAnalyzer:
     """Analyze load balancing metrics from attention tiles."""
 

@@ -106,10 +106,14 @@ def test_memory_optimization_strategies():
     final_memory = manager.get_allocated_memory()
 
     # Memory increase should be minimal due to optimization
-    assert (final_memory - initial_memory) / initial_memory < 0.5  # Less than 50% increase
+    assert (
+        final_memory - initial_memory
+    ) / initial_memory < 0.5  # Less than 50% increase
 
 
-@pytest.mark.parametrize("size", [(10, 10), (100, 100), (500, 500)])  # Reduced from 5000x5000
+@pytest.mark.parametrize(
+    "size", [(10, 10), (100, 100), (500, 500)]
+)  # Reduced from 5000x5000
 def test_memory_scaling(size):
     """Test memory usage scaling with different tensor sizes."""
     manager = MemoryManager()

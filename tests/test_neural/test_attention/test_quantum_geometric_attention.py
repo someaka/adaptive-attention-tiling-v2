@@ -14,7 +14,6 @@ Tests cover:
 10. Topological features
 """
 
-
 import numpy as np
 import pytest
 import torch
@@ -28,24 +27,26 @@ from src.neural.attention.quantum_geometric_attention import (
 
 
 class TestQuantumGeometricAttention:
+    """Test suite for quantum geometric attention."""
+
     @pytest.fixture
-    def hidden_dim(self):
-        """Hidden dimension size."""
+    def hidden_dim(self) -> int:
+        """Return hidden dimension for tests."""
         return 64
 
     @pytest.fixture
-    def num_heads(self):
-        """Number of attention heads."""
+    def num_heads(self) -> int:
+        """Return number of attention heads for tests."""
         return 8
 
     @pytest.fixture
-    def batch_size(self):
-        """Batch size for testing."""
+    def batch_size(self) -> int:
+        """Return batch size for tests."""
         return 16
 
     @pytest.fixture
-    def seq_length(self):
-        """Sequence length for testing."""
+    def seq_length(self) -> int:
+        """Return sequence length for tests."""
         return 32
 
     @pytest.fixture
@@ -58,7 +59,7 @@ class TestQuantumGeometricAttention:
             motive_rank=4,
             manifold_dim=8,
             num_layers=3,
-            tile_size=16
+            tile_size=16,
         )
 
     def test_attention_state_preparation(
@@ -108,8 +109,12 @@ class TestQuantumGeometricAttention:
         )
 
         # Test pattern properties
-        assert patterns.shape == (batch_size, num_heads, seq_length, seq_length), \
-            "Pattern shape correct"
+        assert patterns.shape == (
+            batch_size,
+            num_heads,
+            seq_length,
+            seq_length,
+        ), "Pattern shape correct"
 
         # Test row-wise normalization
         row_sums = patterns.sum(dim=-1)
@@ -134,8 +139,7 @@ class TestQuantumGeometricAttention:
         """Test geometric attention flow computation."""
         # Create patterns and metric tensor
         patterns = torch.softmax(
-            torch.randn(batch_size, num_heads, seq_length, seq_length),
-            dim=-1
+            torch.randn(batch_size, num_heads, seq_length, seq_length), dim=-1
         )
         metric = torch.eye(hidden_dim).expand(batch_size, num_heads, -1, -1)
 
@@ -152,8 +156,9 @@ class TestQuantumGeometricAttention:
         ), "Flow should be conserved"
 
         # Test metric compatibility
-        assert attention_layer.check_metric_compatibility(flow, metric), \
-            "Flow should be compatible with metric"
+        assert attention_layer.check_metric_compatibility(
+            flow, metric
+        ), "Flow should be compatible with metric"
 
         # Test flow metrics
         assert isinstance(metrics, FlowMetrics), "Should return flow metrics"
@@ -171,8 +176,9 @@ class TestQuantumGeometricAttention:
         quantum_state = attention_layer.classical_to_quantum(classical_input)
 
         # Test quantum state properties
-        assert attention_layer.is_valid_quantum_state(quantum_state), \
-            "Should be valid quantum state"
+        assert attention_layer.is_valid_quantum_state(
+            quantum_state
+        ), "Should be valid quantum state"
 
         # Convert back to classical
         classical_output = attention_layer.quantum_to_classical(quantum_state)
@@ -202,8 +208,11 @@ class TestQuantumGeometricAttention:
         integrated = attention_layer.integrate_heads(head_states)
 
         # Test integrated shape
-        assert integrated.shape == (batch_size, seq_length, hidden_dim), \
-            "Integration should preserve dimensions"
+        assert integrated.shape == (
+            batch_size,
+            seq_length,
+            hidden_dim,
+        ), "Integration should preserve dimensions"
 
         # Test head separation
         separated = attention_layer.separate_heads(integrated)
@@ -217,8 +226,11 @@ class TestQuantumGeometricAttention:
 
         # Test attention output
         output = attention_layer(torch.randn(batch_size, seq_length, hidden_dim))
-        assert output.shape == (batch_size, seq_length, hidden_dim), \
-            "Should maintain input shape"
+        assert output.shape == (
+            batch_size,
+            seq_length,
+            hidden_dim,
+        ), "Should maintain input shape"
 
         # Test gradient flow through heads
         output.sum().backward()
@@ -229,10 +241,11 @@ class TestQuantumGeometricAttention:
         self, attention_layer, batch_size, seq_length, hidden_dim
     ):
         """Test quantum geometric phases in attention."""
+
         # Create cyclic attention path
         def create_cyclic_path(steps: int = 100):
             """Create a cyclic path in attention parameter space."""
-            t = torch.linspace(0, 2*np.pi, steps)
+            t = torch.linspace(0, 2 * np.pi, steps)
             return [
                 attention_layer.create_attention_parameters(
                     torch.cos(ti), torch.sin(ti)
@@ -245,8 +258,9 @@ class TestQuantumGeometricAttention:
         berry_phase = attention_layer.compute_berry_phase(path)
 
         # Test phase quantization
-        assert torch.abs(berry_phase - torch.round(berry_phase)) < 1e-4, \
-            "Berry phase should be quantized"
+        assert (
+            torch.abs(berry_phase - torch.round(berry_phase)) < 1e-4
+        ), "Berry phase should be quantized"
 
         # Test parallel transport
         state = torch.randn(batch_size, seq_length, hidden_dim)
@@ -257,13 +271,16 @@ class TestQuantumGeometricAttention:
         assert torch.allclose(
             holonomy @ holonomy.conj().transpose(-1, -2),
             torch.eye(hidden_dim),
-            rtol=1e-4
+            rtol=1e-4,
         ), "Holonomy should be unitary"
 
         # Test Wilczek-Zee connection
         connection = attention_layer.wilczek_zee_connection(path)
-        assert connection.shape == (len(path), hidden_dim, hidden_dim), \
-            "Connection should have correct shape"
+        assert connection.shape == (
+            len(path),
+            hidden_dim,
+            hidden_dim,
+        ), "Connection should have correct shape"
 
     def test_manifold_curvature(
         self, attention_layer, batch_size, seq_length, hidden_dim
@@ -274,33 +291,35 @@ class TestQuantumGeometricAttention:
 
         # Compute metric tensor
         metric = attention_layer.compute_metric_tensor(states)
-        assert metric.shape == (batch_size, hidden_dim, hidden_dim), \
-            "Metric tensor should have correct shape"
+        assert metric.shape == (
+            batch_size,
+            hidden_dim,
+            hidden_dim,
+        ), "Metric tensor should have correct shape"
 
         # Test Riemann curvature
         riemann = attention_layer.compute_riemann_tensor(states)
         # Test symmetries
         assert torch.allclose(
-            riemann,
-            -riemann.transpose(-1, -2),
-            rtol=1e-4
+            riemann, -riemann.transpose(-1, -2), rtol=1e-4
         ), "Riemann tensor should be antisymmetric in last indices"
 
         # Test sectional curvature
         planes = torch.randn(batch_size, hidden_dim, 2)  # Random 2-planes
         sectional = attention_layer.compute_sectional_curvature(states, planes)
-        assert sectional.shape == (batch_size,), \
-            "Sectional curvature should be scalar"
+        assert sectional.shape == (batch_size,), "Sectional curvature should be scalar"
 
         # Test Ricci curvature
         ricci = attention_layer.compute_ricci_tensor(states)
-        assert ricci.shape == (batch_size, hidden_dim, hidden_dim), \
-            "Ricci tensor should have correct shape"
+        assert ricci.shape == (
+            batch_size,
+            hidden_dim,
+            hidden_dim,
+        ), "Ricci tensor should have correct shape"
 
         # Test scalar curvature
         scalar = attention_layer.compute_scalar_curvature(states)
-        assert scalar.shape == (batch_size,), \
-            "Scalar curvature should be scalar"
+        assert scalar.shape == (batch_size,), "Scalar curvature should be scalar"
 
     def test_attention_entanglement(
         self, attention_layer, batch_size, seq_length, hidden_dim
@@ -309,7 +328,7 @@ class TestQuantumGeometricAttention:
         # Create attention state
         state = attention_layer.prepare_attention_state(
             torch.randn(batch_size, seq_length, hidden_dim),
-            torch.ones(batch_size, seq_length).bool()
+            torch.ones(batch_size, seq_length).bool(),
         )
 
         # Test bipartite entanglement
@@ -330,13 +349,13 @@ class TestQuantumGeometricAttention:
 
         # Test mutual information
         mi = attention_layer.compute_mutual_information(
-            state.quantum_state, [0, seq_length//2, -1]
+            state.quantum_state, [0, seq_length // 2, -1]
         )
         assert mi >= 0, "Mutual information should be non-negative"
 
         # Test entanglement spectrum
         spectrum = attention_layer.compute_entanglement_spectrum(
-            state.quantum_state, seq_length//2
+            state.quantum_state, seq_length // 2
         )
         assert torch.all(spectrum >= 0), "Spectrum should be non-negative"
         assert torch.allclose(
@@ -376,9 +395,7 @@ class TestQuantumGeometricAttention:
             """Test recovery from specific error."""
             corrupted = attention_layer.apply_error(code_state, error)
             recovered = attention_layer.recover_state(corrupted)
-            fidelity = attention_layer.compute_state_fidelity(
-                code_state, recovered
-            )
+            fidelity = attention_layer.compute_state_fidelity(code_state, recovered)
             return fidelity > 0.99
 
         assert test_recovery("bit_flip"), "Should recover from bit flips"
@@ -389,39 +406,73 @@ class TestQuantumGeometricAttention:
     ):
         """Test topological features in attention."""
         # Create attention complex
-        complex = attention_layer.build_attention_complex(
+        attention_complex = attention_layer.build_attention_complex(
             torch.randn(batch_size, seq_length, hidden_dim)
         )
 
         # Test Betti numbers
-        betti = attention_layer.compute_betti_numbers(complex)
+        betti = attention_layer.compute_betti_numbers(attention_complex)
         assert len(betti) > 0, "Should compute Betti numbers"
         assert betti[0] >= 1, "Should be connected"
 
         # Test persistent homology
-        diagrams = attention_layer.compute_persistence_diagrams(complex)
+        diagrams = attention_layer.compute_persistence_diagrams(attention_complex)
         assert len(diagrams) > 0, "Should compute persistence diagrams"
 
         # Test topological features
-        features = attention_layer.extract_topological_features(complex)
-        assert features.shape == (batch_size, attention_layer.num_topological_features), \
-            "Should extract topological features"
+        features = attention_layer.extract_topological_features(attention_complex)
+        assert features.shape == (
+            batch_size,
+            attention_layer.num_topological_features,
+        ), "Should extract topological features"
 
         # Test attention filtration
         def test_filtration_consistency(threshold) -> None:
             """Test consistency of attention filtration."""
-            filtered = attention_layer.filter_attention_complex(complex, threshold)
+            filtered = attention_layer.filter_attention_complex(attention_complex, threshold)
             assert attention_layer.check_filtration_consistency(
-                complex, filtered
+                attention_complex, filtered
             ), "Filtration should be consistent"
 
         test_filtration_consistency(0.5)
 
         # Test topological invariants
-        invariants = attention_layer.compute_topological_invariants(complex)
+        invariants = attention_layer.compute_topological_invariants(attention_complex)
         assert len(invariants) > 0, "Should compute topological invariants"
 
         # Test boundary map
-        boundary = attention_layer.compute_boundary_map(complex)
-        assert torch.matrix_rank(boundary) < boundary.shape[1], \
-            "Should have non-trivial homology"
+        boundary = attention_layer.compute_boundary_map(attention_complex)
+        assert (
+            torch.matrix_rank(boundary) < boundary.shape[1]
+        ), "Should have non-trivial homology"
+
+    def test_attention_patterns(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        batch_size: int,
+        seq_length: int,
+    ) -> None:
+        """Test attention pattern computation."""
+        # Create query, key, value tensors
+        query = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
+        key = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
+        value = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
+
+        # Compute attention patterns
+        attention_layer = QuantumGeometricAttention(hidden_dim, num_heads)
+        patterns = attention_layer.compute_attention_patterns(query, key)
+
+        # Test shape and properties
+        assert patterns.shape == (
+            batch_size,
+            num_heads,
+            seq_length,
+            seq_length,
+        ), "Wrong pattern shape"
+
+        # Test row-wise normalization
+        row_sums = patterns.sum(dim=-1)
+        assert torch.allclose(
+            row_sums, torch.ones_like(row_sums), rtol=1e-5
+        ), "Patterns should be row-normalized"

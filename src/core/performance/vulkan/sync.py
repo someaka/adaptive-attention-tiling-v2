@@ -2,4 +2,4 @@
 
 from ...backends.vulkan.command_buffer import VulkanSync
 
-__all__ = ['VulkanSync']
+__all__ = ["VulkanSync"]

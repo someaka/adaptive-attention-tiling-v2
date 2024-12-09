@@ -80,7 +80,9 @@ def generate_sparse_matrix(size: tuple[int, int], sparsity: float) -> torch.Tens
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
 @pytest.mark.parametrize("sparsity", SPARSITY_LEVELS)
 def test_fast_path_optimization(
-    algorithm_optimizer: AlgorithmOptimizer, matrix_size: tuple[int, int], sparsity: float
+    algorithm_optimizer: AlgorithmOptimizer,
+    matrix_size: tuple[int, int],
+    sparsity: float,
 ):
     """Test fast path optimizations for sparse operations."""
     with resource_guard():
@@ -118,7 +120,9 @@ def test_fast_path_optimization(
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
 def test_branch_prediction(
-    algorithm_optimizer: AlgorithmOptimizer, batch_size: int, matrix_size: tuple[int, int]
+    algorithm_optimizer: AlgorithmOptimizer,
+    batch_size: int,
+    matrix_size: tuple[int, int],
 ):
     """Test branch prediction efficiency."""
     with resource_guard():
@@ -138,7 +142,9 @@ def test_branch_prediction(
 
         # Warm-up run
         for x in inputs:
-            _ = algorithm_optimizer.optimize_operation("op_a" if torch.mean(x) > 0 else "op_b", x)
+            _ = algorithm_optimizer.optimize_operation(
+                "op_a" if torch.mean(x) > 0 else "op_b", x
+            )
         algorithm_optimizer.clear_metrics()
 
         # Test run
@@ -160,7 +166,9 @@ def test_branch_prediction(
 
 @pytest.mark.benchmark(min_rounds=5)
 @pytest.mark.parametrize("optimization_level", OPTIMIZATION_LEVELS)
-def test_loop_optimization(algorithm_optimizer: AlgorithmOptimizer, optimization_level: str):
+def test_loop_optimization(
+    algorithm_optimizer: AlgorithmOptimizer, optimization_level: str
+):
     """Test loop optimization strategies."""
     with resource_guard():
         size = 256  # Reduced from 1024
@@ -196,7 +204,9 @@ def test_loop_optimization(algorithm_optimizer: AlgorithmOptimizer, optimization
 
 @pytest.mark.benchmark(min_rounds=5)
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
-def test_numerical_stability(algorithm_optimizer: AlgorithmOptimizer, matrix_size: tuple[int, int]):
+def test_numerical_stability(
+    algorithm_optimizer: AlgorithmOptimizer, matrix_size: tuple[int, int]
+):
     """Test numerical stability of optimized computations."""
     with resource_guard():
         # Generate test matrix
@@ -254,5 +264,7 @@ def test_optimization_overhead(algorithm_optimizer: AlgorithmOptimizer):
         optimized_time = time.perf_counter() - start_time
 
         # Overhead assertions
-        assert optimized_time < baseline_time * 1.5  # Optimization overhead should be reasonable
+        assert (
+            optimized_time < baseline_time * 1.5
+        )  # Optimization overhead should be reasonable
         assert torch.allclose(baseline_result, optimized_result, rtol=1e-4)

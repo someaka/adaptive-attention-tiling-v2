@@ -11,8 +11,8 @@ layout(set = 0, binding = 1) buffer ConnectionBuffer {
     float connection[];
 };
 
-layout(set = 0, binding = 2) buffer OutputBuffer {
-    float output[];
+layout(set = 0, binding = 2) buffer OutBuffer {
+    float out_data[];
 };
 
 // Push constants for dynamic parameters
@@ -55,5 +55,5 @@ void main() {
     
     // Apply Ricci flow
     uint idx = (batch_idx * params.manifold_dim + i) * params.manifold_dim + j;
-    output[idx] = -2.0 * ricci * params.flow_rate;
+    out_data[idx] = -2.0 * ricci * params.flow_rate;
 }

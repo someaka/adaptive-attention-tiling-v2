@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="adaptive-attention-tiling",
@@ -6,7 +6,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "torch",
-        "numpy<2.0.0",  # Pin numpy to 1.x for torch compatibility
+        "numpy>=2.0.0",  # Updated to require numpy 2.x
         "pytest",
         "mlflow",
         "matplotlib",
