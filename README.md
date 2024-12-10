@@ -28,6 +28,26 @@ Adaptive Attention Tiling v2 is a sophisticated attention mechanism that integra
 
 See [REFACTORING_MAP.md](REFACTORING_MAP.md) for detailed component status.
 
+## Current Development Focus
+
+### Stability and Bifurcation Analysis
+We are currently focusing on improving the stability and bifurcation analysis components of the pattern dynamics system. This involves:
+
+1. Fixing numerical stability issues in eigenvalue computation
+2. Improving parameter handling in bifurcation analysis
+3. Enhancing test coverage for edge cases
+
+### Key Components
+- Pattern Dynamics System
+- Stability Analysis
+- Bifurcation Detection
+
+### Running Tests
+To run the current focus tests:
+```bash
+venv/bin/python -m pytest tests/test_neural/test_attention/test_pattern/test_bifurcation.py -v
+```
+
 ## Development Timeline
 *Last Updated: 2024-12-10T14:22:34+01:00*
 

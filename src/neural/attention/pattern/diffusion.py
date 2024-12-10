@@ -64,7 +64,7 @@ class DiffusionSystem(nn.Module):
             [1/12, 1/6, 1/12],
             [1/6,  0.0,  1/6],
             [1/12, 1/6, 1/12]
-        ], dtype=torch.float64)
+        ], dtype=torch.float32)
         
         # Store base kernel for diffusion
         self.register_buffer('base_kernel', kernel)
@@ -93,81 +93,49 @@ class DiffusionSystem(nn.Module):
     def apply_diffusion(
         self,
         state: torch.Tensor,
-        diffusion_coefficient: Union[float, torch.Tensor, callable],
+        diffusion_coefficient: float,
         dt: float
     ) -> torch.Tensor:
         """Apply diffusion to state tensor.
         
         Args:
-            state (torch.Tensor): State tensor [batch, channels, height, width]
-            diffusion_coefficient (Union[float, torch.Tensor, callable]): Diffusion coefficient as scalar, tensor or function
-            dt (float): Time step
+            state (torch.Tensor): Current state tensor
+            diffusion_coefficient (float): Diffusion coefficient
+            dt (float): Time step size
             
         Returns:
             torch.Tensor: Diffused state
         """
-        # Get dimensions
         batch_size, num_channels, height, width = state.shape
         
-        # Convert to double for stability
-        state = state.to(torch.float64)
-        initial_mass = state.sum(dim=(-2,-1), keepdim=True)
+        # Compute diffusion kernel
+        scale = diffusion_coefficient * dt
+        kernel = torch.tensor([
+            [scale/12, scale/6, scale/12],
+            [scale/6, 1-scale, scale/6],
+            [scale/12, scale/6, scale/12]
+        ], device=state.device).view(1, 1, 3, 3).repeat(num_channels, 1, 1, 1)
         
-        # Create Laplacian kernel
-        kernel = self.base_kernel.clone()
+        # Pad input for convolution
+        padded = F.pad(state, (1, 1, 1, 1), mode='replicate')
         
-        # Handle scalar vs tensor vs function diffusion coefficient
-        if isinstance(diffusion_coefficient, (float, int)):
-            scale = diffusion_coefficient * dt
-            kernel = kernel * scale
-        elif callable(diffusion_coefficient):
-            # If diffusion coefficient is a function, evaluate it
-            kernel = kernel.view(1, 1, 3, 3)
-            D = diffusion_coefficient(state)  # Get diffusion coefficient tensor
-            if isinstance(D, torch.Tensor):
-                if D.dim() == 2:  # [num_channels, num_channels]
-                    D = torch.diagonal(D).view(-1, 1, 1)
-                D = D.view(-1, 1, 1, 1)
-            else:
-                D = torch.tensor(D).view(-1, 1, 1, 1)
-            kernel = kernel * D * dt
-        else:
-            # Handle tensor diffusion coefficient
-            kernel = kernel.view(1, 1, 3, 3)
-            if diffusion_coefficient.dim() == 2:  # [num_channels, num_channels]
-                diffusion_coefficient = torch.diagonal(diffusion_coefficient).view(-1, 1, 1)
-            diffusion_coefficient = diffusion_coefficient.view(-1, 1, 1, 1)
-            kernel = kernel * diffusion_coefficient * dt
-        
-        # Ensure kernel preserves mass and symmetry
-        kernel = (kernel + kernel.flip(-1).flip(-2)) / 2  # Make perfectly symmetric
-        
-        # Compute sum for center value, keeping dimensions
-        kernel_sum = kernel.sum(dim=(-2,-1), keepdim=True).expand_as(kernel[..., 1:2, 1:2])
-        kernel[..., 1, 1] = -kernel_sum.squeeze(-1).squeeze(-1)  # Remove +1.0 to make diffusion faster
-        
-        # Prepare kernel for grouped convolution
-        if isinstance(diffusion_coefficient, (float, int)):
-            kernel = kernel.view(1, 1, 3, 3).repeat(num_channels, 1, 1, 1)
-        
-        # Apply periodic padding
-        padded = F.pad(state, (1,1,1,1), mode='circular')
-        
-        # Apply convolution
+        # Apply convolution for diffusion
         diffused = F.conv2d(
-            padded,
-            kernel.to(padded.device),
-            groups=num_channels,
-            padding=0
+            padded, 
+            kernel,
+            padding=0,
+            groups=num_channels
         )
         
-        # Ensure mass conservation
-        final_mass = diffused.sum(dim=(-2,-1), keepdim=True)
-        mass_diff = initial_mass - final_mass
-        correction = mass_diff / (height * width)
-        diffused = diffused + correction
+        # Clamp values to prevent overflow
+        diffused = torch.clamp(diffused, min=-1e6, max=1e6)
         
-        return diffused.to(state.dtype)
+        # Ensure mass conservation
+        initial_mass = state.sum(dim=(2, 3), keepdim=True)
+        current_mass = diffused.sum(dim=(2, 3), keepdim=True)
+        diffused = diffused * (initial_mass / current_mass)
+        
+        return diffused
     
     def _laplacian_kernel(self):
         return self.base_kernel.clone()

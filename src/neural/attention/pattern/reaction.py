@@ -21,15 +21,15 @@ class ReactionSystem:
         hidden_size = 64
         
         self.activator_network = nn.Sequential(
-            nn.Linear(input_size, hidden_size, dtype=torch.float64),
+            nn.Linear(input_size, hidden_size, dtype=torch.float32),
             nn.ReLU(),
-            nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float64)
+            nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float32)
         )
         
         self.inhibitor_network = nn.Sequential(
-            nn.Linear(input_size, hidden_size, dtype=torch.float64),
+            nn.Linear(input_size, hidden_size, dtype=torch.float32),
             nn.ReLU(),
-            nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float64)
+            nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float32)
         )
     
     def reaction_term(self, state: torch.Tensor) -> torch.Tensor:
@@ -88,7 +88,18 @@ class ReactionSystem:
         
         # Compute reaction term with gradient clipping
         with torch.no_grad():
-            reaction = reaction_term(state)
+            try:
+                # Try calling with just state (for default reaction term)
+                reaction = reaction_term(state)
+            except TypeError:
+                # If that fails, assume it's a parameterized reaction term
+                # that takes both state and parameter
+                param = getattr(reaction_term, 'param', None)
+                if param is not None:
+                    reaction = reaction_term(state, param)
+                else:
+                    raise ValueError("Reaction term must take either state or (state, param)")
+                    
             reaction = torch.clamp(reaction, min=-10.0, max=10.0)
         
         # Add reaction to state

@@ -28,7 +28,10 @@ def batch_size() -> int:
 def pattern_system(space_dim, grid_size) -> PatternDynamics:
     """Create a test pattern dynamics system."""
     return PatternDynamics(
-        dim=space_dim, size=grid_size, dt=0.01, boundary="periodic"
+        grid_size=grid_size,
+        space_dim=space_dim,
+        dt=0.01,
+        boundary="periodic"
     )
 
 

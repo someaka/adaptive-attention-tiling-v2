@@ -1,6 +1,6 @@
 """Implementation of stability analysis."""
 
-from typing import Union
+from typing import Union, Callable
 import torch
 from torch import nn
 
@@ -8,136 +8,107 @@ from .models import ReactionDiffusionState, StabilityInfo, StabilityMetrics
 
 
 class StabilityAnalyzer:
-    """Analysis of pattern stability."""
-
-    def __init__(self, input_dim: int, num_modes: int = 8, hidden_dim: int = 64):
+    """Analyzer for pattern stability and bifurcations."""
+    
+    def __init__(self, pattern_system):
         """Initialize stability analyzer.
         
         Args:
-            input_dim: Dimension of input state
-            num_modes: Number of stability modes to analyze
-            hidden_dim: Hidden layer dimension
+            pattern_system: Pattern dynamics system to analyze
         """
-        self.input_dim = input_dim
-        self.num_modes = num_modes
-        self.hidden_dim = hidden_dim
+        self.pattern_system = pattern_system
         
-        # Stability analysis networks
-        self.stability_network = nn.Sequential(
-            nn.Linear(2 * input_dim, hidden_dim * 2, dtype=torch.float64),  # 2x input for pattern + perturbation
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, num_modes * 2, dtype=torch.float64),
-        )
-        
-        # Lyapunov spectrum network
-        self.lyapunov_network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim, dtype=torch.float64),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_modes * 2, dtype=torch.float64),
-        )
-        
-        # Mode decomposition
-        self.mode_analyzer = nn.Sequential(
-            nn.Linear(input_dim, num_modes, dtype=torch.float64),
-            nn.Softmax(dim=-1)
-        )
-    
-    def analyze_stability(
+    def is_stable(
         self,
-        fixed_point: Union[ReactionDiffusionState, torch.Tensor],
-        perturbation: torch.Tensor,
-    ) -> StabilityMetrics:
-        """Analyze stability around fixed point.
+        state: torch.Tensor,
+        reaction_term: Callable[[torch.Tensor], torch.Tensor],
+        threshold: float = 1.0
+    ) -> bool:
+        """Check if a state is stable under the given dynamics.
         
         Args:
-            fixed_point: Fixed point state
-            perturbation: Small perturbation tensor
+            state (torch.Tensor): State to check stability for
+            reaction_term (Callable): Reaction function
+            threshold (float): Stability threshold
             
         Returns:
-            StabilityMetrics object
+            bool: True if state is stable, False otherwise
         """
-        # Convert to tensor if needed
-        if not isinstance(fixed_point, torch.Tensor):
-            fixed_point = fixed_point.to_tensor()
+        # Check if state is numerically valid
+        if torch.isnan(state).any() or torch.isinf(state).any():
+            return False
             
-        # Ensure same dtype
-        fixed_point = fixed_point.to(dtype=torch.float64)
-        perturbation = perturbation.to(dtype=torch.float64)
-        
-        # Add batch dimension if needed
-        if fixed_point.dim() == 3:
-            fixed_point = fixed_point.unsqueeze(0)
-        if perturbation.dim() == 3:
-            perturbation = perturbation.unsqueeze(0)
+        # Compute stability value
+        stability = torch.tensor(self.compute_stability(state), device=state.device)
             
-        # Compute stability metrics
-        linear_stability = self._compute_linear_stability(fixed_point, perturbation)
-        nonlinear_stability = self._compute_nonlinear_stability(fixed_point, perturbation)
-        
-        # Compute Lyapunov spectrum
-        lyapunov_spectrum = self.compute_lyapunov_spectrum(fixed_point)
-        
-        # Compute structural stability (minimum eigenvalue)
-        structural_stability = float(linear_stability.min())
-        
-        return StabilityMetrics(
-            linear_stability=linear_stability,
-            nonlinear_stability=nonlinear_stability,
-            lyapunov_spectrum=lyapunov_spectrum,
-            structural_stability=structural_stability
-        )
-    
-    def compute_lyapunov_spectrum(self, pattern: torch.Tensor) -> torch.Tensor:
-        """Compute Lyapunov spectrum."""
-        # Ensure correct dtype
-        pattern = pattern.to(dtype=torch.float64)
-        
-        # Flatten input
-        flat_pattern = pattern.reshape(pattern.shape[0], -1)
-        
-        # Get stability modes
-        modes = self.mode_analyzer(flat_pattern)
-        
-        # Compute spectrum
-        spectrum = self.lyapunov_network(flat_pattern)
-        spectrum = spectrum.reshape(-1, self.num_modes, 2)  # [batch, modes, (re/im)]
-        
-        # Convert to complex tensor and take real part
-        spectrum = torch.complex(spectrum[..., 0], spectrum[..., 1])
-        spectrum = torch.real(spectrum)
-        
-        return spectrum
-    
-    def _compute_linear_stability(self, pattern: torch.Tensor, perturbation: torch.Tensor) -> torch.Tensor:
-        """Compute linear stability metric."""
-        # Flatten inputs
-        flat_pattern = pattern.reshape(pattern.shape[0], -1)
-        flat_perturb = perturbation.reshape(perturbation.shape[0], -1)
-        
-        # Combine pattern and perturbation
-        combined = torch.cat([flat_pattern, flat_perturb], dim=-1)
-        
-        # Get stability eigenvalues
-        eigenvalues = self.stability_network(combined)
-        eigenvalues = eigenvalues.reshape(-1, self.num_modes, 2)  # [batch, modes, (re/im)]
-        
-        # Return maximum real part
-        return eigenvalues[..., 0].max(dim=-1)[0]
-    
-    def _compute_nonlinear_stability(
+        # Check if stability value is valid and below threshold
+        if torch.isnan(stability) or torch.isinf(stability):
+            return False
+            
+        return stability < threshold
+
+    def compute_stability(
         self,
-        pattern: torch.Tensor,
-        perturbation: torch.Tensor
+        state: torch.Tensor,
+        max_iter: int = 100,
+        tolerance: float = 1e-6
+    ) -> float:
+        """Compute stability value for a state using power iteration.
+        
+        Args:
+            state (torch.Tensor): State to compute stability for
+            max_iter (int): Maximum power iteration steps
+            tolerance (float): Convergence tolerance
+            
+        Returns:
+            float: Stability value
+        """
+        # Initialize random perturbation
+        perturbation = torch.randn_like(state)
+        perturbation = perturbation / torch.norm(perturbation)
+        
+        # Power iteration to find largest eigenvalue
+        prev_lambda = 0.0
+        for _ in range(max_iter):
+            # Apply Jacobian-vector product
+            Av = self._apply_jacobian(state, perturbation)
+            
+            # Normalize
+            lambda_i = torch.norm(Av)
+            if lambda_i == 0:
+                return 0.0
+                
+            perturbation = Av / lambda_i
+            
+            # Check convergence
+            if abs(lambda_i - prev_lambda) < tolerance:
+                break
+                
+            prev_lambda = lambda_i
+            
+        return prev_lambda.item()
+
+    def _apply_jacobian(
+        self,
+        state: torch.Tensor,
+        vector: torch.Tensor,
+        eps: float = 1e-7
     ) -> torch.Tensor:
-        """Compute nonlinear stability metric."""
-        # Flatten inputs
-        flat_pattern = pattern.reshape(pattern.shape[0], -1)
-        flat_perturb = perturbation.reshape(perturbation.shape[0], -1)
+        """Apply Jacobian matrix to vector using finite differences.
         
-        # Combine pattern and perturbation
-        combined = torch.cat([flat_pattern, flat_perturb], dim=-1)
+        Args:
+            state (torch.Tensor): State point to evaluate Jacobian at
+            vector (torch.Tensor): Vector to multiply with Jacobian
+            eps (float): Finite difference step size
+            
+        Returns:
+            torch.Tensor: Result of Jacobian-vector product
+        """
+        # Forward evaluation
+        state_plus = state + eps * vector
+        state_minus = state - eps * vector
         
-        # Get stability metric
-        metric = self.stability_network(combined)
+        # Compute finite difference approximation
+        diff = (state_plus - state_minus) / (2 * eps)
         
-        return metric[..., 0]  # Return real part
+        return diff

@@ -96,7 +96,6 @@ class BifurcationPoint:
 @dataclass
 class BifurcationDiagram:
     """Bifurcation diagram for pattern dynamics."""
-    parameter_range: torch.Tensor
-    bifurcation_points: List[BifurcationPoint]
-    solution_branches: torch.Tensor
-    stability_regions: torch.Tensor
+    solution_states: torch.Tensor  # States at each parameter value
+    solution_params: torch.Tensor  # Parameter values where solutions were found
+    bifurcation_points: torch.Tensor  # Parameter values where bifurcations occur
