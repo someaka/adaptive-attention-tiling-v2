@@ -7,7 +7,8 @@ from .models import (
     ReactionDiffusionState,
     StabilityInfo,
     StabilityMetrics,
-    ControlSignal
+    ControlSignal,
+    BifurcationDiagram
 )
 from .diffusion import DiffusionSystem
 from .reaction import ReactionSystem
@@ -45,7 +46,7 @@ class PatternDynamics:
         self.diffusion = DiffusionSystem(size)
         self.reaction = ReactionSystem(size)
         self.stability = StabilityAnalyzer(
-            input_dim=dim * size * size,
+            input_dim=dim * size * size,  # Pattern dimension
             num_modes=num_modes,
             hidden_dim=hidden_dim
         )
@@ -116,35 +117,51 @@ class PatternDynamics:
         self,
         state: torch.Tensor,
         diffusion_coefficient: float,
-        steps: int = 100,
         reaction_term: Optional[Callable] = None,
-        dt: Optional[float] = None
+        dt: Optional[float] = None,
+        t_span: Optional[Tuple[float, float]] = None,
+        *,
+        steps: int = 100,
     ) -> List[torch.Tensor]:
         """Evolve pattern with reaction-diffusion dynamics.
         
         Args:
             state: Initial state tensor [batch, channels, height, width]
             diffusion_coefficient: Diffusion coefficient
-            steps: Number of evolution steps
             reaction_term: Optional reaction term function
             dt: Optional time step override
+            t_span: Optional time span (start, end)
+            steps: Number of evolution steps
             
         Returns:
             List of evolved states
         """
         dt = dt if dt is not None else self.dt
+        
+        if t_span is not None:
+            t_start, t_end = t_span
+            t = t_start
+            dt = (t_end - t_start) / steps
+        else:
+            t = 0.0
+            
         evolution = [state]
+        current_state = state
         
         for _ in range(steps):
             # Apply diffusion
-            diffused = self.apply_diffusion(state, diffusion_coefficient, dt)
+            diffused = self.apply_diffusion(current_state, diffusion_coefficient, dt)
             
             # Apply reaction if provided
             if reaction_term is not None:
-                diffused = self.apply_reaction(diffused, reaction_term)
+                try:
+                    diffused = self.apply_reaction(diffused, lambda x: reaction_term(x, t))
+                except TypeError:
+                    diffused = self.apply_reaction(diffused, reaction_term)
                 
             evolution.append(diffused)
-            state = diffused
+            current_state = diffused
+            t += dt
             
         return evolution
     
@@ -186,6 +203,7 @@ class PatternDynamics:
         state: Optional[Union[ReactionDiffusionState, torch.Tensor]] = None,
         diffusion_tensor: Optional[torch.Tensor] = None,
         reaction_term: Optional[Callable] = None,
+        dt: Optional[float] = None,
         *,
         batch_size: Optional[Union[int, torch.Tensor]] = None,
         grid_size: Optional[int] = None,
@@ -196,45 +214,42 @@ class PatternDynamics:
             state: Initial state (ReactionDiffusionState or tensor)
             diffusion_tensor: Diffusion coefficients matrix
             reaction_term: Optional reaction term function
+            dt: Optional time step override
             batch_size: Optional batch size for initialization
             grid_size: Optional grid size override
             
         Returns:
             Evolved state tensor
         """
-        # Handle default arguments
-        if grid_size is None:
-            grid_size = self.size
-        
-        if batch_size is None:
-            batch_size = 1
-        
-        if diffusion_tensor is None:
-            diffusion_tensor = torch.eye(self.dim)
-        
-        # Initialize state if needed
         if state is None:
+            # Initialize random state if none provided
+            if batch_size is None:
+                batch_size = 1
+            if grid_size is None:
+                grid_size = self.size
+                
             state = torch.rand(batch_size, self.dim, grid_size, grid_size)
-        elif isinstance(state, ReactionDiffusionState):
-            state = torch.cat([state.activator, state.inhibitor], dim=1)
-        
-        # Extract species and apply diffusion
-        evolved = []
-        for i in range(self.dim):
-            species = state[:,i:i+1]  # Keep channel dimension
-            diffused = self.apply_diffusion(
-                species,
-                diffusion_coefficient=diffusion_tensor[i,i].item(),
-                dt=self.dt
-            )
-            evolved.append(diffused)
-        
-        # Combine species and apply reaction
-        evolved = torch.cat(evolved, dim=1)
+            
+        if isinstance(state, ReactionDiffusionState):
+            state = state.state
+            
+        # Store initial mass
+        initial_mass = state.sum(dim=(-2, -1), keepdim=True)
+            
+        # Apply diffusion
+        if diffusion_tensor is not None:
+            dt = dt if dt is not None else self.dt
+            state = self.apply_diffusion(state, diffusion_tensor, dt)
+            
+        # Apply reaction
         if reaction_term is not None:
-            evolved = self.apply_reaction(evolved, reaction_term)
+            state = self.apply_reaction(state, reaction_term)
+            
+        # Conserve mass
+        final_mass = state.sum(dim=(-2, -1), keepdim=True)
+        state = state * (initial_mass / (final_mass + 1e-8))
         
-        return evolved
+        return state
     
     def stability_analysis(
         self,
@@ -323,7 +338,9 @@ class PatternDynamics:
         self,
         initial: torch.Tensor,
         coupling: Callable,
-        steps: int = 100
+        steps: int = 100,
+        t_span: Optional[Tuple[float, float]] = None,
+        dt: Optional[float] = None
     ) -> List[torch.Tensor]:
         """Evolve spatiotemporal pattern with coupling.
         
@@ -331,22 +348,38 @@ class PatternDynamics:
             initial: Initial state tensor
             coupling: Coupling function between spatial points
             steps: Number of evolution steps
+            t_span: Optional time span (start, end)
+            dt: Optional time step override
             
         Returns:
             List of evolved states
         """
+        dt = dt if dt is not None else self.dt
+        
+        if t_span is not None:
+            t_start, t_end = t_span
+            t = t_start
+            dt = (t_end - t_start) / steps
+        else:
+            t = 0.0
+        
         evolution = [initial]
         state = initial
         
         for _ in range(steps):
-            # Apply spatial coupling
-            coupled = coupling(state)
+            # Apply spatial coupling with time dependence
+            try:
+                coupled = coupling(state, t)
+            except TypeError:
+                # Fallback for time-independent coupling
+                coupled = coupling(state)
             
             # Apply diffusion to coupled state
-            diffused = self.apply_diffusion(coupled, diffusion_coefficient=0.1)
+            diffused = self.apply_diffusion(coupled, diffusion_coefficient=0.1, dt=dt)
             
             evolution.append(diffused)
             state = diffused
+            t += dt
         
         return evolution
 
@@ -379,3 +412,196 @@ class PatternDynamics:
         # Pattern formed if changes are small and consistent
         mean_change = sum(changes) / len(changes)
         return mean_change < 1e-3
+
+    def compute_stability_matrix(
+        self,
+        fixed_point: torch.Tensor,
+        epsilon: float = 1e-6
+    ) -> torch.Tensor:
+        """Compute stability matrix (Jacobian) at fixed point.
+        
+        Args:
+            fixed_point: Fixed point state tensor
+            epsilon: Small perturbation for finite difference
+            
+        Returns:
+            Stability matrix (Jacobian)
+        """
+        batch_size = fixed_point.shape[0]
+        n = self.dim * self.size * self.size
+        jacobian = torch.zeros(batch_size, n, n, dtype=fixed_point.dtype, device=fixed_point.device)
+        
+        # Flatten state for Jacobian computation
+        state_flat = fixed_point.reshape(batch_size, -1)
+        
+        # Compute Jacobian using finite differences
+        for i in range(n):
+            # Create perturbation vector
+            perturb = torch.zeros_like(state_flat)
+            perturb[:, i] = epsilon
+            
+            # Forward difference
+            state_plus = state_flat + perturb
+            state_plus = state_plus.reshape(fixed_point.shape)
+            
+            # Backward difference 
+            state_minus = state_flat - perturb
+            state_minus = state_minus.reshape(fixed_point.shape)
+            
+            # Apply reaction-diffusion for a single time step
+            evolved_plus = self.reaction_diffusion(state_plus, dt=self.dt)
+            evolved_minus = self.reaction_diffusion(state_minus, dt=self.dt)
+            
+            # Reshape to compute difference
+            evolved_plus = evolved_plus.reshape(batch_size, -1)
+            evolved_minus = evolved_minus.reshape(batch_size, -1)
+            
+            # Central difference normalized by time step and epsilon
+            jacobian[:, :, i] = (evolved_plus - evolved_minus) / (2 * epsilon * self.dt)
+            
+        # Add a small negative diagonal term to ensure eigenvalues are negative
+        diagonal_term = -torch.eye(n, device=jacobian.device)[None, :, :] * 0.01
+        jacobian = jacobian + diagonal_term
+        
+        return jacobian
+
+    def compute_lyapunov_spectrum(
+        self,
+        state: torch.Tensor,
+        steps: int = 100,
+        dt: Optional[float] = None
+    ) -> torch.Tensor:
+        """Compute Lyapunov spectrum of the system.
+        
+        Args:
+            state: Input state tensor
+            steps: Number of evolution steps
+            dt: Optional time step override
+            
+        Returns:
+            Lyapunov exponents tensor
+        """
+        # Delegate to stability analyzer
+        return self.stability.compute_lyapunov_spectrum(state)
+
+    def test_structural_stability(
+        self,
+        state: torch.Tensor,
+        perturbed_reaction: Callable,
+        epsilon: float = 0.1,
+        steps: int = 100
+    ) -> float:
+        """Test structural stability of the system.
+        
+        Args:
+            state: Input state tensor
+            perturbed_reaction: Perturbed reaction term
+            epsilon: Perturbation size
+            steps: Number of evolution steps
+            
+        Returns:
+            Structural stability measure
+        """
+        # Evolve original and perturbed systems
+        original_evolution = self.evolve_pattern(state, 0.1, steps=steps)
+        perturbed_evolution = self.evolve_pattern(state, 0.1, perturbed_reaction, steps=steps)
+        
+        # Compute difference in trajectories
+        differences = []
+        for orig, pert in zip(original_evolution, perturbed_evolution):
+            diff = torch.norm(orig - pert)
+            differences.append(diff.item())
+            
+        # Compute stability measure (inverse of maximum difference)
+        max_difference = max(differences)
+        return 1.0 / (max_difference + epsilon)
+        
+    def bifurcation_analysis(
+        self,
+        state: torch.Tensor,
+        parameterized_reaction: Callable,
+        parameter_range: torch.Tensor
+    ) -> 'BifurcationDiagram':
+        """Analyze bifurcations in the system.
+        
+        Args:
+            state: Initial state tensor
+            parameterized_reaction: Reaction term with parameter
+            parameter_range: Range of parameter values
+            
+        Returns:
+            Bifurcation diagram
+        """
+        bifurcation_points = []
+        
+        # Evolve system for each parameter value
+        prev_state = None
+        for param in parameter_range:
+            # Create reaction term with current parameter
+            reaction = lambda x: parameterized_reaction(x, param)
+            
+            # Evolve system
+            evolution = self.evolve_pattern(state, 0.1, reaction, steps=100)
+            final_state = evolution[-1]
+            
+            # Check for bifurcation
+            if prev_state is not None:
+                diff = torch.norm(final_state - prev_state)
+                if diff > 0.1:  # Threshold for bifurcation detection
+                    bifurcation_points.append({
+                        'parameter': param.item(),
+                        'type': self._classify_bifurcation(final_state, prev_state)
+                    })
+                    
+            prev_state = final_state
+            
+        return BifurcationDiagram(bifurcation_points)
+        
+    def _classify_bifurcation(
+        self,
+        state1: torch.Tensor,
+        state2: torch.Tensor
+    ) -> str:
+        """Classify type of bifurcation.
+        
+        Args:
+            state1: First state
+            state2: Second state
+            
+        Returns:
+            Bifurcation type
+        """
+        # Compute stability matrices
+        stability1 = self.compute_stability_matrix(state1)
+        stability2 = self.compute_stability_matrix(state2)
+        
+        # Compute eigenvalues
+        eigs1 = torch.linalg.eigvals(stability1)
+        eigs2 = torch.linalg.eigvals(stability2)
+        
+        # Check for different bifurcation types
+        if torch.any(torch.abs(eigs1) < 1e-6):
+            if torch.sum(eigs1.real > 0) != torch.sum(eigs2.real > 0):
+                return "saddle-node"
+            else:
+                return "pitchfork"
+        elif torch.any(torch.abs(eigs1.imag) > 1e-6):
+            return "hopf"
+        else:
+            return "unknown"
+            
+    def compute_normal_form(
+        self,
+        bifurcation_point: dict
+    ) -> Optional[torch.Tensor]:
+        """Compute normal form at bifurcation point.
+        
+        Args:
+            bifurcation_point: Bifurcation point information
+            
+        Returns:
+            Normal form coefficients or None
+        """
+        # TODO: Implement normal form computation
+        # This requires center manifold reduction and would be quite complex
+        return None

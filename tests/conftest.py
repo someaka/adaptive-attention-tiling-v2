@@ -370,3 +370,21 @@ def test_params() -> dict[str, Any]:
         'rtol': 1e-5,
         'atol': 1e-5
     }
+
+
+@pytest.fixture
+def hidden_dim():
+    """Hidden dimension for pattern dynamics tests"""
+    return 32
+
+
+@pytest.fixture
+def num_patterns():
+    """Number of patterns for pattern dynamics tests"""
+    return 4
+
+
+@pytest.fixture
+def seq_length():
+    """Sequence length for pattern dynamics tests"""
+    return 16

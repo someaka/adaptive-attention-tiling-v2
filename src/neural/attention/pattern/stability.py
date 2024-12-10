@@ -24,9 +24,16 @@ class StabilityAnalyzer:
         
         # Stability analysis networks
         self.stability_network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim * 2, dtype=torch.float64),
+            nn.Linear(2 * input_dim, hidden_dim * 2, dtype=torch.float64),  # 2x input for pattern + perturbation
             nn.ReLU(),
             nn.Linear(hidden_dim * 2, num_modes * 2, dtype=torch.float64),
+        )
+        
+        # Lyapunov spectrum network
+        self.lyapunov_network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, dtype=torch.float64),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_modes * 2, dtype=torch.float64),
         )
         
         # Mode decomposition
@@ -50,25 +57,27 @@ class StabilityAnalyzer:
             StabilityMetrics object
         """
         # Convert to tensor if needed
-        if isinstance(fixed_point, ReactionDiffusionState):
-            state = torch.cat([fixed_point.activator, fixed_point.inhibitor], dim=1)
-        else:
-            state = fixed_point
+        if not isinstance(fixed_point, torch.Tensor):
+            fixed_point = fixed_point.to_tensor()
+            
+        # Ensure same dtype
+        fixed_point = fixed_point.to(dtype=torch.float64)
+        perturbation = perturbation.to(dtype=torch.float64)
         
-        # Convert to double
-        state = state.to(torch.float64)
-        perturbation = perturbation.to(torch.float64)
-        
-        # Compute linear stability
-        linear_stability = self._compute_linear_stability(state)
-        
-        # Compute nonlinear stability
-        nonlinear_stability = self._compute_nonlinear_stability(state, perturbation)
+        # Add batch dimension if needed
+        if fixed_point.dim() == 3:
+            fixed_point = fixed_point.unsqueeze(0)
+        if perturbation.dim() == 3:
+            perturbation = perturbation.unsqueeze(0)
+            
+        # Compute stability metrics
+        linear_stability = self._compute_linear_stability(fixed_point, perturbation)
+        nonlinear_stability = self._compute_nonlinear_stability(fixed_point, perturbation)
         
         # Compute Lyapunov spectrum
-        lyapunov_spectrum = self.compute_lyapunov_spectrum(state)
+        lyapunov_spectrum = self.compute_lyapunov_spectrum(fixed_point)
         
-        # Compute structural stability
+        # Compute structural stability (minimum eigenvalue)
         structural_stability = float(linear_stability.min())
         
         return StabilityMetrics(
@@ -80,6 +89,9 @@ class StabilityAnalyzer:
     
     def compute_lyapunov_spectrum(self, pattern: torch.Tensor) -> torch.Tensor:
         """Compute Lyapunov spectrum."""
+        # Ensure correct dtype
+        pattern = pattern.to(dtype=torch.float64)
+        
         # Flatten input
         flat_pattern = pattern.reshape(pattern.shape[0], -1)
         
@@ -87,18 +99,26 @@ class StabilityAnalyzer:
         modes = self.mode_analyzer(flat_pattern)
         
         # Compute spectrum
-        spectrum = self.stability_network(flat_pattern)
+        spectrum = self.lyapunov_network(flat_pattern)
         spectrum = spectrum.reshape(-1, self.num_modes, 2)  # [batch, modes, (re/im)]
+        
+        # Convert to complex tensor and take real part
+        spectrum = torch.complex(spectrum[..., 0], spectrum[..., 1])
+        spectrum = torch.real(spectrum)
         
         return spectrum
     
-    def _compute_linear_stability(self, state: torch.Tensor) -> torch.Tensor:
+    def _compute_linear_stability(self, pattern: torch.Tensor, perturbation: torch.Tensor) -> torch.Tensor:
         """Compute linear stability metric."""
-        # Flatten input
-        flat_state = state.reshape(state.shape[0], -1)
+        # Flatten inputs
+        flat_pattern = pattern.reshape(pattern.shape[0], -1)
+        flat_perturb = perturbation.reshape(perturbation.shape[0], -1)
+        
+        # Combine pattern and perturbation
+        combined = torch.cat([flat_pattern, flat_perturb], dim=-1)
         
         # Get stability eigenvalues
-        eigenvalues = self.stability_network(flat_state)
+        eigenvalues = self.stability_network(combined)
         eigenvalues = eigenvalues.reshape(-1, self.num_modes, 2)  # [batch, modes, (re/im)]
         
         # Return maximum real part

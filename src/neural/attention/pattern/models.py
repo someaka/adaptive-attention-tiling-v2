@@ -39,12 +39,49 @@ class StabilityMetrics:
     structural_stability: float
 
 
-@dataclass
 class ControlSignal:
-    """Control signal for pattern formation."""
-    magnitude: torch.Tensor
-    direction: torch.Tensor
-    constraints: List[Callable]
+    """Control signal for pattern dynamics."""
+
+    def __init__(
+        self,
+        signal: torch.Tensor,
+        direction: Optional[torch.Tensor] = None,
+        constraints: Optional[List[Callable]] = None
+    ):
+        """Initialize control signal.
+        
+        Args:
+            signal: Control signal tensor
+            direction: Optional preferred direction
+            constraints: Optional list of constraint functions
+        """
+        self.signal = signal
+        self.direction = direction if direction is not None else torch.zeros_like(signal)
+        self.constraints = constraints if constraints is not None else []
+
+    def apply(self, state: torch.Tensor) -> torch.Tensor:
+        """Apply control signal to state.
+        
+        Args:
+            state: Current state tensor
+            
+        Returns:
+            Controlled state tensor
+        """
+        # Apply control signal
+        controlled = state + self.signal
+        
+        # Project along preferred direction if specified
+        if torch.any(self.direction != 0):
+            direction_norm = self.direction / torch.norm(self.direction)
+            projection = torch.sum(controlled * direction_norm, dim=(-2, -1), keepdim=True)
+            controlled = projection * direction_norm
+        
+        # Apply constraints
+        for constraint in self.constraints:
+            controlled = constraint(controlled)
+            
+        return controlled
 
 
 @dataclass

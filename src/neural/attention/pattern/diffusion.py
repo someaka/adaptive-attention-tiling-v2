@@ -11,6 +11,7 @@ import logging
 import torch
 from torch import nn
 import torch.nn.functional as F
+from typing import Union
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class DiffusionSystem(nn.Module):
     def forward(
         self,
         state: torch.Tensor,
-        diffusion_coefficient: float,
+        diffusion_coefficient: Union[float, torch.Tensor, callable],
         dt: float
     ) -> torch.Tensor:
         """Forward pass applies diffusion step.
@@ -92,67 +93,84 @@ class DiffusionSystem(nn.Module):
     def apply_diffusion(
         self,
         state: torch.Tensor,
-        diffusion_coefficient: float,
+        diffusion_coefficient: Union[float, torch.Tensor, callable],
         dt: float
     ) -> torch.Tensor:
-        """Apply one step of diffusion to the input state.
-        
-        The diffusion process:
-        1. Converts input to double precision for numerical stability
-        2. Applies periodic padding to maintain boundary conditions
-        3. Convolves with scaled diffusion kernel
-        4. Corrects mass to ensure exact conservation
+        """Apply diffusion to state tensor.
         
         Args:
-            state: Input state tensor [batch, channels, height, width]
-            diffusion_coefficient: Controls rate of diffusion (larger = faster)
-            dt: Time step size (larger = faster but may reduce stability)
-        
-        Returns:
-            Diffused state tensor with same shape and dtype as input
+            state (torch.Tensor): State tensor [batch, channels, height, width]
+            diffusion_coefficient (Union[float, torch.Tensor, callable]): Diffusion coefficient as scalar, tensor or function
+            dt (float): Time step
             
-        Raises:
-            ValueError: If input contains non-finite values
-            RuntimeError: If diffusion produces non-finite values
+        Returns:
+            torch.Tensor: Diffused state
         """
-        # Input validation
-        if not torch.isfinite(state).all():
-            raise ValueError("Input state contains non-finite values")
+        # Get dimensions
+        batch_size, num_channels, height, width = state.shape
         
-        # Convert to double and track initial properties
-        input_dtype = state.dtype
+        # Convert to double for stability
         state = state.to(torch.float64)
         initial_mass = state.sum(dim=(-2,-1), keepdim=True)
         
-        # Create diffusion kernel by scaling base kernel
+        # Create Laplacian kernel
         kernel = self.base_kernel.clone()
-        scale = diffusion_coefficient * dt
-        kernel = kernel * scale  # Scale by physics parameters
-        # Center value computed to exactly balance the kernel for conservation
-        kernel[1,1] = -kernel.sum() + 1.0  # Ensures sum of kernel is exactly 1.0
         
-        # Prepare kernel for convolution
-        kernel = kernel.view(1, 1, 3, 3).repeat(state.size(1), 1, 1, 1)
+        # Handle scalar vs tensor vs function diffusion coefficient
+        if isinstance(diffusion_coefficient, (float, int)):
+            scale = diffusion_coefficient * dt
+            kernel = kernel * scale
+        elif callable(diffusion_coefficient):
+            # If diffusion coefficient is a function, evaluate it
+            kernel = kernel.view(1, 1, 3, 3)
+            D = diffusion_coefficient(state)  # Get diffusion coefficient tensor
+            if isinstance(D, torch.Tensor):
+                if D.dim() == 2:  # [num_channels, num_channels]
+                    D = torch.diagonal(D).view(-1, 1, 1)
+                D = D.view(-1, 1, 1, 1)
+            else:
+                D = torch.tensor(D).view(-1, 1, 1, 1)
+            kernel = kernel * D * dt
+        else:
+            # Handle tensor diffusion coefficient
+            kernel = kernel.view(1, 1, 3, 3)
+            if diffusion_coefficient.dim() == 2:  # [num_channels, num_channels]
+                diffusion_coefficient = torch.diagonal(diffusion_coefficient).view(-1, 1, 1)
+            diffusion_coefficient = diffusion_coefficient.view(-1, 1, 1, 1)
+            kernel = kernel * diffusion_coefficient * dt
         
-        # Apply periodic padding to maintain boundary conditions
+        # Ensure kernel preserves mass and symmetry
+        kernel = (kernel + kernel.flip(-1).flip(-2)) / 2  # Make perfectly symmetric
+        
+        # Compute sum for center value, keeping dimensions
+        kernel_sum = kernel.sum(dim=(-2,-1), keepdim=True).expand_as(kernel[..., 1:2, 1:2])
+        kernel[..., 1, 1] = -kernel_sum.squeeze(-1).squeeze(-1) + 1.0
+        
+        # Prepare kernel for grouped convolution
+        if isinstance(diffusion_coefficient, (float, int)):
+            kernel = kernel.view(1, 1, 3, 3).repeat(num_channels, 1, 1, 1)
+        
+        # Apply periodic padding
         padded = F.pad(state, (1,1,1,1), mode='circular')
         
-        # Apply convolution grouped by channels
+        # Apply convolution
         diffused = F.conv2d(
-            padded, 
+            padded,
             kernel.to(padded.device),
-            groups=state.size(1),
+            groups=num_channels,
             padding=0
         )
         
-        # Ensure mass conservation using direct correction
+        # Ensure mass conservation
         final_mass = diffused.sum(dim=(-2,-1), keepdim=True)
         mass_diff = initial_mass - final_mass
-        correction = mass_diff / (diffused.size(-1) * diffused.size(-2))
-        diffused = diffused + correction  # Add uniform correction
+        correction = mass_diff / (height * width)
+        diffused = diffused + correction
         
-        # Convert back to input dtype
-        return diffused.to(input_dtype)
+        return diffused.to(state.dtype)
+    
+    def _laplacian_kernel(self):
+        return self.base_kernel.clone()
     
     def test_convergence(
         self,
@@ -211,5 +229,3 @@ class DiffusionSystem(nn.Module):
                 return True
             
             prev_state = curr_state
-        
-        return False

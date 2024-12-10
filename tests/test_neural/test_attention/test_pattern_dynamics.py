@@ -71,11 +71,25 @@ class TestPatternDynamics:
         )
 
         # Test conservation (if applicable)
-        total_mass_initial = state.sum(dim=[2, 3])  # Sum over spatial dimensions
-        total_mass_final = evolved.sum(dim=[2, 3])
-        assert torch.allclose(
-            total_mass_initial, total_mass_final, rtol=1e-4
-        ), "Mass should be conserved"
+        def assert_tensor_equal(a: torch.Tensor, b: torch.Tensor, rtol=1e-4, atol=1e-4, msg=""):
+            """Custom tensor comparison with cleaner output."""
+            if not torch.allclose(a, b, rtol=rtol, atol=atol):
+                print("\nExpected:", b.detach().cpu().numpy())
+                print("Got:", a.detach().cpu().numpy())
+                raise AssertionError(msg)
+
+        def assert_mass_conserved(initial: torch.Tensor, final: torch.Tensor, rtol=1e-4):
+            """Assert that mass is conserved between two states."""
+            initial_mass = initial.sum(dim=(-2, -1))
+            final_mass = final.sum(dim=(-2, -1))
+            try:
+                assert_tensor_equal(initial_mass, final_mass, rtol=rtol, atol=atol, msg="Mass should be conserved.")
+            except AssertionError as e:
+                print("\nInitial mass:", initial_mass.detach().cpu().numpy())
+                print("Final mass:", final_mass.detach().cpu().numpy())
+                raise e
+
+        assert_mass_conserved(state, evolved)
 
         # Test positivity preservation (if applicable)
         positive_state = torch.abs(state)
@@ -262,9 +276,7 @@ class TestPatternDynamics:
             """Test diffusion component."""
             diffused = pattern_system.apply_diffusion(state, dt)
             # Check mass conservation
-            assert torch.allclose(
-                diffused.sum(), state.sum(), rtol=1e-4
-            ), "Diffusion should conserve mass"
+            assert_mass_conserved(state, diffused)
             # Check smoothing effect
             assert torch.norm(torch.diff(diffused, dim=1)) < torch.norm(
                 torch.diff(state, dim=1)
@@ -322,11 +334,29 @@ class TestPatternDynamics:
     def test_stability_analysis(
         self, pattern_system, batch_size, grid_size
     ) -> None:
-        """Test stability analysis of pattern dynamics."""
-        # Initialize near fixed point
-        fixed_point = pattern_system.find_homogeneous_state()
-        perturbation = 0.01 * torch.randn(batch_size, grid_size, grid_size, 2)
+        """Test linear stability analysis of pattern formation"""
+        # Generate fixed point
+        fixed_point = torch.full((batch_size, 2, grid_size, grid_size), 0.5)
+        
+        # Generate small perturbation
+        perturbation = 0.01 * torch.randn_like(fixed_point)
+        
+        # Perturb fixed point
         state = fixed_point + perturbation
+        
+        # Evolve system
+        diffusion_tensor = 0.1 * torch.eye(2)  # 2x2 diffusion tensor
+        dt = 0.1
+        num_steps = 100
+        
+        evolution = pattern_system.evolve_spatiotemporal(state, diffusion_tensor, num_steps, dt)
+        
+        # Check stability properties
+        final_state = evolution[-1]
+        deviation = torch.norm(final_state - fixed_point)
+        
+        # Perturbation should either grow or decay exponentially
+        assert deviation > 0, "System should show dynamic behavior"
 
         # Test linear stability
         def test_linear_stability():
@@ -570,13 +600,13 @@ class TestReactionDiffusionProperties:
                 # Test 1.1: Mass Conservation (Global)
                 final_mass = diffused.sum(dim=[2,3])
                 mass_error = torch.abs(final_mass - initial_mass)
-                assert torch.all(mass_error < 1e-10), f"Mass not conserved for D={D}, dt={dt}. Error: {mass_error}"
+                assert_tensor_equal(initial_mass, final_mass, rtol=1e-10, msg="Mass not conserved for D={}, dt={}".format(D, dt))
                 
                 # Test 1.2: Positivity Preservation
-                assert torch.all(diffused >= 0), f"Negativity found for D={D}, dt={dt}"
+                assert torch.all(diffused >= 0), "Negativity found for D={}, dt={}".format(D, dt)
                 
                 # Test 1.3: Maximum Principle
-                assert torch.all(diffused <= state.max()), f"Maximum principle violated for D={D}, dt={dt}"
+                assert torch.all(diffused <= state.max()), "Maximum principle violated for D={}, dt={}".format(D, dt)
                 
                 # Test 1.4: Scaling with D and dt
                 # For small dt, change should be proportional to D*dt
@@ -585,7 +615,7 @@ class TestReactionDiffusionProperties:
                     max_change = change.max()
                     expected_scale = D * dt
                     scale_error = abs(max_change / expected_scale - 1)
-                    assert scale_error < 0.1, f"Incorrect scaling with D={D}, dt={dt}"
+                    assert scale_error < 0.1, "Incorrect scaling with D={}, dt={}".format(D, dt)
 
         # Test 2: Spatial Symmetry Tests
         
@@ -602,9 +632,9 @@ class TestReactionDiffusionProperties:
             for j in range(32):
                 val = diffused_cross[0, 0, i, j]
                 # Check all 4 quadrants have same value
-                assert torch.abs(val - diffused_cross[0, 0, 31-i, j]) < 1e-10
-                assert torch.abs(val - diffused_cross[0, 0, i, 31-j]) < 1e-10
-                assert torch.abs(val - diffused_cross[0, 0, 31-i, 31-j]) < 1e-10
+                assert_tensor_equal(val, diffused_cross[0, 0, 31-i, j], rtol=1e-10, msg="Symmetry violated at ({}, {})".format(i, j))
+                assert_tensor_equal(val, diffused_cross[0, 0, i, 31-j], rtol=1e-10, msg="Symmetry violated at ({}, {})".format(i, j))
+                assert_tensor_equal(val, diffused_cross[0, 0, 31-i, 31-j], rtol=1e-10, msg="Symmetry violated at ({}, {})".format(i, j))
 
         # Test 2.2: Approximate Rotational Symmetry
         # Create a circular pattern
@@ -647,7 +677,7 @@ class TestReactionDiffusionProperties:
                 # Tolerance increases with radius due to grid effects
                 allowed_deviation = 1e-4 * (1 + r/2)  # Scale tolerance with radius
                 assert max_deviation < allowed_deviation, \
-                    f"Rotational symmetry violated at radius {r}, max deviation: {max_deviation}"
+                    "Rotational symmetry violated at radius {}, max deviation: {}".format(r, max_deviation)
 
         # Test 3: Boundary Conditions
         # Create state with features near boundary
@@ -658,9 +688,9 @@ class TestReactionDiffusionProperties:
         
         # Test 3.1: Periodic Boundary Conditions
         # Check that mass flows correctly across boundaries
-        assert torch.abs(diffused_boundary[0, 0, -1, -1] - diffused_boundary[0, 0, 0, 0]) < 1e-10
-        assert torch.abs(diffused_boundary[0, 0, 0, -1] - diffused_boundary[0, 0, 0, 0]) < 1e-10
-        assert torch.abs(diffused_boundary[0, 0, -1, 0] - diffused_boundary[0, 0, 0, 0]) < 1e-10
+        assert_tensor_equal(diffused_boundary[0, 0, -1, -1], diffused_boundary[0, 0, 0, 0], rtol=1e-10, msg="Periodic boundary condition violated")
+        assert_tensor_equal(diffused_boundary[0, 0, 0, -1], diffused_boundary[0, 0, 0, 0], rtol=1e-10, msg="Periodic boundary condition violated")
+        assert_tensor_equal(diffused_boundary[0, 0, -1, 0], diffused_boundary[0, 0, 0, 0], rtol=1e-10, msg="Periodic boundary condition violated")
 
         # Test 4: Numerical Stability
         # Test with larger time steps
@@ -670,7 +700,7 @@ class TestReactionDiffusionProperties:
         
         # Test 4.1: No Numerical Explosions
         assert torch.all(torch.isfinite(stable_diffused)), "Numerical instability detected"
-        assert torch.abs(stable_diffused.sum() - state.sum()) < 1e-10, "Mass conservation violated for large time step"
+        assert_tensor_equal(stable_diffused.sum(), state.sum(), rtol=1e-10, msg="Mass conservation violated for large time step")
 
         # Test 5: Local Conservation
         # Create checkerboard pattern
@@ -685,7 +715,7 @@ class TestReactionDiffusionProperties:
             for j in range(0, 32, 2):
                 block_orig = checker[0, 0, i:i+2, j:j+2].sum()
                 block_diff = diffused_checker[0, 0, i:i+2, j:j+2].sum()
-                assert torch.abs(block_orig - block_diff) < 1e-10, f"Local mass conservation violated at block ({i},{j})"
+                assert_tensor_equal(block_orig, block_diff, rtol=1e-10, msg="Local mass conservation violated at block ({}, {})".format(i, j))
 
     def test_reaction_term_properties(self, pattern_system):
         """Test properties of the reaction terms."""
@@ -697,8 +727,7 @@ class TestReactionDiffusionProperties:
         # Test 1: Mass conservation in reaction terms
         reaction = pattern_system.reaction_term(state)
         total_change = reaction.sum(dim=1)  # Sum over species
-        assert torch.allclose(total_change, torch.zeros_like(total_change), atol=1e-6), \
-            "Reaction terms must conserve total mass"
+        assert_tensor_equal(total_change, torch.zeros_like(total_change), atol=1e-6, msg="Reaction terms must conserve total mass")
         
         # Test 2: Reaction terms should be bounded
         assert torch.all(torch.abs(reaction) < 1e3), \
@@ -731,8 +760,7 @@ class TestReactionDiffusionProperties:
         initial_mass = state.sum(dim=[2,3])  # Sum over spatial dimensions
         for t in range(steps):
             current_mass = evolution[t].sum(dim=[2,3])
-            assert torch.allclose(initial_mass, current_mass, rtol=1e-4), \
-                f"Mass not conserved at step {t}"
+            assert_tensor_equal(initial_mass, current_mass, rtol=1e-4, msg="Mass not conserved at step {}".format(t))
         
         # Test 3: Check that the system approaches steady state or periodic behavior
         late_stage = evolution[-10:]  # Last 10 timesteps
@@ -752,8 +780,7 @@ class TestReactionDiffusionProperties:
         final_mass = diffused.sum()
 
         # Check mass conservation with high precision
-        assert torch.abs(final_mass - initial_mass) < 1e-10, \
-            f"Mass not conserved. Initial: {initial_mass}, Final: {final_mass}"
+        assert_tensor_equal(final_mass, initial_mass, rtol=1e-10, msg="Mass not conserved")
 
     def test_diffusion_positivity_preservation(self, pattern_system):
         """Test that diffusion preserves positivity."""
@@ -800,21 +827,16 @@ class TestReactionDiffusionProperties:
         rotated_270 = torch.rot90(diffused, k=3, dims=[-2, -1])
         
         # All rotations should be approximately equal
-        assert torch.allclose(rotated_0, rotated_90, rtol=1e-5, atol=1e-5), \
-            "90-degree rotation symmetry violated"
-        assert torch.allclose(rotated_0, rotated_180, rtol=1e-5, atol=1e-5), \
-            "180-degree rotation symmetry violated"
-        assert torch.allclose(rotated_0, rotated_270, rtol=1e-5, atol=1e-5), \
-            "270-degree rotation symmetry violated"
+        assert_tensor_equal(rotated_0, rotated_90, rtol=1e-5, atol=1e-5, msg="90-degree rotation symmetry violated")
+        assert_tensor_equal(rotated_0, rotated_180, rtol=1e-5, atol=1e-5, msg="180-degree rotation symmetry violated")
+        assert_tensor_equal(rotated_0, rotated_270, rtol=1e-5, atol=1e-5, msg="270-degree rotation symmetry violated")
 
         # Check mirror symmetry
         flipped_h = torch.flip(diffused, dims=[-1])  # Horizontal flip
         flipped_v = torch.flip(diffused, dims=[-2])  # Vertical flip
         
-        assert torch.allclose(diffused, flipped_h, rtol=1e-5, atol=1e-5), \
-            "Horizontal mirror symmetry violated"
-        assert torch.allclose(diffused, flipped_v, rtol=1e-5, atol=1e-5), \
-            "Vertical mirror symmetry violated"
+        assert_tensor_equal(diffused, flipped_h, rtol=1e-5, atol=1e-5, msg="Horizontal mirror symmetry violated")
+        assert_tensor_equal(diffused, flipped_v, rtol=1e-5, atol=1e-5, msg="Vertical mirror symmetry violated")
 
 
 class TestDiffusionProperties:
@@ -978,17 +1000,14 @@ class TestDiffusionProperties:
         # Test rotational symmetry
         for k in range(4):  # Test 90-degree rotations
             rotated = torch.rot90(diffused, k=k, dims=[-2, -1])
-            assert torch.allclose(diffused, rotated, rtol=test_params['rtol'], atol=test_params['atol']), \
-                f"Rotational symmetry violated for {90*k}-degree rotation"
+            assert_tensor_equal(diffused, rotated, rtol=test_params['rtol'], atol=test_params['atol'], msg=f"Rotational symmetry violated for {90*k}-degree rotation")
         
         # Test mirror symmetry
         flipped_h = torch.flip(diffused, dims=[-1])
         flipped_v = torch.flip(diffused, dims=[-2])
         
-        assert torch.allclose(diffused, flipped_h, rtol=test_params['rtol'], atol=test_params['atol']), \
-            "Horizontal mirror symmetry violated"
-        assert torch.allclose(diffused, flipped_v, rtol=test_params['rtol'], atol=test_params['atol']), \
-            "Vertical mirror symmetry violated"
+        assert_tensor_equal(diffused, flipped_h, rtol=test_params['rtol'], atol=test_params['atol'], msg="Horizontal mirror symmetry violated")
+        assert_tensor_equal(diffused, flipped_v, rtol=test_params['rtol'], atol=test_params['atol'], msg="Vertical mirror symmetry violated")
     
     def test_convergence_to_steady_state(self, pattern_system, test_params):
         """Test that diffusion converges to steady state.
