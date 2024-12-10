@@ -24,14 +24,14 @@ class StabilityAnalyzer:
         
         # Stability analysis networks
         self.stability_network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim * 2),
+            nn.Linear(input_dim, hidden_dim * 2, dtype=torch.float64),
             nn.ReLU(),
-            nn.Linear(hidden_dim * 2, num_modes * 2),
+            nn.Linear(hidden_dim * 2, num_modes * 2, dtype=torch.float64),
         )
         
         # Mode decomposition
         self.mode_analyzer = nn.Sequential(
-            nn.Linear(input_dim, num_modes),
+            nn.Linear(input_dim, num_modes, dtype=torch.float64),
             nn.Softmax(dim=-1)
         )
     

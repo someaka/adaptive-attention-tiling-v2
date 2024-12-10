@@ -21,7 +21,7 @@ root_logger = logging.getLogger()
 root_logger.handlers = []  # Remove any existing handlers
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],  # Only use StreamHandler for console output
 )
@@ -180,28 +180,43 @@ def pytest_configure(config: Any) -> None:
     Args:
         config: Pytest config object
     """
-    # Configure logging based on verbosity
-    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    log_level = logging.DEBUG if config.option.verbose > 0 else logging.INFO
-
-    # Add console handler
+    # Set up logging
+    log_level = logging.WARNING
+    
+    # Configure console output
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
-    console_handler.setFormatter(logging.Formatter(log_format))
-
-    # Add file handler
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    
+    # Configure file output
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "test.log"
-    file_handler = logging.FileHandler(log_file)
+    
+    file_handler = logging.FileHandler(log_file, mode='w')
     file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(log_format))
-
-    # Configure root logger
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    
+    # Remove any existing handlers and add new ones
     root_logger = logging.getLogger()
+    root_logger.handlers = []  # Remove any existing handlers
     root_logger.setLevel(log_level)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Add summary info after tests finish."""
+    session = terminalreporter._session
+    if exitstatus == 0:
+        logger.warning("All tests passed successfully")
+    else:
+        failed = len([i for i in session.items if i.get_closest_marker('failed')])
+        logger.warning(f"Test session finished with {session.testscollected - failed} passed, {failed} failed")
 
 
 def pytest_unconfigure(config: Any) -> None:
@@ -338,4 +353,20 @@ def benchmark_config() -> dict[str, int | float]:
         "min_rounds": 5,  # Minimum number of rounds
         "calibration_precision": 10,
         "disable_gc": False,  # Keep garbage collection enabled
+    }
+
+
+@pytest.fixture
+def test_params() -> dict[str, Any]:
+    """Common test parameters."""
+    return {
+        'diffusion_coefficient': 0.2,  # Increased for faster convergence
+        'dt': 0.2,  # Increased for faster convergence while maintaining stability
+        'grid_size': 32,
+        'batch_size': 1,
+        'channels': 1,
+        'device': 'cpu',
+        'dtype': torch.float32,
+        'rtol': 1e-5,
+        'atol': 1e-5
     }

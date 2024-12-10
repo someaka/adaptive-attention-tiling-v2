@@ -21,15 +21,15 @@ class ReactionSystem:
         hidden_size = 64
         
         self.activator_network = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
+            nn.Linear(input_size, hidden_size, dtype=torch.float64),
             nn.ReLU(),
-            nn.Linear(hidden_size, grid_size * grid_size)
+            nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float64)
         )
         
         self.inhibitor_network = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
+            nn.Linear(input_size, hidden_size, dtype=torch.float64),
             nn.ReLU(),
-            nn.Linear(hidden_size, grid_size * grid_size)
+            nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float64)
         )
     
     def reaction_term(self, state: torch.Tensor) -> torch.Tensor:
@@ -50,9 +50,17 @@ class ReactionSystem:
         activator = state[:,0:1]  # [batch, 1, height, width]
         inhibitor = state[:,1:2]  # [batch, 1, height, width]
         
-        # Compute reaction terms
-        activator_term = activator * activator / (1.0 + inhibitor) - activator
-        inhibitor_term = activator * activator - inhibitor
+        # Add small epsilon to prevent division by zero
+        eps = 1e-10
+        
+        # Compute reaction terms with improved numerical stability
+        activator_term = (activator * activator) / (1.0 + inhibitor + eps) - activator
+        inhibitor_term = torch.clamp(activator * activator, min=0.0, max=10.0) - inhibitor
+        
+        # Scale terms for stability
+        scale = 0.1
+        activator_term = scale * activator_term
+        inhibitor_term = scale * inhibitor_term
         
         # Combine terms
         return torch.cat([activator_term, inhibitor_term], dim=1)
@@ -75,18 +83,21 @@ class ReactionSystem:
             reaction_term = self.reaction_term
         
         # Convert to double for numerical stability
+        orig_dtype = state.dtype
         state = state.to(torch.float64)
         
-        # Compute reaction term
-        reaction = reaction_term(state)
+        # Compute reaction term with gradient clipping
+        with torch.no_grad():
+            reaction = reaction_term(state)
+            reaction = torch.clamp(reaction, min=-10.0, max=10.0)
         
         # Add reaction to state
         reacted = state + reaction
         
-        # Ensure non-negativity
-        reacted = torch.clamp(reacted, min=0.0)
+        # Ensure non-negativity and upper bound
+        reacted = torch.clamp(reacted, min=0.0, max=100.0)
         
-        return reacted.to(state.dtype)
+        return reacted.to(orig_dtype)
     
     def find_reaction_fixed_points(
         self,

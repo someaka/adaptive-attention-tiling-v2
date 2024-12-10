@@ -67,7 +67,20 @@ class PatternDynamics:
             Diffused state tensor
         """
         dt = dt if dt is not None else self.dt
-        return self.diffusion.apply_diffusion(state, diffusion_coefficient, dt)
+        
+        # Convert to float64 for numerical stability
+        orig_dtype = state.dtype
+        state = state.to(torch.float64)
+        
+        # Apply diffusion with numerical stability
+        diffused = self.diffusion.apply_diffusion(state, diffusion_coefficient, dt)
+        
+        # Ensure non-negative values (if applicable)
+        if torch.all(state >= 0):
+            diffused = torch.clamp(diffused, min=0.0)
+            
+        # Convert back to original dtype
+        return diffused.to(orig_dtype)
         
     def apply_reaction(
         self,
@@ -80,13 +93,24 @@ class PatternDynamics:
         Args:
             state: Input state tensor [batch, channels, height, width]
             reaction_term: Optional reaction term function
-            dt: Optional time step override
+            dt: Optional time step override (not used in base implementation)
             
         Returns:
             Reacted state tensor
         """
-        dt = dt if dt is not None else self.dt
-        return self.reaction.apply_reaction(state, reaction_term, dt)
+        # Convert to float64 for numerical stability
+        orig_dtype = state.dtype
+        state = state.to(torch.float64)
+        
+        # Apply reaction with numerical stability
+        reacted = self.reaction.apply_reaction(state, reaction_term)
+        
+        # Ensure non-negative values (if applicable)
+        if torch.all(state >= 0):
+            reacted = torch.clamp(reacted, min=0.0)
+            
+        # Convert back to original dtype
+        return reacted.to(orig_dtype)
         
     def evolve_pattern(
         self,
@@ -117,7 +141,7 @@ class PatternDynamics:
             
             # Apply reaction if provided
             if reaction_term is not None:
-                diffused = self.apply_reaction(diffused, reaction_term, dt)
+                diffused = self.apply_reaction(diffused, reaction_term)
                 
             evolution.append(diffused)
             state = diffused
@@ -166,7 +190,18 @@ class PatternDynamics:
         batch_size: Optional[Union[int, torch.Tensor]] = None,
         grid_size: Optional[int] = None,
     ) -> torch.Tensor:
-        """Evolve reaction-diffusion system."""
+        """Evolve reaction-diffusion system.
+        
+        Args:
+            state: Initial state (ReactionDiffusionState or tensor)
+            diffusion_tensor: Diffusion coefficients matrix
+            reaction_term: Optional reaction term function
+            batch_size: Optional batch size for initialization
+            grid_size: Optional grid size override
+            
+        Returns:
+            Evolved state tensor
+        """
         # Handle default arguments
         if grid_size is None:
             grid_size = self.size
@@ -183,11 +218,23 @@ class PatternDynamics:
         elif isinstance(state, ReactionDiffusionState):
             state = torch.cat([state.activator, state.inhibitor], dim=1)
         
-        # Apply reaction-diffusion step
-        diffused = self.apply_diffusion(state, diffusion_tensor[0,0].item(), self.dt)
-        reacted = self.apply_reaction(diffused, reaction_term)
+        # Extract species and apply diffusion
+        evolved = []
+        for i in range(self.dim):
+            species = state[:,i:i+1]  # Keep channel dimension
+            diffused = self.apply_diffusion(
+                species,
+                diffusion_coefficient=diffusion_tensor[i,i].item(),
+                dt=self.dt
+            )
+            evolved.append(diffused)
         
-        return reacted
+        # Combine species and apply reaction
+        evolved = torch.cat(evolved, dim=1)
+        if reaction_term is not None:
+            evolved = self.apply_reaction(evolved, reaction_term)
+        
+        return evolved
     
     def stability_analysis(
         self,
@@ -203,3 +250,132 @@ class PatternDynamics:
     ) -> torch.Tensor:
         """Find fixed points of the reaction term."""
         return self.reaction.find_reaction_fixed_points(state)
+
+    def find_homogeneous_state(self) -> torch.Tensor:
+        """Find homogeneous steady state.
+        
+        Returns:
+            Homogeneous state tensor
+        """
+        # Initialize with uniform random state
+        state = torch.rand(1, self.dim, self.size, self.size)
+        
+        # Apply diffusion until convergence
+        max_iter = 1000
+        tol = 1e-6
+        
+        for _ in range(max_iter):
+            # Apply strong diffusion to homogenize
+            state = self.apply_diffusion(state, diffusion_coefficient=1.0, dt=0.1)
+            
+            # Check if state is uniform
+            mean = state.mean(dim=(-2, -1), keepdim=True)
+            if torch.max(torch.abs(state - mean)) < tol:
+                return state
+        
+        return state
+
+    def pattern_control(
+        self,
+        current: torch.Tensor,
+        target: torch.Tensor,
+        constraints: List[Callable]
+    ) -> ControlSignal:
+        """Compute control signal to drive system towards target state.
+        
+        Args:
+            current: Current state tensor
+            target: Target state tensor
+            constraints: List of constraint functions
+            
+        Returns:
+            Control signal
+        """
+        # Initialize control signal
+        control = torch.zeros_like(current)
+        
+        # Compute error
+        error = target - current
+        
+        # Scale control by error and constraints
+        for constraint in constraints:
+            # Evaluate constraint
+            violation = constraint(current)
+            
+            # Add gradient-based correction
+            if violation > 0:
+                # Use autograd to get constraint gradient
+                current.requires_grad_(True)
+                c = constraint(current)
+                c.backward()
+                grad = current.grad
+                current.requires_grad_(False)
+                
+                # Update control to reduce violation
+                control = control - 0.1 * violation * grad
+        
+        # Add error correction
+        control = control + 0.1 * error
+        
+        return ControlSignal(control)
+
+    def evolve_spatiotemporal(
+        self,
+        initial: torch.Tensor,
+        coupling: Callable,
+        steps: int = 100
+    ) -> List[torch.Tensor]:
+        """Evolve spatiotemporal pattern with coupling.
+        
+        Args:
+            initial: Initial state tensor
+            coupling: Coupling function between spatial points
+            steps: Number of evolution steps
+            
+        Returns:
+            List of evolved states
+        """
+        evolution = [initial]
+        state = initial
+        
+        for _ in range(steps):
+            # Apply spatial coupling
+            coupled = coupling(state)
+            
+            # Apply diffusion to coupled state
+            diffused = self.apply_diffusion(coupled, diffusion_coefficient=0.1)
+            
+            evolution.append(diffused)
+            state = diffused
+        
+        return evolution
+
+    def detect_pattern_formation(
+        self,
+        evolution: List[torch.Tensor]
+    ) -> bool:
+        """Detect if pattern formation occurred.
+        
+        Args:
+            evolution: List of states from time evolution
+            
+        Returns:
+            True if stable pattern formed
+        """
+        if len(evolution) < 2:
+            return False
+            
+        # Check if final states are similar (stable pattern)
+        final_states = evolution[-10:]
+        if len(final_states) < 2:
+            return False
+            
+        # Compute changes between consecutive states
+        changes = []
+        for i in range(len(final_states)-1):
+            diff = torch.abs(final_states[i+1] - final_states[i]).mean()
+            changes.append(diff.item())
+            
+        # Pattern formed if changes are small and consistent
+        mean_change = sum(changes) / len(changes)
+        return mean_change < 1e-3
