@@ -388,3 +388,9 @@ def num_patterns():
 def seq_length():
     """Sequence length for pattern dynamics tests"""
     return 16
+
+
+@pytest.fixture
+def pattern_dynamics(pattern_system):
+    """Create pattern dynamics system for testing."""
+    return pattern_system

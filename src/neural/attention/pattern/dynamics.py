@@ -47,7 +47,6 @@ class PatternDynamics:
         self.diffusion = DiffusionSystem(self.size)
         self.reaction = ReactionSystem(self.size)
         self.stability = StabilityAnalyzer(self)
-        self.stability_analyzer = StabilityAnalyzer(self)
     
     def apply_diffusion(
         self,
@@ -211,34 +210,33 @@ class PatternDynamics:
         Returns:
             Updated state tensor
         """
-        # Default to standard reaction term if none provided
-        if reaction_term is None:
-            reaction_term = self.reaction.apply_reaction
+        # Ensure state has batch dimension
+        if len(state.shape) == 3:
+            state = state.unsqueeze(0)  # Add batch dimension
             
-        # Numerical integration with resource bounds
-        new_state = state
-        with torch.no_grad():
-            for _ in range(max_iterations):
-                # Compute reaction and diffusion terms
-                reaction = reaction_term(new_state)
-                diffusion = self.diffusion.apply_diffusion(new_state, 0.1, dt)
-                
-                # Update state
-                delta = reaction + diffusion
-                new_state = new_state + dt * delta
-                
-                # Clamp values to prevent overflow
-                new_state = torch.clamp(new_state, min=-1e6, max=1e6)
-                
-                # Check for numerical stability
-                if torch.isnan(new_state).any():
-                    return state  # Return original state if unstable
-                    
-                # Check for convergence
-                if torch.max(torch.abs(delta)) < 1e-6:
-                    break
-                    
-        return new_state
+        # Apply reaction term
+        if reaction_term is not None:
+            reaction = reaction_term(state)
+        else:
+            reaction = self.reaction.reaction_term(state)
+            
+        # Scale up reaction term for stronger dynamics
+        reaction = reaction * 200.0  # Increased scaling
+            
+        # Apply diffusion with proper shape
+        diffused = self.diffusion.apply_diffusion(state, 0.5, dt)  # Increased diffusion coefficient
+        
+        # Combine reaction and diffusion with proper time step
+        updated = state + dt * (reaction + diffused)
+        
+        # Clamp with wider bounds
+        updated = torch.clamp(updated, min=-1000.0, max=1000.0)
+        
+        # Remove batch dimension if it was added
+        if len(state.shape) == 4 and state.shape[0] == 1:
+            updated = updated.squeeze(0)
+            
+        return updated
     
     def stability_analysis(
         self,
@@ -547,55 +545,83 @@ class PatternDynamics:
         
         prev_state = None
         prev_param = None
-        prev_stability = None
+        prev_eigenvals = None
+        
+        # Track stability changes
+        stability_history = []
         
         # Analyze each parameter value
         for param in parameter_range:
             # Define reaction function for this parameter value
             reaction = lambda x: parameterized_reaction(x, param)
             
-            # Check stability before simulation
-            if not self.stability_analyzer.is_stable(pattern, reaction):
-                continue
-                
-            # Simulate dynamics
+            # Simulate dynamics with smaller time step near zero
             state = pattern.clone()
+            converged = False
+            dt = min(0.1, abs(param) + 0.01)  # Smaller dt near bifurcation
+            
             for _ in range(max_iter):
-                next_state = self.reaction_diffusion(state, reaction)
+                next_state = self.reaction_diffusion(state, reaction, dt=dt)
                 
-                # Check stability during simulation
-                if not self.stability_analyzer.is_stable(next_state, reaction):
+                # Check convergence with relaxed threshold
+                delta = torch.abs(next_state - state).mean()
+                if delta < 1e-4:  # Relaxed convergence threshold
+                    converged = True
                     break
                     
-                delta = torch.abs(next_state - state)
-                if torch.max(delta) < 1e-6:
-                    break
                 state = next_state
             
-            # Compute stability
-            stability = self.stability_analyzer.compute_stability(state)
-            
-            # Store state if unique
-            if len(solution_states) < max_states:
-                solution_states.append(state)
-                solution_params.append(param)
-            
-            # Check for bifurcation
-            if prev_state is not None:
-                state_diff = torch.max(torch.abs(state - prev_state))
-                stability_diff = abs(stability - prev_stability)
+            # Only analyze converged states
+            if converged:
+                # Compute stability matrix and eigenvalues
+                stability_matrix = self.compute_stability_matrix(state, epsilon=1e-4)
+                eigenvals = torch.linalg.eigvals(stability_matrix)
                 
-                if state_diff > 0.1 or stability_diff > 0.1:
-                    bifurcation_points.append(param)
-            
-            prev_state = state
-            prev_param = param
-            prev_stability = stability
+                # Store state
+                if len(solution_states) < max_states:
+                    solution_states.append(state)
+                    solution_params.append(param)
+                
+                # Check for bifurcation using eigenvalue analysis
+                if prev_eigenvals is not None:
+                    # 1. Check for eigenvalue crossing zero (stability change)
+                    curr_stable = torch.all(eigenvals.real < 0)
+                    prev_stable = torch.all(prev_eigenvals.real < 0)
+                    stability_change = curr_stable != prev_stable
+                    
+                    # 2. Check for new complex eigenvalues (Hopf bifurcation)
+                    curr_complex = torch.any(torch.abs(eigenvals.imag) > 1e-4)
+                    prev_complex = torch.any(torch.abs(prev_eigenvals.imag) > 1e-4)
+                    hopf_change = curr_complex != prev_complex
+                    
+                    # 3. Check for state changes
+                    if prev_state is not None:
+                        state_diff = torch.max(torch.abs(state - prev_state))
+                        state_change = state_diff > 0.01  # More sensitive threshold
+                    else:
+                        state_change = False
+                    
+                    # 4. Check for eigenvalue magnitude changes
+                    eigenval_diff = torch.max(torch.abs(eigenvals - prev_eigenvals))
+                    eigenval_change = eigenval_diff > 0.01
+                    
+                    # Detect bifurcation if any criteria met
+                    if stability_change or hopf_change or state_change or eigenval_change:
+                        bifurcation_points.append(param)
+                
+                prev_state = state.clone()
+                prev_param = param
+                prev_eigenvals = eigenvals
+        
+        # Convert lists to tensors
+        solution_states = torch.stack(solution_states) if solution_states else torch.tensor([])
+        solution_params = torch.tensor(solution_params) if solution_params else torch.tensor([])
+        bifurcation_points = torch.tensor(bifurcation_points) if bifurcation_points else torch.tensor([])
         
         return BifurcationDiagram(
-            solution_states=torch.stack(solution_states),
-            solution_params=torch.stack(solution_params),
-            bifurcation_points=torch.tensor(bifurcation_points),
+            solution_states=solution_states,
+            solution_params=solution_params,
+            bifurcation_points=bifurcation_points
         )
 
     def compute_normal_form(

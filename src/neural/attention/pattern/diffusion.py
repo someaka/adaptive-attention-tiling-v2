@@ -11,7 +11,7 @@ import logging
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Union
+from typing import Union, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -39,35 +39,25 @@ class DiffusionSystem(nn.Module):
        - Rate controlled by diffusion coefficient and time step
     """
 
-    def __init__(self, grid_size: int):
-        """Initialize diffusion system with a symmetric kernel.
-        
-        The diffusion kernel is a 9-point stencil discretization of the Laplacian:
-        [[1/12, 1/6, 1/12],
-         [1/6,  0.0,  1/6],
-         [1/12, 1/6, 1/12]]
-         
-        This is a second-order accurate approximation of the Laplacian operator.
-        The kernel is normalized to sum to 1 (excluding center).
-        The center value is set during apply_diffusion based on physics parameters
-        to ensure stability and conservation.
+    def __init__(self, grid_size: int = 32):
+        """Initialize diffusion system.
         
         Args:
-            grid_size: Size of square grid to operate on
+            grid_size (int, optional): Size of spatial grid. Defaults to 32.
         """
         super().__init__()
-        self.grid_size = grid_size
+        self.size = grid_size
         
-        # Initialize 3x3 diffusion kernel
-        # This is a discretized Laplacian operator
+        # Initialize diffusion kernel
         kernel = torch.tensor([
-            [1/12, 1/6, 1/12],
-            [1/6,  0.0,  1/6],
-            [1/12, 1/6, 1/12]
-        ], dtype=torch.float32)
+            [0.0833, 0.1667, 0.0833],
+            [0.1667, 0.0000, 0.1667],
+            [0.0833, 0.1667, 0.0833]
+        ], dtype=torch.float64)
         
-        # Store base kernel for diffusion
-        self.register_buffer('base_kernel', kernel)
+        # Expand kernel for multi-channel convolution
+        kernel = kernel.unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, 3, 3]
+        self.kernel = kernel
 
     def forward(
         self,
@@ -96,49 +86,46 @@ class DiffusionSystem(nn.Module):
         diffusion_coefficient: float,
         dt: float
     ) -> torch.Tensor:
-        """Apply diffusion to state tensor.
+        """Apply diffusion to state.
         
         Args:
-            state (torch.Tensor): Current state tensor
-            diffusion_coefficient (float): Diffusion coefficient
-            dt (float): Time step size
+            state: State tensor [batch, channels, height, width]
+            diffusion_coefficient: Diffusion coefficient
+            dt: Time step
             
         Returns:
             torch.Tensor: Diffused state
         """
-        batch_size, num_channels, height, width = state.shape
+        # Ensure state has batch and channel dimensions
+        if len(state.shape) == 2:  # [height, width]
+            state = state.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
+        elif len(state.shape) == 3:  # [channels, height, width]
+            state = state.unsqueeze(0)  # Add batch dim
+        elif len(state.shape) != 4:
+            raise ValueError(f"Expected state tensor of shape [batch, channels, height, width] or [channels, height, width] or [height, width], got shape {state.shape}")
+            
+        # Get kernel and scale by diffusion parameters
+        kernel = self.kernel.clone().to(state.dtype)
+        kernel = kernel * (diffusion_coefficient * dt)
+        kernel[0,0,1,1] = 1.0 - (diffusion_coefficient * dt)
         
-        # Compute diffusion kernel
-        scale = diffusion_coefficient * dt
-        kernel = torch.tensor([
-            [scale/12, scale/6, scale/12],
-            [scale/6, 1-scale, scale/6],
-            [scale/12, scale/6, scale/12]
-        ], device=state.device).view(1, 1, 3, 3).repeat(num_channels, 1, 1, 1)
+        # Expand kernel for each channel
+        kernel = kernel.repeat(state.shape[1], 1, 1, 1)
         
-        # Pad input for convolution
-        padded = F.pad(state, (1, 1, 1, 1), mode='replicate')
+        # Apply periodic boundary conditions
+        pad_size = 1
+        padded = F.pad(state, (pad_size,)*4, mode='circular')
         
-        # Apply convolution for diffusion
-        diffused = F.conv2d(
-            padded, 
-            kernel,
-            padding=0,
-            groups=num_channels
-        )
+        # Apply convolution
+        diffused = F.conv2d(padded, kernel, padding=0, groups=state.shape[1])
         
-        # Clamp values to prevent overflow
-        diffused = torch.clamp(diffused, min=-1e6, max=1e6)
-        
-        # Ensure mass conservation
-        initial_mass = state.sum(dim=(2, 3), keepdim=True)
-        current_mass = diffused.sum(dim=(2, 3), keepdim=True)
-        diffused = diffused * (initial_mass / current_mass)
-        
+        # Remove extra dimensions if they were added
+        if len(state.shape) == 2:
+            diffused = diffused.squeeze(0).squeeze(0)
+        elif len(state.shape) == 3:
+            diffused = diffused.squeeze(0)
+            
         return diffused
-    
-    def _laplacian_kernel(self):
-        return self.base_kernel.clone()
     
     def test_convergence(
         self,
@@ -173,12 +160,12 @@ class DiffusionSystem(nn.Module):
             # Apply diffusion with reduced logging
             with torch.no_grad():
                 # Create diffusion kernel
-                kernel = self.base_kernel.clone()
+                kernel = self.kernel.clone()
                 kernel = kernel * (diffusion_coefficient * dt)
-                kernel[1,1] = 1.0 - (diffusion_coefficient * dt)
+                kernel[0,0,1,1] = 1.0 - (diffusion_coefficient * dt)
                 
                 # Prepare kernel for convolution
-                kernel = kernel.view(1, 1, 3, 3).repeat(state.size(1), 1, 1, 1)
+                kernel = kernel.repeat(state.size(1), 1, 1, 1)
                 
                 # Apply periodic padding
                 padded = F.pad(prev_state, (1,1,1,1), mode='circular')
