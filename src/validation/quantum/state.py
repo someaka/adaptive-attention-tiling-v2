@@ -8,11 +8,44 @@ This module validates quantum state properties:
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional, Any
 
 import torch
+import numpy as np
 
 from ...core.quantum.state_space import QuantumState
+
+
+@dataclass
+class ValidationResult:
+    """Result of a validation operation."""
+
+    is_valid: bool  # Whether validation passed
+    details: Dict[str, Any]  # Detailed validation results
+    error_msg: Optional[str] = None  # Error message if validation failed
+
+
+@dataclass
+class StateProperties:
+    """Properties of a quantum state."""
+    
+    is_normalized: bool  # Whether state is normalized
+    is_pure: bool  # Whether state is pure
+    trace: complex  # Trace of density matrix
+    rank: int  # Rank of density matrix
+    eigenvalues: torch.Tensor  # Eigenvalues of density matrix
+    purity: float  # Purity measure
+
+
+@dataclass
+class UncertaintyMetrics:
+    """Uncertainty relation metrics."""
+    
+    position_uncertainty: float  # Position uncertainty
+    momentum_uncertainty: float  # Momentum uncertainty
+    energy_uncertainty: float  # Energy uncertainty
+    heisenberg_product: float  # Position-momentum uncertainty product
+    robertson_product: float  # General uncertainty product
 
 
 @dataclass
@@ -43,6 +76,18 @@ class TomographyValidation:
     completeness: float  # Measurement completeness
     confidence: float  # Statistical confidence
     estimated_state: torch.Tensor  # Reconstructed state
+
+
+@dataclass
+class EntanglementMetrics:
+    """Entanglement metrics for quantum states."""
+
+    concurrence: float  # Entanglement measure for 2-qubit states
+    von_neumann_entropy: float  # Entanglement entropy
+    negativity: float  # Negativity measure
+    log_negativity: float  # Logarithmic negativity
+    ppt_criterion: bool  # Positive partial transpose criterion
+    witness_value: float  # Entanglement witness value
 
 
 class StatePreparationValidator:
@@ -265,6 +310,122 @@ class TomographyValidator:
         p_value = torch.exp(-0.5 * (chi_squared - dof))
 
         return torch.minimum(p_value, torch.tensor(1.0))
+
+
+class StateValidator:
+    """Validator for quantum state properties."""
+
+    def __init__(self, tolerance: float = 1e-6):
+        """Initialize validator.
+        
+        Args:
+            tolerance: Numerical tolerance for comparisons
+        """
+        self.tolerance = tolerance
+        self.preparation_validator = StatePreparationValidator(tolerance)
+        self.density_validator = DensityMatrixValidator(tolerance)
+        self.tomography_validator = TomographyValidator()
+
+    def validate_state(self, state: QuantumState) -> StateProperties:
+        """Validate basic state properties.
+        
+        Args:
+            state: Quantum state to validate
+            
+        Returns:
+            StateProperties containing validation results
+        """
+        # Get density matrix
+        rho = state.density_matrix()
+        
+        # Check normalization
+        trace = torch.trace(rho).item()
+        is_normalized = abs(trace - 1.0) < self.tolerance
+        
+        # Get eigendecomposition
+        eigenvalues = torch.linalg.eigvalsh(rho)
+        
+        # Check purity
+        purity = torch.trace(rho @ rho).real.item()
+        is_pure = abs(purity - 1.0) < self.tolerance
+        
+        # Get rank (number of non-zero eigenvalues)
+        rank = torch.sum(eigenvalues.abs() > self.tolerance).item()
+        
+        return StateProperties(
+            is_normalized=is_normalized,
+            is_pure=is_pure, 
+            trace=trace,
+            rank=rank,
+            eigenvalues=eigenvalues,
+            purity=purity
+        )
+
+    def validate_uncertainty(self, state: QuantumState) -> UncertaintyMetrics:
+        """Validate uncertainty relations.
+        
+        Args:
+            state: Quantum state to validate
+            
+        Returns:
+            UncertaintyMetrics containing validation results
+        """
+        # Position and momentum operators
+        x = self._position_operator(state.num_qubits)
+        p = self._momentum_operator(state.num_qubits)
+        
+        # Calculate uncertainties
+        pos_uncert = self._calculate_uncertainty(state, x)
+        mom_uncert = self._calculate_uncertainty(state, p)
+        
+        # Energy uncertainty
+        h = self._hamiltonian(state.num_qubits)
+        energy_uncert = self._calculate_uncertainty(state, h)
+        
+        # Uncertainty products
+        heisenberg = pos_uncert * mom_uncert
+        robertson = energy_uncert * pos_uncert
+        
+        return UncertaintyMetrics(
+            position_uncertainty=pos_uncert,
+            momentum_uncertainty=mom_uncert,
+            energy_uncertainty=energy_uncert,
+            heisenberg_product=heisenberg,
+            robertson_product=robertson
+        )
+
+    def _position_operator(self, num_qubits: int) -> torch.Tensor:
+        """Construct position operator."""
+        dim = 2 ** num_qubits
+        diag = torch.arange(dim, dtype=torch.float32)
+        return torch.diag(diag)
+
+    def _momentum_operator(self, num_qubits: int) -> torch.Tensor:
+        """Construct momentum operator."""
+        dim = 2 ** num_qubits
+        p = torch.zeros((dim, dim), dtype=torch.complex64)
+        for i in range(dim-1):
+            p[i,i+1] = 1j
+            p[i+1,i] = -1j
+        return p / np.sqrt(2)
+
+    def _hamiltonian(self, num_qubits: int) -> torch.Tensor:
+        """Construct system Hamiltonian."""
+        x = self._position_operator(num_qubits)
+        p = self._momentum_operator(num_qubits)
+        return x @ x / 2 + p @ p / 2
+
+    def _calculate_uncertainty(self, state: QuantumState, operator: torch.Tensor) -> float:
+        """Calculate uncertainty of an operator."""
+        # Get expectation value
+        rho = state.density_matrix()
+        exp_val = torch.trace(rho @ operator).real.item()
+        
+        # Get expectation of square
+        exp_sq = torch.trace(rho @ operator @ operator).real.item()
+        
+        # Return uncertainty
+        return np.sqrt(abs(exp_sq - exp_val**2))
 
 
 class QuantumStateValidator:

@@ -16,6 +16,31 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=torch.Tensor)
 
 
+def assert_manifold_properties(tensor: torch.Tensor) -> bool:
+    """
+    Assert that a tensor satisfies basic manifold properties.
+    
+    Args:
+        tensor: Tensor to check
+        
+    Returns:
+        bool: True if properties are satisfied
+    """
+    # Check smoothness (finite values)
+    assert torch.all(torch.isfinite(tensor)), "Tensor contains non-finite values"
+    
+    # Check differentiability (gradients can be computed)
+    if tensor.requires_grad:
+        try:
+            loss = tensor.sum()
+            loss.backward()
+            assert torch.all(torch.isfinite(tensor.grad)), "Non-finite gradients"
+        except Exception as e:
+            raise AssertionError(f"Differentiability check failed: {e}")
+    
+    return True
+
+
 def generate_random_tensor(
     shape: tuple[int, ...],
     device: str = "cpu",

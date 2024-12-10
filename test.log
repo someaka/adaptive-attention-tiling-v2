@@ -1,2 +1,29 @@
-2024-12-09 17:08:46,816 - tests.conftest - INFO - Collected 0 test items
-2024-12-09 17:08:46,867 - tests.conftest - INFO - Test session finished with 0 passed, 0 failed
+2024-12-10 16:18:14,970 - tests.conftest - INFO - Collected 9 test items
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_reaction_diffusion
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_stability_analysis
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_bifurcation_analysis
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_pattern_control
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_spatiotemporal_evolution
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_reaction_diffusion_dynamics
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_control_systems
+2024-12-10 16:18:14,971 - tests.conftest - DEBUG - Test item: test_pattern_detection
+2024-12-10 16:18:14,971 - tests.conftest - DEBUG - Test item: test_forward_pass
+2024-12-10 16:18:14,971 - tests.conftest - INFO - Setting up test: test_reaction_diffusion
+2024-12-10 16:18:15,009 - tests.conftest - INFO - Tearing down test: test_reaction_diffusion
+2024-12-10 16:18:15,060 - tests.conftest - INFO - Setting up test: test_stability_analysis
+2024-12-10 16:18:15,074 - tests.conftest - INFO - Tearing down test: test_stability_analysis
+2024-12-10 16:18:15,121 - tests.conftest - INFO - Setting up test: test_bifurcation_analysis
+2024-12-10 16:18:15,132 - tests.conftest - INFO - Tearing down test: test_bifurcation_analysis
+2024-12-10 16:18:15,177 - tests.conftest - INFO - Setting up test: test_pattern_control
+2024-12-10 16:18:15,251 - tests.conftest - INFO - Tearing down test: test_pattern_control
+2024-12-10 16:18:15,298 - tests.conftest - INFO - Setting up test: test_spatiotemporal_evolution
+2024-12-10 16:18:15,539 - tests.conftest - INFO - Tearing down test: test_spatiotemporal_evolution
+2024-12-10 16:18:15,591 - tests.conftest - INFO - Setting up test: test_reaction_diffusion_dynamics
+2024-12-10 16:18:15,646 - tests.conftest - INFO - Tearing down test: test_reaction_diffusion_dynamics
+2024-12-10 16:18:15,707 - tests.conftest - INFO - Setting up test: test_control_systems
+2024-12-10 16:18:15,723 - tests.conftest - INFO - Tearing down test: test_control_systems
+2024-12-10 16:18:15,768 - tests.conftest - INFO - Setting up test: test_pattern_detection
+2024-12-10 16:18:15,769 - tests.conftest - INFO - Tearing down test: test_pattern_detection
+2024-12-10 16:18:15,823 - tests.conftest - INFO - Setting up test: test_forward_pass
+2024-12-10 16:18:15,825 - tests.conftest - INFO - Tearing down test: test_forward_pass
+2024-12-10 16:18:15,870 - tests.conftest - INFO - Test session finished with 1 passed, 6 failed

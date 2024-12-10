@@ -1,0 +1,263 @@
+"""Advanced Metrics Analyzer.
+
+This module implements advanced metrics computation for the quantum geometric attention framework.
+It provides metrics for analyzing information flow, computational efficiency, and adaptation quality.
+"""
+
+from typing import List, Optional, Tuple
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+
+class InformationDensityAnalyzer:
+    """Analyze information density in sequences using various metrics."""
+
+    def __init__(
+        self,
+        window_size: int = 5,
+        smoothing_factor: float = 0.5,
+    ) -> None:
+        """Initialize analyzer with window size and smoothing parameters."""
+        if window_size < 1:
+            msg = "Window size must be positive"
+            raise ValueError(msg)
+        if not 0 <= smoothing_factor <= 1:
+            msg = "Smoothing factor must be between 0 and 1"
+            raise ValueError(msg)
+
+        self.window_size = window_size
+        self.smoothing_factor = smoothing_factor
+
+    def compute_gradient_density(self, sequence: torch.Tensor) -> torch.Tensor:
+        """Compute density based on gradient magnitudes."""
+        # Handle single token case
+        if sequence.shape[1] == 1:
+            return torch.zeros_like(sequence, dtype=torch.float)
+
+        # Convert to float for gradient computation
+        x = sequence.float()
+
+        # Compute forward differences
+        forward_diff = x[:, 1:] - x[:, :-1]
+
+        # Get non-zero differences (changes in sequence)
+        changes = (forward_diff != 0).float()
+
+        # Create density tensor with 1s at change points
+        density = torch.zeros_like(x)
+        density[:, :-1] = changes
+
+        return density
+
+    def compute_entropy_density(
+        self,
+        sequence: torch.Tensor,
+        vocab_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Compute density based on local entropy."""
+        # Handle single token case
+        if sequence.shape[1] == 1:
+            return torch.zeros_like(sequence, dtype=torch.float)
+
+        batch_size, seq_length = sequence.shape
+
+        # Determine vocabulary size if not provided
+        if vocab_size is None:
+            vocab_size = int(torch.max(sequence)) + 1
+
+        # Create sliding windows
+        pad_size = self.window_size // 2
+        padded = F.pad(sequence, (pad_size, pad_size), mode="replicate")
+
+        # Initialize output
+        entropy = torch.zeros(batch_size, seq_length, device=sequence.device)
+
+        # Compute entropy for each position
+        for i in range(seq_length):
+            # Extract window
+            window = padded[:, i : i + self.window_size]
+
+            # Count unique tokens in window
+            unique_tokens = torch.unique(window, dim=1)
+            entropy[:, i] = unique_tokens.size(1) / self.window_size
+
+        # Scale entropy to [0, 1]
+        return entropy.clamp(0, 1)
+
+    def smooth_density(
+        self,
+        density: torch.Tensor,
+        *,
+        use_exponential: bool = True,
+    ) -> torch.Tensor:
+        """Apply smoothing to density values."""
+        # Handle single token case
+        if density.shape[1] == 1:
+            return density
+
+        # Apply moving average using convolution
+        kernel_size = min(self.window_size, density.size(1))
+        if kernel_size % 2 == 0:
+            kernel_size -= 1  # Ensure odd kernel size
+
+        kernel = torch.ones(1, 1, kernel_size) / kernel_size
+        if density.device.type == "vulkan":
+            kernel = kernel.vulkan()
+
+        # Add channel dimension for conv1d
+        x = density.unsqueeze(1)
+        # pylint: disable=not-callable
+        smoothed = F.conv1d(x, kernel, padding=kernel_size // 2)
+
+        # Remove channel dimension
+        smoothed = smoothed.squeeze(1)
+
+        if use_exponential:
+            # Apply exponential smoothing
+            alpha = self.smoothing_factor
+            smoothed = alpha * density + (1 - alpha) * smoothed
+
+        return smoothed
+
+    def analyze_density(
+        self,
+        sequence: torch.Tensor,
+        method: str = "gradient",
+        *,
+        apply_smoothing: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Analyze sequence density using specified method."""
+        if method not in ["gradient", "entropy"]:
+            msg = "Method must be 'gradient' or 'entropy'"
+            raise ValueError(msg)
+
+        # Compute raw density
+        if method == "gradient":
+            density = self.compute_gradient_density(sequence)
+        else:
+            density = self.compute_entropy_density(sequence)
+
+        # Apply smoothing if requested
+        smoothed = self.smooth_density(density) if apply_smoothing else density
+
+        return density, smoothed
+
+    def analyze_multi_scale(
+        self,
+        sequence: torch.Tensor,
+        num_scales: int = 3,
+        method: str = "gradient",
+    ) -> torch.Tensor:
+        """Analyze density at multiple scales."""
+        batch_size, seq_length = sequence.shape
+        densities = torch.zeros(batch_size, num_scales, seq_length)
+
+        for scale in range(num_scales):
+            # Compute density at current scale
+            density, _ = self.analyze_density(
+                sequence,
+                method=method,
+                apply_smoothing=True,
+            )
+
+            densities[:, scale] = density
+
+        return densities
+
+
+class AdvancedMetricsAnalyzer:
+    """Analyzer for computing advanced metrics in quantum geometric attention."""
+
+    def __init__(self):
+        """Initialize the metrics analyzer."""
+        self.history = {
+            "ifq": [],  # Information Flow Quality
+            "cer": [],  # Compute-to-Efficiency Ratio
+            "ae": [],  # Adaptation Efficiency
+        }
+        self.density_analyzer = InformationDensityAnalyzer()
+
+    def compute_ifq(
+        self,
+        pattern_stability: float,
+        cross_tile_flow: float,
+        edge_utilization: float,
+        info_density: float,
+        alpha: float = 0.25,  # Weight for each component
+    ) -> float:
+        """Compute Information Flow Quality (IFQ)."""
+        components = [
+            pattern_stability,
+            cross_tile_flow,
+            edge_utilization,
+            info_density,
+        ]
+
+        # Normalize components
+        components = [max(0.0, min(1.0, c)) for c in components]
+
+        # Weighted sum
+        ifq = sum(alpha * c for c in components)
+
+        # Store in history
+        self.history["ifq"].append(ifq)
+
+        return ifq
+
+    def compute_cer(
+        self,
+        information_transferred: float,
+        compute_cost: float,
+        memory_usage: float,
+        resolution: float,
+        beta: float = 0.5,  # Balance between compute and memory
+    ) -> float:
+        """Compute Compute-to-Efficiency Ratio (CER)."""
+        # Normalize inputs
+        info = max(1e-6, information_transferred)
+        compute = max(1e-6, compute_cost)
+        memory = max(1e-6, memory_usage)
+        res = max(1e-6, resolution)
+
+        # Compute efficiency ratio
+        resource_cost = beta * compute + (1 - beta) * memory
+        cer = (info * res) / resource_cost
+
+        # Store in history
+        self.history["cer"].append(cer)
+
+        return cer
+
+    def compute_ae(
+        self,
+        resolution_history: List[float],
+        load_variance_history: List[float],
+        window_size: int = 10,
+    ) -> float:
+        """Compute Adaptation Efficiency (AE)."""
+        if not resolution_history or not load_variance_history:
+            return 1.0
+
+        # Compute resolution adaptation smoothness
+        res_diffs = [
+            abs(resolution_history[i + 1] - resolution_history[i])
+            for i in range(len(resolution_history) - 1)
+        ]
+        smoothness = 1.0 / (1.0 + np.mean(res_diffs) if res_diffs else 1.0)
+
+        # Compute load balancing effectiveness
+        load_balance = 1.0 / (1.0 + np.mean(load_variance_history))
+
+        # Combine metrics
+        ae = 0.5 * (smoothness + load_balance)
+
+        # Store in history
+        self.history["ae"].append(ae)
+
+        return ae
+
+    def get_history(self, metric: str) -> List[float]:
+        """Get history of a specific metric."""
+        return self.history.get(metric, [])

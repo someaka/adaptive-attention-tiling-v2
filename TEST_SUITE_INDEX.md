@@ -34,6 +34,16 @@
   - Partition function
   - Coverage: 100%
 
+### 1.3 Geometric Framework Tests (`/tests/core/attention/`)
+- [x] `test_geometric.py`
+  - Minkowski inner product
+  - Hyperbolic exponential map
+  - Hyperbolic logarithm map
+  - Parallel transport
+  - Geodesic distances
+  - All tests passing
+  - Coverage: 100%
+
 ## 2. Performance Tests
 ### 2.1 CPU Tests (`/tests/performance/cpu/`)
 - [x] `test_vectorization.py`

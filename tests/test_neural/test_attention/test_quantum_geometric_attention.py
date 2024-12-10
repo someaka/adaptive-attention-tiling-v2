@@ -12,16 +12,20 @@ Tests cover:
 8. Entanglement
 9. Error correction
 10. Topological features
+11. Advanced geometric structures
+12. Pattern dynamics
 """
 
 import numpy as np
 import pytest
 import torch
 
-from src.neural.attention.quantum_geometric_attention import (
+from src.core.tiling.quantum_geometric_attention import (
     AttentionMetrics,
     AttentionState,
     FlowMetrics,
+    GeometricStructures,
+    PatternDynamics,
     QuantumGeometricAttention,
 )
 
@@ -60,6 +64,27 @@ class TestQuantumGeometricAttention:
             manifold_dim=8,
             num_layers=3,
             tile_size=16,
+        )
+
+    @pytest.fixture
+    def geometric_structures(self, hidden_dim):
+        """Create geometric structures for testing."""
+        return GeometricStructures(
+            dim=hidden_dim,
+            manifold_type="hyperbolic",
+            curvature=-1.0,
+            parallel_transport_method="schild",
+        )
+
+    @pytest.fixture
+    def pattern_dynamics(self, hidden_dim, num_heads):
+        """Create pattern dynamics for testing."""
+        return PatternDynamics(
+            dim=hidden_dim,
+            num_heads=num_heads,
+            num_patterns=64,
+            temperature=0.1,
+            adaptation_rate=0.01,
         )
 
     def test_attention_state_preparation(
@@ -476,3 +501,30 @@ class TestQuantumGeometricAttention:
         assert torch.allclose(
             row_sums, torch.ones_like(row_sums), rtol=1e-5
         ), "Patterns should be row-normalized"
+
+    def test_geometric_structures(self, geometric_structures, hidden_dim):
+        """Test geometric structures functionality."""
+        # Test metric initialization
+        assert geometric_structures.metric.shape == (hidden_dim, hidden_dim)
+        assert geometric_structures.connection.shape == (hidden_dim, hidden_dim, hidden_dim)
+        assert geometric_structures.curvature_tensor.shape == (hidden_dim, hidden_dim, hidden_dim, hidden_dim)
+
+        # Test sectional curvature computation
+        v1 = torch.randn(hidden_dim)
+        v2 = torch.randn(hidden_dim)
+        curvature = geometric_structures.compute_sectional_curvature(None, v1, v2)
+        assert isinstance(curvature, torch.Tensor)
+        assert curvature.ndim == 0  # Scalar output
+
+    def test_pattern_dynamics(self, pattern_dynamics, hidden_dim, batch_size):
+        """Test pattern dynamics functionality."""
+        # Test pattern library initialization
+        assert pattern_dynamics.patterns.shape == (64, hidden_dim)
+        assert pattern_dynamics.pattern_importance.shape == (64,)
+        assert pattern_dynamics.transfer_weights.shape == (8, 64, 64)
+
+        # Test Fisher information computation
+        states = torch.randn(batch_size, hidden_dim)
+        fisher = pattern_dynamics.compute_fisher_information(states)
+        assert fisher.shape == (hidden_dim, hidden_dim)
+        assert torch.allclose(fisher, fisher.t())  # Should be symmetric

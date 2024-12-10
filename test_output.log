@@ -1,0 +1,436 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-8.3.4, pluggy-1.5.0 -- /home/d/Desktop/AAT/adaptive-attention-tiling-v2/venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests
+configfile: pytest.ini
+collecting ... 2024-12-10 16:18:14,970 - tests.conftest - INFO - Collected 9 test items
+
+----------------------------- live log collection ------------------------------
+2024-12-10 16:18:14 [    INFO] Collected 9 test items (conftest.py:169)
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_reaction_diffusion
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_stability_analysis
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_bifurcation_analysis
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_pattern_control
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_spatiotemporal_evolution
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_reaction_diffusion_dynamics
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_control_systems
+2024-12-10 16:18:14,971 - tests.conftest - DEBUG - Test item: test_pattern_detection
+2024-12-10 16:18:14,971 - tests.conftest - DEBUG - Test item: test_forward_pass
+collected 9 items
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_reaction_diffusion 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:14 [    INFO] Setting up test: test_reaction_diffusion (conftest.py:229)
+FAILED                                                                   [ 11%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_reaction_diffusion (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_stability_analysis 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_stability_analysis (conftest.py:229)
+FAILED                                                                   [ 22%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_stability_analysis (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_bifurcation_analysis 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_bifurcation_analysis (conftest.py:229)
+FAILED                                                                   [ 33%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_bifurcation_analysis (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_pattern_control 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_pattern_control (conftest.py:229)
+FAILED                                                                   [ 44%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_pattern_control (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_spatiotemporal_evolution 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_spatiotemporal_evolution (conftest.py:229)
+PASSED                                                                   [ 55%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_spatiotemporal_evolution (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_reaction_diffusion_dynamics 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_reaction_diffusion_dynamics (conftest.py:229)
+FAILED                                                                   [ 66%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_reaction_diffusion_dynamics (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_control_systems 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_control_systems (conftest.py:229)
+FAILED                                                                   [ 77%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_control_systems (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_pattern_detection 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_pattern_detection (conftest.py:229)
+ERROR                                                                    [ 88%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_pattern_detection (conftest.py:238)
+
+tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_forward_pass 
+-------------------------------- live log setup --------------------------------
+2024-12-10 16:18:15 [    INFO] Setting up test: test_forward_pass (conftest.py:229)
+ERROR                                                                    [100%]
+------------------------------ live log teardown -------------------------------
+2024-12-10 16:18:15 [    INFO] Tearing down test: test_forward_pass (conftest.py:238)
+
+
+==================================== ERRORS ====================================
+_________ ERROR at setup of TestPatternDynamics.test_pattern_detection _________
+file /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_pattern_dynamics.py, line 484
+      def test_pattern_detection(
+E       fixture 'hidden_dim' not found
+>       available fixtures: _resource_guard_fixture, _set_random_seeds_fixture, batch_size, benchmark_config, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, device, doctest_namespace, dtype, grid_size, monkeypatch, pattern_system, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, root_dir, ruff_path, setup_logging, space_dim, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_pattern_dynamics.py:484
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,768 - tests.conftest - INFO - Setting up test: test_pattern_detection
+2024-12-10 16:18:15,768 - tests.conftest - INFO - Setting up test: test_pattern_detection
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_pattern_detection
+___________ ERROR at setup of TestPatternDynamics.test_forward_pass ____________
+file /home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_pattern_dynamics.py, line 509
+      def test_forward_pass(
+E       fixture 'hidden_dim' not found
+>       available fixtures: _resource_guard_fixture, _set_random_seeds_fixture, batch_size, benchmark_config, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, device, doctest_namespace, dtype, grid_size, monkeypatch, pattern_system, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, root_dir, ruff_path, setup_logging, space_dim, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/home/d/Desktop/AAT/adaptive-attention-tiling-v2/tests/test_neural/test_attention/test_pattern_dynamics.py:509
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,823 - tests.conftest - INFO - Setting up test: test_forward_pass
+2024-12-10 16:18:15,823 - tests.conftest - INFO - Setting up test: test_forward_pass
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_forward_pass
+=================================== FAILURES ===================================
+_________________ TestPatternDynamics.test_reaction_diffusion __________________
+tests/test_neural/test_attention/test_pattern_dynamics.py:67: in test_reaction_diffusion
+    evolved = pattern_system.reaction_diffusion(
+        batch_size = 8
+        diffusion_tensor = tensor([[0.1000, 0.0000],
+        [0.0000, 0.0500]])
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb6bd6930>
+        reaction_term = <function TestPatternDynamics.test_reaction_diffusion.<locals>.reaction_term at 0x760cb5bc3ba0>
+        self       = <test_pattern_dynamics.TestPatternDynamics object at 0x760cb674ea80>
+        state      = tensor([[[[ 1.4856e-01, -1.4914e-01, -8.1185e-01,  ...,  6.4664e-01,
+            3.7862e-02,  5.4500e-01],
+          [...380e-01],
+          [ 1.1430e+00, -7.9580e-01, -1.0001e-01,  ..., -3.5706e-01,
+           -1.6358e-02, -1.5166e+00]]]])
+src/neural/attention/pattern_dynamics.py:646: in reaction_diffusion
+    diffused[:,i] += self.apply_diffusion(state[:,j], diffusion_tensor[i,j])
+E   RuntimeError: output with shape [8, 32, 32] doesn't match the broadcast shape [8, 8, 32, 32]
+        batch_size = 1
+        diffused   = tensor([[[[0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0... [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.]]]])
+        diffusion_tensor = tensor([[0.1000, 0.0000],
+        [0.0000, 0.0500]])
+        grid_size  = 32
+        i          = 0
+        j          = 0
+        reaction_term = <function TestPatternDynamics.test_reaction_diffusion.<locals>.reaction_term at 0x760cb5bc3ba0>
+        self       = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb6bd6930>
+        state      = tensor([[[[ 0.1465, -0.1476, -0.8057,  ...,  0.6402,  0.0374,  0.5388],
+          [ 0.2821, -1.2159,  1.4724,  ..., -1..., -1.6278,  ...,  0.5691,  0.0683, -0.3147],
+          [ 1.1323, -0.7820, -0.0980,  ..., -0.3442, -0.0040, -1.4978]]]])
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:14,970 - tests.conftest - INFO - Collected 9 test items
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_reaction_diffusion
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_stability_analysis
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_bifurcation_analysis
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_pattern_control
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_spatiotemporal_evolution
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_reaction_diffusion_dynamics
+2024-12-10 16:18:14,970 - tests.conftest - DEBUG - Test item: test_control_systems
+2024-12-10 16:18:14,971 - tests.conftest - DEBUG - Test item: test_pattern_detection
+2024-12-10 16:18:14,971 - tests.conftest - DEBUG - Test item: test_forward_pass
+2024-12-10 16:18:14,971 - tests.conftest - INFO - Setting up test: test_reaction_diffusion
+2024-12-10 16:18:14,971 - tests.conftest - INFO - Setting up test: test_reaction_diffusion
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_reaction_diffusion
+--------------------------- Captured stderr teardown ---------------------------
+2024-12-10 16:18:15,009 - tests.conftest - INFO - Tearing down test: test_reaction_diffusion
+2024-12-10 16:18:15,009 - tests.conftest - INFO - Tearing down test: test_reaction_diffusion
+---------------------------- Captured log teardown -----------------------------
+INFO     tests.conftest:conftest.py:238 Tearing down test: test_reaction_diffusion
+_________________ TestPatternDynamics.test_stability_analysis __________________
+tests/test_neural/test_attention/test_pattern_dynamics.py:327: in test_stability_analysis
+    state = fixed_point + perturbation
+E   RuntimeError: The size of tensor a (32) must match the size of tensor b (2) at non-singleton dimension 3
+        batch_size = 8
+        fixed_point = tensor([[[[0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0... [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.]]]])
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5b580e0>
+        perturbation = tensor([[[[ 2.4846e-04,  1.1398e-03],
+          [-6.4809e-03,  1.3562e-02],
+          [ 4.8122e-03, -1.4652e-02],
+    ....,
+          [-3.2650e-04, -1.9915e-03],
+          [-1.5581e-03,  7.9717e-03],
+          [-2.4359e-03, -1.5807e-02]]]])
+        self       = <test_pattern_dynamics.TestPatternDynamics object at 0x760cb5ffeab0>
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,060 - tests.conftest - INFO - Setting up test: test_stability_analysis
+2024-12-10 16:18:15,060 - tests.conftest - INFO - Setting up test: test_stability_analysis
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_stability_analysis
+--------------------------- Captured stderr teardown ---------------------------
+2024-12-10 16:18:15,074 - tests.conftest - INFO - Tearing down test: test_stability_analysis
+2024-12-10 16:18:15,074 - tests.conftest - INFO - Tearing down test: test_stability_analysis
+---------------------------- Captured log teardown -----------------------------
+INFO     tests.conftest:conftest.py:238 Tearing down test: test_stability_analysis
+________________ TestPatternDynamics.test_bifurcation_analysis _________________
+tests/test_neural/test_attention/test_pattern_dynamics.py:390: in test_bifurcation_analysis
+    branch, stability = test_continuation()
+        batch_size = 8
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5b392b0>
+        self       = <test_pattern_dynamics.TestPatternDynamics object at 0x760cb5fff6e0>
+        test_continuation = <function TestPatternDynamics.test_bifurcation_analysis.<locals>.test_continuation at 0x760cbbdc7c40>
+tests/test_neural/test_attention/test_pattern_dynamics.py:381: in test_continuation
+    branch = pattern_system.continue_solution(
+E   AttributeError: 'PatternDynamics' object has no attribute 'continue_solution'
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5b392b0>
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,121 - tests.conftest - INFO - Setting up test: test_bifurcation_analysis
+2024-12-10 16:18:15,121 - tests.conftest - INFO - Setting up test: test_bifurcation_analysis
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_bifurcation_analysis
+--------------------------- Captured stderr teardown ---------------------------
+2024-12-10 16:18:15,132 - tests.conftest - INFO - Tearing down test: test_bifurcation_analysis
+2024-12-10 16:18:15,132 - tests.conftest - INFO - Tearing down test: test_bifurcation_analysis
+---------------------------- Captured log teardown -----------------------------
+INFO     tests.conftest:conftest.py:238 Tearing down test: test_bifurcation_analysis
+___________________ TestPatternDynamics.test_pattern_control ___________________
+tests/test_neural/test_attention/test_pattern_dynamics.py:188: in test_pattern_control
+    control = pattern_system.pattern_control(current, target, constraints)
+        constraints = [<function TestPatternDynamics.test_pattern_control.<locals>.<lambda> at 0x760cb5b7a2a0>, <function TestPatternDynamics.test_pattern_control.<locals>.<lambda> at 0x760cb5b78fe0>]
+        current    = tensor([[[[-0.3585,  0.8682, -1.0203,  ...,  0.7693, -1.5406, -0.3490],
+          [-0.3572, -0.9249, -2.6858,  ...,  0..., -1.5183,  ...,  0.4649,  1.2410, -1.9846],
+          [-1.5387, -0.0064, -1.1650,  ..., -0.8883,  0.4085, -0.5030]]]])
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5ffcb30>
+        self       = <test_pattern_dynamics.TestPatternDynamics object at 0x760cb5fff920>
+        target     = tensor([[[[ 0.9604, -0.0922,  0.8066,  ..., -0.1435,  0.2883,  1.1617],
+          [ 0.0256,  1.3659, -1.3708,  ..., -0..., -0.3133,  ..., -2.0104, -2.2170,  1.5013],
+          [ 0.5007, -2.2591, -2.0986,  ..., -0.2268, -0.3298,  0.5640]]]])
+src/neural/attention/pattern_dynamics.py:952: in pattern_control
+    control = self.controller.compute_control(current, target_flat)
+        batch_size = 1
+        constraints = [<function TestPatternDynamics.test_pattern_control.<locals>.<lambda> at 0x760cb5b7a2a0>, <function TestPatternDynamics.test_pattern_control.<locals>.<lambda> at 0x760cb5b78fe0>]
+        current    = ReactionDiffusionState(activator=tensor([[[-0.3585,  0.8682, -1.0203,  ...,  0.7693, -1.5406, -0.3490],
+         [-0.3...  1.2410, -1.9846],
+         [-1.5387, -0.0064, -1.1650,  ..., -0.8883,  0.4085, -0.5030]]]), gradients=None, time=0.0)
+        self       = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5ffcb30>
+        target     = ReactionDiffusionState(activator=tensor([[[ 0.9604, -0.0922,  0.8066,  ..., -0.1435,  0.2883,  1.1617],
+         [ 0.0... -2.2170,  1.5013],
+         [ 0.5007, -2.2591, -2.0986,  ..., -0.2268, -0.3298,  0.5640]]]), gradients=None, time=0.0)
+        target_flat = tensor([[ 0.9604, -0.0922,  0.8066,  ..., -0.2268, -0.3298,  0.5640]])
+src/neural/attention/pattern_dynamics.py:447: in compute_control
+    control = self.network(combined)
+        batch_size = 1
+        combined   = tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]])
+        flattened_state = tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.8883,  0.4085, -0.5030]])
+        self       = <src.neural.attention.pattern_dynamics.PatternController object at 0x760cb5b82720>
+        state      = ReactionDiffusionState(activator=tensor([[[-0.3585,  0.8682, -1.0203,  ...,  0.7693, -1.5406, -0.3490],
+         [-0.3...  1.2410, -1.9846],
+         [-1.5387, -0.0064, -1.1650,  ..., -0.8883,  0.4085, -0.5030]]]), gradients=None, time=0.0)
+        target     = tensor([[ 0.9604, -0.0922,  0.8066,  ..., -0.2268, -0.3298,  0.5640]])
+venv/lib/python3.12/site-packages/torch/nn/modules/module.py:1739: in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+        args       = (tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]]),)
+        kwargs     = {}
+        self       = Sequential(
+  (0): Linear(in_features=256, out_features=128, bias=True)
+  (1): ReLU()
+  (2): Linear(in_features=128, out_features=128, bias=True)
+)
+venv/lib/python3.12/site-packages/torch/nn/modules/module.py:1750: in _call_impl
+    return forward_call(*args, **kwargs)
+        args       = (tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]]),)
+        forward_call = <bound method Sequential.forward of Sequential(
+  (0): Linear(in_features=256, out_features=128, bias=True)
+  (1): ReLU()
+  (2): Linear(in_features=128, out_features=128, bias=True)
+)>
+        kwargs     = {}
+        self       = Sequential(
+  (0): Linear(in_features=256, out_features=128, bias=True)
+  (1): ReLU()
+  (2): Linear(in_features=128, out_features=128, bias=True)
+)
+venv/lib/python3.12/site-packages/torch/nn/modules/container.py:250: in forward
+    input = module(input)
+        input      = tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]])
+        module     = Linear(in_features=256, out_features=128, bias=True)
+        self       = Sequential(
+  (0): Linear(in_features=256, out_features=128, bias=True)
+  (1): ReLU()
+  (2): Linear(in_features=128, out_features=128, bias=True)
+)
+venv/lib/python3.12/site-packages/torch/nn/modules/module.py:1739: in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+        args       = (tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]]),)
+        kwargs     = {}
+        self       = Linear(in_features=256, out_features=128, bias=True)
+venv/lib/python3.12/site-packages/torch/nn/modules/module.py:1750: in _call_impl
+    return forward_call(*args, **kwargs)
+        args       = (tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]]),)
+        forward_call = <bound method Linear.forward of Linear(in_features=256, out_features=128, bias=True)>
+        kwargs     = {}
+        self       = Linear(in_features=256, out_features=128, bias=True)
+venv/lib/python3.12/site-packages/torch/nn/modules/linear.py:125: in forward
+    return F.linear(input, self.weight, self.bias)
+E   RuntimeError: mat1 and mat2 shapes cannot be multiplied (1x4096 and 256x128)
+        input      = tensor([[-0.3585,  0.8682, -1.0203,  ..., -0.2268, -0.3298,  0.5640]])
+        self       = Linear(in_features=256, out_features=128, bias=True)
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,177 - tests.conftest - INFO - Setting up test: test_pattern_control
+2024-12-10 16:18:15,177 - tests.conftest - INFO - Setting up test: test_pattern_control
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_pattern_control
+--------------------------- Captured stderr teardown ---------------------------
+2024-12-10 16:18:15,251 - tests.conftest - INFO - Tearing down test: test_pattern_control
+2024-12-10 16:18:15,251 - tests.conftest - INFO - Tearing down test: test_pattern_control
+---------------------------- Captured log teardown -----------------------------
+INFO     tests.conftest:conftest.py:238 Tearing down test: test_pattern_control
+_____________ TestPatternDynamics.test_reaction_diffusion_dynamics _____________
+tests/test_neural/test_attention/test_pattern_dynamics.py:306: in test_reaction_diffusion_dynamics
+    test_full_dynamics(state)
+        batch_size = 8
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5fff8c0>
+        self       = <test_pattern_dynamics.TestPatternDynamics object at 0x760cb5fffd40>
+        state      = tensor([[[[ 0.3818,  1.3606, -1.3352,  ...,  0.9968, -0.0838,  0.6765],
+          [-0.4245, -1.1882, -1.5566,  ...,  0..., -0.0482,  ..., -0.6654,  0.8030,  2.3367],
+          [ 0.8164, -0.1077,  0.5916,  ...,  1.7392,  1.0738,  0.0469]]]])
+        test_diffusion = <function TestPatternDynamics.test_reaction_diffusion_dynamics.<locals>.test_diffusion at 0x760cb5bc3060>
+        test_full_dynamics = <function TestPatternDynamics.test_reaction_diffusion_dynamics.<locals>.test_full_dynamics at 0x760cb5b7bba0>
+        test_reaction = <function TestPatternDynamics.test_reaction_diffusion_dynamics.<locals>.test_reaction at 0x760cb5b7a160>
+tests/test_neural/test_attention/test_pattern_dynamics.py:292: in test_full_dynamics
+    trajectory = pattern_system.evolve_pattern(state, steps)
+        batch_size = 8
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5fff8c0>
+        state      = tensor([[[[ 0.3818,  1.3606, -1.3352,  ...,  0.9968, -0.0838,  0.6765],
+          [-0.4245, -1.1882, -1.5566,  ...,  0..., -0.0482,  ..., -0.6654,  0.8030,  2.3367],
+          [ 0.8164, -0.1077,  0.5916,  ...,  1.7392,  1.0738,  0.0469]]]])
+        steps      = 100
+src/neural/attention/pattern_dynamics.py:732: in evolve_pattern
+    current = self.apply_reaction_diffusion(
+        batch_size = 8
+        channels   = 2
+        current    = tensor([[[[ 0.3818,  1.3606, -1.3352,  ...,  0.9968, -0.0838,  0.6765],
+          [-0.4245, -1.1882, -1.5566,  ...,  0..., -0.0482,  ..., -0.6654,  0.8030,  2.3367],
+          [ 0.8164, -0.1077,  0.5916,  ...,  1.7392,  1.0738,  0.0469]]]])
+        diffusion_tensor = tensor([[100.,   0.],
+        [  0., 100.]])
+        evolution  = tensor([[[[[ 0.3818,  1.3606, -1.3352,  ...,  0.9968, -0.0838,  0.6765],
+           [-0.4245, -1.1882, -1.5566,  ..., ... 0.0000,  ...,  0.0000,  0.0000,  0.0000],
+           [ 0.0000,  0.0000,  0.0000,  ...,  0.0000,  0.0000,  0.0000]]]]])
+        grid_size  = 32
+        reaction_term = None
+        self       = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5fff8c0>
+        state      = tensor([[[[ 0.3818,  1.3606, -1.3352,  ...,  0.9968, -0.0838,  0.6765],
+          [-0.4245, -1.1882, -1.5566,  ...,  0..., -0.0482,  ..., -0.6654,  0.8030,  2.3367],
+          [ 0.8164, -0.1077,  0.5916,  ...,  1.7392,  1.0738,  0.0469]]]])
+        steps      = 100
+        t          = 1
+src/neural/attention/pattern_dynamics.py:684: in apply_reaction_diffusion
+    return self.reaction_diffusion(
+        batch_size = 8
+        diffusion_tensor = tensor([[100.,   0.],
+        [  0., 100.]])
+        grid_size  = 32
+        reaction_term = None
+        self       = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5fff8c0>
+        state      = tensor([[[[ 0.3818,  1.3606, -1.3352,  ...,  0.9968, -0.0838,  0.6765],
+          [-0.4245, -1.1882, -1.5566,  ...,  0..., -0.0482,  ..., -0.6654,  0.8030,  2.3367],
+          [ 0.8164, -0.1077,  0.5916,  ...,  1.7392,  1.0738,  0.0469]]]])
+src/neural/attention/pattern_dynamics.py:646: in reaction_diffusion
+    diffused[:,i] += self.apply_diffusion(state[:,j], diffusion_tensor[i,j])
+E   RuntimeError: output with shape [8, 32, 32] doesn't match the broadcast shape [8, 8, 32, 32]
+        batch_size = 8
+        diffused   = tensor([[[[0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0... [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.],
+          [0., 0., 0.,  ..., 0., 0., 0.]]]])
+        diffusion_tensor = tensor([[100.,   0.],
+        [  0., 100.]])
+        grid_size  = 32
+        i          = 0
+        j          = 0
+        reaction_term = <bound method PatternDynamics.reaction_term of <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5fff8c0>>
+        self       = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5fff8c0>
+        state      = tensor([[[[ 0.4097,  1.3805, -1.2882,  ...,  1.0203, -0.0528,  0.7025],
+          [-0.3884, -1.1427, -1.5071,  ...,  0..., -0.0474,  ..., -0.5977,  0.8008,  2.3134],
+          [ 0.8273, -0.1036,  0.6134,  ...,  1.7536,  1.0969,  0.0734]]]])
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,591 - tests.conftest - INFO - Setting up test: test_reaction_diffusion_dynamics
+2024-12-10 16:18:15,591 - tests.conftest - INFO - Setting up test: test_reaction_diffusion_dynamics
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_reaction_diffusion_dynamics
+--------------------------- Captured stderr teardown ---------------------------
+2024-12-10 16:18:15,646 - tests.conftest - INFO - Tearing down test: test_reaction_diffusion_dynamics
+2024-12-10 16:18:15,646 - tests.conftest - INFO - Tearing down test: test_reaction_diffusion_dynamics
+---------------------------- Captured log teardown -----------------------------
+INFO     tests.conftest:conftest.py:238 Tearing down test: test_reaction_diffusion_dynamics
+___________________ TestPatternDynamics.test_control_systems ___________________
+tests/test_neural/test_attention/test_pattern_dynamics.py:430: in test_control_systems
+    test_controllability()
+        batch_size = 8
+        grid_size  = 32
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5b82270>
+        self       = <test_pattern_dynamics.TestPatternDynamics object at 0x760cb5b38140>
+        target     = tensor([[[[ 0.1931,  0.1760, -0.3688,  ...,  0.3289,  0.0624,  0.0609],
+          [ 0.3051,  0.1633, -0.4527,  ...,  0..., -0.0712,  ..., -0.1235, -0.1036, -0.3551],
+          [-0.3415, -0.4168, -0.2312,  ..., -0.2117, -0.0951, -0.1974]]]])
+        test_controllability = <function TestPatternDynamics.test_control_systems.<locals>.test_controllability at 0x760cb5b7b920>
+tests/test_neural/test_attention/test_pattern_dynamics.py:425: in test_controllability
+    control_matrix = pattern_system.compute_control_matrix()
+E   AttributeError: 'PatternDynamics' object has no attribute 'compute_control_matrix'
+        pattern_system = <src.neural.attention.pattern_dynamics.PatternDynamics object at 0x760cb5b82270>
+---------------------------- Captured stderr setup -----------------------------
+2024-12-10 16:18:15,707 - tests.conftest - INFO - Setting up test: test_control_systems
+2024-12-10 16:18:15,707 - tests.conftest - INFO - Setting up test: test_control_systems
+------------------------------ Captured log setup ------------------------------
+INFO     tests.conftest:conftest.py:229 Setting up test: test_control_systems
+--------------------------- Captured stderr teardown ---------------------------
+2024-12-10 16:18:15,723 - tests.conftest - INFO - Tearing down test: test_control_systems
+2024-12-10 16:18:15,723 - tests.conftest - INFO - Tearing down test: test_control_systems
+---------------------------- Captured log teardown -----------------------------
+INFO     tests.conftest:conftest.py:238 Tearing down test: test_control_systems
+=============================== warnings summary ===============================
+test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_reaction_diffusion_dynamics
+  /home/d/Desktop/AAT/adaptive-attention-tiling-v2/venv/lib/python3.12/site-packages/torch/functional.py:539: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /home/d/Desktop/pytorch/aten/src/ATen/native/TensorShape.cpp:3611.)
+    return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]2024-12-10 16:18:15,870 - tests.conftest - INFO - Test session finished with 1 passed, 6 failed
+2024-12-10 16:18:15,870 - tests.conftest - INFO - Test session finished with 1 passed, 6 failed
+
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_reaction_diffusion
+FAILED tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_stability_analysis
+FAILED tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_bifurcation_analysis
+FAILED tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_pattern_control
+FAILED tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_reaction_diffusion_dynamics
+FAILED tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_control_systems
+ERROR tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_pattern_detection
+ERROR tests/test_neural/test_attention/test_pattern_dynamics.py::TestPatternDynamics::test_forward_pass
+=============== 6 failed, 1 passed, 1 warning, 2 errors in 0.92s ===============

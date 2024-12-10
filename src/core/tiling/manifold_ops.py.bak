@@ -1,0 +1,205 @@
+"""Manifold Operations for Quantum Geometric Attention.
+
+This module implements operations on different manifold types:
+- Hyperbolic exponential and logarithm maps
+- Euclidean exponential and logarithm maps
+- Parallel transport methods
+"""
+
+from typing import Optional, Tuple
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+
+class HyperbolicExponential(nn.Module):
+    """Exponential map for hyperbolic manifold."""
+
+    def __init__(self, dim: int, curvature: float = -1.0):
+        super().__init__()
+        self.dim = dim
+        self.curvature = curvature
+        self.scale = 2.0 / (1.0 + torch.sqrt(1.0 + 4.0 * torch.abs(torch.tensor(curvature))))
+
+    def forward(self, x: torch.Tensor, base_point: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Apply exponential map.
+        
+        Args:
+            x: Tangent vector at base point
+            base_point: Point on manifold where tangent vector is based
+            
+        Returns:
+            Point on manifold
+        """
+        if base_point is None:
+            base_point = torch.zeros_like(x)
+
+        # Compute norm of tangent vector
+        norm = torch.norm(x, dim=-1, keepdim=True)
+        
+        # Handle zero norm case
+        mask = norm > 0
+        norm = norm.clamp(min=1e-8)
+        
+        # Compute hyperbolic functions
+        sqrt_c = torch.sqrt(torch.abs(self.curvature))
+        sinh = torch.sinh(sqrt_c * norm) / sqrt_c
+        cosh = torch.cosh(sqrt_c * norm)
+        
+        # Compute exponential map
+        coef = sinh / norm
+        ret = torch.where(mask, coef * x, x)
+        
+        # Apply parallel transport if base point is not origin
+        if not torch.allclose(base_point, torch.zeros_like(base_point)):
+            base_norm = torch.norm(base_point, dim=-1, keepdim=True)
+            base_norm = base_norm.clamp(min=1e-8)
+            
+            # Compute parallel transport coefficients
+            lambda_base = 2.0 / (1.0 - self.curvature * (base_norm ** 2))
+            direction = x - torch.sum(x * base_point, dim=-1, keepdim=True) * base_point / base_norm**2
+            
+            ret = base_point * cosh.unsqueeze(-1) + direction * sinh.unsqueeze(-1)
+            ret = ret * lambda_base.unsqueeze(-1)
+        
+        return ret
+
+
+class HyperbolicLogarithm(nn.Module):
+    """Logarithm map for hyperbolic manifold."""
+
+    def __init__(self, dim: int, curvature: float = -1.0):
+        super().__init__()
+        self.dim = dim
+        self.curvature = curvature
+        self.scale = 2.0 / (1.0 + torch.sqrt(1.0 + 4.0 * torch.abs(torch.tensor(curvature))))
+
+    def forward(self, x: torch.Tensor, base_point: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Apply logarithm map.
+        
+        Args:
+            x: Point on manifold
+            base_point: Reference point for logarithm map
+            
+        Returns:
+            Tangent vector at base point
+        """
+        if base_point is None:
+            base_point = torch.zeros_like(x)
+
+        # Handle case where x is at base_point
+        if torch.allclose(x, base_point):
+            return torch.zeros_like(x)
+
+        # Compute distance and direction
+        diff = x - base_point
+        norm = torch.norm(diff, dim=-1, keepdim=True)
+        direction = diff / norm.clamp(min=1e-8)
+        
+        # Compute hyperbolic angle
+        sqrt_c = torch.sqrt(torch.abs(self.curvature))
+        distance = torch.arccosh(1.0 + 2.0 * norm**2 * self.curvature / (1.0 - self.curvature * norm**2))
+        
+        # Compute logarithm map
+        result = direction * distance / sqrt_c
+        
+        # Apply parallel transport if base point is not origin
+        if not torch.allclose(base_point, torch.zeros_like(base_point)):
+            base_norm = torch.norm(base_point, dim=-1, keepdim=True)
+            lambda_base = 2.0 / (1.0 - self.curvature * (base_norm ** 2))
+            result = result / lambda_base.unsqueeze(-1)
+        
+        return result
+
+
+class EuclideanExponential(nn.Module):
+    """Exponential map for Euclidean manifold."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor, base_point: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Apply exponential map.
+        
+        Args:
+            x: Tangent vector
+            base_point: Point where tangent vector is based
+            
+        Returns:
+            Point on manifold
+        """
+        if base_point is None:
+            return x
+        return base_point + x
+
+
+class EuclideanLogarithm(nn.Module):
+    """Logarithm map for Euclidean manifold."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor, base_point: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Apply logarithm map.
+        
+        Args:
+            x: Point on manifold
+            base_point: Reference point
+            
+        Returns:
+            Tangent vector at base point
+        """
+        if base_point is None:
+            return x
+        return x - base_point
+
+
+class ParallelTransport(nn.Module):
+    """Parallel transport on manifold."""
+
+    def __init__(self, dim: int, method: str = "schild"):
+        super().__init__()
+        self.dim = dim
+        self.method = method
+
+    def forward(
+        self, 
+        vector: torch.Tensor, 
+        source: torch.Tensor, 
+        target: torch.Tensor,
+        connection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Transport vector from source to target point.
+        
+        Args:
+            vector: Tangent vector to transport
+            source: Source point
+            target: Target point
+            connection: Optional Christoffel symbols
+            
+        Returns:
+            Transported vector at target point
+        """
+        if self.method == "schild":
+            # Implement Schild's ladder
+            midpoint = (source + target) / 2
+            if connection is not None:
+                # Use connection to parallel transport
+                gamma = torch.einsum("ijk,j,k->i", connection, vector, target - source)
+                return vector - gamma
+            return vector  # Default to Euclidean transport
+            
+        elif self.method == "pole":
+            # Pole ladder method
+            if connection is not None:
+                # Transport using pole construction
+                pole = source + torch.cross(vector, target - source, dim=-1)
+                gamma = torch.einsum("ijk,j,k->i", connection, vector, pole - source)
+                return vector - gamma
+            return vector
+            
+        else:
+            raise ValueError(f"Unknown transport method: {self.method}")
