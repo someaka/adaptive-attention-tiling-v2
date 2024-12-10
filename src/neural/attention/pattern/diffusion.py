@@ -144,7 +144,7 @@ class DiffusionSystem(nn.Module):
         
         # Compute sum for center value, keeping dimensions
         kernel_sum = kernel.sum(dim=(-2,-1), keepdim=True).expand_as(kernel[..., 1:2, 1:2])
-        kernel[..., 1, 1] = -kernel_sum.squeeze(-1).squeeze(-1) + 1.0
+        kernel[..., 1, 1] = -kernel_sum.squeeze(-1).squeeze(-1)  # Remove +1.0 to make diffusion faster
         
         # Prepare kernel for grouped convolution
         if isinstance(diffusion_coefficient, (float, int)):
