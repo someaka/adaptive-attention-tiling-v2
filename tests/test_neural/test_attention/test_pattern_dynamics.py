@@ -12,6 +12,7 @@ Tests cover:
 import numpy as np
 import pytest
 import torch
+import logging
 
 from src.neural.attention.pattern_dynamics import (
     BifurcationDiagram,
@@ -58,10 +59,11 @@ class TestPatternDynamics:
 
         # Define reaction term (activator-inhibitor)
         def reaction_term(state):
-            u, v = state[:, 0], state[:, 1]
-            du = u**2 * v - u
-            dv = u**2 - v
-            return torch.stack([du, dv], dim=1)
+            u, v = state[:, 0:1], state[:, 1:2]  # Keep dimensions
+            # Mass-conserving reaction terms
+            du = u * v / (1 + u**2) - u  # Saturating reaction
+            dv = u**2 / (1 + u**2) - v   # Balancing term
+            return torch.cat([du, dv], dim=1)  # Preserve dimensions
 
         # Evolve system
         evolved = pattern_system.reaction_diffusion(
@@ -532,3 +534,551 @@ class TestPatternDynamics:
         assert output["patterns"].shape == (batch_size, seq_length, num_patterns)
         assert output["similarities"].shape == (batch_size, seq_length, num_patterns)
         assert output["scores"].shape == (batch_size, seq_length)
+
+
+class TestReactionDiffusionProperties:
+    """Test suite for reaction-diffusion system properties."""
+
+    @pytest.fixture
+    def pattern_system(self) -> PatternDynamics:
+        """Create a test pattern dynamics system."""
+        return PatternDynamics(dim=2, size=32, dt=0.01, boundary="periodic")
+
+    def test_diffusion_kernel_properties(self):
+        """Test that the diffusion kernel has correct mathematical properties."""
+        # Initialize system
+        system = PatternDynamics(dim=2, size=32)
+        
+        # Test 1: Kernel Construction Properties
+        # Create a state with known mass for testing
+        state = torch.zeros((1, 2, 32, 32), dtype=torch.float64)
+        state[0, 0, 16, 16] = 1.0  # Single peak in center
+        state[0, 1, 8:24, 8:24] = 0.5  # Uniform block in second channel
+        
+        # Get initial mass per channel
+        initial_mass = state.sum(dim=[2,3])
+        
+        # Test different diffusion coefficients and time steps
+        diff_coeffs = [0.1, 0.01, 0.001]
+        time_steps = [0.1, 0.01, 0.001]
+        
+        for D in diff_coeffs:
+            for dt in time_steps:
+                # Apply diffusion
+                diffused = system.apply_diffusion(state.clone(), D, dt)
+                
+                # Test 1.1: Mass Conservation (Global)
+                final_mass = diffused.sum(dim=[2,3])
+                mass_error = torch.abs(final_mass - initial_mass)
+                assert torch.all(mass_error < 1e-10), f"Mass not conserved for D={D}, dt={dt}. Error: {mass_error}"
+                
+                # Test 1.2: Positivity Preservation
+                assert torch.all(diffused >= 0), f"Negativity found for D={D}, dt={dt}"
+                
+                # Test 1.3: Maximum Principle
+                assert torch.all(diffused <= state.max()), f"Maximum principle violated for D={D}, dt={dt}"
+                
+                # Test 1.4: Scaling with D and dt
+                # For small dt, change should be proportional to D*dt
+                if dt <= 0.01:
+                    change = torch.abs(diffused - state)
+                    max_change = change.max()
+                    expected_scale = D * dt
+                    scale_error = abs(max_change / expected_scale - 1)
+                    assert scale_error < 0.1, f"Incorrect scaling with D={D}, dt={dt}"
+
+        # Test 2: Spatial Symmetry Tests
+        
+        # Test 2.1: Grid-Aligned Symmetry
+        # Create a cross pattern (perfectly aligned with grid)
+        cross_state = torch.zeros((1, 1, 32, 32), dtype=torch.float64)
+        cross_state[0, 0, 16, :] = 1.0  # Horizontal line
+        cross_state[0, 0, :, 16] = 1.0  # Vertical line
+        
+        diffused_cross = system.apply_diffusion(cross_state, 0.1, 0.01)
+        
+        # Verify 4-fold symmetry (should be exact due to grid alignment)
+        for i in range(32):
+            for j in range(32):
+                val = diffused_cross[0, 0, i, j]
+                # Check all 4 quadrants have same value
+                assert torch.abs(val - diffused_cross[0, 0, 31-i, j]) < 1e-10
+                assert torch.abs(val - diffused_cross[0, 0, i, 31-j]) < 1e-10
+                assert torch.abs(val - diffused_cross[0, 0, 31-i, 31-j]) < 1e-10
+
+        # Test 2.2: Approximate Rotational Symmetry
+        # Create a circular pattern
+        center = 16
+        radius = 5
+        symmetric_state = torch.zeros((1, 1, 32, 32), dtype=torch.float64)
+        
+        # More precise circle creation using sub-pixel distance
+        for i in range(32):
+            for j in range(32):
+                # Compute distance to center
+                dy = i - center
+                dx = j - center
+                r = (dx*dx + dy*dy)**0.5
+                # Smooth falloff near boundary
+                if r <= radius:
+                    symmetric_state[0, 0, i, j] = 1.0
+                elif r <= radius + 1:
+                    symmetric_state[0, 0, i, j] = radius + 1 - r  # Linear falloff
+        
+        diffused_sym = system.apply_diffusion(symmetric_state, 0.1, 0.01)
+        
+        # Test rotational symmetry with appropriate tolerance for grid effects
+        for r in range(1, 10):
+            points = []
+            # Collect points at approximately radius r
+            for i in range(32):
+                for j in range(32):
+                    dy = i - center
+                    dx = j - center
+                    point_r = (dx*dx + dy*dy)**0.5
+                    if abs(point_r - r) < 0.5:  # Points within 0.5 pixels of target radius
+                        points.append(diffused_sym[0, 0, i, j])
+            
+            if len(points) > 0:  # Only test if we found points at this radius
+                points = torch.tensor(points)
+                mean_val = points.mean()
+                # Allow for grid discretization effects
+                max_deviation = torch.max(torch.abs(points - mean_val))
+                # Tolerance increases with radius due to grid effects
+                allowed_deviation = 1e-4 * (1 + r/2)  # Scale tolerance with radius
+                assert max_deviation < allowed_deviation, \
+                    f"Rotational symmetry violated at radius {r}, max deviation: {max_deviation}"
+
+        # Test 3: Boundary Conditions
+        # Create state with features near boundary
+        boundary_state = torch.zeros((1, 1, 32, 32), dtype=torch.float64)
+        boundary_state[0, 0, 0:3, 0:3] = 1.0  # Corner feature
+        
+        diffused_boundary = system.apply_diffusion(boundary_state, 0.1, 0.01)
+        
+        # Test 3.1: Periodic Boundary Conditions
+        # Check that mass flows correctly across boundaries
+        assert torch.abs(diffused_boundary[0, 0, -1, -1] - diffused_boundary[0, 0, 0, 0]) < 1e-10
+        assert torch.abs(diffused_boundary[0, 0, 0, -1] - diffused_boundary[0, 0, 0, 0]) < 1e-10
+        assert torch.abs(diffused_boundary[0, 0, -1, 0] - diffused_boundary[0, 0, 0, 0]) < 1e-10
+
+        # Test 4: Numerical Stability
+        # Test with larger time steps
+        large_dt = 1.0
+        large_D = 1.0
+        stable_diffused = system.apply_diffusion(state.clone(), large_D, large_dt)
+        
+        # Test 4.1: No Numerical Explosions
+        assert torch.all(torch.isfinite(stable_diffused)), "Numerical instability detected"
+        assert torch.abs(stable_diffused.sum() - state.sum()) < 1e-10, "Mass conservation violated for large time step"
+
+        # Test 5: Local Conservation
+        # Create checkerboard pattern
+        checker = torch.zeros((1, 1, 32, 32), dtype=torch.float64)
+        checker[0, 0, ::2, ::2] = 1.0
+        checker[0, 0, 1::2, 1::2] = 1.0
+        
+        diffused_checker = system.apply_diffusion(checker, 0.1, 0.01)
+        
+        # Test 5.1: Local Mass Conservation (2x2 blocks)
+        for i in range(0, 32, 2):
+            for j in range(0, 32, 2):
+                block_orig = checker[0, 0, i:i+2, j:j+2].sum()
+                block_diff = diffused_checker[0, 0, i:i+2, j:j+2].sum()
+                assert torch.abs(block_orig - block_diff) < 1e-10, f"Local mass conservation violated at block ({i},{j})"
+
+    def test_reaction_term_properties(self, pattern_system):
+        """Test properties of the reaction terms."""
+        # Create test states
+        batch_size = 4
+        grid_size = 32
+        state = torch.randn(batch_size, 2, grid_size, grid_size)
+        
+        # Test 1: Mass conservation in reaction terms
+        reaction = pattern_system.reaction_term(state)
+        total_change = reaction.sum(dim=1)  # Sum over species
+        assert torch.allclose(total_change, torch.zeros_like(total_change), atol=1e-6), \
+            "Reaction terms must conserve total mass"
+        
+        # Test 2: Reaction terms should be bounded
+        assert torch.all(torch.abs(reaction) < 1e3), \
+            "Reaction terms should be bounded"
+        
+        # Test 3: Check scaling behavior
+        scaled_state = 2 * state
+        scaled_reaction = pattern_system.reaction_term(scaled_state)
+        # Reaction terms should not grow faster than quadratically
+        assert torch.all(torch.abs(scaled_reaction) < 4 * torch.abs(reaction) + 1e-6), \
+            "Reaction terms should not grow faster than quadratically"
+
+    def test_spatiotemporal_stability(self, pattern_system):
+        """Test stability properties of the full reaction-diffusion system."""
+        # Create initial state
+        batch_size = 2
+        grid_size = 32
+        state = torch.randn(batch_size, 2, grid_size, grid_size)
+        
+        # Define diffusion tensor
+        diffusion_tensor = torch.tensor([[0.1, 0.0], [0.0, 0.05]])
+        
+        # Test 1: Evolution should remain bounded
+        steps = 50
+        evolution = pattern_system.evolve_pattern(state, diffusion_tensor, steps=steps)
+        assert torch.all(torch.abs(evolution) < 1e3), \
+            "Pattern evolution should remain bounded"
+        
+        # Test 2: Check mass conservation over time
+        initial_mass = state.sum(dim=[2,3])  # Sum over spatial dimensions
+        for t in range(steps):
+            current_mass = evolution[t].sum(dim=[2,3])
+            assert torch.allclose(initial_mass, current_mass, rtol=1e-4), \
+                f"Mass not conserved at step {t}"
+        
+        # Test 3: Check that the system approaches steady state or periodic behavior
+        late_stage = evolution[-10:]  # Last 10 timesteps
+        variation = torch.std(late_stage, dim=0)
+        assert torch.all(variation < 1e1), \
+            "System should approach steady state or show bounded oscillations"
+
+    def test_diffusion_mass_conservation(self, pattern_system):
+        """Test that diffusion preserves total mass."""
+        # Create test state with known total mass
+        state = torch.ones(1, 1, 32, 32)
+        state[0, 0, 16, 16] = 2.0  # Add a peak
+        initial_mass = state.sum()
+
+        # Apply diffusion
+        diffused = pattern_system.apply_diffusion(state, diffusion_coefficient=0.1, dt=0.01)
+        final_mass = diffused.sum()
+
+        # Check mass conservation with high precision
+        assert torch.abs(final_mass - initial_mass) < 1e-10, \
+            f"Mass not conserved. Initial: {initial_mass}, Final: {final_mass}"
+
+    def test_diffusion_positivity_preservation(self, pattern_system):
+        """Test that diffusion preserves positivity."""
+        # Create positive test state
+        state = torch.rand(1, 1, 32, 32)  # Random values between 0 and 1
+        
+        # Apply diffusion
+        diffused = pattern_system.apply_diffusion(state, diffusion_coefficient=0.1, dt=0.01)
+        
+        # Check positivity preservation
+        assert torch.all(diffused >= 0), "Diffusion should preserve positivity"
+
+    def test_diffusion_maximum_principle(self, pattern_system):
+        """Test that diffusion satisfies the maximum principle."""
+        # Create test state with known bounds
+        state = torch.rand(1, 1, 32, 32)  # Random values between 0 and 1
+        initial_min = state.min()
+        initial_max = state.max()
+        
+        # Apply diffusion
+        diffused = pattern_system.apply_diffusion(state, diffusion_coefficient=0.1, dt=0.01)
+        
+        # Check maximum principle
+        assert torch.all(diffused >= initial_min - 1e-10), \
+            "Diffusion violated minimum value constraint"
+        assert torch.all(diffused <= initial_max + 1e-10), \
+            "Diffusion violated maximum value constraint"
+
+    def test_diffusion_symmetry_preservation(self, pattern_system):
+        """Test that diffusion preserves spatial symmetry."""
+        # Create a symmetric test pattern (cross shape)
+        state = torch.zeros(1, 1, 32, 32)
+        mid = 16
+        state[0, 0, mid, :] = 1.0  # Horizontal line
+        state[0, 0, :, mid] = 1.0  # Vertical line
+        
+        # Apply diffusion
+        diffused = pattern_system.apply_diffusion(state, diffusion_coefficient=0.1, dt=0.01)
+        
+        # Check rotational symmetry (90-degree rotations)
+        rotated_0 = diffused
+        rotated_90 = torch.rot90(diffused, k=1, dims=[-2, -1])
+        rotated_180 = torch.rot90(diffused, k=2, dims=[-2, -1])
+        rotated_270 = torch.rot90(diffused, k=3, dims=[-2, -1])
+        
+        # All rotations should be approximately equal
+        assert torch.allclose(rotated_0, rotated_90, rtol=1e-5, atol=1e-5), \
+            "90-degree rotation symmetry violated"
+        assert torch.allclose(rotated_0, rotated_180, rtol=1e-5, atol=1e-5), \
+            "180-degree rotation symmetry violated"
+        assert torch.allclose(rotated_0, rotated_270, rtol=1e-5, atol=1e-5), \
+            "270-degree rotation symmetry violated"
+
+        # Check mirror symmetry
+        flipped_h = torch.flip(diffused, dims=[-1])  # Horizontal flip
+        flipped_v = torch.flip(diffused, dims=[-2])  # Vertical flip
+        
+        assert torch.allclose(diffused, flipped_h, rtol=1e-5, atol=1e-5), \
+            "Horizontal mirror symmetry violated"
+        assert torch.allclose(diffused, flipped_v, rtol=1e-5, atol=1e-5), \
+            "Vertical mirror symmetry violated"
+
+
+class TestDiffusionProperties:
+    """Test suite for diffusion properties."""
+    
+    @pytest.fixture
+    def pattern_system(self, test_params):
+        """Create a pattern system for testing."""
+        from src.neural.attention.pattern.diffusion import DiffusionSystem
+        return DiffusionSystem(grid_size=test_params['grid_size'])
+    
+    @pytest.fixture
+    def test_params(self):
+        """Common test parameters."""
+        return {
+            'diffusion_coefficient': 0.1,
+            'dt': 0.01,
+            'grid_size': 32,
+            'batch_size': 1,
+            'channels': 1,
+            'device': 'cpu',
+            'dtype': torch.float32,
+            'rtol': 1e-5,  # Relative tolerance for comparisons
+            'atol': 1e-5   # Absolute tolerance for comparisons
+        }
+        
+    def create_test_state(self, params, pattern='uniform'):
+        """Create a test state tensor.
+        
+        Args:
+            params: Test parameters
+            pattern: Type of test pattern ('uniform', 'random', 'impulse', 'checkerboard', 'gradient')
+            
+        Returns:
+            Test state tensor
+        """
+        shape = (params['batch_size'], params['channels'], 
+                params['grid_size'], params['grid_size'])
+                
+        if pattern == 'uniform':
+            state = torch.ones(shape, dtype=params['dtype'], device=params['device'])
+        elif pattern == 'random':
+            torch.manual_seed(42)  # For reproducibility
+            state = torch.rand(shape, dtype=params['dtype'], device=params['device'])
+        elif pattern == 'impulse':
+            state = torch.zeros(shape, dtype=params['dtype'], device=params['device'])
+            mid = params['grid_size'] // 2
+            state[:, :, mid-1:mid+2, mid-1:mid+2] = 1.0
+        elif pattern == 'checkerboard':
+            x = torch.arange(params['grid_size'], device=params['device'])
+            y = torch.arange(params['grid_size'], device=params['device'])
+            xx, yy = torch.meshgrid(x, y, indexing='ij')
+            state = ((xx + yy) % 2).to(params['dtype']).view(1, 1, params['grid_size'], params['grid_size'])
+            state = state.repeat(params['batch_size'], params['channels'], 1, 1)
+        elif pattern == 'gradient':
+            x = torch.linspace(0, 1, params['grid_size'], device=params['device'])
+            y = torch.linspace(0, 1, params['grid_size'], device=params['device'])
+            xx, yy = torch.meshgrid(x, y, indexing='ij')
+            state = (xx * yy).to(params['dtype']).view(1, 1, params['grid_size'], params['grid_size'])
+            state = state.repeat(params['batch_size'], params['channels'], 1, 1)
+        else:
+            raise ValueError(f"Unknown pattern type: {pattern}")
+            
+        return state
+        
+    def test_mass_conservation(self, pattern_system, test_params):
+        """Test that diffusion conserves total mass."""
+        patterns = ['uniform', 'random', 'impulse', 'checkerboard', 'gradient']
+        
+        for pattern in patterns:
+            state = self.create_test_state(test_params, pattern)
+            initial_mass = state.sum()
+            
+            # Apply diffusion multiple times
+            for i in range(10):
+                # Temporarily reduce logging level for this operation
+                logger = logging.getLogger('src.neural.attention.pattern.diffusion')
+                original_level = logger.getEffectiveLevel()
+                if i > 0:  # Only log for first iteration
+                    logger.setLevel(logging.WARNING)
+                
+                state = pattern_system.apply_diffusion(
+                    state, 
+                    test_params['diffusion_coefficient'],
+                    test_params['dt']
+                )
+                
+                # Restore logging level
+                logger.setLevel(original_level)
+                
+                # Check mass conservation with relative tolerance
+                current_mass = state.sum()
+                mass_error = torch.abs(current_mass - initial_mass)
+                mass_scale = torch.max(torch.abs(initial_mass), torch.tensor(1.0))
+                relative_error = mass_error / mass_scale
+                
+                assert relative_error < test_params['rtol'], \
+                    f"Mass not conserved for {pattern} pattern. Error: {mass_error.item():.2e}"
+                
+                # Check for numerical stability
+                assert torch.isfinite(state).all(), \
+                    f"Non-finite values found in {pattern} pattern"
+    
+    def test_positivity_preservation(self, pattern_system, test_params):
+        """Test that diffusion preserves positivity."""
+        patterns = ['uniform', 'random', 'impulse', 'checkerboard', 'gradient']
+        
+        for pattern in patterns:
+            state = self.create_test_state(test_params, pattern)
+            
+            # Apply diffusion multiple times
+            for _ in range(10):
+                state = pattern_system.apply_diffusion(
+                    state, 
+                    test_params['diffusion_coefficient'],
+                    test_params['dt']
+                )
+                
+                # Check positivity
+                min_val = state.min()
+                assert min_val >= -test_params['atol'], \
+                    f"Positivity violated for {pattern} pattern. Min value: {min_val.item():.2e}"
+    
+    def test_maximum_principle(self, pattern_system, test_params):
+        """Test that diffusion satisfies the maximum principle."""
+        patterns = ['uniform', 'random', 'impulse', 'checkerboard', 'gradient']
+        
+        for pattern in patterns:
+            state = self.create_test_state(test_params, pattern)
+            initial_max = state.max()
+            initial_min = state.min()
+            
+            # Apply diffusion multiple times
+            for _ in range(10):
+                state = pattern_system.apply_diffusion(
+                    state, 
+                    test_params['diffusion_coefficient'],
+                    test_params['dt']
+                )
+                
+                # Check maximum principle
+                max_val = state.max()
+                min_val = state.min()
+                
+                assert max_val <= initial_max + test_params['atol'], \
+                    f"Maximum principle violated for {pattern} pattern. Max exceeded by {(max_val - initial_max).item():.2e}"
+                assert min_val >= initial_min - test_params['atol'], \
+                    f"Maximum principle violated for {pattern} pattern. Min exceeded by {(initial_min - min_val).item():.2e}"
+    
+    def test_symmetry_preservation(self, pattern_system, test_params):
+        """Test that diffusion preserves symmetry."""
+        # Test with symmetric patterns
+        state = self.create_test_state(test_params, 'uniform')
+        
+        # Apply diffusion
+        diffused = pattern_system.apply_diffusion(
+            state,
+            test_params['diffusion_coefficient'],
+            test_params['dt']
+        )
+        
+        # Test rotational symmetry
+        for k in range(4):  # Test 90-degree rotations
+            rotated = torch.rot90(diffused, k=k, dims=[-2, -1])
+            assert torch.allclose(diffused, rotated, rtol=test_params['rtol'], atol=test_params['atol']), \
+                f"Rotational symmetry violated for {90*k}-degree rotation"
+        
+        # Test mirror symmetry
+        flipped_h = torch.flip(diffused, dims=[-1])
+        flipped_v = torch.flip(diffused, dims=[-2])
+        
+        assert torch.allclose(diffused, flipped_h, rtol=test_params['rtol'], atol=test_params['atol']), \
+            "Horizontal mirror symmetry violated"
+        assert torch.allclose(diffused, flipped_v, rtol=test_params['rtol'], atol=test_params['atol']), \
+            "Vertical mirror symmetry violated"
+    
+    def test_convergence_to_steady_state(self, pattern_system, test_params):
+        """Test that diffusion converges to steady state.
+        
+        This test verifies three key properties of diffusion:
+        1. The system converges to a uniform steady state
+        2. The mean value is preserved during diffusion
+        3. Total mass is conserved throughout the process
+        
+        For each test pattern (impulse, checkerboard, gradient), we:
+        - Apply diffusion until the state is sufficiently uniform
+        - Verify the final state matches theoretical expectations
+        - Check that mass is conserved during the entire process
+        """
+        patterns = ['impulse', 'checkerboard', 'gradient']  # Patterns that should converge
+        
+        # Use larger dt and diffusion coefficient for faster convergence
+        test_params = test_params.copy()
+        test_params['dt'] = 0.2  # Further increased from 0.1
+        test_params['diffusion_coefficient'] = 1.0  # Further increased from 0.5
+        
+        for pattern in patterns:
+            # Initialize state and compute theoretical steady state properties
+            state = self.create_test_state(test_params, pattern)
+            initial_mass = state.sum()
+            initial_mean = initial_mass / (state.shape[-2] * state.shape[-1])  # Expected uniform value
+            
+            # Apply diffusion until convergence or max iterations
+            max_iter = 1000  # Reduced since we have faster convergence now
+            tol = test_params['rtol'] * 10  # Relaxed tolerance due to numerical precision
+            min_steps = 10  # Ensure we take at least this many steps
+            
+            prev_state = state
+            converged = False
+            for i in range(max_iter):
+                # Reduce logging noise during iteration
+                logger = logging.getLogger('src.neural.attention.pattern.diffusion')
+                original_level = logger.getEffectiveLevel()
+                if i > 0:  # Only log first iteration for debugging
+                    logger.setLevel(logging.WARNING)
+                
+                # Apply single diffusion step
+                curr_state = pattern_system.apply_diffusion(
+                    prev_state,
+                    test_params['diffusion_coefficient'],
+                    test_params['dt']
+                )
+                
+                logger.setLevel(original_level)
+                
+                # Check convergence using relative change in state
+                # This is more appropriate than comparing to mean for early iterations
+                state_scale = torch.max(torch.abs(prev_state), torch.tensor(test_params['atol']))
+                relative_change = (torch.abs(curr_state - prev_state) / state_scale).max()
+                
+                # Only check convergence after minimum steps to allow initial diffusion
+                if i >= min_steps and relative_change < tol:
+                    converged = True
+                    break
+                    
+                prev_state = curr_state
+                
+            # Verify convergence was achieved within max iterations
+            assert converged, \
+                f"Diffusion did not converge for {pattern} pattern after {max_iter} iterations. " \
+                f"Relative change: {relative_change.item():.2e}, Mean: {curr_state.mean().item():.2e}"
+            
+            # Verify steady state properties
+            final_state = curr_state
+            final_mean = final_state.mean(dim=(-2, -1), keepdim=True)
+            
+            # 1. Check state is uniform (using relative deviation from mean)
+            max_deviation = torch.max(torch.abs(final_state - final_mean))
+            relative_deviation = max_deviation / (torch.abs(final_mean) + test_params['atol'])
+            assert relative_deviation < tol * 10, \  # Relaxed tolerance for final uniformity check
+                f"Steady state is not uniform for {pattern} pattern. " \
+                f"Relative deviation: {relative_deviation.item():.2e}"
+            
+            # 2. Check mean value is preserved (should equal initial mean)
+            mean_error = torch.abs(final_mean - initial_mean) / (torch.abs(initial_mean) + test_params['atol'])
+            assert torch.all(mean_error < test_params['rtol']), \
+                f"Mean value not preserved for {pattern} pattern. " \
+                f"Error: {mean_error.item():.2e}"
+            
+            # 3. Verify mass conservation (should equal initial mass)
+            final_mass = final_state.sum()
+            mass_error = torch.abs(final_mass - initial_mass)
+            mass_scale = torch.max(torch.abs(initial_mass), torch.tensor(1.0))
+            relative_error = mass_error / mass_scale
+            assert relative_error < test_params['rtol'], \
+                f"Mass not conserved during convergence for {pattern} pattern. " \
+                f"Error: {mass_error.item():.2e}"

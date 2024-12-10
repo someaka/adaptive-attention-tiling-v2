@@ -1,0 +1,2208 @@
+"""Pattern Dynamics Implementation for Neural Attention.
+
+This module implements pattern dynamics for attention mechanisms:
+- Reaction-diffusion systems for pattern formation
+- Stability analysis of attention patterns
+- Bifurcation detection and analysis
+- Pattern control mechanisms
+- Evolution optimization
+"""
+
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Callable, Union
+import numpy as np
+
+import torch
+from torch import nn
+
+
+@dataclass
+class ReactionDiffusionState:
+    """State of the reaction-diffusion system."""
+
+    activator: torch.Tensor  # Activator concentration
+    inhibitor: torch.Tensor  # Inhibitor concentration
+    gradients: Optional[torch.Tensor] = None  # Spatial gradients (optional)
+    time: float = 0.0  # Current time (default 0.0)
+
+    def sum(self, dim=None) -> torch.Tensor:
+        """Compute sum of activator and inhibitor concentrations.
+        
+        Args:
+            dim: Dimension to sum over. If None, sum over all dimensions.
+        """
+        if dim is None:
+            return self.activator.sum() + self.inhibitor.sum()
+        else:
+            return self.activator.sum(dim=dim) + self.inhibitor.sum(dim=dim)
+
+
+@dataclass
+class StabilityInfo:
+    """Information about pattern stability."""
+
+    eigenvalues: torch.Tensor  # Stability eigenvalues
+    eigenvectors: torch.Tensor  # Corresponding modes
+    growth_rates: torch.Tensor  # Mode growth rates
+    stable: bool  # Overall stability flag
+
+
+@dataclass
+class BifurcationPoint:
+    """Represents a bifurcation in pattern dynamics."""
+
+    parameter: float  # Bifurcation parameter value
+    type: str  # Type of bifurcation
+    normal_form: torch.Tensor  # Normal form coefficients
+    eigenvalues: torch.Tensor  # Critical eigenvalues
+
+
+@dataclass
+class StabilityMetrics:
+    """Metrics for pattern stability analysis."""
+    linear_stability: torch.Tensor
+    nonlinear_stability: torch.Tensor
+    lyapunov_spectrum: torch.Tensor
+    structural_stability: float
+
+
+@dataclass 
+class ControlSignal:
+    """Control signal for pattern formation."""
+    magnitude: torch.Tensor
+    direction: torch.Tensor
+    constraints: List[Callable]
+
+
+@dataclass
+class BifurcationDiagram:
+    """Bifurcation diagram for pattern dynamics."""
+    parameter_range: torch.Tensor
+    bifurcation_points: List[BifurcationPoint]
+    solution_branches: torch.Tensor
+    stability_regions: torch.Tensor
+
+
+class ReactionDiffusionSystem:
+    """Implementation of reaction-diffusion dynamics."""
+
+    def __init__(self, grid_size: int, dt: float = 0.01):
+        """Initialize reaction-diffusion system.
+        
+        Args:
+            grid_size: Size of square grid
+            dt: Time step
+        """
+        self.grid_size = grid_size
+        self.dt = dt
+        
+        # Initialize neural networks for reaction terms
+        input_size = grid_size * grid_size * 2  # Flattened size for both species
+        hidden_size = 64
+        
+        self.activator_network = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, grid_size * grid_size)
+        )
+        
+        self.inhibitor_network = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, grid_size * grid_size)
+        )
+
+        # Diffusion operators (3x3 convolution with periodic padding)
+        self.diffusion_activator = nn.Conv2d(1, 1, 3, padding=1)
+        self.diffusion_inhibitor = nn.Conv2d(1, 1, 3, padding=1)
+        
+        # Initialize diffusion kernels with normalized weights for mass conservation
+        with torch.no_grad():
+            kernel = torch.tensor([[0.05, 0.2, 0.05],
+                               [0.2, 0.0, 0.2],
+                               [0.05, 0.2, 0.05]])
+            kernel = kernel / kernel[kernel > 0].sum()  # Normalize for mass conservation
+            self.diffusion_activator.weight.data[0,0] = kernel
+            self.diffusion_inhibitor.weight.data[0,0] = kernel
+
+    def step(
+        self, state: ReactionDiffusionState, dt: float = 0.01
+    ) -> ReactionDiffusionState:
+        """Perform one step of reaction-diffusion."""
+        batch_size = state.activator.shape[0]
+        grid_size = int(np.sqrt(state.activator.shape[1]))  # Corrected to use shape[1]
+        
+        # Reshape for 2D convolution
+        activator = state.activator.reshape(batch_size, 1, grid_size, grid_size)
+        inhibitor = state.inhibitor.reshape(batch_size, 1, grid_size, grid_size)
+        
+        # Apply diffusion
+        diff_a = self.diffusion_activator(activator)
+        diff_i = self.diffusion_inhibitor(inhibitor)
+        
+        # Flatten back
+        diff_a = diff_a.reshape(batch_size, -1)
+        diff_i = diff_i.reshape(batch_size, -1)
+        
+        # Apply reaction - reshape inputs to match network dimensions
+        combined = torch.cat([diff_a, diff_i], dim=-1)  # [batch_size, grid_size * grid_size * 2]
+        reaction_a = self.activator_network(combined)  # [batch_size, grid_size * grid_size]
+        reaction_i = self.inhibitor_network(combined)  # [batch_size, grid_size * grid_size]
+        
+        # Update state
+        new_activator = state.activator + dt * (reaction_a + diff_a)
+        new_inhibitor = state.inhibitor + dt * (reaction_i + diff_i)
+        
+        # Ensure concentrations remain bounded
+        new_activator = torch.clamp(new_activator, -10.0, 10.0)
+        new_inhibitor = torch.clamp(new_inhibitor, -10.0, 10.0)
+        
+        return ReactionDiffusionState(
+            activator=new_activator,
+            inhibitor=new_inhibitor,
+            gradients=state.gradients,
+            time=state.time + dt
+        )
+
+    def apply_diffusion(
+        self,
+        state: torch.Tensor,
+        diffusion_coefficient: float,
+        dt: float
+    ) -> torch.Tensor:
+        """Apply diffusion operator to state.
+        
+        Args:
+            state: Input state tensor [batch, channels, height, width]
+            diffusion_coefficient: Diffusion coefficient
+            dt: Time step
+        
+        Returns:
+            Diffused state tensor [batch, channels, height, width]
+        """
+        # Convert to double for numerical stability
+        state = state.to(torch.float64)
+        
+        # Create symmetric diffusion kernel with exact coefficients
+        kernel = torch.tensor([
+            [0.0625, 0.125, 0.0625],
+            [0.125, 0.25, 0.125],
+            [0.0625, 0.125, 0.0625]
+        ], dtype=torch.float64, device=state.device)
+        
+        # Scale kernel by diffusion coefficient and dt
+        kernel = kernel * (diffusion_coefficient * dt)
+        
+        # Add identity for forward Euler step
+        identity = torch.zeros((3,3), dtype=torch.float64, device=state.device)
+        identity[1,1] = 1.0
+        kernel = kernel + identity
+        
+        # Normalize kernel for exact mass conservation
+        kernel = kernel / kernel.sum()
+        kernel = kernel.view(1, 1, 3, 3)
+        
+        # Store initial mass for conservation
+        initial_mass = state.sum(dim=(2,3), keepdim=True)
+        
+        # Process each channel separately with strict mass conservation
+        channels = []
+        for c in range(state.shape[1]):
+            channel = state[:,c:c+1]  # [batch, 1, height, width]
+            
+            # Apply periodic boundary conditions
+            padded = torch.nn.functional.pad(channel, (1,1,1,1), mode='circular')
+            
+            # Apply diffusion
+            diffused = torch.nn.functional.conv2d(padded, kernel, padding=0)
+            
+            # Ensure non-negativity
+            diffused = torch.clamp(diffused, min=0.0)
+            
+            channels.append(diffused)
+        
+        # Combine channels
+        diffused = torch.cat(channels, dim=1)
+        
+        # Ensure exact mass conservation across all channels
+        diffused_mass = diffused.sum(dim=(2,3), keepdim=True)
+        mass_ratio = initial_mass / (diffused_mass + 1e-15)
+        diffused = diffused * mass_ratio
+        
+        # Verify mass conservation
+        final_mass = diffused.sum(dim=(2,3), keepdim=True)
+        assert torch.allclose(initial_mass, final_mass, rtol=1e-12, atol=1e-12), \
+            f"Mass not conserved: {(initial_mass - final_mass).abs().max().item()}"
+        
+        # Convert back to original dtype
+        return diffused.to(state.dtype)
+
+    def test_convergence(
+        self,
+        state: torch.Tensor,
+        max_iter: int = 1000,
+        tol: float = 1e-6
+    ) -> bool:
+        """Test convergence to steady state.
+        
+        Args:
+            state: Initial state tensor
+            max_iter: Maximum number of iterations
+            tol: Convergence tolerance
+            
+        Returns:
+            True if converged, False otherwise
+        """
+        prev_state = state
+        
+        for i in range(max_iter):
+            # Apply diffusion
+            diffused = self.apply_diffusion(prev_state, 0.1, 0.01)
+            
+            # Check convergence
+            change = torch.norm(diffused - prev_state) / torch.norm(prev_state + 1e-10)
+            if change < tol:
+                return True
+                
+            prev_state = diffused
+            
+        return False
+
+    def reaction_term(self, state: torch.Tensor) -> torch.Tensor:
+        """Default reaction term for pattern formation.
+        
+        This implements a simple activator-inhibitor system with:
+            - Autocatalytic production of activator
+            - Linear degradation of both species
+            - Nonlinear inhibition
+            
+        Args:
+            state: Input tensor [batch, channels, height, width]
+            
+        Returns:
+            Reaction term tensor [batch, channels, height, width]
+        """
+        # Split activator and inhibitor
+        u = state[:,0:1]  # Keep dimensions
+        v = state[:,1:2]
+        
+        # Parameters for mass conservation
+        alpha = 1.0  # Production rate
+        beta = 1.0   # Saturation parameter
+        gamma = 0.5  # Linear coupling
+        
+        # Compute nonlinear terms
+        activation = alpha * (u * u) / (1.0 + beta * u * u)
+        coupling = gamma * u
+        
+        # Ensure mass conservation
+        du = activation * v - coupling
+        dv = -activation * v + coupling
+        
+        # Verify mass conservation
+        total_change = du + dv
+        assert torch.allclose(total_change, torch.zeros_like(total_change), atol=1e-6), \
+            "Reaction terms must sum to zero for mass conservation"
+        
+        # Stack and return
+        reaction = torch.cat([du, dv], dim=1)
+        
+        return reaction
+
+    def apply_reaction(
+        self,
+        state: torch.Tensor,
+        reaction_term: Optional[Callable] = None
+    ) -> torch.Tensor:
+        """Apply reaction term to state.
+        
+        Args:
+            state: Input tensor [batch, channels, height, width]
+            reaction_term: Optional reaction term function
+            
+        Returns:
+            Reacted tensor [batch, channels, height, width]
+        """
+        if reaction_term is None:
+            reaction_term = self.reaction_term
+            
+        # Apply reaction term
+        reaction = reaction_term(state)
+        
+        # Add small noise to break symmetry and promote pattern formation
+        noise = 0.001 * torch.randn_like(state)  # Reduced noise amplitude
+        
+        return state + self.dt * (reaction + noise)
+
+    def reaction_diffusion(
+        self,
+        state: Optional[Union[ReactionDiffusionState, torch.Tensor]] = None,
+        diffusion_tensor: Optional[torch.Tensor] = None,
+        reaction_term: Optional[Callable] = None,
+        *,
+        batch_size: Optional[Union[int, torch.Tensor]] = None,
+        grid_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Evolve reaction-diffusion system.
+        
+        Args:
+            state: Optional initial state. If None, random state is generated
+            diffusion_tensor: Optional 2x2 diffusion tensor
+            reaction_term: Optional reaction term function
+            batch_size: Batch size for random initialization
+            grid_size: Grid size for random initialization
+        
+        Returns:
+            Evolved state tensor [batch, channels, height, width]
+        """
+        # Handle default parameters
+        if grid_size is None:
+            grid_size = self.grid_size
+        if batch_size is None:
+            batch_size = 1
+        if diffusion_tensor is None:
+            diffusion_tensor = torch.tensor([[0.1, 0.0], [0.0, 0.05]], device=state.device if state is not None else 'cpu')
+        if reaction_term is None:
+            reaction_term = self.reaction_term
+            
+        # Initialize state if not provided
+        if state is None:
+            state = 0.5 + 0.01 * torch.randn(batch_size, 2, grid_size, grid_size)  # Reduced initial noise
+        elif isinstance(state, ReactionDiffusionState):
+            state = torch.stack([state.activator, state.inhibitor], dim=1)
+            
+        # Ensure proper shape [batch, channels, height, width]
+        if state.dim() == 3:
+            state = state.unsqueeze(1)
+            
+        # Log initial state properties
+        print(f"\nInitial state shape: {state.shape}")
+        print(f"Initial state range: [{state.min():.4f}, {state.max():.4f}]")
+        
+        # Store initial mass per channel and batch
+        initial_mass = state.sum(dim=[2,3], keepdim=True)  # [batch, channel, 1, 1]
+        print(f"Initial mass per channel:\n{initial_mass.squeeze()}")
+            
+        # Apply reaction step first
+        reacted = self.apply_reaction(state, reaction_term)
+        
+        # Conserve mass after reaction
+        current_mass = reacted.sum(dim=[2,3], keepdim=True)
+        mass_ratio = initial_mass / (current_mass + torch.finfo(current_mass.dtype).eps)
+        reacted = reacted * mass_ratio
+        
+        print(f"\nAfter reaction (mass-conserved):")
+        print(f"Reacted state range: [{reacted.min():.4f}, {reacted.max():.4f}]")
+        print(f"Reacted mass per channel:\n{reacted.sum(dim=[2,3], keepdim=True).squeeze()}")
+        
+        # Apply diffusion step
+        diffused = torch.zeros_like(reacted)
+        for i in range(reacted.shape[1]):  # For each species
+            for j in range(reacted.shape[1]):  # Cross-diffusion terms
+                if diffusion_tensor[i,j] != 0:  # Skip zero coefficients
+                    diffused_ij = self.apply_diffusion(reacted[:,j:j+1], diffusion_tensor[i,j], self.dt)
+                    diffused[:,i:i+1] += diffused_ij
+                    print(f"\nDiffusion from species {j} to {i}:")
+                    print(f"Diffusion coefficient: {diffusion_tensor[i,j]:.4f}")
+                    print(f"Mass before diffusion: {reacted[:,j:j+1].sum():.4f}")
+                    print(f"Mass after diffusion: {diffused_ij.sum():.4f}")
+
+        # Conserve mass after diffusion
+        current_mass = diffused.sum(dim=[2,3], keepdim=True)
+        mass_ratio = initial_mass / (current_mass + torch.finfo(current_mass.dtype).eps)
+        diffused = diffused * mass_ratio
+
+        print(f"\nAfter diffusion (mass-conserved):")
+        print(f"Diffused state range: [{diffused.min():.4f}, {diffused.max():.4f}]")
+        print(f"Diffused mass per channel:\n{diffused.sum(dim=[2,3], keepdim=True).squeeze()}")
+        
+        # Combine reaction and diffusion effects with proper scaling
+        state = reacted + diffused
+        
+        # Final mass conservation check
+        current_mass = state.sum(dim=[2,3], keepdim=True)
+        mass_ratio = initial_mass / (current_mass + torch.finfo(current_mass.dtype).eps)
+        state = state * mass_ratio
+        
+        # Ensure concentrations remain bounded and positive
+        state = torch.clamp(state, 0.0, 10.0)
+        
+        # Log final state
+        print(f"\nFinal state:")
+        print(f"State range: [{state.min():.4f}, {state.max():.4f}]")
+        print(f"Final mass per channel:\n{state.sum(dim=[2,3], keepdim=True).squeeze()}")
+        print(f"Mass conservation error: {(state.sum(dim=[2,3]) - initial_mass.squeeze()).abs().max():.4e}")
+        
+        return state
+
+    def apply_reaction_diffusion(
+        self, 
+        state: torch.Tensor,
+        diffusion_tensor: torch.Tensor,
+        reaction_term: Optional[Callable] = None,
+        grid_size: int = 32,
+        batch_size: int = 1,
+    ) -> torch.Tensor:
+        """Apply reaction-diffusion dynamics to a state.
+        
+        Args:
+            state: Input state tensor [batch, channels, height, width]
+            diffusion_tensor: Diffusion coefficients
+            reaction_term: Optional reaction term function
+            grid_size: Size of spatial grid
+            batch_size: Batch size
+        
+        Returns:
+            Evolved state tensor [batch, channels, height, width]
+        """
+        # Handle scalar diffusion coefficient
+        if isinstance(diffusion_tensor, (int, float)):
+            diffusion_tensor = torch.eye(2) * diffusion_tensor
+    
+        # Ensure proper tensor dimensions
+        if state.dim() == 3:  # [batch, height, width]
+            state = state.unsqueeze(1)  # Add channel dimension
+            
+        # Apply reaction-diffusion step
+        return self.reaction_diffusion(
+            state,
+            diffusion_tensor,
+            reaction_term,
+            grid_size=grid_size,
+            batch_size=batch_size
+        )
+
+    def evolve_pattern(
+        self,
+        state: torch.Tensor,
+        diffusion_tensor: torch.Tensor,
+        reaction_term: Optional[Callable] = None,
+        steps: int = 100
+    ) -> torch.Tensor:
+        """Evolve pattern over time.
+        
+        Args:
+            state: Initial state [batch_size, channels, height, width]
+            diffusion_tensor: Diffusion coefficients [channels, channels]
+            reaction_term: Optional reaction term function
+            steps: Number of evolution steps
+            
+        Returns:
+            Evolution tensor [steps, batch, channels, height, width]
+        """
+        # Ensure state has correct dimensions
+        if state.dim() == 3:  # [batch, height, width]
+            state = state.unsqueeze(1)  # [batch, channels, height, width]
+        elif state.dim() == 2:  # [height, width]
+            state = state.unsqueeze(0).unsqueeze(0)  # [1, channels, height, width]
+        
+        # Handle scalar diffusion coefficient
+        if isinstance(diffusion_tensor, (int, float)):
+            diffusion_tensor = torch.eye(2) * diffusion_tensor
+    
+        # Get dimensions
+        batch_size = state.shape[0]
+        channels = 2  # Fixed for reaction-diffusion
+        grid_size = state.shape[-1]
+    
+        # Initialize evolution tensor
+        evolution = torch.zeros(steps, batch_size, channels, grid_size, grid_size)
+        evolution[0] = state
+    
+        # Evolve system
+        current = state
+        for t in range(1, steps):
+            current = self.apply_reaction_diffusion(
+                current,
+                diffusion_tensor,
+                reaction_term,
+                grid_size=grid_size,
+                batch_size=batch_size
+            )
+            evolution[t] = current
+    
+        return evolution
+
+    def detect_pattern_formation(self, time_evolution: torch.Tensor) -> bool:
+        """Detect if stable patterns have formed.
+        
+        Args:
+            time_evolution: Evolution tensor [steps, batch, channels, height, width]
+            
+        Returns:
+            True if stable patterns detected
+        """
+        if not isinstance(time_evolution, torch.Tensor):
+            raise ValueError("time_evolution must be a tensor")
+            
+        if time_evolution.dim() != 5:
+            raise ValueError(f"time_evolution must have 5 dimensions, got {time_evolution.dim()}")
+            
+        # Compute spatial variation over time
+        spatial_var = time_evolution.var(dim=[3, 4])  # [steps, batch, channels]
+        
+        # Compute temporal variation of spatial patterns
+        temporal_var = torch.diff(spatial_var, dim=0)  # [steps-1, batch, channels]
+        
+        # Patterns are stable if temporal variation decreases
+        stability = torch.abs(temporal_var[-10:]).mean() < 0.01
+        
+        # And if spatial variation is significant
+        pattern_formed = spatial_var[-1].mean() > 0.1
+        
+        return bool(stability and pattern_formed)
+
+    def stability_analysis(
+        self,
+        fixed_point: Union[ReactionDiffusionState, torch.Tensor],
+        perturbation: torch.Tensor,
+    ) -> StabilityMetrics:
+        """Analyze stability around fixed point.
+        
+        Args:
+            fixed_point: Fixed point state
+            perturbation: Small perturbation tensor
+            
+        Returns:
+            StabilityMetrics object
+        """
+        # Convert to tensor if needed
+        if isinstance(fixed_point, ReactionDiffusionState):
+            state = torch.cat([fixed_point.activator, fixed_point.inhibitor], dim=1)
+        else:
+            state = fixed_point
+
+        # Compute linear stability
+        state_plus = state + perturbation
+        state_minus = state - perturbation
+        
+        # Evolution with reaction-diffusion
+        evolved_plus = self.apply_reaction_diffusion(
+            state_plus,
+            torch.eye(2) * 0.1,  # Default diffusion tensor
+            grid_size=state.shape[2],
+            batch_size=state.shape[0]
+        )
+        
+        evolved_minus = self.apply_reaction_diffusion(
+            state_minus,
+            torch.eye(2) * 0.1,
+            grid_size=state.shape[2],
+            batch_size=state.shape[0]
+        )
+        
+        # Approximate Jacobian
+        jacobian = (evolved_plus - evolved_minus) / (2 * perturbation)
+        
+        # Compute eigenvalues for linear stability
+        linear_stability = torch.linalg.eigvals(jacobian.reshape(state.shape[0], -1, -1))
+        
+        # Compute nonlinear stability
+        nonlinear_stability = self._compute_nonlinear_stability(state, perturbation)
+        
+        # Compute Lyapunov spectrum
+        lyapunov_spectrum = self.compute_lyapunov_spectrum(state)
+        
+        # Compute structural stability
+        structural_stability = self.test_structural_stability(
+            state,
+            lambda x: self.reaction_term(x)  # Use default reaction term
+        )
+        
+        return StabilityMetrics(
+            linear_stability=linear_stability,
+            nonlinear_stability=nonlinear_stability,
+            lyapunov_spectrum=lyapunov_spectrum,
+            structural_stability=structural_stability
+        )
+
+    def compute_lyapunov_spectrum(self, pattern: torch.Tensor) -> torch.Tensor:
+        """Compute Lyapunov spectrum."""
+        # Use stability eigenvalues as approximation
+        state = ReactionDiffusionState(
+            activator=pattern[:, 0],
+            inhibitor=pattern[:, 1],
+            gradients=torch.zeros_like(pattern),
+            time=0.0
+        )
+        info = self.stability.analyze_stability(state)
+        return info.eigenvalues.real
+
+    def test_structural_stability(
+        self,
+        pattern: torch.Tensor,
+        perturbed_reaction: Callable
+    ) -> float:
+        """Test structural stability under perturbation."""
+        # Compare original and perturbed trajectories
+        original = self.evolve_pattern(pattern, torch.eye(2), lambda x: x)
+        perturbed = self.evolve_pattern(pattern, torch.eye(2), perturbed_reaction)
+        
+        difference = torch.norm(original - perturbed)
+        return 1.0 / (1.0 + difference)
+
+    def bifurcation_analysis(
+        self,
+        pattern: torch.Tensor,
+        parameterized_reaction: Callable,
+        parameter_range: torch.Tensor
+    ) -> BifurcationDiagram:
+        """Analyze bifurcations."""
+        # Evolve system for each parameter
+        states = []
+        for param in parameter_range:
+            evolved = self.evolve_pattern(
+                pattern,
+                torch.eye(2),
+                lambda x: parameterized_reaction(x, param)
+            )
+            states.append(evolved[-1])
+
+        # Detect bifurcations
+        bifurcations = self.bifurcation.detect_bifurcations(states, parameter_range)
+
+        return BifurcationDiagram(
+            parameter_range=parameter_range,
+            bifurcation_points=bifurcations,
+            solution_branches=torch.stack(states),
+            stability_regions=torch.ones_like(parameter_range)
+        )
+
+    def compute_normal_form(self, bifurcation: BifurcationPoint) -> torch.Tensor:
+        """Compute normal form coefficients."""
+        return bifurcation.normal_form
+
+    def pattern_control(
+        self,
+        current: Union[ReactionDiffusionState, torch.Tensor],
+        target: Union[ReactionDiffusionState, torch.Tensor],
+        constraints: Optional[List[Callable]] = None,
+    ) -> ControlSignal:
+        """Compute control signal to drive system toward target pattern.
+        
+        Args:
+            current: Current state
+            target: Target state
+            constraints: Optional list of constraint functions
+            
+        Returns:
+            Control signal tensor
+        """
+        # Convert states to tensors if needed
+        if isinstance(current, ReactionDiffusionState):
+            current_state = torch.cat([current.activator, current.inhibitor], dim=1)
+        else:
+            current_state = current
+            
+        if isinstance(target, ReactionDiffusionState):
+            target_state = torch.cat([target.activator, target.inhibitor], dim=1)
+        else:
+            target_state = target
+            
+        # Flatten spatial dimensions
+        current_flat = current_state.reshape(current_state.shape[0], -1)
+        target_flat = target_state.reshape(target_state.shape[0], -1)
+        
+        # Compute control direction
+        direction = target_flat - current_flat
+        direction = direction / (direction.norm(dim=1, keepdim=True) + 1e-8)
+        
+        # Compute control magnitude based on distance
+        distance = (target_flat - current_flat).norm(dim=1, keepdim=True)
+        magnitude = torch.clamp(distance, 0.0, 1.0)
+        
+        # Apply constraints if provided
+        if constraints:
+            for constraint in constraints:
+                # Project control to satisfy constraint
+                constraint_grad = torch.autograd.functional.jacobian(
+                    constraint, current_flat
+                )
+                direction = direction - torch.einsum(
+                    'bi,bij->bj',
+                    direction, constraint_grad
+                )
+                direction = direction / (direction.norm(dim=1, keepdim=True) + 1e-8)
+        
+        # Reshape control signal to match input dimensions
+        control = (magnitude.unsqueeze(-1) * direction).reshape(current_state.shape)
+        
+        return ControlSignal(
+            magnitude=magnitude.reshape(current_state.shape[0], 1, 1, 1),
+            direction=direction.reshape(current_state.shape),
+            constraints=constraints or []
+        )
+
+    def apply_control(
+        self,
+        pattern: torch.Tensor,
+        control: ControlSignal
+    ) -> torch.Tensor:
+        """Apply control signal to pattern."""
+        # Apply control while respecting constraints
+        controlled = pattern + control.magnitude * control.direction.reshape(pattern.shape)
+        
+        # Project onto constraint manifold
+        for constraint in control.constraints:
+            violation = constraint(controlled)
+            controlled = controlled - violation * control.direction.reshape(pattern.shape)
+            
+        return controlled
+
+    def _compute_nonlinear_stability(
+        self,
+        pattern: torch.Tensor,
+        perturbation: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute nonlinear stability metric."""
+        # Evolve both original and perturbed patterns
+        original = self.evolve_pattern(pattern, torch.eye(2), lambda x: x)
+        perturbed = self.evolve_pattern(pattern + perturbation, torch.eye(2), lambda x: x)
+        
+        # Compute maximal deviation
+        difference = torch.norm(original - perturbed)
+        return -torch.log(difference.max())
+
+    def find_reaction_fixed_points(
+        self,
+        state: torch.Tensor
+    ) -> List[torch.Tensor]:
+        """Find fixed points of the reaction term."""
+        # Sample points in phase space
+        u_range = torch.linspace(-2, 2, 100)
+        v_range = torch.linspace(-2, 2, 100)
+        U, V = torch.meshgrid(u_range, v_range)
+        points = torch.stack([U, V], dim=0)
+        
+        # Compute reaction term
+        du = points[0]**2 * points[1] - points[0]
+        dv = points[0]**2 - points[1]
+        reaction = torch.stack([du, dv], dim=0)
+        
+        # Find zeros
+        zeros = torch.where(torch.norm(reaction, dim=0) < 0.1)
+        fixed_points = [points[:, i, j] for i, j in zip(*zeros)]
+        
+        return fixed_points
+
+    def evolve_spatiotemporal(
+        self,
+        initial: torch.Tensor,
+        coupling: Callable,
+        t_span: List[float],
+        steps: int = 100
+    ) -> List[torch.Tensor]:
+        """Evolve pattern with space-time coupling."""
+        evolution = [initial]
+        current = initial
+        
+        # Time points
+        times = torch.linspace(t_span[0], t_span[1], steps)
+        dt = times[1] - times[0]
+        
+        for t in times:
+            # Apply diffusion
+            diffused = self.apply_diffusion(current, 0.1, dt)
+            
+            # Apply reaction with coupling
+            coupled = diffused + coupling(diffused, t)
+            reacted = self.apply_reaction(coupled)
+            
+            # Update state
+            current = reacted
+            evolution.append(current)
+            
+        return evolution
+
+    def find_spatiotemporal_symmetries(
+        self,
+        evolution: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> torch.Tensor:
+        """Find symmetries in space-time evolution.
+        
+        Args:
+            evolution: Evolution tensor [steps, batch, channels, height, width]
+            or list of tensors
+        
+        Returns:
+            Symmetry tensor [batch_size, num_symmetries]
+        """
+        # Convert list to tensor if needed
+        if isinstance(evolution, list):
+            evolution = torch.stack(evolution)
+    
+        # Ensure correct dimensions
+        if evolution.dim() == 4:  # [steps, batch, height, width]
+            evolution = evolution.unsqueeze(2)  # Add channel dimension
+    
+        # Get dimensions
+        steps, batch_size = evolution.shape[:2]
+    
+        # Compute temporal correlations
+        temporal_corr = torch.zeros(batch_size, steps)
+        for t in range(steps):
+            temporal_corr[:, t] = torch.mean(
+                (evolution[t] * evolution[0]).reshape(batch_size, -1),
+                dim=1
+            )
+    
+        # Find peaks in correlations
+        peaks = torch.zeros(batch_size, steps, dtype=bool)
+        for b in range(batch_size):
+            for t in range(1, steps-1):
+                if (temporal_corr[b,t] > temporal_corr[b,t-1] and 
+                    temporal_corr[b,t] > temporal_corr[b,t+1]):
+                    peaks[b,t] = True
+    
+        # Count symmetries
+        num_symmetries = peaks.sum(dim=1)
+    
+        return num_symmetries.float()
+
+    def classify_pattern(
+        self,
+        evolution: List[torch.Tensor]
+    ) -> str:
+        """Classify spatiotemporal pattern type.
+        
+        Args:
+            evolution: List of state tensors over time
+            
+        Returns:
+            Pattern type as string: "stationary", "periodic", "quasi-periodic", or "chaotic"
+        """
+        # Convert list to tensor [time, batch, channels, height, width]
+        trajectory = torch.stack(evolution)
+        
+        # Compute time differences and norms
+        diff = torch.diff(trajectory, dim=0)
+        norm = torch.norm(diff.reshape(len(evolution)-1, -1), dim=1)
+        
+        # Compute mean and std of differences
+        mean_diff = torch.mean(norm)
+        std_diff = torch.std(norm)
+        
+        # Compute temporal autocorrelation
+        n = len(evolution)
+        corr = torch.zeros(n//2)
+        for t in range(n//2):
+            corr[t] = torch.mean(
+                (trajectory[t:] * trajectory[:-t if t > 0 else None]).reshape(n-t, -1),
+                dim=1
+            ).mean()
+        
+        # Normalize correlation
+        corr = corr / corr[0]
+        
+        # Find peaks in correlation
+        peaks = []
+        for t in range(1, len(corr)-1):
+            if corr[t] > corr[t-1] and corr[t] > corr[t+1]:
+                peaks.append(t)
+                
+        # Classify based on peaks and variability
+        if mean_diff < 0.01:  # Very small changes
+            return "stationary"
+        elif len(peaks) == 0:  # No periodicity
+            if std_diff / mean_diff > 0.5:  # High variability
+                return "chaotic"
+            else:
+                return "stationary"
+        elif len(peaks) == 1:  # Single period
+            return "periodic"
+        else:  # Multiple periods
+            return "quasi-periodic"
+
+    def estimate_embedding_dimension(
+        self,
+        evolution: List[torch.Tensor]
+    ) -> int:
+        """Estimate embedding dimension of attractor."""
+        # Convert to tensor and flatten spatial dimensions
+        trajectory = torch.stack(evolution)
+        flat = trajectory.reshape(len(evolution), -1)
+        
+        # Perform SVD
+        _, s, _ = torch.linalg.svd(flat)
+        
+        # Count significant singular values
+        return torch.sum(s > 0.1 * s[0]).item()
+
+    def control_energy(
+        self,
+        control: ControlSignal
+    ) -> float:
+        """Compute control energy."""
+        return torch.norm(control.magnitude * control.direction).item()
+
+    def test_reachability(
+        self,
+        current: torch.Tensor,
+        target: torch.Tensor
+    ) -> bool:
+        """Test if target is reachable from current state."""
+        # Create state
+        state = ReactionDiffusionState(
+            activator=current[:, 0],
+            inhibitor=current[:, 1],
+            gradients=torch.zeros_like(current),
+            time=0.0
+        )
+        
+        # Get control
+        control = self.controller.compute_control(state, target.reshape(-1))
+        
+        # Check if control can reach target
+        controlled = current + control.reshape(current.shape)
+        return torch.allclose(controlled, target, rtol=0.1)
+
+    def find_homogeneous_state(
+        self,
+        initial_guess: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Find homogeneous steady state using Newton's method."""
+        if initial_guess is None:
+            initial_guess = torch.zeros(self.dim)
+            
+        def reaction_term(x):
+            # Default reaction term (activator-inhibitor)
+            u, v = x[0], x[1]
+            du = u**2 * v - u
+            dv = u**2 - v
+            return torch.stack([du, dv])
+            
+        # Newton iteration
+        x = initial_guess
+        for _ in range(100):
+            fx = reaction_term(x)
+            if torch.norm(fx) < 1e-6:
+                break
+                
+            # Compute Jacobian
+            h = 1e-6
+            jac = torch.zeros(self.dim, self.dim)
+            for i in range(self.dim):
+                x_plus = x.clone()
+                x_plus[i] += h
+                jac[:, i] = (reaction_term(x_plus) - fx) / h
+                
+            # Update
+            dx = torch.linalg.solve(jac, -fx)
+            x = x + dx
+            
+        return x.reshape(1, self.dim, 1, 1).repeat(1, 1, self.size, self.size)
+
+    def generate_target_pattern(
+        self,
+        batch_size: int,
+        grid_size: int,
+        num_species: int = 2
+    ) -> torch.Tensor:
+        """Generate a target pattern for testing control systems.
+        
+        Args:
+            batch_size: Number of patterns to generate
+            grid_size: Size of each spatial dimension
+            num_species: Number of chemical species
+            
+        Returns:
+            Target pattern tensor of shape [batch_size, num_species, grid_size, grid_size]
+        """
+        # Generate random pattern
+        pattern = torch.randn(batch_size, num_species, grid_size, grid_size)
+        
+        # Apply smoothing to make it more realistic
+        kernel = torch.ones(1, 1, 3, 3) / 9.0
+        smoothed = []
+        for i in range(num_species):
+            species = pattern[:, i:i+1]  # Keep batch and channel dims
+            smoothed.append(nn.functional.conv2d(species, kernel, padding=1))
+        pattern = torch.cat(smoothed, dim=1)
+        
+        # Ensure concentrations are bounded
+        pattern = torch.clamp(pattern, -self.max_concentration, self.max_concentration)
+        
+        return pattern
+
+    def spatiotemporal_evolution(
+        self,
+        initial_state: Union[ReactionDiffusionState, torch.Tensor],
+        steps: int = 100,
+        *,
+        diffusion_tensor: Optional[torch.Tensor] = None,
+        reaction_term: Optional[Callable] = None,
+    ) -> torch.Tensor:
+        """Compute spatiotemporal evolution of pattern.
+        
+        Args:
+            initial_state: Initial state
+            steps: Number of time steps
+            diffusion_tensor: Optional diffusion tensor
+            reaction_term: Optional reaction term
+        
+        Returns:
+            Evolution tensor [steps, batch, channels, height, width]
+        """
+        # Convert initial state to tensor if needed
+        if isinstance(initial_state, ReactionDiffusionState):
+            state = torch.stack([initial_state.activator, initial_state.inhibitor], dim=1)
+        else:
+            state = initial_state
+        
+        # Default diffusion tensor if not provided
+        if diffusion_tensor is None:
+            diffusion_tensor = torch.eye(2)
+        
+        # Evolve system
+        evolution = []
+        current = state
+        
+        for _ in range(steps):
+            evolved = self.apply_reaction_diffusion(
+                current,
+                diffusion_tensor,
+                reaction_term,
+                grid_size=state.shape[-1],
+                batch_size=state.shape[0]
+            )
+            evolution.append(evolved)
+            current = evolved
+        
+        # Stack along time dimension
+        return torch.stack(evolution)
+
+
+class StabilityAnalyzer:
+    """Analysis of pattern stability."""
+
+    def __init__(self, input_dim: int, num_modes: int = 8, hidden_dim: int = 64):
+        self.input_dim = input_dim
+        self.num_modes = num_modes
+        self.hidden_dim = hidden_dim
+
+        # Stability analysis networks
+        self.stability_network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim * 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, num_modes * 2),
+        )
+
+        # Mode decomposition
+        self.mode_analyzer = nn.Sequential(
+            nn.Linear(input_dim, num_modes), nn.Softmax(dim=-1)
+        )
+
+    def analyze_stability(self, state: ReactionDiffusionState) -> StabilityInfo:
+        """Analyze stability of current pattern."""
+        # Combine state information 
+        state_vector = torch.cat([state.activator.mean(0), state.inhibitor.mean(0)])
+
+        # Compute stability matrix
+        stability = self.stability_network(state_vector)
+        stability = stability.reshape(self.num_modes, 2, 2)
+
+        # Compute eigendecomposition for each mode
+        eigenvalues = []
+        eigenvectors = []
+        for mode_matrix in stability:
+            evals, evecs = torch.linalg.eigh(mode_matrix)
+            eigenvalues.append(evals)
+            eigenvectors.append(evecs)
+
+        eigenvalues = torch.stack(eigenvalues)
+        eigenvectors = torch.stack(eigenvectors)
+
+        # Analyze growth rates for different modes
+        growth_rates = self.mode_analyzer(state_vector)
+
+        # Check stability criteria
+        stable = torch.all(eigenvalues.real < 0)
+
+        return StabilityInfo(
+            eigenvalues=eigenvalues,
+            eigenvectors=eigenvectors,
+            growth_rates=growth_rates,
+            stable=stable
+        )
+
+
+class BifurcationDetector:
+    """Detection and analysis of bifurcations."""
+
+    def __init__(self, input_dim: int, param_range: Tuple[float, float], hidden_dim: int = 64):
+        self.input_dim = input_dim
+        self.param_range = param_range
+        self.hidden_dim = hidden_dim
+
+        # Bifurcation detection network
+        self.detector = nn.Sequential(
+            nn.Linear(input_dim + 1, hidden_dim * 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, 4),  # [type, strength, re(λ), im(λ)]
+        )
+
+        # Normal form computation
+        self.normal_form = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim * 2),
+            nn.Tanh(),
+            nn.Linear(hidden_dim * 2, 3),  # Up to cubic terms
+        )
+
+    def detect_bifurcations(
+        self, states: List[ReactionDiffusionState], parameters: torch.Tensor
+    ) -> List[BifurcationPoint]:
+        """Detect bifurcations in parameter range."""
+        bifurcations = []
+
+        for state, param in zip(states, parameters):
+            # Combine state and parameter
+            state_vector = torch.cat(
+                [state.activator.mean(0), state.inhibitor.mean(0), param.unsqueeze(0)]
+            )
+
+            # Analyze bifurcation
+            detection = self.detector(state_vector)
+            
+            # Check bifurcation strength threshold
+            if detection[1] > 0.5:
+                # Get bifurcation type
+                bif_type = self._classify_bifurcation(detection)
+                
+                # Compute normal form coefficients
+                normal_form = self.normal_form(state_vector)
+                
+                # Create bifurcation point
+                bifurcations.append(
+                    BifurcationPoint(
+                        parameter=param.item(),
+                        type=bif_type,
+                        normal_form=normal_form,
+                        eigenvalues=detection[2:],
+                    )
+                )
+
+        return bifurcations
+
+    def _classify_bifurcation(self, detection: torch.Tensor) -> str:
+        """Classify type of bifurcation based on eigenvalues."""
+        # Get real and imaginary parts
+        re_lambda = detection[2]
+        im_lambda = detection[3]
+        
+        # Classify based on eigenvalue structure
+        if torch.abs(im_lambda) > 0.1:
+            return "hopf"  # Complex conjugate pair crossing
+        elif re_lambda > 0:
+            if detection[0].argmax() == 2:
+                return "pitchfork"  # Symmetry-breaking
+            else:
+                return "saddle-node"  # Tangent bifurcation
+        else:
+            return "transcritical"  # Exchange of stability
+
+
+class PatternController:
+    """Control of pattern formation and evolution."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        output_dim: int = 64,
+        control_dim: int = 4
+    ):
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.control_dim = control_dim
+
+        # Control policy network
+        self.network = nn.Sequential(
+            nn.Linear(input_dim * 2, hidden_dim * 2),  # *2 for both current and target states
+            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, input_dim),  # Output control signal matching input dimension
+        )
+
+        # Value estimation
+        self.value = nn.Sequential(
+            nn.Linear(input_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def compute_control(self, state: ReactionDiffusionState, target: torch.Tensor) -> torch.Tensor:
+        """Compute control signal to drive system toward target state.
+        
+        Args:
+            state: Current state (ReactionDiffusionState)
+            target: Target state tensor
+        
+        Returns:
+            Control signal tensor
+        """
+        # Flatten and concatenate activator and inhibitor
+        batch_size = state.activator.shape[0]
+        flattened_state = torch.cat([
+            state.activator.reshape(batch_size, -1),
+            state.inhibitor.reshape(batch_size, -1)
+        ], dim=1)
+        
+        # Concatenate with target state
+        combined = torch.cat([flattened_state, target.reshape(batch_size, -1)], dim=1)
+        
+        # Compute control signal
+        control = self.network(combined)
+        
+        # Reshape to match input state dimensions
+        grid_size = int(np.sqrt(control.shape[1] // 2))
+        control = control.reshape(batch_size, 2, grid_size, grid_size)
+        
+        return control
+
+
+class PatternDynamics:
+    """Complete pattern dynamics system."""
+
+    def __init__(
+        self, 
+        dim: int,
+        size: int,
+        dt: float = 0.01,
+        boundary: str = "periodic",
+        hidden_dim: int = 64,
+        num_modes: int = 8,
+        param_range: Tuple[float, float] = (0.0, 1.0),
+    ):
+        self.dim = dim
+        self.size = size
+        self.dt = dt
+        self.boundary = boundary
+        self.max_concentration = 10.0
+        
+        # Initialize subsystems
+        self.reaction_diffusion_system = ReactionDiffusionSystem(
+            grid_size=size,
+            dt=dt
+        )
+        self.stability = StabilityAnalyzer(
+            input_dim=dim * size * 2,
+            num_modes=num_modes,
+            hidden_dim=hidden_dim
+        )
+        self.bifurcation = BifurcationDetector(
+            input_dim=dim * size * 2,
+            param_range=param_range,
+            hidden_dim=hidden_dim
+        )
+        self.controller = PatternController(
+            input_dim=dim * size * 2,
+            hidden_dim=hidden_dim,
+            output_dim=dim * size * 2
+        )
+
+    def apply_diffusion(
+        self,
+        state: torch.Tensor,
+        diffusion_coefficient: float,
+        dt: float
+    ) -> torch.Tensor:
+        """Apply diffusion operator.
+        
+        Args:
+            state: Input tensor [batch, channels, height, width]
+            diffusion_coefficient: Diffusion coefficient
+            dt: Time step
+            
+        Returns:
+            Diffused tensor [batch, channels, height, width]
+        """
+        # Convert to double for numerical stability
+        state = state.to(torch.float64)
+        
+        # Create symmetric diffusion kernel with exact coefficients
+        kernel = torch.tensor([
+            [0.0625, 0.125, 0.0625],
+            [0.125, 0.25, 0.125],
+            [0.0625, 0.125, 0.0625]
+        ], dtype=torch.float64, device=state.device)
+        
+        # Scale kernel by diffusion coefficient and dt
+        kernel = kernel * (diffusion_coefficient * dt)
+        
+        # Add identity for forward Euler step
+        identity = torch.zeros((3,3), dtype=torch.float64, device=state.device)
+        identity[1,1] = 1.0
+        kernel = kernel + identity
+        
+        # Normalize kernel for exact mass conservation
+        kernel = kernel / kernel.sum()
+        kernel = kernel.view(1, 1, 3, 3)
+        
+        # Store initial mass for conservation
+        initial_mass = state.sum(dim=(2,3), keepdim=True)
+        
+        # Process each channel separately with strict mass conservation
+        channels = []
+        for c in range(state.shape[1]):
+            channel = state[:,c:c+1]  # [batch, 1, height, width]
+            
+            # Apply periodic boundary conditions
+            padded = torch.nn.functional.pad(channel, (1,1,1,1), mode='circular')
+            
+            # Apply diffusion
+            diffused = torch.nn.functional.conv2d(padded, kernel, padding=0)
+            
+            # Ensure non-negativity
+            diffused = torch.clamp(diffused, min=0.0)
+            
+            channels.append(diffused)
+        
+        # Combine channels
+        diffused = torch.cat(channels, dim=1)
+        
+        # Ensure exact mass conservation across all channels
+        diffused_mass = diffused.sum(dim=(2,3), keepdim=True)
+        mass_ratio = initial_mass / (diffused_mass + 1e-15)
+        diffused = diffused * mass_ratio
+        
+        # Verify mass conservation
+        final_mass = diffused.sum(dim=(2,3), keepdim=True)
+        assert torch.allclose(initial_mass, final_mass, rtol=1e-12, atol=1e-12), \
+            f"Mass not conserved: {(initial_mass - final_mass).abs().max().item()}"
+        
+        # Convert back to original dtype
+        return diffused.to(state.dtype)
+
+    def test_convergence(
+        self,
+        state: torch.Tensor,
+        max_iter: int = 1000,
+        tol: float = 1e-6
+    ) -> bool:
+        """Test convergence to steady state.
+        
+        Args:
+            state: Initial state tensor
+            max_iter: Maximum number of iterations
+            tol: Convergence tolerance
+            
+        Returns:
+            True if converged, False otherwise
+        """
+        prev_state = state
+        
+        for i in range(max_iter):
+            # Apply diffusion
+            diffused = self.apply_diffusion(prev_state, 0.1, 0.01)
+            
+            # Check convergence
+            change = torch.norm(diffused - prev_state) / torch.norm(prev_state + 1e-10)
+            if change < tol:
+                return True
+                
+            prev_state = diffused
+            
+        return False
+
+    def reaction_term(self, state: torch.Tensor) -> torch.Tensor:
+        """Default reaction term for pattern formation.
+        
+        This implements a simple activator-inhibitor system with:
+            - Autocatalytic production of activator
+            - Linear degradation of both species
+            - Nonlinear inhibition
+            
+        Args:
+            state: Input tensor [batch, channels, height, width]
+            
+        Returns:
+            Reaction term tensor [batch, channels, height, width]
+        """
+        # Split activator and inhibitor
+        u = state[:,0:1]  # Keep dimensions
+        v = state[:,1:2]
+        
+        # Parameters for mass conservation
+        alpha = 1.0  # Production rate
+        beta = 1.0   # Saturation parameter
+        gamma = 0.5  # Linear coupling
+        
+        # Compute nonlinear terms
+        activation = alpha * (u * u) / (1.0 + beta * u * u)
+        coupling = gamma * u
+        
+        # Ensure mass conservation
+        du = activation * v - coupling
+        dv = -activation * v + coupling
+        
+        # Verify mass conservation
+        total_change = du + dv
+        assert torch.allclose(total_change, torch.zeros_like(total_change), atol=1e-6), \
+            "Reaction terms must sum to zero for mass conservation"
+        
+        # Stack and return
+        reaction = torch.cat([du, dv], dim=1)
+        
+        return reaction
+
+    def apply_reaction(
+        self,
+        state: torch.Tensor,
+        reaction_term: Optional[Callable] = None
+    ) -> torch.Tensor:
+        """Apply reaction term to state.
+        
+        Args:
+            state: Input tensor [batch, channels, height, width]
+            reaction_term: Optional reaction term function
+            
+        Returns:
+            Reacted tensor [batch, channels, height, width]
+        """
+        if reaction_term is None:
+            reaction_term = self.reaction_term
+            
+        # Apply reaction term
+        reaction = reaction_term(state)
+        
+        # Add small noise to break symmetry and promote pattern formation
+        noise = 0.001 * torch.randn_like(state)  # Reduced noise amplitude
+        
+        return state + self.dt * (reaction + noise)
+
+    def reaction_diffusion(
+        self,
+        state: Optional[Union[ReactionDiffusionState, torch.Tensor]] = None,
+        diffusion_tensor: Optional[torch.Tensor] = None,
+        reaction_term: Optional[Callable] = None,
+        *,
+        batch_size: Optional[Union[int, torch.Tensor]] = None,
+        grid_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Evolve reaction-diffusion system.
+        
+        Args:
+            state: Optional initial state. If None, random state is generated
+            diffusion_tensor: Optional 2x2 diffusion tensor
+            reaction_term: Optional reaction term function
+            batch_size: Batch size for random initialization
+            grid_size: Grid size for random initialization
+        
+        Returns:
+            Evolved state tensor [batch, channels, height, width]
+        """
+        # Handle default parameters
+        if grid_size is None:
+            grid_size = self.size
+        if batch_size is None:
+            batch_size = 1
+        if diffusion_tensor is None:
+            diffusion_tensor = torch.tensor([[0.1, 0.0], [0.0, 0.05]], device=state.device if state is not None else 'cpu')
+        if reaction_term is None:
+            reaction_term = self.reaction_term
+            
+        # Initialize state if not provided
+        if state is None:
+            state = 0.5 + 0.01 * torch.randn(batch_size, 2, grid_size, grid_size)  # Reduced initial noise
+        elif isinstance(state, ReactionDiffusionState):
+            state = torch.stack([state.activator, state.inhibitor], dim=1)
+            
+        # Ensure proper shape [batch, channels, height, width]
+        if state.dim() == 3:
+            state = state.unsqueeze(1)
+            
+        # Log initial state properties
+        print(f"\nInitial state shape: {state.shape}")
+        print(f"Initial state range: [{state.min():.4f}, {state.max():.4f}]")
+        
+        # Store initial mass per channel and batch
+        initial_mass = state.sum(dim=[2,3], keepdim=True)  # [batch, channel, 1, 1]
+        print(f"Initial mass per channel:\n{initial_mass.squeeze()}")
+            
+        # Apply reaction step first
+        reacted = self.apply_reaction(state, reaction_term)
+        
+        # Conserve mass after reaction
+        current_mass = reacted.sum(dim=[2,3], keepdim=True)
+        mass_ratio = initial_mass / (current_mass + torch.finfo(current_mass.dtype).eps)
+        reacted = reacted * mass_ratio
+        
+        print(f"\nAfter reaction (mass-conserved):")
+        print(f"Reacted state range: [{reacted.min():.4f}, {reacted.max():.4f}]")
+        print(f"Reacted mass per channel:\n{reacted.sum(dim=[2,3], keepdim=True).squeeze()}")
+        
+        # Apply diffusion step
+        diffused = torch.zeros_like(reacted)
+        for i in range(reacted.shape[1]):  # For each species
+            for j in range(reacted.shape[1]):  # Cross-diffusion terms
+                if diffusion_tensor[i,j] != 0:  # Skip zero coefficients
+                    diffused_ij = self.apply_diffusion(reacted[:,j:j+1], diffusion_tensor[i,j], self.dt)
+                    diffused[:,i:i+1] += diffused_ij
+                    print(f"\nDiffusion from species {j} to {i}:")
+                    print(f"Diffusion coefficient: {diffusion_tensor[i,j]:.4f}")
+                    print(f"Mass before diffusion: {reacted[:,j:j+1].sum():.4f}")
+                    print(f"Mass after diffusion: {diffused_ij.sum():.4f}")
+
+        # Conserve mass after diffusion
+        current_mass = diffused.sum(dim=[2,3], keepdim=True)
+        mass_ratio = initial_mass / (current_mass + torch.finfo(current_mass.dtype).eps)
+        diffused = diffused * mass_ratio
+
+        print(f"\nAfter diffusion (mass-conserved):")
+        print(f"Diffused state range: [{diffused.min():.4f}, {diffused.max():.4f}]")
+        print(f"Diffused mass per channel:\n{diffused.sum(dim=[2,3], keepdim=True).squeeze()}")
+        
+        # Combine reaction and diffusion effects with proper scaling
+        state = reacted + diffused
+        
+        # Final mass conservation check
+        current_mass = state.sum(dim=[2,3], keepdim=True)
+        mass_ratio = initial_mass / (current_mass + torch.finfo(current_mass.dtype).eps)
+        state = state * mass_ratio
+        
+        # Ensure concentrations remain bounded and positive
+        state = torch.clamp(state, 0.0, self.max_concentration)
+        
+        # Log final state
+        print(f"\nFinal state:")
+        print(f"State range: [{state.min():.4f}, {state.max():.4f}]")
+        print(f"Final mass per channel:\n{state.sum(dim=[2,3], keepdim=True).squeeze()}")
+        print(f"Mass conservation error: {(state.sum(dim=[2,3]) - initial_mass.squeeze()).abs().max():.4e}")
+        
+        return state
+
+    def apply_reaction_diffusion(
+        self, 
+        state: torch.Tensor,
+        diffusion_tensor: torch.Tensor,
+        reaction_term: Optional[Callable] = None,
+        grid_size: int = 32,
+        batch_size: int = 1,
+    ) -> torch.Tensor:
+        """Apply reaction-diffusion dynamics to a state.
+        
+        Args:
+            state: Input state tensor [batch, channels, height, width]
+            diffusion_tensor: Diffusion coefficients
+            reaction_term: Optional reaction term function
+            grid_size: Size of spatial grid
+            batch_size: Batch size
+        
+        Returns:
+            Evolved state tensor [batch, channels, height, width]
+        """
+        # Handle scalar diffusion coefficient
+        if isinstance(diffusion_tensor, (int, float)):
+            diffusion_tensor = torch.eye(2) * diffusion_tensor
+    
+        # Ensure proper tensor dimensions
+        if state.dim() == 3:  # [batch, height, width]
+            state = state.unsqueeze(1)  # Add channel dimension
+            
+        # Apply reaction-diffusion step
+        return self.reaction_diffusion(
+            state,
+            diffusion_tensor,
+            reaction_term,
+            grid_size=grid_size,
+            batch_size=batch_size
+        )
+
+    def evolve_pattern(
+        self,
+        state: torch.Tensor,
+        diffusion_tensor: torch.Tensor,
+        reaction_term: Optional[Callable] = None,
+        steps: int = 100
+    ) -> torch.Tensor:
+        """Evolve pattern over time.
+        
+        Args:
+            state: Initial state [batch_size, channels, height, width]
+            diffusion_tensor: Diffusion coefficients [channels, channels]
+            reaction_term: Optional reaction term function
+            steps: Number of evolution steps
+            
+        Returns:
+            Evolution tensor [steps, batch, channels, height, width]
+        """
+        # Ensure state has correct dimensions
+        if state.dim() == 3:  # [batch, height, width]
+            state = state.unsqueeze(1)  # [batch, channels, height, width]
+        elif state.dim() == 2:  # [height, width]
+            state = state.unsqueeze(0).unsqueeze(0)  # [1, channels, height, width]
+        
+        # Handle scalar diffusion coefficient
+        if isinstance(diffusion_tensor, (int, float)):
+            diffusion_tensor = torch.eye(2) * diffusion_tensor
+    
+        # Get dimensions
+        batch_size = state.shape[0]
+        channels = 2  # Fixed for reaction-diffusion
+        grid_size = state.shape[-1]
+    
+        # Initialize evolution tensor
+        evolution = torch.zeros(steps, batch_size, channels, grid_size, grid_size)
+        evolution[0] = state
+    
+        # Evolve system
+        current = state
+        for t in range(1, steps):
+            current = self.apply_reaction_diffusion(
+                current,
+                diffusion_tensor,
+                reaction_term,
+                grid_size=grid_size,
+                batch_size=batch_size
+            )
+            evolution[t] = current
+    
+        return evolution
+
+    def detect_pattern_formation(self, time_evolution: torch.Tensor) -> bool:
+        """Detect if stable patterns have formed.
+        
+        Args:
+            time_evolution: Evolution tensor [steps, batch, channels, height, width]
+            
+        Returns:
+            True if stable patterns detected
+        """
+        if not isinstance(time_evolution, torch.Tensor):
+            raise ValueError("time_evolution must be a tensor")
+            
+        if time_evolution.dim() != 5:
+            raise ValueError(f"time_evolution must have 5 dimensions, got {time_evolution.dim()}")
+            
+        # Compute spatial variation over time
+        spatial_var = time_evolution.var(dim=[3, 4])  # [steps, batch, channels]
+        
+        # Compute temporal variation of spatial patterns
+        temporal_var = torch.diff(spatial_var, dim=0)  # [steps-1, batch, channels]
+        
+        # Patterns are stable if temporal variation decreases
+        stability = torch.abs(temporal_var[-10:]).mean() < 0.01
+        
+        # And if spatial variation is significant
+        pattern_formed = spatial_var[-1].mean() > 0.1
+        
+        return bool(stability and pattern_formed)
+
+    def stability_analysis(
+        self,
+        fixed_point: Union[ReactionDiffusionState, torch.Tensor],
+        perturbation: torch.Tensor,
+    ) -> StabilityMetrics:
+        """Analyze stability around fixed point.
+        
+        Args:
+            fixed_point: Fixed point state
+            perturbation: Small perturbation tensor
+            
+        Returns:
+            StabilityMetrics object
+        """
+        # Convert to tensor if needed
+        if isinstance(fixed_point, ReactionDiffusionState):
+            state = torch.cat([fixed_point.activator, fixed_point.inhibitor], dim=1)
+        else:
+            state = fixed_point
+
+        # Compute linear stability
+        state_plus = state + perturbation
+        state_minus = state - perturbation
+        
+        # Evolution with reaction-diffusion
+        evolved_plus = self.apply_reaction_diffusion(
+            state_plus,
+            torch.eye(2) * 0.1,  # Default diffusion tensor
+            grid_size=state.shape[2],
+            batch_size=state.shape[0]
+        )
+        
+        evolved_minus = self.apply_reaction_diffusion(
+            state_minus,
+            torch.eye(2) * 0.1,
+            grid_size=state.shape[2],
+            batch_size=state.shape[0]
+        )
+        
+        # Approximate Jacobian
+        jacobian = (evolved_plus - evolved_minus) / (2 * perturbation)
+        
+        # Compute eigenvalues for linear stability
+        linear_stability = torch.linalg.eigvals(jacobian.reshape(state.shape[0], -1, -1))
+        
+        # Compute nonlinear stability
+        nonlinear_stability = self._compute_nonlinear_stability(state, perturbation)
+        
+        # Compute Lyapunov spectrum
+        lyapunov_spectrum = self.compute_lyapunov_spectrum(state)
+        
+        # Compute structural stability
+        structural_stability = self.test_structural_stability(
+            state,
+            lambda x: self.reaction_term(x)  # Use default reaction term
+        )
+        
+        return StabilityMetrics(
+            linear_stability=linear_stability,
+            nonlinear_stability=nonlinear_stability,
+            lyapunov_spectrum=lyapunov_spectrum,
+            structural_stability=structural_stability
+        )
+
+    def compute_lyapunov_spectrum(self, pattern: torch.Tensor) -> torch.Tensor:
+        """Compute Lyapunov spectrum."""
+        # Use stability eigenvalues as approximation
+        state = ReactionDiffusionState(
+            activator=pattern[:, 0],
+            inhibitor=pattern[:, 1],
+            gradients=torch.zeros_like(pattern),
+            time=0.0
+        )
+        info = self.stability.analyze_stability(state)
+        return info.eigenvalues.real
+
+    def test_structural_stability(
+        self,
+        pattern: torch.Tensor,
+        perturbed_reaction: Callable
+    ) -> float:
+        """Test structural stability under perturbation."""
+        # Compare original and perturbed trajectories
+        original = self.evolve_pattern(pattern, torch.eye(2), lambda x: x)
+        perturbed = self.evolve_pattern(pattern, torch.eye(2), perturbed_reaction)
+        
+        difference = torch.norm(original - perturbed)
+        return 1.0 / (1.0 + difference)
+
+    def bifurcation_analysis(
+        self,
+        pattern: torch.Tensor,
+        parameterized_reaction: Callable,
+        parameter_range: torch.Tensor
+    ) -> BifurcationDiagram:
+        """Analyze bifurcations."""
+        # Evolve system for each parameter
+        states = []
+        for param in parameter_range:
+            evolved = self.evolve_pattern(
+                pattern,
+                torch.eye(2),
+                lambda x: parameterized_reaction(x, param)
+            )
+            states.append(evolved[-1])
+
+        # Detect bifurcations
+        bifurcations = self.bifurcation.detect_bifurcations(states, parameter_range)
+
+        return BifurcationDiagram(
+            parameter_range=parameter_range,
+            bifurcation_points=bifurcations,
+            solution_branches=torch.stack(states),
+            stability_regions=torch.ones_like(parameter_range)
+        )
+
+    def compute_normal_form(self, bifurcation: BifurcationPoint) -> torch.Tensor:
+        """Compute normal form coefficients."""
+        return bifurcation.normal_form
+
+    def pattern_control(
+        self,
+        current: Union[ReactionDiffusionState, torch.Tensor],
+        target: Union[ReactionDiffusionState, torch.Tensor],
+        constraints: Optional[List[Callable]] = None,
+    ) -> ControlSignal:
+        """Compute control signal to drive system toward target pattern.
+        
+        Args:
+            current: Current state
+            target: Target state
+            constraints: Optional list of constraint functions
+            
+        Returns:
+            Control signal tensor
+        """
+        # Convert states to tensors if needed
+        if isinstance(current, ReactionDiffusionState):
+            current_state = torch.cat([current.activator, current.inhibitor], dim=1)
+        else:
+            current_state = current
+            
+        if isinstance(target, ReactionDiffusionState):
+            target_state = torch.cat([target.activator, target.inhibitor], dim=1)
+        else:
+            target_state = target
+            
+        # Flatten spatial dimensions
+        current_flat = current_state.reshape(current_state.shape[0], -1)
+        target_flat = target_state.reshape(target_state.shape[0], -1)
+        
+        # Compute control direction
+        direction = target_flat - current_flat
+        direction = direction / (direction.norm(dim=1, keepdim=True) + 1e-8)
+        
+        # Compute control magnitude based on distance
+        distance = (target_flat - current_flat).norm(dim=1, keepdim=True)
+        magnitude = torch.clamp(distance, 0.0, 1.0)
+        
+        # Apply constraints if provided
+        if constraints:
+            for constraint in constraints:
+                # Project control to satisfy constraint
+                constraint_grad = torch.autograd.functional.jacobian(
+                    constraint, current_flat
+                )
+                direction = direction - torch.einsum(
+                    'bi,bij->bj',
+                    direction, constraint_grad
+                )
+                direction = direction / (direction.norm(dim=1, keepdim=True) + 1e-8)
+        
+        # Reshape control signal to match input dimensions
+        control = (magnitude.unsqueeze(-1) * direction).reshape(current_state.shape)
+        
+        return ControlSignal(
+            magnitude=magnitude.reshape(current_state.shape[0], 1, 1, 1),
+            direction=direction.reshape(current_state.shape),
+            constraints=constraints or []
+        )
+
+    def apply_control(
+        self,
+        pattern: torch.Tensor,
+        control: ControlSignal
+    ) -> torch.Tensor:
+        """Apply control signal to pattern."""
+        # Apply control while respecting constraints
+        controlled = pattern + control.magnitude * control.direction.reshape(pattern.shape)
+        
+        # Project onto constraint manifold
+        for constraint in control.constraints:
+            violation = constraint(controlled)
+            controlled = controlled - violation * control.direction.reshape(pattern.shape)
+            
+        return controlled
+
+    def _compute_nonlinear_stability(
+        self,
+        pattern: torch.Tensor,
+        perturbation: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute nonlinear stability metric."""
+        # Evolve both original and perturbed patterns
+        original = self.evolve_pattern(pattern, torch.eye(2), lambda x: x)
+        perturbed = self.evolve_pattern(pattern + perturbation, torch.eye(2), lambda x: x)
+        
+        # Compute maximal deviation
+        difference = torch.norm(original - perturbed)
+        return -torch.log(difference.max())
+
+    def find_reaction_fixed_points(
+        self,
+        state: torch.Tensor
+    ) -> List[torch.Tensor]:
+        """Find fixed points of the reaction term."""
+        # Sample points in phase space
+        u_range = torch.linspace(-2, 2, 100)
+        v_range = torch.linspace(-2, 2, 100)
+        U, V = torch.meshgrid(u_range, v_range)
+        points = torch.stack([U, V], dim=0)
+        
+        # Compute reaction term
+        du = points[0]**2 * points[1] - points[0]
+        dv = points[0]**2 - points[1]
+        reaction = torch.stack([du, dv], dim=0)
+        
+        # Find zeros
+        zeros = torch.where(torch.norm(reaction, dim=0) < 0.1)
+        fixed_points = [points[:, i, j] for i, j in zip(*zeros)]
+        
+        return fixed_points
+
+    def evolve_spatiotemporal(
+        self,
+        initial: torch.Tensor,
+        coupling: Callable,
+        t_span: List[float],
+        steps: int = 100
+    ) -> List[torch.Tensor]:
+        """Evolve pattern with space-time coupling."""
+        evolution = [initial]
+        current = initial
+        
+        # Time points
+        times = torch.linspace(t_span[0], t_span[1], steps)
+        dt = times[1] - times[0]
+        
+        for t in times:
+            # Apply diffusion
+            diffused = self.apply_diffusion(current, 0.1, dt)
+            
+            # Apply reaction with coupling
+            coupled = diffused + coupling(diffused, t)
+            reacted = self.apply_reaction(coupled)
+            
+            # Update state
+            current = reacted
+            evolution.append(current)
+            
+        return evolution
+
+    def find_spatiotemporal_symmetries(
+        self,
+        evolution: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> torch.Tensor:
+        """Find symmetries in space-time evolution.
+        
+        Args:
+            evolution: Evolution tensor [steps, batch, channels, height, width]
+            or list of tensors
+        
+        Returns:
+            Symmetry tensor [batch_size, num_symmetries]
+        """
+        # Convert list to tensor if needed
+        if isinstance(evolution, list):
+            evolution = torch.stack(evolution)
+    
+        # Ensure correct dimensions
+        if evolution.dim() == 4:  # [steps, batch, height, width]
+            evolution = evolution.unsqueeze(2)  # Add channel dimension
+    
+        # Get dimensions
+        steps, batch_size = evolution.shape[:2]
+    
+        # Compute temporal correlations
+        temporal_corr = torch.zeros(batch_size, steps)
+        for t in range(steps):
+            temporal_corr[:, t] = torch.mean(
+                (evolution[t] * evolution[0]).reshape(batch_size, -1),
+                dim=1
+            )
+    
+        # Find peaks in correlations
+        peaks = torch.zeros(batch_size, steps, dtype=bool)
+        for b in range(batch_size):
+            for t in range(1, steps-1):
+                if (temporal_corr[b,t] > temporal_corr[b,t-1] and 
+                    temporal_corr[b,t] > temporal_corr[b,t+1]):
+                    peaks[b,t] = True
+    
+        # Count symmetries
+        num_symmetries = peaks.sum(dim=1)
+    
+        return num_symmetries.float()
+
+    def classify_pattern(
+        self,
+        evolution: List[torch.Tensor]
+    ) -> str:
+        """Classify spatiotemporal pattern type.
+        
+        Args:
+            evolution: List of state tensors over time
+            
+        Returns:
+            Pattern type as string: "stationary", "periodic", "quasi-periodic", or "chaotic"
+        """
+        # Convert list to tensor [time, batch, channels, height, width]
+        trajectory = torch.stack(evolution)
+        
+        # Compute time differences and norms
+        diff = torch.diff(trajectory, dim=0)
+        norm = torch.norm(diff.reshape(len(evolution)-1, -1), dim=1)
+        
+        # Compute mean and std of differences
+        mean_diff = torch.mean(norm)
+        std_diff = torch.std(norm)
+        
+        # Compute temporal autocorrelation
+        n = len(evolution)
+        corr = torch.zeros(n//2)
+        for t in range(n//2):
+            corr[t] = torch.mean(
+                (trajectory[t:] * trajectory[:-t if t > 0 else None]).reshape(n-t, -1),
+                dim=1
+            ).mean()
+        
+        # Normalize correlation
+        corr = corr / corr[0]
+        
+        # Find peaks in correlation
+        peaks = []
+        for t in range(1, len(corr)-1):
+            if corr[t] > corr[t-1] and corr[t] > corr[t+1]:
+                peaks.append(t)
+                
+        # Classify based on peaks and variability
+        if mean_diff < 0.01:  # Very small changes
+            return "stationary"
+        elif len(peaks) == 0:  # No periodicity
+            if std_diff / mean_diff > 0.5:  # High variability
+                return "chaotic"
+            else:
+                return "stationary"
+        elif len(peaks) == 1:  # Single period
+            return "periodic"
+        else:  # Multiple periods
+            return "quasi-periodic"
+
+    def estimate_embedding_dimension(
+        self,
+        evolution: List[torch.Tensor]
+    ) -> int:
+        """Estimate embedding dimension of attractor."""
+        # Convert to tensor and flatten spatial dimensions
+        trajectory = torch.stack(evolution)
+        flat = trajectory.reshape(len(evolution), -1)
+        
+        # Perform SVD
+        _, s, _ = torch.linalg.svd(flat)
+        
+        # Count significant singular values
+        return torch.sum(s > 0.1 * s[0]).item()
+
+    def control_energy(
+        self,
+        control: ControlSignal
+    ) -> float:
+        """Compute control energy."""
+        return torch.norm(control.magnitude * control.direction).item()
+
+    def test_reachability(
+        self,
+        current: torch.Tensor,
+        target: torch.Tensor
+    ) -> bool:
+        """Test if target is reachable from current state."""
+        # Create state
+        state = ReactionDiffusionState(
+            activator=current[:, 0],
+            inhibitor=current[:, 1],
+            gradients=torch.zeros_like(current),
+            time=0.0
+        )
+        
+        # Get control
+        control = self.controller.compute_control(state, target.reshape(-1))
+        
+        # Check if control can reach target
+        controlled = current + control.reshape(current.shape)
+        return torch.allclose(controlled, target, rtol=0.1)
+
+    def find_homogeneous_state(
+        self,
+        initial_guess: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Find homogeneous steady state using Newton's method."""
+        if initial_guess is None:
+            initial_guess = torch.zeros(self.dim)
+            
+        def reaction_term(x):
+            # Default reaction term (activator-inhibitor)
+            u, v = x[0], x[1]
+            du = u**2 * v - u
+            dv = u**2 - v
+            return torch.stack([du, dv])
+            
+        # Newton iteration
+        x = initial_guess
+        for _ in range(100):
+            fx = reaction_term(x)
+            if torch.norm(fx) < 1e-6:
+                break
+                
+            # Compute Jacobian
+            h = 1e-6
+            jac = torch.zeros(self.dim, self.dim)
+            for i in range(self.dim):
+                x_plus = x.clone()
+                x_plus[i] += h
+                jac[:, i] = (reaction_term(x_plus) - fx) / h
+                
+            # Update
+            dx = torch.linalg.solve(jac, -fx)
+            x = x + dx
+            
+        return x.reshape(1, self.dim, 1, 1).repeat(1, 1, self.size, self.size)
+
+    def generate_target_pattern(
+        self,
+        batch_size: int,
+        grid_size: int,
+        num_species: int = 2
+    ) -> torch.Tensor:
+        """Generate a target pattern for testing control systems.
+        
+        Args:
+            batch_size: Number of patterns to generate
+            grid_size: Size of each spatial dimension
+            num_species: Number of chemical species
+            
+        Returns:
+            Target pattern tensor of shape [batch_size, num_species, grid_size, grid_size]
+        """
+        # Generate random pattern
+        pattern = torch.randn(batch_size, num_species, grid_size, grid_size)
+        
+        # Apply smoothing to make it more realistic
+        kernel = torch.ones(1, 1, 3, 3) / 9.0
+        smoothed = []
+        for i in range(num_species):
+            species = pattern[:, i:i+1]  # Keep batch and channel dims
+            smoothed.append(nn.functional.conv2d(species, kernel, padding=1))
+        pattern = torch.cat(smoothed, dim=1)
+        
+        # Ensure concentrations are bounded
+        pattern = torch.clamp(pattern, -self.max_concentration, self.max_concentration)
+        
+        return pattern
+
+    def spatiotemporal_evolution(
+        self,
+        initial_state: Union[ReactionDiffusionState, torch.Tensor],
+        steps: int = 100,
+        *,
+        diffusion_tensor: Optional[torch.Tensor] = None,
+        reaction_term: Optional[Callable] = None,
+    ) -> torch.Tensor:
+        """Compute spatiotemporal evolution of pattern.
+        
+        Args:
+            initial_state: Initial state
+            steps: Number of time steps
+            diffusion_tensor: Optional diffusion tensor
+            reaction_term: Optional reaction term
+        
+        Returns:
+            Evolution tensor [steps, batch, channels, height, width]
+        """
+        # Convert initial state to tensor if needed
+        if isinstance(initial_state, ReactionDiffusionState):
+            state = torch.stack([initial_state.activator, initial_state.inhibitor], dim=1)
+        else:
+            state = initial_state
+        
+        # Default diffusion tensor if not provided
+        if diffusion_tensor is None:
+            diffusion_tensor = torch.eye(2)
+        
+        # Evolve system
+        evolution = []
+        current = state
+        
+        for _ in range(steps):
+            evolved = self.apply_reaction_diffusion(
+                current,
+                diffusion_tensor,
+                reaction_term,
+                grid_size=state.shape[-1],
+                batch_size=state.shape[0]
+            )
+            evolution.append(evolved)
+            current = evolved
+        
+        # Stack along time dimension
+        return torch.stack(evolution)

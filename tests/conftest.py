@@ -17,10 +17,13 @@ import pytest
 import torch
 
 # Configure logging
+root_logger = logging.getLogger()
+root_logger.handlers = []  # Remove any existing handlers
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("test.log", mode="w")],
+    handlers=[logging.StreamHandler()],  # Only use StreamHandler for console output
 )
 
 logger = logging.getLogger(__name__)
