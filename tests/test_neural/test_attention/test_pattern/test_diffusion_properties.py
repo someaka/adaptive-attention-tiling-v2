@@ -50,13 +50,13 @@ def create_test_state(params, pattern='uniform'):
     elif pattern == 'checkerboard':
         x = torch.arange(grid_size)
         y = torch.arange(grid_size)
-        X, Y = torch.meshgrid(x, y)
+        X, Y = torch.meshgrid(x, y, indexing='ij')
         pattern = (-1)**(X + Y)
         return pattern.expand(batch_size, 2, -1, -1).float()
     elif pattern == 'gradient':
         x = torch.linspace(0, 1, grid_size)
         y = torch.linspace(0, 1, grid_size)
-        X, Y = torch.meshgrid(x, y)
+        X, Y = torch.meshgrid(x, y, indexing='ij')
         pattern = X + Y
         return pattern.expand(batch_size, 2, -1, -1).float()
     else:
