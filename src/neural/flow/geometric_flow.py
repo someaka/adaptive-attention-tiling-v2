@@ -140,11 +140,13 @@ class RicciTensor:
     def __init__(self, tensor: torch.Tensor):
         self.tensor = tensor
         
-    def __instancecheck__(self, instance):
-        return isinstance(instance, RicciTensor)
+    @classmethod
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, cls)
         
-    def __subclasscheck__(self, subclass):
-        return issubclass(subclass, RicciTensor)
+    @classmethod
+    def __subclasscheck__(cls, subclass):
+        return issubclass(subclass, cls)
         
     def __torch_function__(self, func, types, args=(), kwargs=None):
         if kwargs is None:
@@ -152,6 +154,22 @@ class RicciTensor:
         args = [a.tensor if isinstance(a, RicciTensor) else a for a in args]
         ret = func(*args, **kwargs)
         return RicciTensor(ret) if isinstance(ret, torch.Tensor) else ret
+        
+    def __truediv__(self, other):
+        if isinstance(other, RicciTensor):
+            other = other.tensor
+        return RicciTensor(self.tensor / other)
+        
+    def __mul__(self, other):
+        if isinstance(other, RicciTensor):
+            other = other.tensor
+        return RicciTensor(self.tensor * other)
+        
+    def __rmul__(self, other):
+        return self.__mul__(other)
+        
+    def __getattr__(self, name):
+        return getattr(self.tensor, name)
 
 
 class FlowStepNetwork(nn.Module):
@@ -541,27 +559,18 @@ class GeometricFlow:
             Mean curvature tensor
         """
         batch_size = metric.shape[0]
-        n = self.manifold_dim
+        n = metric.shape[1]
         
-        # Add small regularization to prevent singular matrices
-        eye = torch.eye(n, device=metric.device).unsqueeze(0).expand(batch_size, -1, -1)
-        metric = metric + 1e-6 * eye
+        # Compute Christoffel symbols
+        christoffel = self.compute_connection(metric)
         
-        # Compute metric inverse
-        metric_inv = torch.inverse(metric)
-        
-        # Compute connection coefficients
-        connection = self.compute_connection(metric)
-        
-        # Compute mean curvature components
-        mean_curv = torch.zeros_like(metric)
+        # Compute mean curvature
+        mean_curv = torch.zeros(batch_size, device=metric.device)
         for i in range(n):
             for j in range(n):
-                for k in range(n):
-                    for l in range(n):
-                        mean_curv[:, i, j] += metric_inv[:, k, l] * connection[:, i, k, l]
-        
-        return mean_curv
+                mean_curv += torch.diagonal(metric, dim1=1, dim2=2)[:, i] * christoffel[:, i, j, j]
+                
+        return mean_curv / (n * (n-1))
 
     def compute_ricci_tensor(self, metric: torch.Tensor) -> RicciTensor:
         """Compute Ricci tensor from metric.

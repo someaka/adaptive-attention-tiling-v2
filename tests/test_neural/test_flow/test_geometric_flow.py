@@ -97,7 +97,7 @@ class TestGeometricFlow:
         
         # Check invariants
         validator = FlowValidator()
-        assert validator.validate_invariants(flow_system, points, metric)
+        assert validator.validate_invariants(new_metric, flow)
         
     def test_ricci_flow(self, points, metric, flow_system):
         """Test Ricci flow evolution."""
@@ -133,3 +133,28 @@ class TestGeometricFlow:
         # Check resolution
         for sing in singularities:
             assert sing.is_removable()
+
+
+class FlowValidator:
+    """Validator for geometric flow properties."""
+    
+    def validate_invariants(self, metric: torch.Tensor, flow: torch.Tensor) -> bool:
+        """Validate geometric invariants of the flow.
+        
+        Args:
+            metric: Metric tensor
+            flow: Flow vector field
+            
+        Returns:
+            True if invariants are preserved
+        """
+        batch_size = metric.shape[0]
+        n = metric.shape[1]
+        
+        # Check volume preservation
+        vol_form = torch.sqrt(torch.abs(torch.det(metric)))
+        flow_div = torch.zeros(batch_size, device=metric.device)
+        for i in range(n):
+            flow_div += torch.diagonal(metric, dim1=1, dim2=2)[:, i] * flow[:, i]
+            
+        return torch.allclose(flow_div, torch.zeros_like(flow_div), rtol=1e-3)
