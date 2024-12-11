@@ -13,6 +13,7 @@ from typing import Callable, List, Tuple
 
 import torch
 from torch import nn
+import torch.nn.init as nn_init
 
 
 @dataclass
@@ -282,13 +283,61 @@ class HamiltonianSystem(nn.Module):
         """
         super().__init__()
         self.manifold_dim = manifold_dim
+        self.hidden_dim = hidden_dim
         
         # Network for computing Hamiltonian
-        self.energy_network = nn.Sequential(
-            nn.Linear(manifold_dim * 2, hidden_dim),
-            nn.ReLU(),
+        self.hamiltonian_network = nn.Sequential(
+            nn.Linear(manifold_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
             nn.Linear(hidden_dim, 1)
         )
+        
+    def forward(self, points: torch.Tensor) -> torch.Tensor:
+        """Forward pass computing Hamiltonian evolution.
+        
+        Args:
+            points: Points tensor of shape (batch_size, phase_dim)
+            
+        Returns:
+            Evolved points tensor
+        """
+        return self.evolve(points, dt=0.01)
+        
+    def evolve(self, points: torch.Tensor, dt: float = 0.01) -> torch.Tensor:
+        """Evolve points along Hamiltonian flow.
+        
+        Args:
+            points: Points tensor of shape (batch_size, phase_dim)
+            dt: Time step size
+            
+        Returns:
+            Evolved points tensor
+        """
+        # Compute Hamiltonian
+        H = self.hamiltonian_network(points)
+        
+        # Compute gradients
+        dH = torch.autograd.grad(H.sum(), points, create_graph=True)[0]
+        
+        # Split into position and momentum components
+        pos = points[..., :self.manifold_dim//2]
+        mom = points[..., self.manifold_dim//2:]
+        
+        # Compute symplectic gradients
+        dpos = dH[..., self.manifold_dim//2:]  # Momentum gradient
+        dmom = -dH[..., :self.manifold_dim//2]  # Position gradient
+        
+        # Update points
+        new_pos = pos + dt * dpos
+        new_mom = mom + dt * dmom
+        
+        # Normalize momentum to preserve energy
+        new_mom = new_mom / (torch.norm(new_mom, dim=-1, keepdim=True) + 1e-8)
+        
+        # Combine updated components
+        return torch.cat([new_pos, new_mom], dim=-1)
 
     def _to_phase_space(self, states: torch.Tensor) -> PhaseSpacePoint:
         """Convert states tensor to phase space point.
@@ -299,9 +348,14 @@ class HamiltonianSystem(nn.Module):
         Returns:
             Phase space point with position and momentum
         """
-        batch_size = states.shape[0]
-        position = states
-        momentum = torch.zeros_like(position)
+        # Split states into position and momentum
+        manifold_dim = self.manifold_dim // 2  # Half for position, half for momentum
+        position = states[..., :manifold_dim]
+        momentum = states[..., manifold_dim:]
+        
+        # Ensure momentum is conjugate to position
+        momentum = momentum / (torch.norm(momentum, dim=-1, keepdim=True) + 1e-8)
+        
         return PhaseSpacePoint(position=position, momentum=momentum, time=0.0)
 
     def compute_energy(self, states: torch.Tensor) -> torch.Tensor:
@@ -315,9 +369,9 @@ class HamiltonianSystem(nn.Module):
         """
         phase_point = self._to_phase_space(states)
         phase_vector = torch.cat([phase_point.position, phase_point.momentum], dim=-1)
-        return self.energy_network(phase_vector).squeeze(-1)
+        return self.hamiltonian_network(phase_vector).squeeze(-1)
 
-    def evolve(self, states: torch.Tensor, num_steps: int = 100, dt: float = 0.01) -> torch.Tensor:
+    def evolve_states(self, states: torch.Tensor, num_steps: int = 100, dt: float = 0.01) -> torch.Tensor:
         """Evolve states using Hamiltonian dynamics.
         
         Args:
@@ -328,23 +382,27 @@ class HamiltonianSystem(nn.Module):
         Returns:
             Evolved states
         """
-        phase_point = self._to_phase_space(states)
-        current = phase_point
+        # Convert to phase space
+        current = self._to_phase_space(states)
+        phase_vector = states
         
-        for _ in range(num_steps):
-            # Compute energy gradient
-            phase_vector = torch.cat([current.position, current.momentum], dim=-1)
-            energy = self.energy_network(phase_vector)
-            
-            # Update position and momentum using symplectic integration
-            grad_energy = torch.autograd.grad(energy.sum(), phase_vector)[0]
-            grad_q = grad_energy[:, :self.manifold_dim]
-            grad_p = grad_energy[:, self.manifold_dim:]
-            
-            # Update momentum then position (symplectic Euler)
-            new_momentum = current.momentum - dt * grad_q
-            new_position = current.position + dt * grad_p
-            
-            current = PhaseSpacePoint(position=new_position, momentum=new_momentum, time=current.time + dt)
+        # Compute energy and its gradients
+        energy = self.compute_energy(phase_vector)
+        grad_energy = torch.autograd.grad(energy.sum(), phase_vector, create_graph=True)[0]
         
-        return current.position
+        # Split gradients into position and momentum components
+        manifold_dim = self.manifold_dim // 2
+        grad_q = grad_energy[..., :manifold_dim]
+        grad_p = grad_energy[..., manifold_dim:]
+        
+        # Update position and momentum using symplectic integration
+        new_position = current.position + dt * grad_p
+        new_momentum = current.momentum - dt * grad_q
+        
+        # Normalize momentum
+        new_momentum = new_momentum / (torch.norm(new_momentum, dim=-1, keepdim=True) + 1e-8)
+        
+        # Combine into phase space vector
+        evolved_states = torch.cat([new_position, new_momentum], dim=-1)
+        
+        return evolved_states

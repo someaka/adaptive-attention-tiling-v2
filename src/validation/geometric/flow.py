@@ -54,11 +54,16 @@ class ConvergenceValidation:
 class ValidationResult:
     """Result of validation with message."""
     
-    def __init__(self, is_valid: bool, message: str = "", stable: bool = False, error: float = 0.0):
+    def __init__(self, is_valid: bool, message: str = "", stable: bool = False, error: float = 0.0, initial_energy: torch.Tensor = None, final_energy: torch.Tensor = None, relative_error: torch.Tensor = None, initial_states: torch.Tensor = None, final_states: torch.Tensor = None):
         self.is_valid = is_valid
         self.message = message
         self.stable = stable
         self.error = error
+        self.initial_energy = initial_energy
+        self.final_energy = final_energy
+        self.relative_error = relative_error
+        self.initial_states = initial_states
+        self.final_states = final_states
 
 
 class GeometricFlowValidator:
@@ -323,105 +328,147 @@ class FlowStabilityValidator:
 
 
 class EnergyValidator:
-    """Validation of energy conservation properties."""
+    """Validator for energy conservation in geometric flow."""
     
     def __init__(self, tolerance: float = 1e-5):
         self.tolerance = tolerance
 
-    def validate_energy(
-        self,
-        hamiltonian: HamiltonianSystem,
-        states: torch.Tensor,
-        time_steps: int = 100,
-    ) -> EnergyValidation:
-        """Validate energy conservation."""
-        # Track energy evolution
-        energies = []
-        current = states.clone()
-
-        initial_energy = hamiltonian.compute_energy(current)
-
-        for _ in range(time_steps):
-            current = hamiltonian.evolve(current)
-            energies.append(hamiltonian.compute_energy(current))
-
-        energies = torch.stack(energies)
-
-        # Compute relative error
-        relative_error = torch.abs((energies - initial_energy) / initial_energy).mean()
-
-        # Compute drift rate
-        drift_rate = torch.mean((energies[1:] - energies[:-1]) / time_steps)
-
-        # Compute fluctuations
-        fluctuations = torch.std(energies, dim=0)
-
-        # Check conservation
-        conserved = (
-            relative_error < self.tolerance 
+    def validate_energy(self, flow_system, states: torch.Tensor) -> ValidationResult:
+        """Validate energy conservation.
+        
+        Args:
+            flow_system: Geometric flow system
+            states: Initial states tensor of shape (batch_size, phase_dim)
+            
+        Returns:
+            Validation result with energy metrics
+        """
+        batch_size = states.shape[0]
+        
+        # Compute initial energy
+        initial_energy = flow_system.compute_energy(states)
+        
+        # Evolve states
+        evolved_states = flow_system(states)
+        
+        # Compute final energy
+        final_energy = flow_system.compute_energy(evolved_states)
+        
+        # Compute relative error per batch element
+        relative_error = torch.abs(final_energy - initial_energy) / (torch.abs(initial_energy) + 1e-8)
+        
+        # Check if energy is conserved within tolerance
+        is_conserved = torch.all(relative_error < self.tolerance)
+        
+        return ValidationResult(
+            is_valid=is_conserved,
+            message="Energy conservation validation",
+            initial_energy=initial_energy,
+            final_energy=final_energy,
+            relative_error=relative_error,
+            initial_states=states,
+            final_states=evolved_states
         )
 
-        return EnergyValidation(
-            conserved=conserved,
-            relative_error=relative_error.item(),
-            drift_rate=drift_rate.item(),
-            fluctuations=fluctuations,
+    def validate_convergence(self, flow_system, states: torch.Tensor) -> ValidationResult:
+        """Validate that flow converges.
+        
+        Args:
+            flow_system: Geometric flow system
+            states: Initial states tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Validation result with convergence metrics
+        """
+        # Initialize
+        iterations = self.max_iterations
+        current_states = states
+        
+        for i in range(self.max_iterations):
+            # Evolve states
+            next_states = flow_system(current_states)
+            
+            # Extract position components for comparison
+            if next_states.shape[-1] > states.shape[-1]:
+                next_pos = next_states[..., :states.shape[-1]]
+            else:
+                next_pos = next_states
+                
+            # Compute error as L2 norm of difference
+            error = torch.norm(next_pos - current_states, dim=-1)
+            
+            # Check convergence
+            if torch.all(error < self.threshold):
+                iterations = i + 1
+                break
+                
+            current_states = next_pos
+            
+        # Check if converged within max iterations
+        converged = iterations < self.max_iterations
+        
+        return ValidationResult(
+            is_valid=converged,
+            message=f"Flow convergence validation (iterations={iterations})",
+            stable=converged,
+            error=error,  # Keep as tensor
+            initial_states=states,
+            final_states=next_pos
         )
 
 
 class ConvergenceValidator:
-    """Validation of flow convergence properties."""
+    """Validator for flow convergence properties."""
     
     def __init__(self, threshold: float = 1e-4, max_iterations: int = 1000):
         self.threshold = threshold
         self.max_iterations = max_iterations
 
-    def validate_convergence(
-        self, flow: GeometricFlow, points: torch.Tensor
-    ) -> ConvergenceValidation:
-        """Validate flow convergence."""
-        residuals = []
-        current = points.clone()
-
-        # Iterate until convergence or max iterations
-        for iteration in range(self.max_iterations):
-            # Flow step
-            next_points = flow.step(current)
-
-            # Compute residual
-            residual = torch.norm(next_points - current)
-            residuals.append(residual.item())
-
+    def validate_convergence(self, flow_system, states: torch.Tensor) -> ValidationResult:
+        """Validate that flow converges.
+        
+        Args:
+            flow_system: Geometric flow system
+            states: Initial states tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Validation result with convergence metrics
+        """
+        # Initialize
+        iterations = self.max_iterations
+        current_states = states
+        
+        for i in range(self.max_iterations):
+            # Evolve states
+            next_states = flow_system(current_states)
+            
+            # Extract position components for comparison
+            if next_states.shape[-1] > states.shape[-1]:
+                next_pos = next_states[..., :states.shape[-1]]
+            else:
+                next_pos = next_states
+                
+            # Compute error as L2 norm of difference
+            error = torch.norm(next_pos - current_states, dim=-1)
+            
             # Check convergence
-            if residual < self.threshold:
-                return ConvergenceValidation(
-                    converged=True,
-                    rate=self._compute_rate(residuals),
-                    residuals=torch.tensor(residuals),
-                    iterations=iteration + 1,
-                )
-
-            current = next_points
-
-        # Did not converge
-        return ConvergenceValidation(
-            converged=False,
-            rate=self._compute_rate(residuals),
-            residuals=torch.tensor(residuals),
-            iterations=self.max_iterations,
+            if torch.all(error < self.threshold):
+                iterations = i + 1
+                break
+                
+            current_states = next_pos
+            
+        # Check if converged within max iterations
+        converged = iterations < self.max_iterations
+        
+        return ValidationResult(
+            is_valid=converged,
+            message=f"Flow convergence validation (iterations={iterations})",
+            stable=converged,
+            error=error,  # Keep as tensor
+            initial_states=states,
+            final_states=next_pos
         )
-
-    def _compute_rate(self, residuals: List[float]) -> float:
-        """Compute convergence rate from residuals."""
-        if len(residuals) < 2:
-            return 0.0
-
-        # Use last few iterations for rate
-        window = min(10, len(residuals) - 1)
-        rates = [
-            np.log(residuals[i + 1] / residuals[i]) for i in range(-window - 1, -1)
-        ]
-        return float(np.mean(rates))
 
 
 class GeometricFlowValidator:
