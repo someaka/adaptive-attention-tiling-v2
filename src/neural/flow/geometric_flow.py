@@ -513,55 +513,54 @@ class GeometricFlow:
             Connection coefficients of shape (batch_size, n, n, n)
         """
         batch_size = metric.shape[0]
-        n = metric.shape[1]
+        n = self.manifold_dim
         
         # Add small diagonal term to prevent singularity
         eye = torch.eye(n, device=metric.device).unsqueeze(0).expand(batch_size, -1, -1)
         regularized_metric = metric + 1e-6 * eye
         
-        # Compute inverse metric safely
-        try:
-            metric_inv = torch.inverse(regularized_metric)
-        except RuntimeError:
-            # If still singular, use pseudoinverse
-            metric_inv = torch.linalg.pinv(regularized_metric)
-            
-        # Initialize connection tensor
-        connection = torch.zeros(batch_size, n, n, n, device=metric.device)
+        # Initialize connection coefficients
+        connection = torch.zeros(
+            batch_size, n, n, n,
+            device=metric.device,
+            requires_grad=False  # Initialize without grad to avoid in-place issues
+        )
         
-        # Compute metric derivatives for each component
+        # Compute inverse metric safely using pseudoinverse
+        metric_inv = torch.linalg.pinv(regularized_metric)
+        
+        # Compute metric derivatives using finite differences
+        eps = 1e-6
+        metric_deriv = torch.zeros(batch_size, n, n, n, device=metric.device)
+        
+        for k in range(n):
+            # Forward difference
+            points_plus = self.points.clone()
+            points_plus.data[:, k] += eps  # Use .data to avoid in-place grad issues
+            metric_plus = self.compute_metric(points_plus)
+            
+            # Backward difference
+            points_minus = self.points.clone()
+            points_minus.data[:, k] -= eps  # Use .data to avoid in-place grad issues
+            metric_minus = self.compute_metric(points_minus)
+            
+            # Central difference
+            metric_deriv[:, :, :, k] = (metric_plus - metric_minus) / (2 * eps)
+        
+        # Compute Christoffel symbols
         for i in range(n):
             for j in range(n):
-                grad_ij = torch.autograd.grad(
-                    regularized_metric[:,i,j].sum(), 
-                    self.points,
-                    create_graph=True,
-                    retain_graph=True
-                )[0]  # Shape: (batch_size, n)
-                
-                # Compute connection components
                 for k in range(n):
-                    term1 = grad_ij[:,:] # (batch_size, n)
-                    term2 = torch.autograd.grad(
-                        regularized_metric[:,i,k].sum(),
-                        self.points,
-                        create_graph=True,
-                        retain_graph=True
-                    )[0][:,:] # (batch_size, n)
-                    term3 = torch.autograd.grad(
-                        regularized_metric[:,j,k].sum(),
-                        self.points,
-                        create_graph=True,
-                        retain_graph=True
-                    )[0][:,:] # (batch_size, n)
-                    
-                    # Contract with inverse metric
-                    connection[:,i,j,k] = 0.5 * (
-                        torch.einsum('bi,bi->b', metric_inv[:,i,:], term1) +
-                        torch.einsum('bi,bi->b', metric_inv[:,i,:], term2) -
-                        torch.einsum('bi,bi->b', metric_inv[:,i,:], term3)
-                    )
-                    
+                    # Γ^k_ij = 1/2 g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
+                    for l in range(n):
+                        connection[:, k, i, j] = connection[:, k, i, j] + 0.5 * metric_inv[:, k, l] * (
+                            metric_deriv[:, j, l, i] +
+                            metric_deriv[:, i, l, j] -
+                            metric_deriv[:, i, j, l]
+                        )
+        
+        # Make connection require grad after computations
+        connection.requires_grad_(True)
         return connection
 
     def compute_mean_curvature(self, metric: torch.Tensor) -> torch.Tensor:
@@ -612,52 +611,74 @@ class GeometricFlow:
             Ricci tensor
         """
         batch_size = metric.shape[0]
-        n = metric.shape[1]
+        n = self.manifold_dim
+        
+        # Initialize Ricci tensor
+        ricci = torch.zeros(batch_size, n, n, device=metric.device)
         
         # Compute connection coefficients
         connection = self.compute_connection(metric)
         
-        # Initialize Ricci tensor
-        ricci = torch.zeros_like(metric)
-        
         # Compute Ricci tensor components
         for i in range(n):
             for j in range(n):
-                # R_ij = R^k_ikj
+                # First term: connection derivatives
+                term1 = torch.zeros(batch_size, device=metric.device)
                 for k in range(n):
-                    # First term: partial_k Gamma^k_ij
-                    term1 = torch.autograd.grad(
-                        connection[:,k,i,j].sum(),
+                    term1 += torch.autograd.grad(
+                        connection[:, k, i, k],
                         self.points,
+                        grad_outputs=torch.ones_like(connection[:, k, i, k]),
                         create_graph=True,
-                        retain_graph=True
-                    )[0][:,:] # (batch_size, n)
-                    
-                    # Second term: partial_j Gamma^k_ik
-                    term2 = torch.autograd.grad(
-                        connection[:,k,i,k].sum(),
-                        self.points,
-                        create_graph=True,
-                        retain_graph=True
-                    )[0][:,:] # (batch_size, n)
-                    
-                    # Third term: Gamma^k_ij Gamma^l_kl
-                    term3 = torch.einsum(
-                        'bkij,bklm,blm->b',
-                        connection, connection,
-                        metric
-                    )
-                    
-                    # Fourth term: Gamma^k_il Gamma^l_kj
-                    term4 = torch.einsum(
-                        'bkil,blkj->bij',
-                        connection, connection
-                    )
-                    
-                    # Combine terms
-                    ricci[:,i,j] += term1[:,k] - term2[:,j] + term3 - term4[:,i,j]
-                    
+                        retain_graph=True,
+                    )[0][:, j]
+                
+                # Second term: connection product
+                term2 = torch.zeros(batch_size, device=metric.device)
+                for k in range(n):
+                    for l in range(n):
+                        term2 += connection[:, k, i, l] * connection[:, l, j, k]
+                
+                # Store result without in-place operation
+                ricci_ij = term1 - term2
+                ricci = torch.cat([
+                    ricci[:, :i],
+                    torch.cat([
+                        ricci[:, i:i+1, :j],
+                        ricci_ij.unsqueeze(-1).unsqueeze(-1),
+                        ricci[:, i:i+1, j+1:]
+                    ], dim=-1),
+                    ricci[:, i+1:]
+                ], dim=1)
+        
         return RicciTensor(ricci)
+
+    def compute_flow_vector(self, points: torch.Tensor, ricci: RicciTensor) -> torch.Tensor:
+        """Compute flow vector field at points.
+        
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            ricci: Ricci tensor at points
+            
+        Returns:
+            Flow vector field of shape (batch_size, manifold_dim)
+        """
+        # Get metric at current points
+        metric = self.compute_metric(points)
+        
+        # Compute flow based on flow type
+        if self.flow_type == "ricci":
+            # Ricci flow: -2 * Ricci tensor
+            flow = -2 * ricci.tensor
+        else:
+            # Mean curvature flow
+            mean_curv = self.compute_mean_curvature(metric)
+            flow = mean_curv.unsqueeze(-1) * metric
+            
+        # Normalize flow to preserve volume
+        flow = self.normalize_flow(flow)
+        
+        return flow
 
     def flow_step(
         self, metric: torch.Tensor, ricci: RicciTensor, timestep: float = None
