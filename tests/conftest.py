@@ -394,3 +394,67 @@ def seq_length():
 def pattern_dynamics(pattern_system):
     """Create pattern dynamics system for testing."""
     return pattern_system
+
+
+# Validation fixtures
+@pytest.fixture(scope="session")
+def flow_stability_validator():
+    """Get flow stability validator for testing."""
+    from src.validation.geometric.flow import FlowStabilityValidator
+    return FlowStabilityValidator(tolerance=1e-6, stability_threshold=0.1)
+
+@pytest.fixture(scope="session")
+def energy_validator():
+    """Get energy validator for testing."""
+    from src.validation.geometric.flow import EnergyValidator
+    return EnergyValidator(tolerance=1e-6, drift_threshold=0.01)
+
+@pytest.fixture(scope="session")
+def convergence_validator():
+    """Get convergence validator for testing."""
+    from src.validation.geometric.flow import ConvergenceValidator
+    return ConvergenceValidator(tolerance=1e-6, max_iterations=1000)
+
+@pytest.fixture(scope="session")
+def geometric_flow_validator(
+    flow_stability_validator,
+    energy_validator,
+    convergence_validator
+):
+    """Get complete geometric flow validator for testing."""
+    from src.validation.geometric.flow import GeometricFlowValidator
+    return GeometricFlowValidator(
+        tolerance=1e-6,
+        stability_threshold=0.1,
+        drift_threshold=0.01,
+        max_iterations=1000
+    )
+
+# Pattern validation fixtures
+@pytest.fixture(scope="session")
+def pattern_validator():
+    """Get pattern validator for testing."""
+    from src.validation.patterns.validation import PatternValidator
+    return PatternValidator()
+
+# Quantum validation fixtures
+@pytest.fixture(scope="session")
+def quantum_validator():
+    """Get quantum validator for testing."""
+    from src.validation.quantum.validation import QuantumStateValidator
+    return QuantumStateValidator()
+
+# Combined validation framework
+@pytest.fixture(scope="session")
+def validation_framework(
+    geometric_flow_validator,
+    pattern_validator,
+    quantum_validator
+):
+    """Get complete validation framework for testing."""
+    from src.validation.framework import ValidationFramework
+    return ValidationFramework(
+        geometric_validator=geometric_flow_validator,
+        pattern_validator=pattern_validator,
+        quantum_validator=quantum_validator
+    )

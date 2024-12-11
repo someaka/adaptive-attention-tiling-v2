@@ -403,3 +403,20 @@ from src.core.validation.stability import LinearStabilityValidator
 4. Stabilize timing-sensitive tests
 
 See [TEST_SUITE_INDEX.md](TEST_SUITE_INDEX.md) for test details.
+
+## Quantum Core Module Status
+
+#### Recent Fixes
+- [x] Berry Phase Calculation (2024-12-11)
+  - Fixed phase accumulation sign in `compute_berry_phase`
+  - Removed incorrect π scaling factor
+  - Geometric phase now correctly reflects cyclic evolution
+  - All quantum state tomography tests passing
+
+#### Next Steps
+- [ ] Geometric Flow Testing
+  - Test manifold projection methods
+  - Verify Riemannian metric calculations
+  - Validate geodesic computations
+  - Check parallel transport implementation
+  - Test curvature tensor calculations

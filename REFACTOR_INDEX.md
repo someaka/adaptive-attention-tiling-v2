@@ -92,6 +92,12 @@ This document tracks the refactoring progress for ensuring all components are pr
     - `evolve_with_decoherence`: Open system dynamics
     - `compute_berry_phase`: Geometric phase
     - `evaluate_entanglement_witness`: Entanglement detection
+  - [x] Fixed Berry phase calculation
+    - Fixed phase accumulation in `compute_berry_phase` method to correctly calculate geometric phase
+    - Changed phase accumulation sign from negative to positive to match quantum mechanical convention
+    - Removed incorrect π scaling factor as the geometric phase naturally converges to π for cyclic evolution
+    - All quantum state tomography tests now pass, including `test_geometric_phase`
+    - Phase calculation now properly reflects the solid angle traced by the state during cyclic evolution
   - [ ] Fix all 11 failing tests in `test_state_space.py`
   - [ ] Add proper error handling and validation
   - [ ] Optimize tensor operations
