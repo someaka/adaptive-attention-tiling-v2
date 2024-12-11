@@ -136,58 +136,22 @@ class RicciTensorNetwork(nn.Module):
 
 class RicciTensor:
     """Wrapper class for Ricci tensor to ensure proper tensor operations."""
-
+    
     def __init__(self, tensor: torch.Tensor):
         self.tensor = tensor
-
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        
+    def __instancecheck__(self, instance):
+        return isinstance(instance, RicciTensor)
+        
+    def __subclasscheck__(self, subclass):
+        return issubclass(subclass, RicciTensor)
+        
+    def __torch_function__(self, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-        if func is torch.allclose:
-            other = args[1]
-            if isinstance(other, RicciTensor):
-                other = other.tensor
-            return torch.allclose(args[0].tensor, other, **kwargs)
-        return NotImplemented
-
-    def __truediv__(self, other):
-        """Division operator."""
-        if isinstance(other, (int, float)):
-            return RicciTensor(self.tensor / other)
-        elif isinstance(other, RicciTensor):
-            return RicciTensor(self.tensor / other.tensor)
-        return NotImplemented
-
-    def __mul__(self, other):
-        """Multiplication operator."""
-        if isinstance(other, (int, float)):
-            return RicciTensor(self.tensor * other)
-        elif isinstance(other, RicciTensor):
-            return RicciTensor(self.tensor * other.tensor)
-        return NotImplemented
-
-    def __rmul__(self, other):
-        """Right multiplication operator."""
-        return self.__mul__(other)
-
-    def __getattr__(self, name):
-        """Forward tensor operations to the underlying tensor."""
-        if hasattr(self.tensor, name):
-            return getattr(self.tensor, name)
-        raise AttributeError(f"'RicciTensor' object has no attribute '{name}'")
-
-    def transpose(self, *args, **kwargs):
-        """Transpose the tensor."""
-        return RicciTensor(self.tensor.transpose(*args, **kwargs))
-
-    def reshape(self, *args, **kwargs):
-        """Reshape the tensor."""
-        return self.tensor.reshape(*args, **kwargs)
-
-    def view(self, *args, **kwargs):
-        """View the tensor."""
-        return self.tensor.view(*args, **kwargs)
+        args = [a.tensor if isinstance(a, RicciTensor) else a for a in args]
+        ret = func(*args, **kwargs)
+        return RicciTensor(ret) if isinstance(ret, torch.Tensor) else ret
 
 
 class FlowStepNetwork(nn.Module):
@@ -202,8 +166,8 @@ class FlowStepNetwork(nn.Module):
         """
         super().__init__()
         
-        # Input size accounts for flattened metric and Ricci tensors
-        input_dim = manifold_dim * manifold_dim * 2
+        # Input size accounts for points and Ricci tensor
+        input_dim = manifold_dim + manifold_dim * manifold_dim
         output_dim = manifold_dim
         
         # Network for computing flow vector field
@@ -232,19 +196,21 @@ class FlowStepNetwork(nn.Module):
         Returns:
             Flow vector field of shape (batch_size, manifold_dim)
         """
-        self.set_points(points)
+        batch_size = points.shape[0]
         
-        # Flatten and concatenate points and ricci tensors
-        points_flat = points.reshape(points.shape[0], -1)
-        ricci_flat = ricci.tensor.reshape(ricci.tensor.shape[0], -1)
+        # Flatten tensors for network input
+        ricci_flat = ricci.tensor.reshape(batch_size, -1)
+        points_flat = points.reshape(batch_size, -1)
         network_input = torch.cat([points_flat, ricci_flat], dim=1)
         
-        # Compute flow vector
+        # Compute flow vector field
         flow = self.flow_network(network_input)
-        flow = flow.reshape(points.shape)
         
-        # Normalize flow to preserve volume
-        flow = self.normalize_flow(flow, self.compute_metric(points))
+        # Normalize flow
+        flow = self.normalize_flow(flow, ricci.tensor)
+        
+        # Ensure output shape matches points shape
+        flow = flow.reshape(batch_size, points.shape[1])
         
         return flow
         
@@ -262,21 +228,16 @@ class FlowStepNetwork(nn.Module):
         n = flow.shape[1]
         
         # Compute divergence
-        div = torch.zeros(batch_size, 1, device=flow.device)
+        div = torch.zeros(batch_size, device=flow.device)
         for i in range(n):
-            div += torch.autograd.grad(
-                flow[:,i].sum(), 
-                self.points,
-                create_graph=True,
-                retain_graph=True
-            )[0][:,i]
-            
-        # Project out divergence component
-        normalized = flow.clone()
+            div += torch.diagonal(metric, dim1=1, dim2=2)[:, i] * flow[:, i]
+        
+        # Normalize flow
+        norm_flow = flow.clone()
         for i in range(n):
-            normalized[:,i] = flow[:,i] - div * self.points[:,i] / n
+            norm_flow[:, i] = flow[:, i] - div / n
             
-        return normalized
+        return norm_flow
 
     def compute_energy(self, points: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
         """Compute flow energy.
@@ -364,8 +325,7 @@ class SingularityDetector(nn.Module):
                 singularities.append(
                     SingularityInfo(
                         location=points[i],
-                        type=self._classify_singularity(detection[i, 0]),
-                        severity=detection[i, 1].item(),
+                        curvature=detection[i, 0],
                         resolution=resolution,
                     )
                 )
@@ -373,10 +333,17 @@ class SingularityDetector(nn.Module):
         return singularities
 
     def _classify_singularity(self, type_idx: torch.Tensor) -> str:
-        """Classify type of singularity."""
-        idx = type_idx.argmax().item()
-        types = ["focus", "node", "saddle", "center"]
-        return types[idx]
+        """Classify type of singularity.
+        
+        Args:
+            type_idx: Type index from singularity detector
+            
+        Returns:
+            String describing singularity type
+        """
+        types = ["removable", "essential", "conical", "cusp"]
+        type_idx = torch.argmax(type_idx).item()
+        return types[type_idx]
 
 
 class FlowNormalizer(nn.Module):
@@ -458,6 +425,7 @@ class GeometricFlow:
         self.flow_type = flow_type
         self.timestep = timestep
         self.normalize_method = normalize_method
+        self.dt = timestep
         
         # Initialize components
         self.ricci = RicciTensorNetwork(manifold_dim, hidden_dim)
@@ -573,33 +541,27 @@ class GeometricFlow:
             Mean curvature tensor
         """
         batch_size = metric.shape[0]
+        n = self.manifold_dim
+        
+        # Add small regularization to prevent singular matrices
+        eye = torch.eye(n, device=metric.device).unsqueeze(0).expand(batch_size, -1, -1)
+        metric = metric + 1e-6 * eye
+        
+        # Compute metric inverse
+        metric_inv = torch.inverse(metric)
         
         # Compute connection coefficients
         connection = self.compute_connection(metric)
         
-        # Compute inverse metric
-        metric_inv = torch.inverse(metric)
+        # Compute mean curvature components
+        mean_curv = torch.zeros_like(metric)
+        for i in range(n):
+            for j in range(n):
+                for k in range(n):
+                    for l in range(n):
+                        mean_curv[:, i, j] += metric_inv[:, k, l] * connection[:, i, k, l]
         
-        # Initialize mean curvature tensor
-        mean_curvature = torch.zeros_like(metric)
-        
-        # Compute mean curvature components using einsum for batch operations
-        for i in range(self.manifold_dim):
-            for j in range(self.manifold_dim):
-                # Contract connection coefficients with inverse metric
-                trace = torch.einsum(
-                    'bkl,bkl->b',  # Contract over k,l indices for each batch
-                    metric_inv,
-                    connection[..., i, j, :]  # Select appropriate connection components
-                )
-                
-                # Reshape trace for broadcasting
-                trace = trace.view(batch_size, 1)
-                
-                # Update mean curvature tensor
-                mean_curvature[..., i, j] = -0.5 * trace.squeeze()
-        
-        return mean_curvature
+        return mean_curv
 
     def compute_ricci_tensor(self, metric: torch.Tensor) -> RicciTensor:
         """Compute Ricci tensor from metric.
@@ -651,6 +613,7 @@ class GeometricFlow:
                     ricci[:, i+1:]
                 ], dim=1)
         
+        # Wrap tensor in RicciTensor class
         return RicciTensor(ricci)
 
     def compute_flow_vector(self, points: torch.Tensor, ricci: RicciTensor) -> torch.Tensor:
@@ -663,20 +626,21 @@ class GeometricFlow:
         Returns:
             Flow vector field of shape (batch_size, manifold_dim)
         """
-        # Get metric at current points
-        metric = self.compute_metric(points)
+        batch_size = points.shape[0]
         
-        # Compute flow based on flow type
-        if self.flow_type == "ricci":
-            # Ricci flow: -2 * Ricci tensor
-            flow = -2 * ricci.tensor
-        else:
-            # Mean curvature flow
-            mean_curv = self.compute_mean_curvature(metric)
-            flow = mean_curv.unsqueeze(-1) * metric
-            
-        # Normalize flow to preserve volume
-        flow = self.normalize_flow(flow)
+        # Flatten tensors for network input
+        ricci_flat = ricci.tensor.reshape(batch_size, -1)
+        points_flat = points.reshape(batch_size, -1)
+        network_input = torch.cat([points_flat, ricci_flat], dim=1)
+        
+        # Compute flow vector field
+        flow = self.flow_step.flow_network(network_input)
+        
+        # Normalize flow
+        flow = self.flow_step.normalize_flow(flow, ricci.tensor)
+        
+        # Ensure output shape matches points shape
+        flow = flow.reshape(batch_size, self.manifold_dim)
         
         return flow
 
@@ -1048,3 +1012,16 @@ class GeometricFlow:
             sequence.append(rescaled)
         
         return sequence
+
+    def _classify_singularity(self, type_idx: torch.Tensor) -> str:
+        """Classify type of singularity.
+        
+        Args:
+            type_idx: Type index from singularity detector
+            
+        Returns:
+            String describing singularity type
+        """
+        types = ["removable", "essential", "conical", "cusp"]
+        type_idx = torch.argmax(type_idx).item()
+        return types[type_idx]
