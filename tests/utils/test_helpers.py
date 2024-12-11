@@ -2,9 +2,96 @@
 
 import torch
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Callable
+import time
+import psutil
+import os
 
 from src.core.quantum.state_space import QuantumState
+
+
+def measure_memory_usage(func: Callable) -> Callable:
+    """Decorator to measure memory usage of a function.
+    
+    Args:
+        func: Function to measure
+        
+    Returns:
+        Wrapped function that measures memory
+    """
+    def wrapper(*args, **kwargs):
+        # Get initial memory usage
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        
+        # Run function
+        result = func(*args, **kwargs)
+        
+        # Get final memory usage
+        final_memory = process.memory_info().rss / 1024 / 1024  # MB
+        
+        # Print memory usage
+        print(f"Memory usage for {func.__name__}:")
+        print(f"Initial: {initial_memory:.2f} MB")
+        print(f"Final: {final_memory:.2f} MB")
+        print(f"Difference: {final_memory - initial_memory:.2f} MB")
+        
+        return result
+    return wrapper
+
+
+def benchmark_forward_backward(
+    model: torch.nn.Module,
+    input_data: torch.Tensor,
+    target: torch.Tensor,
+    loss_fn: Callable,
+    num_iterations: int = 100,
+) -> Tuple[float, float]:
+    """Benchmark forward and backward passes.
+    
+    Args:
+        model: Model to benchmark
+        input_data: Input data
+        target: Target data
+        loss_fn: Loss function
+        num_iterations: Number of iterations
+        
+    Returns:
+        Average forward time, average backward time
+    """
+    forward_times = []
+    backward_times = []
+    
+    for _ in range(num_iterations):
+        # Forward pass
+        start = time.time()
+        output = model(input_data)
+        forward_time = time.time() - start
+        forward_times.append(forward_time)
+        
+        # Backward pass
+        loss = loss_fn(output, target)
+        start = time.time()
+        loss.backward()
+        backward_time = time.time() - start
+        backward_times.append(backward_time)
+        
+        model.zero_grad()
+    
+    return np.mean(forward_times), np.mean(backward_times)
+
+
+def assert_tensor_equal(tensor1: torch.Tensor, tensor2: torch.Tensor, tolerance: float = 1e-6) -> None:
+    """Assert that two tensors are equal within a tolerance.
+    
+    Args:
+        tensor1: First tensor
+        tensor2: Second tensor
+        tolerance: Numerical tolerance for comparisons
+    """
+    assert tensor1.shape == tensor2.shape, f"Tensor shapes don't match: {tensor1.shape} vs {tensor2.shape}"
+    assert torch.allclose(tensor1, tensor2, atol=tolerance), \
+        f"Tensors not equal within tolerance {tolerance}"
 
 
 def assert_manifold_properties(metric_tensor: torch.Tensor, tolerance: float = 1e-6) -> None:
@@ -67,6 +154,20 @@ def generate_test_density_matrix(num_qubits: int, pure: bool = True) -> torch.Te
             state = state / torch.norm(state)
             rho += weights[i] * state.outer(state)
         return rho
+
+
+def generate_random_tensor(shape: Tuple[int, ...], requires_grad: bool = True) -> torch.Tensor:
+    """Generate a random tensor for testing.
+    
+    Args:
+        shape: Shape of tensor to generate
+        requires_grad: Whether tensor requires gradients
+        
+    Returns:
+        Random tensor
+    """
+    tensor = torch.randn(*shape, requires_grad=requires_grad)
+    return tensor
 
 
 def assert_quantum_state_properties(state: QuantumState, tolerance: float = 1e-6) -> None:

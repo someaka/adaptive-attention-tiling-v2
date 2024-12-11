@@ -1,127 +1,136 @@
-"""Tests for GPU memory management system."""
+"""Tests for Vulkan memory management functionality."""
 
-import gc
-
+import logging
 import pytest
-import torch
+import numpy as np
+from pathlib import Path
 
-from src.core.performance.gpu.memory_management import GPUMemoryManager
+from src.core.performance.vulkan.memory_management import (
+    VulkanMemoryError,
+    VulkanMemoryManager,
+)
 
+# Configure logging
+@pytest.fixture(scope="session", autouse=True)
+def configure_logging():
+    log_dir = Path(__file__).parent.parent.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "vulkan_memory_tests.log"
+    
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+    )
+    return logging.getLogger(__name__)
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
-class TestGPUMemoryManager:
-    """Test suite for GPU memory management."""
+@pytest.fixture
+def memory_manager(request):
+    """Fixture to create and cleanup VulkanMemoryManager."""
+    manager = None
+    try:
+        manager = VulkanMemoryManager()
+        yield manager
+    finally:
+        if manager:
+            manager.cleanup()
 
-    @pytest.fixture
-    def manager(self):
-        """Create a GPU memory manager for testing."""
-        manager = GPUMemoryManager()
-        # Clear GPU memory before each test
-        torch.cuda.empty_cache()
-        gc.collect()
-        return manager
+@pytest.mark.gpu
+def test_buffer_allocation(memory_manager, configure_logging):
+    """Test basic buffer allocation."""
+    logger = configure_logging
+    
+    # Test allocation with tuple size
+    buffer1 = memory_manager.allocate_buffer((100, 100), np.float32)
+    assert buffer1 is not None
+    logger.info("Successfully allocated buffer with tuple size")
 
-    def test_tensor_allocation(self, manager):
-        """Test basic tensor allocation on GPU."""
-        initial_memory = manager.get_allocated_memory()
+    # Test allocation with byte size
+    buffer2 = memory_manager.allocate_buffer(1024)
+    assert buffer2 is not None
+    logger.info("Successfully allocated buffer with byte size")
 
-        # Allocate tensor
-        tensor = manager.allocate_tensor((100, 100))
+@pytest.mark.gpu
+def test_data_transfer(memory_manager, configure_logging):
+    """Test data transfer between host and device."""
+    logger = configure_logging
+    
+    # Create test data
+    test_data = np.random.rand(100, 100).astype(np.float32)
+    
+    # Allocate buffer and transfer data
+    buffer = memory_manager.allocate_buffer(test_data.shape, test_data.dtype)
+    memory_manager.copy_to_device(buffer, test_data)
+    
+    # Read back data
+    result = memory_manager.copy_to_host(buffer)
+    assert np.allclose(test_data, result)
+    logger.info("Successfully completed data transfer test")
 
-        # Check tensor properties
-        assert tensor.device.type == "cuda"
-        assert tensor.shape == (100, 100)
-        assert manager.get_allocated_memory() > initial_memory
+@pytest.mark.gpu
+def test_memory_tracking(memory_manager, configure_logging):
+    """Test memory tracking and metrics."""
+    logger = configure_logging
+    
+    # Record initial memory usage
+    initial_usage = memory_manager.get_memory_usage()
+    
+    # Allocate some buffers
+    buffers = []
+    for _ in range(5):
+        buf = memory_manager.allocate_buffer((50, 50), np.float32)
+        buffers.append(buf)
+    
+    # Check memory increased
+    current_usage = memory_manager.get_memory_usage()
+    assert current_usage > initial_usage
+    
+    # Cleanup buffers
+    for buf in buffers:
+        memory_manager.free_buffer(buf)
+    
+    # Verify memory returned to initial state
+    final_usage = memory_manager.get_memory_usage()
+    assert final_usage == initial_usage
+    logger.info("Successfully completed memory tracking test")
 
-        # Verify memory tracking
-        assert manager.get_peak_memory() >= manager.get_allocated_memory()
-        assert manager.get_fragmentation_ratio() >= 0.0
+@pytest.mark.gpu
+def test_error_handling(memory_manager, configure_logging):
+    """Test error handling scenarios."""
+    logger = configure_logging
+    
+    # Test invalid allocation
+    with pytest.raises(VulkanMemoryError):
+        memory_manager.allocate_buffer((-1, -1), np.float32)
+    
+    # Test double free
+    buffer = memory_manager.allocate_buffer((10, 10), np.float32)
+    memory_manager.free_buffer(buffer)
+    with pytest.raises(VulkanMemoryError):
+        memory_manager.free_buffer(buffer)
+    
+    logger.info("Successfully completed error handling test")
 
-    def test_memory_tracking(self, manager):
-        """Test memory usage tracking during operations."""
-        # Allocate multiple tensors
-        tensors = [manager.allocate_tensor((50, 50)) for _ in range(5)]
-        peak_memory = manager.get_peak_memory()
-
-        # Delete some tensors
-        del tensors[::2]
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        # Check memory changes
-        assert manager.get_allocated_memory() < peak_memory
-        assert manager.get_peak_memory() == peak_memory
-
-    def test_cpu_to_gpu_transfer(self, manager):
-        """Test CPU to GPU tensor transfer."""
-        # Create CPU tensor
-        cpu_tensor = torch.randn(100, 100)
-        initial_memory = manager.get_allocated_memory()
-
-        # Transfer to GPU
-        gpu_tensor = manager.transfer_to_gpu(cpu_tensor)
-
-        # Verify transfer
-        assert gpu_tensor.device.type == "cuda"
-        assert torch.all(cpu_tensor == gpu_tensor.cpu())
-        assert manager.get_allocated_memory() > initial_memory
-
-    def test_memory_optimization(self, manager):
-        """Test memory layout optimization."""
-        # Allocate tensors of different sizes
-        [
-            manager.allocate_tensor((10, 10)),
-            manager.allocate_tensor((50, 50)),
-            manager.allocate_tensor((20, 20)),
-        ]
-
-        # Record fragmentation
-        initial_fragmentation = manager.get_fragmentation_ratio()
-
-        # Optimize memory layout
-        manager.optimize_memory_layout()
-
-        # Check if fragmentation improved or stayed the same
-        assert manager.get_fragmentation_ratio() <= initial_fragmentation * 1.1
-
-    def test_cache_management(self, manager):
-        """Test GPU memory cache management."""
-        # Record initial cache
-        initial_cache = manager.get_cache_memory()
-
-        # Allocate and free some tensors
-        tensor = manager.allocate_tensor((1000, 1000))
-        del tensor
-        gc.collect()
-
-        # Clear cache
-        manager.clear_cache()
-
-        # Verify cache was cleared
-        assert manager.get_cache_memory() <= initial_cache
-
-    def test_memory_limits(self, manager):
-        """Test handling of memory limits."""
-        # Try to allocate a very large tensor
-        large_size = (1000, 1000, 1000)  # 4GB for float32
-
-        # This should raise an out of memory error
-        with pytest.raises(RuntimeError, match="out of memory"):
-            manager.allocate_tensor(large_size)
-
-    @pytest.mark.parametrize("size", [(10, 10), (100, 100), (500, 500)])
-    def test_memory_scaling(self, manager, size):
-        """Test memory usage scaling with different tensor sizes."""
-        initial_memory = manager.get_allocated_memory()
-
-        # Allocate tensor
-        manager.allocate_tensor(size)
-        final_memory = manager.get_allocated_memory()
-
-        # Calculate theoretical memory (assuming float32)
-        theoretical_memory = size[0] * size[1] * 4
-
-        # Check if actual memory usage is within 10% of theoretical
-        actual_memory = final_memory - initial_memory
-        ratio = actual_memory / theoretical_memory
-        assert 0.9 <= ratio <= 1.1  # Within 10% of theoretical memory
+@pytest.mark.gpu
+def test_buffer_pool_cleanup(memory_manager, configure_logging):
+    """Test buffer pool cleanup mechanism."""
+    logger = configure_logging
+    
+    # Allocate multiple buffers
+    buffers = []
+    for _ in range(10):
+        buf = memory_manager.allocate_buffer((20, 20), np.float32)
+        buffers.append(buf)
+    
+    # Free half of them
+    for buf in buffers[:5]:
+        memory_manager.free_buffer(buf)
+    
+    # Force cleanup
+    memory_manager.cleanup_pool()
+    
+    # Verify remaining buffers are still valid
+    for buf in buffers[5:]:
+        assert memory_manager.is_buffer_valid(buf)
+    
+    logger.info("Successfully completed buffer pool cleanup test")

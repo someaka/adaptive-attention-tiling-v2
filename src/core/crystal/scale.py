@@ -9,7 +9,7 @@ This module implements the scale system for multi-scale analysis:
 """
 
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Dict, Any
 
 import numpy as np
 import torch
@@ -246,6 +246,148 @@ class ScaleInvariance:
         return invariants
 
 
+class ScaleCohomology:
+    """Analysis of scale cohomology and obstructions."""
+    
+    def __init__(self, dim: int, num_scales: int = 4):
+        """Initialize scale cohomology analysis.
+        
+        Args:
+            dim: Dimension of state space
+            num_scales: Number of scales to analyze
+        """
+        self.dim = dim
+        self.num_scales = num_scales
+        
+        # Cohomology computation networks
+        self.cocycle_network = nn.Sequential(
+            nn.Linear(dim * 2, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim),
+        )
+        
+        self.coboundary_network = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),
+            nn.Linear(dim * 2, dim),
+        )
+        
+        # Obstruction detector
+        self.obstruction_detector = nn.Sequential(
+            nn.Linear(dim * 3, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, 1),
+            nn.Sigmoid(),
+        )
+        
+    def compute_cocycle(
+        self,
+        state1: torch.Tensor,
+        state2: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        """Compute cocycle between states at given scale.
+        
+        Args:
+            state1: First quantum state
+            state2: Second quantum state
+            scale: Scale parameter
+            
+        Returns:
+            Cocycle tensor
+        """
+        combined = torch.cat([state1, state2], dim=-1)
+        cocycle = self.cocycle_network(combined)
+        return cocycle * scale
+        
+    def compute_coboundary(
+        self,
+        state: torch.Tensor,
+        scale1: float,
+        scale2: float,
+    ) -> torch.Tensor:
+        """Compute coboundary of state between scales.
+        
+        Args:
+            state: Quantum state
+            scale1: First scale
+            scale2: Second scale
+            
+        Returns:
+            Coboundary tensor
+        """
+        coboundary = self.coboundary_network(state)
+        return coboundary * (scale2 - scale1)
+        
+    def detect_obstructions(
+        self,
+        states: List[torch.Tensor],
+        scales: List[float],
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """Detect cohomological obstructions.
+        
+        Args:
+            states: List of quantum states
+            scales: List of scale parameters
+            
+        Returns:
+            Obstruction probability and list of obstruction tensors
+        """
+        obstructions = []
+        
+        for i in range(len(states) - 2):
+            # Compute consecutive cocycles
+            cocycle1 = self.compute_cocycle(states[i], states[i+1], scales[i])
+            cocycle2 = self.compute_cocycle(states[i+1], states[i+2], scales[i+1])
+            
+            # Compute coboundary
+            coboundary = self.compute_coboundary(states[i+1], scales[i], scales[i+2])
+            
+            # Compute obstruction
+            combined = torch.cat([cocycle1, cocycle2, coboundary], dim=-1)
+            obstruction_prob = self.obstruction_detector(combined)
+            
+            if obstruction_prob > 0.5:
+                obstructions.append(cocycle2 - cocycle1 - coboundary)
+                
+        return torch.tensor(len(obstructions) > 0, dtype=torch.float), obstructions
+        
+    def analyze_cohomology(
+        self,
+        states: List[torch.Tensor],
+        scales: List[float],
+    ) -> Dict[str, Any]:
+        """Complete cohomology analysis.
+        
+        Args:
+            states: List of quantum states
+            scales: List of scale parameters
+            
+        Returns:
+            Dictionary with analysis results
+        """
+        has_obstruction, obstructions = self.detect_obstructions(states, scales)
+        
+        # Compute cohomology groups
+        cocycles = []
+        coboundaries = []
+        
+        for i in range(len(states) - 1):
+            cocycles.append(
+                self.compute_cocycle(states[i], states[i+1], scales[i])
+            )
+            coboundaries.append(
+                self.compute_coboundary(states[i], scales[i], scales[i+1])
+            )
+            
+        return {
+            'has_obstruction': has_obstruction,
+            'obstructions': obstructions,
+            'cocycles': cocycles,
+            'coboundaries': coboundaries,
+        }
+
+
 class ScaleSystem:
     """Complete scale system for multi-scale analysis."""
 
@@ -254,10 +396,11 @@ class ScaleSystem:
         self.rg_flow = RenormalizationFlow(coupling_dim)
         self.anomaly = AnomalyDetector(dim)
         self.invariance = ScaleInvariance(dim, num_scales)
+        self.cohomology = ScaleCohomology(dim, num_scales)
 
     def analyze_scales(
         self, states: List[torch.Tensor], couplings: torch.Tensor
-    ) -> Tuple[RGFlow, List[AnomalyPolynomial], List[Tuple[torch.Tensor, float]]]:
+    ) -> Tuple[RGFlow, List[AnomalyPolynomial], List[Tuple[torch.Tensor, float]], Dict[str, Any]]:
         """Complete multi-scale analysis."""
         # Compute RG flow
         fixed_points, stability = self.rg_flow.find_fixed_points(couplings)
@@ -278,4 +421,7 @@ class ScaleSystem:
         # Find scale invariant structures
         invariants = self.invariance.find_invariant_structures(torch.stack(states))
 
-        return rg_flow, anomalies, invariants
+        # Analyze cohomology
+        cohomology_results = self.cohomology.analyze_cohomology(states, [1.0] * len(states))
+
+        return rg_flow, anomalies, invariants, cohomology_results

@@ -20,7 +20,12 @@ import numpy as np
 import pytest
 import torch
 
-from src.core.patterns.riemannian import RiemannianStructure
+from src.core.patterns.riemannian import (
+    PatternRiemannianStructure,
+    RiemannianFramework,
+    ChristoffelSymbols,
+    CurvatureTensor,
+)
 
 
 class TestRiemannianStructure:
@@ -32,7 +37,7 @@ class TestRiemannianStructure:
     @pytest.fixture
     def riemannian_structure(self, manifold_dim):
         """Create a test Riemannian structure."""
-        return RiemannianStructure(dim=manifold_dim)
+        return PatternRiemannianStructure(dim=manifold_dim)
 
     def test_metric_tensor(self, riemannian_structure, manifold_dim):
         """Test metric tensor properties."""

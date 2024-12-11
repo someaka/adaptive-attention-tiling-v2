@@ -163,15 +163,53 @@ def _run_ruff_commands(ruff_path: Path, file_path: Path) -> None:
         raise
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Modify test items before test run.
+def pytest_collection_modifyitems(items):
+    """Modify test items in place to ensure proper test execution order based on dependency analysis."""
+    import json
+    import os
+    from pathlib import Path
 
-    Args:
-        items: List of test items to modify
-    """
-    logger.info("Collected %d test items", len(items))
+    # Load dependency analysis results
+    project_root = str(Path(__file__).parent.parent)
+    dep_file = os.path.join(project_root, 'dependency_analysis.json')
+    
+    try:
+        with open(dep_file, 'r') as f:
+            dep_data = json.load(f)
+            dependency_levels = dep_data['dependency_levels']
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        # Fallback to default levels if analysis file not found or invalid
+        logger.warning("Dependency analysis file not found or invalid. Using default test ordering.")
+        return
+
+    def get_test_level(item):
+        """Determine the dependency level for a test item based on analysis results."""
+        # Convert test path to module path format
+        test_path = str(item.fspath)
+        if test_path.startswith(project_root):
+            test_path = test_path[len(project_root):].lstrip(os.sep)
+        test_path = os.path.splitext(test_path)[0].replace(os.sep, '.')
+        
+        # Check each level's modules to find where this test belongs
+        for level in sorted(dependency_levels.keys(), key=int):
+            level_modules = dependency_levels[level]
+            # Check if test path matches any module in this level
+            if any(test_path.startswith(mod.replace('src.', 'tests.test_')) or 
+                  test_path.startswith(mod.replace('src.', 'tests.')) 
+                  for mod in level_modules):
+                return int(level)
+        
+        # Default to level 0 if no match found
+        return 0
+
+    # Sort items by dependency level
+    items.sort(key=get_test_level)
+
+    # Add markers based on levels
     for item in items:
-        logger.debug("Test item: %s", item.name)
+        level = get_test_level(item)
+        marker = getattr(pytest.mark, f'level{level}')
+        item.add_marker(marker)
 
 
 def pytest_configure(config: Any) -> None:

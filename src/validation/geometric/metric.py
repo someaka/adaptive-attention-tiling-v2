@@ -5,14 +5,194 @@ This module validates geometric properties:
 - Connection compatibility
 - Curvature bounds
 - Geodesic completeness
+- Smoothness properties
 """
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Dict
 
 import torch
 
 from ...core.patterns.riemannian import RiemannianFramework
+from ..base import ValidationResult
+
+@dataclass
+class SmoothnessMetrics:
+    """Metrics for measuring smoothness of geometric quantities."""
+
+    def __init__(self, tolerance: float = 1e-5):
+        """Initialize smoothness metrics.
+        
+        Args:
+            tolerance: Numerical tolerance for smoothness checks
+        """
+        self.tolerance = tolerance
+        
+    def compute_derivatives(
+        self,
+        metric: torch.Tensor,
+        coords: torch.Tensor,
+        order: int = 1
+    ) -> torch.Tensor:
+        """Compute derivatives of metric tensor.
+        
+        Args:
+            metric: Metric tensor
+            coords: Coordinate points
+            order: Order of derivatives to compute
+            
+        Returns:
+            Tensor of derivatives
+        """
+        # Initialize list to store derivatives
+        derivatives = []
+        
+        # Compute derivatives up to specified order
+        for i in range(order):
+            if i == 0:
+                current = metric
+            else:
+                # Use autograd to compute higher derivatives
+                current = torch.autograd.grad(
+                    current.sum(),
+                    coords,
+                    create_graph=True
+                )[0]
+            derivatives.append(current)
+            
+        return torch.stack(derivatives)
+        
+    def check_continuity(
+        self,
+        metric: torch.Tensor,
+        coords: torch.Tensor
+    ) -> bool:
+        """Check if metric is continuous.
+        
+        Args:
+            metric: Metric tensor
+            coords: Coordinate points
+            
+        Returns:
+            True if metric is continuous
+        """
+        # Compute first derivatives
+        derivatives = self.compute_derivatives(metric, coords, order=1)
+        
+        # Check if derivatives are finite
+        return torch.all(torch.isfinite(derivatives))
+        
+    def check_differentiability(
+        self,
+        metric: torch.Tensor,
+        coords: torch.Tensor,
+        order: int = 2
+    ) -> bool:
+        """Check if metric is differentiable up to given order.
+        
+        Args:
+            metric: Metric tensor
+            coords: Coordinate points
+            order: Order of differentiability to check
+            
+        Returns:
+            True if metric is differentiable up to given order
+        """
+        # Compute derivatives up to specified order
+        derivatives = self.compute_derivatives(metric, coords, order=order)
+        
+        # Check if all derivatives exist and are finite
+        return torch.all(torch.isfinite(derivatives))
+        
+    def compute_smoothness_error(
+        self,
+        metric: torch.Tensor,
+        coords: torch.Tensor,
+        order: int = 2
+    ) -> float:
+        """Compute error in smoothness.
+        
+        Args:
+            metric: Metric tensor
+            coords: Coordinate points
+            order: Order of derivatives to check
+            
+        Returns:
+            Smoothness error measure
+        """
+        # Compute derivatives
+        derivatives = self.compute_derivatives(metric, coords, order=order)
+        
+        # Compute magnitude of derivatives
+        magnitudes = torch.norm(derivatives, dim=(-2, -1))
+        
+        # Return maximum magnitude as error measure
+        return float(torch.max(magnitudes).item())
+        
+    def validate_smoothness(
+        self,
+        metric: torch.Tensor,
+        coords: torch.Tensor,
+        order: int = 2
+    ) -> Dict[str, bool]:
+        """Validate smoothness properties of metric.
+        
+        Args:
+            metric: Metric tensor
+            coords: Coordinate points
+            order: Order of smoothness to check
+            
+        Returns:
+            Dictionary with validation results
+        """
+        results = {
+            "is_continuous": self.check_continuity(metric, coords),
+            "is_differentiable": self.check_differentiability(
+                metric, coords, order
+            ),
+            "smoothness_error": self.compute_smoothness_error(
+                metric, coords, order
+            ),
+            "meets_tolerance": False
+        }
+        
+        # Check if smoothness error is within tolerance
+        results["meets_tolerance"] = (
+            results["smoothness_error"] < self.tolerance
+        )
+        
+        return results
+
+
+@dataclass
+class MetricProperties:
+    """Properties of Riemannian metric."""
+
+    is_positive_definite: bool  # Positive definiteness
+    is_compatible: bool  # Connection compatibility
+    is_complete: bool  # Geodesic completeness
+    has_bounded_curvature: bool  # Bounded curvature
+    
+    eigenvalues: torch.Tensor = None  # Metric eigenvalues
+    christoffel_symbols: torch.Tensor = None  # Connection symbols
+    curvature_bounds: 'CurvatureBounds' = None  # Curvature bounds
+    
+    def __post_init__(self):
+        """Validate property combinations."""
+        if not self.is_positive_definite:
+            raise ValueError("Metric must be positive definite")
+        if self.is_complete and not self.is_compatible:
+            raise ValueError("Complete metric must be compatible with connection")
+
+
+@dataclass
+class CurvatureBounds:
+    """Bounds on curvature tensors."""
+    
+    ricci_lower: float  # Lower bound on Ricci curvature
+    ricci_upper: float  # Upper bound on Ricci curvature
+    sectional_lower: float  # Lower bound on sectional curvature
+    sectional_upper: float  # Upper bound on sectional curvature
 
 
 @dataclass

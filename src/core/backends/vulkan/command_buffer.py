@@ -20,6 +20,99 @@ class CommandConfig:
     dispatch_z: int = 1
 
 
+class VulkanSync:
+    """Synchronization primitives for Vulkan operations."""
+    
+    def __init__(self, device: int):  # device: VkDevice
+        """Initialize sync primitives.
+        
+        Args:
+            device: Vulkan device handle
+        """
+        self.device = device
+        self.fences: Dict[int, int] = {}  # Dict[id, VkFence]
+        self.semaphores: Dict[int, int] = {}  # Dict[id, VkSemaphore]
+        
+    def create_fence(self, signaled: bool = False) -> int:
+        """Create a fence.
+        
+        Args:
+            signaled: Whether fence should be created in signaled state
+            
+        Returns:
+            Fence handle
+        """
+        create_info = vk.VkFenceCreateInfo(
+            flags=vk.VK_FENCE_CREATE_SIGNALED_BIT if signaled else 0
+        )
+        fence = vk.vkCreateFence(self.device, create_info, None)
+        self.fences[id(fence)] = fence
+        return fence
+        
+    def create_semaphore(self) -> int:
+        """Create a semaphore.
+        
+        Returns:
+            Semaphore handle
+        """
+        create_info = vk.VkSemaphoreCreateInfo()
+        semaphore = vk.vkCreateSemaphore(self.device, create_info, None)
+        self.semaphores[id(semaphore)] = semaphore
+        return semaphore
+        
+    def wait_for_fence(self, fence: int, timeout: int = None) -> bool:
+        """Wait for a fence to be signaled.
+        
+        Args:
+            fence: Fence handle
+            timeout: Timeout in nanoseconds
+            
+        Returns:
+            True if fence was signaled
+        """
+        result = vk.vkWaitForFences(
+            self.device,
+            1,
+            [fence],
+            True,
+            timeout or 0xFFFFFFFFFFFFFFFF
+        )
+        return result == vk.VK_SUCCESS
+        
+    def reset_fence(self, fence: int):
+        """Reset a fence to unsignaled state.
+        
+        Args:
+            fence: Fence handle
+        """
+        vk.vkResetFences(self.device, 1, [fence])
+        
+    def destroy_fence(self, fence: int):
+        """Destroy a fence.
+        
+        Args:
+            fence: Fence handle
+        """
+        vk.vkDestroyFence(self.device, fence, None)
+        del self.fences[id(fence)]
+        
+    def destroy_semaphore(self, semaphore: int):
+        """Destroy a semaphore.
+        
+        Args:
+            semaphore: Semaphore handle
+        """
+        vk.vkDestroySemaphore(self.device, semaphore, None)
+        del self.semaphores[id(semaphore)]
+        
+    def cleanup(self):
+        """Cleanup all sync primitives."""
+        for fence in list(self.fences.values()):
+            self.destroy_fence(fence)
+        for semaphore in list(self.semaphores.values()):
+            self.destroy_semaphore(semaphore)
+
+
 class CommandBufferManager:
     """Manages command buffer allocation and recording with advanced batching."""
 

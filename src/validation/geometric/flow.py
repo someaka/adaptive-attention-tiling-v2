@@ -12,13 +12,350 @@ This module validates flow properties:
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
 from ...neural.flow.geometric_flow import GeometricFlow
 from ...neural.flow.hamiltonian import HamiltonianSystem
+from ..base import ValidationResult
+
+
+@dataclass
+class SingularityDetector:
+    """Detector for flow singularities."""
+
+    def __init__(
+        self,
+        threshold: float = 1e6,
+        window_size: int = 10
+    ):
+        """Initialize singularity detector.
+        
+        Args:
+            threshold: Threshold for singularity detection
+            window_size: Window size for temporal analysis
+        """
+        self.threshold = threshold
+        self.window_size = window_size
+        
+    def detect_singularities(
+        self,
+        flow: GeometricFlow,
+        state: torch.Tensor,
+        time_points: torch.Tensor
+    ) -> Dict[str, bool]:
+        """Detect singularities in flow.
+        
+        Args:
+            flow: Geometric flow
+            state: Initial state
+            time_points: Time points to check
+            
+        Returns:
+            Dictionary with detection results
+        """
+        # Track flow evolution
+        current_state = state
+        has_singularity = False
+        singularity_time = None
+        
+        # Check each time point
+        for t in time_points:
+            # Evolve state
+            new_state = flow.evolve(current_state, t)
+            
+            # Check for singularities
+            if self._check_singularity(new_state):
+                has_singularity = True
+                singularity_time = t
+                break
+                
+            current_state = new_state
+            
+        return {
+            "has_singularity": has_singularity,
+            "singularity_time": singularity_time
+        }
+        
+    def _check_singularity(
+        self,
+        state: torch.Tensor
+    ) -> bool:
+        """Check if state contains singularities.
+        
+        Args:
+            state: State tensor
+            
+        Returns:
+            True if singularity detected
+        """
+        # Check for infinities
+        if torch.any(torch.isinf(state)):
+            return True
+            
+        # Check for NaNs
+        if torch.any(torch.isnan(state)):
+            return True
+            
+        # Check for extremely large values
+        if torch.any(torch.abs(state) > self.threshold):
+            return True
+            
+        return False
+        
+    def analyze_singularity(
+        self,
+        flow: GeometricFlow,
+        state: torch.Tensor,
+        time_points: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """Analyze singularity properties.
+        
+        Args:
+            flow: Geometric flow
+            state: Initial state
+            time_points: Time points to analyze
+            
+        Returns:
+            Dictionary with analysis results
+        """
+        # Track flow properties
+        current_state = state
+        states = []
+        derivatives = []
+        
+        # Evolve and analyze
+        for t in time_points:
+            # Store current state
+            states.append(current_state)
+            
+            # Compute time derivative
+            dt = t[1] - t[0] if len(t) > 1 else 0.01
+            derivative = (
+                flow.evolve(current_state, dt) - current_state
+            ) / dt
+            derivatives.append(derivative)
+            
+            # Evolve state
+            current_state = flow.evolve(current_state, t)
+            
+            # Check for singularity
+            if self._check_singularity(current_state):
+                break
+                
+        # Convert to tensors
+        states = torch.stack(states)
+        derivatives = torch.stack(derivatives)
+        
+        return {
+            "states": states,
+            "derivatives": derivatives,
+            "times": time_points[:len(states)]
+        }
+
+
+@dataclass
+class FlowProperties:
+    """Properties of geometric flow."""
+    
+    is_stable: bool = True
+    is_conservative: bool = True
+    is_convergent: bool = True
+    has_singularities: bool = False
+    stability_metrics: Optional[Dict] = None
+    energy_metrics: Optional[Dict] = None
+    convergence_metrics: Optional[Dict] = None
+    singularity_metrics: Optional[Dict] = None
+
+
+@dataclass
+class FlowValidator:
+    """Validator for geometric flow properties."""
+
+    def __init__(
+        self,
+        tolerance: float = 1e-5,
+        max_time: float = 100.0,
+        time_step: float = 0.01
+    ):
+        """Initialize flow validator.
+        
+        Args:
+            tolerance: Numerical tolerance
+            max_time: Maximum evolution time
+            time_step: Integration time step
+        """
+        self.tolerance = tolerance
+        self.max_time = max_time
+        self.time_step = time_step
+        
+        # Initialize sub-validators
+        self.stability_validator = FlowStabilityValidator(tolerance)
+        self.energy_validator = EnergyValidator(tolerance)
+        self.convergence_validator = ConvergenceValidator(tolerance)
+        
+    def validate(
+        self,
+        flow: GeometricFlow,
+        initial_states: torch.Tensor,
+    ) -> ValidationResult:
+        """Validate geometric flow.
+        
+        Args:
+            flow: Geometric flow to validate
+            initial_states: Initial states tensor
+            
+        Returns:
+            Validation result
+        """
+        # Track flow properties
+        properties = FlowProperties(
+            is_stable=True,
+            is_conservative=True,
+            is_convergent=True,
+            has_singularities=False
+        )
+        
+        # Validate stability
+        stability_result = self.stability_validator.validate_stability(
+            flow, initial_states
+        )
+        properties.stability_metrics = stability_result
+        properties.is_stable = stability_result.stable
+        
+        # Validate energy conservation
+        energy_result = self.energy_validator.validate_energy(
+            flow, initial_states
+        )
+        properties.energy_metrics = energy_result
+        properties.is_conservative = energy_result.conserved
+        
+        # Validate convergence
+        convergence_result = self.convergence_validator.validate_convergence(
+            flow, initial_states
+        )
+        properties.convergence_metrics = convergence_result
+        properties.is_convergent = convergence_result.converged
+        
+        # Check for singularities
+        singularity_result = self.validate_singularities(
+            flow, initial_states
+        )
+        properties.has_singularities = singularity_result.has_singularities
+        
+        # Compile validation result
+        return ValidationResult(
+            is_valid=properties.is_stable and properties.is_convergent,
+            message=self._generate_message(properties),
+            stable=properties.is_stable,
+            error=convergence_result.error,
+            initial_energy=energy_result.initial,
+            final_energy=energy_result.final,
+            relative_error=energy_result.relative_error,
+            initial_states=initial_states,
+            final_states=convergence_result.final_states
+        )
+        
+    def validate_singularities(
+        self,
+        flow: GeometricFlow,
+        states: torch.Tensor,
+    ) -> Dict:
+        """Validate flow for singularities.
+        
+        Args:
+            flow: Geometric flow
+            states: States tensor
+            
+        Returns:
+            Dictionary with singularity information
+        """
+        # Evolve flow
+        time = 0.0
+        current_states = states
+        has_singularities = False
+        singularity_time = None
+        
+        while time < self.max_time:
+            # Evolve one step
+            new_states = flow.evolve(current_states, self.time_step)
+            
+            # Check for singularities
+            if self._detect_singularity(new_states):
+                has_singularities = True
+                singularity_time = time
+                break
+                
+            current_states = new_states
+            time += self.time_step
+            
+        return {
+            "has_singularities": has_singularities,
+            "singularity_time": singularity_time
+        }
+        
+    def _detect_singularity(self, states: torch.Tensor) -> bool:
+        """Detect if states contain singularities.
+        
+        Args:
+            states: States tensor
+            
+        Returns:
+            True if singularity detected
+        """
+        # Check for NaN or Inf values
+        if torch.any(torch.isnan(states)) or torch.any(torch.isinf(states)):
+            return True
+            
+        # Check for extremely large values
+        if torch.any(torch.abs(states) > 1e6):
+            return True
+            
+        return False
+        
+    def _generate_message(self, properties: FlowProperties) -> str:
+        """Generate validation message.
+        
+        Args:
+            properties: Flow properties
+            
+        Returns:
+            Validation message
+        """
+        messages = []
+        
+        if not properties.is_stable:
+            messages.append("Flow is unstable")
+            
+        if not properties.is_conservative:
+            messages.append("Flow does not conserve energy")
+            
+        if not properties.is_convergent:
+            messages.append("Flow does not converge")
+            
+        if properties.has_singularities:
+            messages.append("Flow develops singularities")
+            
+        if not messages:
+            return "Flow validation successful"
+            
+        return "Flow validation failed: " + "; ".join(messages)
+
+
+@dataclass
+class EnergyMetrics:
+    """Energy metrics for geometric flow."""
+    
+    kinetic: float  # Kinetic energy
+    potential: float  # Potential energy
+    total: Optional[float] = None  # Total energy
+    
+    def __post_init__(self):
+        """Compute total energy if not provided."""
+        if self.total is None:
+            self.total = self.kinetic + self.potential
 
 
 @dataclass
@@ -274,7 +611,7 @@ class FlowStabilityValidator:
         return ValidationResult(True, "All singularities are valid")
 
     def validate_invariants(self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor) -> ValidationResult:
-        """Validate geometric invariants are preserved by flow.
+        """Validate geometric invariants of the flow.
         
         Args:
             flow: Geometric flow object
@@ -282,49 +619,42 @@ class FlowStabilityValidator:
             metric: Metric tensor
             
         Returns:
-            True if all invariants are preserved
+            ValidationResult containing validation status and messages
         """
+        # Initialize validation
         is_valid = True
         messages = []
-
-        # Compute initial invariants
-        init_det = torch.det(metric)
-        init_eigenvals = torch.linalg.eigvalsh(metric)
-        init_condition = torch.max(init_eigenvals) / torch.min(init_eigenvals.abs())
-
+        
+        # Get initial conditions
+        init_det = torch.linalg.det(metric)
+        init_eigenvals = torch.linalg.eigvals(metric).real
+        init_condition = torch.max(init_eigenvals) / (torch.min(init_eigenvals) + 1e-8)
+        
         # Evolve metric
-        evolved_metric = flow.flow_step(points, metric)
-        evolved_det = torch.det(evolved_metric)
-        evolved_eigenvals = torch.linalg.eigvalsh(evolved_metric)
-        evolved_condition = torch.max(evolved_eigenvals) / torch.min(evolved_eigenvals.abs())
-
-        # Check determinant preservation
-        rel_det_change = torch.abs(evolved_det - init_det) / (torch.abs(init_det) + 1e-10)
-        if rel_det_change > 0.1:  # 10% tolerance
+        evolved_metric, _ = flow.flow_step(metric, flow.compute_ricci_tensor(points, metric))
+        
+        # Check evolved conditions
+        evolved_det = torch.linalg.det(evolved_metric)
+        evolved_eigenvals = torch.linalg.eigvals(evolved_metric).real
+        evolved_condition = torch.max(evolved_eigenvals) / (torch.min(evolved_eigenvals) + 1e-8)
+        
+        # Validate determinant preservation
+        det_ratio = evolved_det / (init_det + 1e-8)
+        if not torch.allclose(det_ratio, torch.ones_like(det_ratio), rtol=1e-2):
             is_valid = False
-            messages.append(f"Determinant not preserved: {rel_det_change:.2e}")
-
-        # Check eigenvalue bounds
+            messages.append(f"Determinant not preserved: ratio={det_ratio}")
+        
+        # Validate eigenvalue bounds
         if torch.any(evolved_eigenvals < 0):
             is_valid = False
-            messages.append("Metric lost positive definiteness")
-
-        # Check conditioning
-        if evolved_condition > 1e4:
+            messages.append(f"Negative eigenvalues: {evolved_eigenvals}")
+            
+        # Validate condition number
+        if evolved_condition > 2 * init_condition:
             is_valid = False
-            messages.append(f"Poor evolved conditioning: {evolved_condition:.2e}")
-
-        # Check Ricci flow convergence
-        ricci = flow.compute_ricci_tensor(points, metric)
-        ricci_norm = torch.norm(ricci.tensor)
-        if ricci_norm > 1e2:
-            is_valid = False
-            messages.append(f"Large Ricci tensor norm: {ricci_norm:.2e}")
-
-        return ValidationResult(
-            is_valid=is_valid,
-            message="; ".join(messages) if messages else "Invariants preserved"
-        )
+            messages.append(f"Condition number increased significantly: {evolved_condition/init_condition}")
+            
+        return ValidationResult(is_valid=is_valid, message="; ".join(messages) if messages else "Invariants preserved")
 
 
 class EnergyValidator:
@@ -551,7 +881,7 @@ class GeometricFlowValidator:
         return self.stability_validator.validate_singularities(metric, singularities, threshold)
 
     def validate_invariants(self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor) -> ValidationResult:
-        """Validate geometric invariants are preserved by flow.
+        """Validate geometric invariants of the flow.
         
         Args:
             flow: Geometric flow object
@@ -559,6 +889,39 @@ class GeometricFlowValidator:
             metric: Metric tensor
             
         Returns:
-            True if all invariants are preserved
+            ValidationResult containing validation status and messages
         """
-        return self.stability_validator.validate_invariants(flow, points, metric)
+        # Initialize validation
+        is_valid = True
+        messages = []
+        
+        # Get initial conditions
+        init_det = torch.linalg.det(metric)
+        init_eigenvals = torch.linalg.eigvals(metric).real
+        init_condition = torch.max(init_eigenvals) / (torch.min(init_eigenvals) + 1e-8)
+        
+        # Evolve metric
+        evolved_metric, _ = flow.flow_step(metric, flow.compute_ricci_tensor(points, metric))
+        
+        # Check evolved conditions
+        evolved_det = torch.linalg.det(evolved_metric)
+        evolved_eigenvals = torch.linalg.eigvals(evolved_metric).real
+        evolved_condition = torch.max(evolved_eigenvals) / (torch.min(evolved_eigenvals) + 1e-8)
+        
+        # Validate determinant preservation
+        det_ratio = evolved_det / (init_det + 1e-8)
+        if not torch.allclose(det_ratio, torch.ones_like(det_ratio), rtol=1e-2):
+            is_valid = False
+            messages.append(f"Determinant not preserved: ratio={det_ratio}")
+        
+        # Validate eigenvalue bounds
+        if torch.any(evolved_eigenvals < 0):
+            is_valid = False
+            messages.append(f"Negative eigenvalues: {evolved_eigenvals}")
+            
+        # Validate condition number
+        if evolved_condition > 2 * init_condition:
+            is_valid = False
+            messages.append(f"Condition number increased significantly: {evolved_condition/init_condition}")
+            
+        return ValidationResult(is_valid=is_valid, message="; ".join(messages) if messages else "Invariants preserved")

@@ -6,10 +6,11 @@ This module implements Hamiltonian mechanics for neural flows:
 - Poisson bracket algebra
 - Conservation laws
 - Phase space dynamics
+- Canonical transformations
 """
 
 from dataclasses import dataclass
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 
 import torch
 from torch import nn
@@ -42,6 +43,175 @@ class ConservedQuantity:
     name: str  # Name of conserved quantity
     tolerance: float  # Conservation tolerance
     history: List[float]  # Value history
+
+
+class CanonicalTransform:
+    """Canonical transformation of phase space coordinates."""
+
+    def __init__(
+        self,
+        phase_dim: int,
+        generating_function: Optional[Callable] = None,
+        transform_type: str = "f1"
+    ):
+        """Initialize canonical transformation.
+        
+        Args:
+            phase_dim: Phase space dimension
+            generating_function: Optional generating function F(q,Q,t)
+            transform_type: Type of generating function:
+                          f1: F1(q,Q,t)
+                          f2: F2(q,P,t)
+                          f3: F3(p,Q,t)
+                          f4: F4(p,P,t)
+        """
+        self.phase_dim = phase_dim
+        self.transform_type = transform_type
+        
+        if generating_function is None:
+            # Default to identity transformation
+            self.generating_function = lambda q, Q, t: torch.sum(q * Q, dim=-1)
+        else:
+            self.generating_function = generating_function
+            
+    def transform(
+        self,
+        point: PhaseSpacePoint,
+        inverse: bool = False
+    ) -> PhaseSpacePoint:
+        """Apply canonical transformation.
+        
+        Args:
+            point: Phase space point to transform
+            inverse: If True, apply inverse transformation
+            
+        Returns:
+            Transformed phase space point
+        """
+        if inverse:
+            return self._inverse_transform(point)
+            
+        if self.transform_type == "f1":
+            return self._f1_transform(point)
+        elif self.transform_type == "f2":
+            return self._f2_transform(point)
+        elif self.transform_type == "f3":
+            return self._f3_transform(point)
+        elif self.transform_type == "f4":
+            return self._f4_transform(point)
+        else:
+            raise ValueError(f"Unknown transform type: {self.transform_type}")
+            
+    def _f1_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """F1(q,Q,t) transform: p = ∂F1/∂q, P = -∂F1/∂Q."""
+        q, p = point.position, point.momentum
+        
+        # Compute new momentum
+        p_new = torch.autograd.grad(
+            self.generating_function(q, q, point.time),
+            q,
+            create_graph=True
+        )[0]
+        
+        # Compute new position (implicit)
+        P_new = -torch.autograd.grad(
+            self.generating_function(q, q, point.time),
+            q,
+            create_graph=True
+        )[0]
+        
+        return PhaseSpacePoint(
+            position=q,
+            momentum=P_new,
+            time=point.time
+        )
+        
+    def _f2_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """F2(q,P,t) transform: p = ∂F2/∂q, Q = ∂F2/∂P."""
+        q, p = point.position, point.momentum
+        
+        # Compute new momentum
+        p_new = torch.autograd.grad(
+            self.generating_function(q, p, point.time),
+            q,
+            create_graph=True
+        )[0]
+        
+        # Compute new position
+        Q_new = torch.autograd.grad(
+            self.generating_function(q, p, point.time),
+            p,
+            create_graph=True
+        )[0]
+        
+        return PhaseSpacePoint(
+            position=Q_new,
+            momentum=p,
+            time=point.time
+        )
+        
+    def _f3_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """F3(p,Q,t) transform: q = -∂F3/∂p, P = -∂F3/∂Q."""
+        q, p = point.position, point.momentum
+        
+        # Compute new position
+        q_new = -torch.autograd.grad(
+            self.generating_function(p, q, point.time),
+            p,
+            create_graph=True
+        )[0]
+        
+        # Compute new momentum
+        P_new = -torch.autograd.grad(
+            self.generating_function(p, q, point.time),
+            q,
+            create_graph=True
+        )[0]
+        
+        return PhaseSpacePoint(
+            position=q_new,
+            momentum=P_new,
+            time=point.time
+        )
+        
+    def _f4_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """F4(p,P,t) transform: q = -∂F4/∂p, Q = ∂F4/∂P."""
+        q, p = point.position, point.momentum
+        
+        # Compute new position
+        q_new = -torch.autograd.grad(
+            self.generating_function(p, p, point.time),
+            p,
+            create_graph=True
+        )[0]
+        
+        # Compute new momentum (implicit)
+        Q_new = torch.autograd.grad(
+            self.generating_function(p, p, point.time),
+            p,
+            create_graph=True
+        )[0]
+        
+        return PhaseSpacePoint(
+            position=Q_new,
+            momentum=p,
+            time=point.time
+        )
+        
+    def _inverse_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """Apply inverse canonical transformation."""
+        # For F1 and F4, invert by swapping variables
+        if self.transform_type in ["f1", "f4"]:
+            return PhaseSpacePoint(
+                position=point.momentum,
+                momentum=point.position,
+                time=point.time
+            )
+            
+        # For F2 and F3, need to solve implicit equations
+        raise NotImplementedError(
+            f"Inverse transform not implemented for type {self.transform_type}"
+        )
 
 
 class HamiltonianNetwork(nn.Module):

@@ -27,7 +27,7 @@ class TensorDescriptor:
     is_contiguous: bool
 
 
-class VulkanTensorOps:
+class VulkanCompute:
     """High-performance tensor operations using Vulkan compute."""
 
     def __init__(self, device: int, queue: int, queue_family_index: int):  # device: VkDevice, queue: VkQueue
