@@ -1,5 +1,5 @@
 # Adaptive Attention Tiling v2 - Refactoring Map
-*Last Updated: 2024-12-10T01:42:40+01:00*
+*Last Updated: 2024-12-11T00:19:02+01:00*
 
 ## Implementation Status Map
 
@@ -291,6 +291,93 @@ from src.core.validation.stability import LinearStabilityValidator
    - Fix timing-sensitive tests
    - Address race conditions
    - Implement proper cleanup
+
+## Dependency-Ordered Implementation Priority
+
+### 1. Core State Space (HIGHEST PRIORITY)
+- **Location**: `src/core/quantum/state_space.py`
+- **Status**: Foundation needs implementation
+- **Dependencies**: None
+- **Required By**: Quantum Geometric Attention, Pattern Analysis
+- **Critical Methods Needed**:
+  - [ ] `prepare_state`: State preparation from classical data
+  - [ ] `compute_entropy`: Von Neumann entropy calculation
+  - [ ] `fubini_study_distance`: Quantum state distance
+  - [ ] `quantum_tangent_vector`: Tangent space operations
+  - [ ] `parallel_transport`: Geometric transport
+  - [ ] `state_fidelity`: State comparison
+- **Action Items**:
+  - [ ] Implement core quantum state operations
+  - [ ] Add proper error handling
+  - [ ] Fix 11 failing tests in `test_state_space.py`
+
+### 2. Geometric Flow System (HIGH PRIORITY)
+- **Location**: `src/core/tiling/geometric_flow.py`
+- **Status**: Unstable implementation
+- **Dependencies**: State Space
+- **Required By**: Quantum Attention, Pattern Analysis
+- **Critical Issues**:
+  - [ ] Fix NaN in distance calculations
+  - [ ] Stabilize exponential map
+  - [ ] Implement missing `RicciTensor` class
+- **Action Items**:
+  - [ ] Add proper curvature bounds
+  - [ ] Implement flow normalization
+  - [ ] Fix failing tests in `test_geometric.py`
+
+### 3. Quantum Geometric Attention (HIGH PRIORITY)
+- **Location**: `src/core/tiling/quantum_geometric_attention.py`
+- **Status**: Missing core components
+- **Dependencies**: State Space, Geometric Flow
+- **Required By**: Pattern Analysis
+- **Missing Components**:
+  - [ ] `HyperbolicExponential` class
+  - [ ] `prepare_quantum_state` method
+  - [ ] `quantum_encode` method
+  - [ ] `build_attention_complex` method
+- **Action Items**:
+  - [ ] Implement missing classes
+  - [ ] Connect with geometric flow
+  - [ ] Add comprehensive tests
+
+### 4. Pattern Analysis (MEDIUM-HIGH PRIORITY)
+- **Location**: `src/neural/attention/pattern/`
+- **Status**: Stability complete, bifurcation needed
+- **Dependencies**: Geometric Flow
+- **Components**:
+  - [x] Stability Analysis
+  - [ ] Bifurcation Detection
+  - [ ] Pattern Evolution
+- **Action Items**:
+  - [ ] Implement bifurcation detection
+  - [ ] Add parameter continuation methods
+  - [ ] Add branch tracking algorithms
+
+### 5. Metrics System (MEDIUM PRIORITY)
+- **Location**: `src/core/metrics/`
+- **Status**: Integration needed
+- **Dependencies**: All above components
+- **Issues**:
+  - [ ] Fix pattern detection integration
+  - [ ] Update flow computation
+  - [ ] Add performance monitoring
+- **Action Items**:
+  - [ ] Implement missing metrics
+  - [ ] Fix integration points
+  - [ ] Add validation tests
+
+### 6. Backend Integration (MEDIUM-LOW PRIORITY)
+- **Location**: `src/core/backends/`
+- **Status**: Performance optimization needed
+- **Dependencies**: All above components
+- **Focus Areas**:
+  - [ ] Vulkan compute shader optimization
+  - [ ] Memory management improvements
+  - [ ] Tensor operation efficiency
+- **Action Items**:
+  - [ ] Profile current performance
+  - [ ] Optimize critical paths
+  - [ ] Add performance tests
 
 ## Progress Tracking
 

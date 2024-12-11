@@ -13,7 +13,7 @@ from typing import List, Tuple, Dict, Optional, Any
 import torch
 import numpy as np
 
-from ...core.quantum.state_space import QuantumState
+from ...core.quantum.types import QuantumState
 
 
 @dataclass

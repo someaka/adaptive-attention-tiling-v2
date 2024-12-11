@@ -1,3 +1,5 @@
+⚠️ IMPORTANT: WINDSURF TERMINAL CANNOT USE VENV DIRECTLY. USE FULL PATHS LIKE `venv/bin/pytest` INSTEAD OF `pytest` ⚠️
+
 # Adaptive Attention Tiling v2
 
 A high-performance quantum geometric attention framework combining advanced mathematical principles with efficient GPU acceleration.
