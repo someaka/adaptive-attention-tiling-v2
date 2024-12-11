@@ -142,13 +142,16 @@ class RicciTensor:
         
     @classmethod
     def __instancecheck__(cls, instance):
-        return isinstance(instance, cls)
+        """Check if instance is a RicciTensor."""
+        return hasattr(instance, 'tensor') and isinstance(instance.tensor, torch.Tensor)
         
     @classmethod
     def __subclasscheck__(cls, subclass):
+        """Check if subclass is a RicciTensor subclass."""
         return issubclass(subclass, cls)
         
     def __torch_function__(self, func, types, args=(), kwargs=None):
+        """Handle torch function calls on RicciTensor."""
         if kwargs is None:
             kwargs = {}
         args = [a.tensor if isinstance(a, RicciTensor) else a for a in args]
@@ -156,20 +159,27 @@ class RicciTensor:
         return RicciTensor(ret) if isinstance(ret, torch.Tensor) else ret
         
     def __truediv__(self, other):
-        if isinstance(other, RicciTensor):
-            other = other.tensor
-        return RicciTensor(self.tensor / other)
+        """Handle division."""
+        if isinstance(other, (int, float)):
+            return RicciTensor(self.tensor / other)
+        return RicciTensor(self.tensor / other.tensor)
         
     def __mul__(self, other):
-        if isinstance(other, RicciTensor):
-            other = other.tensor
-        return RicciTensor(self.tensor * other)
+        """Handle multiplication."""
+        if isinstance(other, (int, float)):
+            return RicciTensor(self.tensor * other)
+        return RicciTensor(self.tensor * other.tensor)
         
     def __rmul__(self, other):
+        """Handle right multiplication."""
         return self.__mul__(other)
         
     def __getattr__(self, name):
-        return getattr(self.tensor, name)
+        """Forward attribute access to tensor."""
+        try:
+            return getattr(self.tensor, name)
+        except AttributeError:
+            raise AttributeError(f"'RicciTensor' object has no attribute '{name}'")
 
 
 class FlowStepNetwork(nn.Module):
@@ -245,17 +255,27 @@ class FlowStepNetwork(nn.Module):
         batch_size = flow.shape[0]
         n = flow.shape[1]
         
-        # Compute divergence
+        # Add small epsilon to prevent division by zero
+        epsilon = 1e-8
+        
+        # Compute metric determinant
+        det = torch.det(metric)
+        det = torch.abs(det) + epsilon
+        
+        # Compute divergence using covariant derivative
         div = torch.zeros(batch_size, device=flow.device)
         for i in range(n):
-            div += torch.diagonal(metric, dim1=1, dim2=2)[:, i] * flow[:, i]
+            for j in range(n):
+                div += metric[:, i, j] * flow[:, j]
+                
+        # Normalize flow to preserve volume
+        scale = div / (n * torch.sqrt(det))
+        scale = scale.unsqueeze(1)
         
-        # Normalize flow
-        norm_flow = flow.clone()
-        for i in range(n):
-            norm_flow[:, i] = flow[:, i] - div / n
-            
-        return norm_flow
+        # Apply normalization
+        normalized_flow = flow - scale * torch.diagonal(metric, dim1=1, dim2=2)
+        
+        return normalized_flow
 
     def compute_energy(self, points: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
         """Compute flow energy.
@@ -582,47 +602,31 @@ class GeometricFlow:
             Ricci tensor
         """
         batch_size = metric.shape[0]
-        n = self.manifold_dim
+        n = metric.shape[1]
+        
+        # Compute Christoffel symbols
+        christoffel = self.compute_connection(metric)
         
         # Initialize Ricci tensor
-        ricci = torch.zeros(batch_size, n, n, device=metric.device)
-        
-        # Compute connection coefficients
-        connection = self.compute_connection(metric)
+        ricci = torch.zeros_like(metric)
         
         # Compute Ricci tensor components
         for i in range(n):
             for j in range(n):
-                # First term: connection derivatives
-                term1 = torch.zeros(batch_size, device=metric.device)
-                for k in range(n):
-                    term1 += torch.autograd.grad(
-                        connection[:, k, i, k],
-                        self.points,
-                        grad_outputs=torch.ones_like(connection[:, k, i, k]),
-                        create_graph=True,
-                        retain_graph=True,
-                    )[0][:, j]
-                
-                # Second term: connection product
-                term2 = torch.zeros(batch_size, device=metric.device)
                 for k in range(n):
                     for l in range(n):
-                        term2 += connection[:, k, i, l] * connection[:, l, j, k]
-                
-                # Store result without in-place operation
-                ricci_ij = term1 - term2
-                ricci = torch.cat([
-                    ricci[:, :i],
-                    torch.cat([
-                        ricci[:, i:i+1, :j],
-                        ricci_ij.unsqueeze(-1).unsqueeze(-1),
-                        ricci[:, i:i+1, j+1:]
-                    ], dim=-1),
-                    ricci[:, i+1:]
-                ], dim=1)
+                        # R_ij = R^k_ikj
+                        term1 = christoffel[:, k, i, j] * christoffel[:, l, k, l]
+                        term2 = christoffel[:, k, i, l] * christoffel[:, l, k, j]
+                        ricci[:, i, j] += term1 - term2
+                        
+        # Ensure tensor is symmetric
+        ricci = 0.5 * (ricci + ricci.transpose(1, 2))
         
-        # Wrap tensor in RicciTensor class
+        # Add small epsilon for numerical stability
+        epsilon = 1e-8
+        ricci = ricci + epsilon * torch.eye(n, device=metric.device).unsqueeze(0).expand(batch_size, -1, -1)
+        
         return RicciTensor(ricci)
 
     def compute_flow_vector(self, points: torch.Tensor, ricci: RicciTensor) -> torch.Tensor:
