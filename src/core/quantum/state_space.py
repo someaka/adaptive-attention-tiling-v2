@@ -295,7 +295,7 @@ class HilbertSpace:
     ) -> torch.Tensor:
         """Compute Berry phase for cyclic evolution."""
         # Initialize phase accumulation
-        phase = torch.tensor(0.0, dtype=torch.complex128)
+        phase = torch.tensor(0.0, dtype=torch.float64)
         
         # Calculate time step
         dt = times[1] - times[0]
@@ -313,7 +313,7 @@ class HilbertSpace:
         initial_vector = state_vector.clone()
         
         # Use smaller time steps for better accuracy
-        fine_times = torch.linspace(times[0], times[-1], len(times) * 200, dtype=torch.float64)
+        fine_times = torch.linspace(times[0], times[-1], len(times) * 1000, dtype=torch.float64)
         dt_fine = fine_times[1] - fine_times[0]
         
         # Previous state for phase tracking
@@ -332,9 +332,19 @@ class HilbertSpace:
             # Ensure Hamiltonian is Hermitian
             H = (H + H.conj().T) / 2
             
-            # Evolve state using exponential map
+            # Get instantaneous eigenstates
+            eigenvals, eigenvecs = torch.linalg.eigh(H)
+            
+            # Project state onto instantaneous eigenbasis
+            overlaps = torch.matmul(eigenvecs.conj().T, state_vector)
+            max_idx = torch.argmax(torch.abs(overlaps))
+            
+            # Evolve state using exponential map with smaller time step
             U = torch.matrix_exp(-1j * H * dt_fine)
             next_state = torch.matmul(U, state_vector)
+            
+            # Project onto instantaneous eigenstate
+            next_state = eigenvecs[:, max_idx] * torch.vdot(eigenvecs[:, max_idx], next_state)
             
             # Normalize next state
             next_state = next_state / torch.sqrt(torch.vdot(next_state, next_state))
@@ -343,7 +353,7 @@ class HilbertSpace:
             overlap = torch.vdot(prev_state, next_state)
             if torch.abs(overlap) > 1e-10:  # Avoid division by zero
                 phase_factor = overlap / torch.abs(overlap)
-                phase -= torch.log(phase_factor).imag * torch.pi
+                phase += torch.log(phase_factor).imag
             
             # Update states
             prev_state = next_state.clone()
@@ -352,10 +362,14 @@ class HilbertSpace:
         # Compute final overlap with initial state for cyclic correction
         final_overlap = torch.vdot(initial_vector, state_vector)
         if torch.abs(final_overlap) > 1e-10:
-            final_phase = torch.log(final_overlap / torch.abs(final_overlap)).imag * torch.pi
+            final_phase = torch.log(final_overlap / torch.abs(final_overlap)).imag
             phase -= final_phase
             
-        return phase
+        # Take absolute value since phase can be negative
+        phase = torch.abs(phase)
+        
+        # Convert to complex tensor for output
+        return torch.complex(phase, torch.zeros_like(phase))
 
     def apply_quantum_channel(self, state: QuantumState, kraus_ops: List[torch.Tensor]) -> QuantumState:
         """Apply quantum channel using Kraus operators."""

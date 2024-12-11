@@ -269,14 +269,35 @@ class TestHilbertSpace:
             torch.tensor([1.0, 0.0], dtype=torch.float64)
         )
 
+        # Test intermediate states
+        times_debug = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], dtype=torch.float64)
+        for t in times_debug:
+            H = hamiltonian(t.item())
+            eigenvals, eigenvecs = torch.linalg.eigh(H)
+            # Check eigenvalues are ±1
+            assert torch.allclose(
+                torch.sort(torch.abs(eigenvals))[0],
+                torch.tensor([1.0, 1.0], dtype=torch.float64),
+            ), f"Eigenvalues at t={t} should be ±1"
+            # Check eigenvectors are orthonormal
+            overlap = torch.abs(torch.vdot(eigenvecs[:, 0], eigenvecs[:, 1]))
+            assert overlap < 1e-10, f"Eigenvectors at t={t} should be orthogonal"
+
         # Compute Berry phase
         times = torch.linspace(0, 1.0, 100, dtype=torch.float64)
         berry_phase = hilbert_space.compute_berry_phase(
             initial_state, hamiltonian, times
         )
 
-        # Test phase is real and matches theoretical value
+        # Test phase is real
         assert torch.abs(berry_phase.imag) < 1e-5, "Berry phase should be real"
+
+        # Print debug info
+        print(f"\nBerry phase: {berry_phase.real}")
+        print(f"Expected phase: {np.pi}")
+        print(f"Relative error: {torch.abs(berry_phase.real - np.pi) / np.pi}")
+
+        # Test matches theoretical value
         assert torch.allclose(
             berry_phase.real, torch.tensor(np.pi, dtype=torch.float64), rtol=1e-2
         ), "Berry phase should match theoretical value"
