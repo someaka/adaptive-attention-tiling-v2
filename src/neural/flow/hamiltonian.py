@@ -270,51 +270,81 @@ class ConservationLaws(nn.Module):
         return updated
 
 
-class HamiltonianSystem:
-    """Complete Hamiltonian system for neural flow."""
+class HamiltonianSystem(nn.Module):
+    """Hamiltonian system for geometric flow."""
 
-    def __init__(self, phase_dim: int, hidden_dim: int = 128, num_invariants: int = 4):
-        self.hamiltonian = HamiltonianNetwork(phase_dim, hidden_dim)
-        self.integrator = SymplecticIntegrator(phase_dim, hidden_dim // 2)
-        self.poisson = PoissonBracket(phase_dim, hidden_dim // 4)
-        self.conservation = ConservationLaws(phase_dim, num_invariants)
+    def __init__(self, manifold_dim: int, hidden_dim: int = 128):
+        """Initialize Hamiltonian system.
+        
+        Args:
+            manifold_dim: Dimension of manifold
+            hidden_dim: Hidden layer dimension
+        """
+        super().__init__()
+        self.manifold_dim = manifold_dim
+        
+        # Network for computing Hamiltonian
+        self.energy_network = nn.Sequential(
+            nn.Linear(manifold_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
 
-    def evolve(
-        self, initial_point: PhaseSpacePoint, num_steps: int = 100, dt: float = 0.01
-    ) -> Tuple[List[PhaseSpacePoint], List[ConservedQuantity]]:
-        """Evolve system according to Hamilton's equations."""
-        trajectories = [initial_point]
-        current = initial_point
+    def _to_phase_space(self, states: torch.Tensor) -> PhaseSpacePoint:
+        """Convert states tensor to phase space point.
+        
+        Args:
+            states: States tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Phase space point with position and momentum
+        """
+        batch_size = states.shape[0]
+        position = states
+        momentum = torch.zeros_like(position)
+        return PhaseSpacePoint(position=position, momentum=momentum, time=0.0)
 
-        # Initialize conservation tracking
-        quantities = self.conservation.detect_invariants(initial_point)
+    def compute_energy(self, states: torch.Tensor) -> torch.Tensor:
+        """Compute energy of states.
+        
+        Args:
+            states: States tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Energy scalar
+        """
+        phase_point = self._to_phase_space(states)
+        phase_vector = torch.cat([phase_point.position, phase_point.momentum], dim=-1)
+        return self.energy_network(phase_vector).squeeze(-1)
 
+    def evolve(self, states: torch.Tensor, num_steps: int = 100, dt: float = 0.01) -> torch.Tensor:
+        """Evolve states using Hamiltonian dynamics.
+        
+        Args:
+            states: States tensor of shape (batch_size, manifold_dim)
+            num_steps: Number of evolution steps
+            dt: Time step size
+            
+        Returns:
+            Evolved states
+        """
+        phase_point = self._to_phase_space(states)
+        current = phase_point
+        
         for _ in range(num_steps):
-            # Compute Hamiltonian gradient
+            # Compute energy gradient
             phase_vector = torch.cat([current.position, current.momentum], dim=-1)
-            phase_vector.requires_grad_(True)
-
-            H = self.hamiltonian(
-                PhaseSpacePoint(
-                    phase_vector[:, : self.phase_dim],
-                    phase_vector[:, self.phase_dim :],
-                    current.time,
-                )
-            )
-
-            H_grad = torch.autograd.grad(H.sum(), phase_vector)[0]
-
-            # Compute symplectic form
-            symplectic = self.integrator.compute_symplectic_form(current)
-
-            # Perform integration step
-            new_point = self.integrator.step(current, H_grad, dt)
-
-            # Track conservation
-            quantities = self.conservation.track_conservation(quantities, new_point)
-
-            # Update state
-            current = new_point
-            trajectories.append(current)
-
-        return trajectories, quantities
+            energy = self.energy_network(phase_vector)
+            
+            # Update position and momentum using symplectic integration
+            grad_energy = torch.autograd.grad(energy.sum(), phase_vector)[0]
+            grad_q = grad_energy[:, :self.manifold_dim]
+            grad_p = grad_energy[:, self.manifold_dim:]
+            
+            # Update momentum then position (symplectic Euler)
+            new_momentum = current.momentum - dt * grad_q
+            new_position = current.position + dt * grad_p
+            
+            current = PhaseSpacePoint(position=new_position, momentum=new_momentum, time=current.time + dt)
+        
+        return current.position

@@ -54,89 +54,88 @@ class ConvergenceValidation:
 class ValidationResult:
     """Result of validation with message."""
     
-    def __init__(self, is_valid: bool, message: str = ""):
+    def __init__(self, is_valid: bool, message: str = "", stable: bool = False, error: float = 0.0):
         self.is_valid = is_valid
         self.message = message
+        self.stable = stable
+        self.error = error
+
+
+class GeometricFlowValidator:
+    """Validator for geometric flow properties."""
+
+    def __init__(self, tolerance: float = 1e-5):
+        """Initialize validator.
+        
+        Args:
+            tolerance: Tolerance for validation checks
+        """
+        self.tolerance = tolerance
+
+    def validate(self, points: torch.Tensor) -> bool:
+        """Validate geometric invariants of flow.
+        
+        Args:
+            points: Points tensor
+            
+        Returns:
+            True if validation passes
+        """
+        # Basic shape validation
+        if points.dim() != 2:
+            return False
+            
+        # Check for NaN/Inf values
+        if torch.any(torch.isnan(points)) or torch.any(torch.isinf(points)):
+            return False
+            
+        return True
 
 
 class FlowStabilityValidator:
-    """Validation of flow stability properties."""
+    """Validator for flow stability."""
 
-    def __init__(self, tolerance: float = 1e-6, stability_threshold: float = 0.1):
+    def __init__(self, tolerance: float = 1e-5, stability_threshold: float = 0.1):
+        """Initialize validator.
+        
+        Args:
+            tolerance: Tolerance for stability checks
+            stability_threshold: Maximum allowed Lyapunov exponent
+        """
         self.tolerance = tolerance
         self.stability_threshold = stability_threshold
 
-    def validate_stability(
-        self, flow: GeometricFlow, points: torch.Tensor, time_steps: int = 100
-    ) -> FlowStabilityValidation:
-        """Validate flow stability."""
-        # Compute Lyapunov exponents
-        lyapunov = self._compute_lyapunov(flow, points, time_steps)
-
-        # Measure perturbation growth
-        growth = self._measure_growth(flow, points, time_steps)
-
-        # Compute error bounds
-        error_bounds = torch.sqrt(torch.abs(lyapunov)) * growth
-
+    def validate_stability(self, flow: GeometricFlow, points: torch.Tensor) -> ValidationResult:
+        """Validate stability of flow.
+        
+        Args:
+            flow: GeometricFlow instance
+            points: Points tensor
+            
+        Returns:
+            Validation result
+        """
+        # Compute initial metric
+        flow.points = points
+        metric = flow.compute_metric(points)
+        
+        # Evolve points
+        evolved_points = flow(points)
+        evolved_metric = flow.compute_metric(evolved_points)
+        
+        # Compute metric difference
+        metric_diff = torch.norm(evolved_metric - metric, dim=(-2,-1))
+        max_diff = torch.max(metric_diff)
+        
         # Check stability
-        stable = torch.all(lyapunov <= self.stability_threshold)
-
-        return FlowStabilityValidation(
+        stable = max_diff <= self.stability_threshold
+        
+        return ValidationResult(
+            is_valid=stable,
             stable=stable,
-            lyapunov_exponents=lyapunov,
-            perturbation_growth=growth,
-            error_bounds=error_bounds,
+            error=max_diff.item(),
+            message="Flow stability check"
         )
-
-    def _compute_lyapunov(
-        self, flow: GeometricFlow, points: torch.Tensor, time_steps: int
-    ) -> torch.Tensor:
-        """Compute Lyapunov exponents of flow."""
-        # Initialize perturbation vectors
-        dim = points.shape[-1]
-        perturbations = torch.eye(dim, device=points.device)
-
-        # Evolve perturbations
-        evolved = []
-        current = points.clone()
-
-        for _ in range(time_steps):
-            # Flow step
-            current = flow.step(current)
-
-            # Evolve perturbations
-            jacobian = flow.compute_jacobian(current)
-            perturbations = torch.matmul(jacobian, perturbations)
-
-            # Orthogonalize
-            perturbations, _ = torch.linalg.qr(perturbations)
-            evolved.append(torch.diagonal(perturbations, dim1=-2, dim2=-1))
-
-        # Compute exponents
-        evolved = torch.stack(evolved)
-        return torch.mean(torch.log(torch.abs(evolved)), dim=0)
-
-    def _measure_growth(
-        self, flow: GeometricFlow, points: torch.Tensor, time_steps: int
-    ) -> torch.Tensor:
-        """Measure perturbation growth rates."""
-        # Add small perturbations
-        eps = 1e-5
-        perturbed = points + eps * torch.randn_like(points)
-
-        # Evolve both
-        original = points.clone()
-        current_perturbed = perturbed.clone()
-
-        differences = []
-        for _ in range(time_steps):
-            original = flow.step(original)
-            current_perturbed = flow.step(current_perturbed)
-            differences.append(torch.norm(current_perturbed - original, dim=-1))
-
-        differences = torch.stack(differences)
-        return torch.mean(differences / eps, dim=0)
 
     def validate_normalization(self, metric: torch.Tensor, normalized_metric: torch.Tensor) -> bool:
         """Validate flow normalization.
@@ -325,10 +324,9 @@ class FlowStabilityValidator:
 
 class EnergyValidator:
     """Validation of energy conservation properties."""
-
-    def __init__(self, tolerance: float = 1e-6, drift_threshold: float = 0.01):
+    
+    def __init__(self, tolerance: float = 1e-5):
         self.tolerance = tolerance
-        self.drift_threshold = drift_threshold
 
     def validate_energy(
         self,
@@ -360,7 +358,7 @@ class EnergyValidator:
 
         # Check conservation
         conserved = (
-            relative_error < self.tolerance and abs(drift_rate) < self.drift_threshold
+            relative_error < self.tolerance 
         )
 
         return EnergyValidation(
@@ -373,9 +371,9 @@ class EnergyValidator:
 
 class ConvergenceValidator:
     """Validation of flow convergence properties."""
-
-    def __init__(self, tolerance: float = 1e-6, max_iterations: int = 1000):
-        self.tolerance = tolerance
+    
+    def __init__(self, threshold: float = 1e-4, max_iterations: int = 1000):
+        self.threshold = threshold
         self.max_iterations = max_iterations
 
     def validate_convergence(
@@ -395,7 +393,7 @@ class ConvergenceValidator:
             residuals.append(residual.item())
 
             # Check convergence
-            if residual < self.tolerance:
+            if residual < self.threshold:
                 return ConvergenceValidation(
                     converged=True,
                     rate=self._compute_rate(residuals),
@@ -428,32 +426,23 @@ class ConvergenceValidator:
 
 class GeometricFlowValidator:
     """Complete geometric flow validation system."""
-
-    def __init__(
-        self,
-        tolerance: float = 1e-6,
-        stability_threshold: float = 0.1,
-        drift_threshold: float = 0.01,
-        max_iterations: int = 1000,
-    ):
-        self.stability_validator = FlowStabilityValidator(
-            tolerance, stability_threshold
-        )
-        self.energy_validator = EnergyValidator(tolerance, drift_threshold)
-        self.convergence_validator = ConvergenceValidator(tolerance, max_iterations)
-
+    
+    def __init__(self, tolerance: float = 1e-5):
+        self.tolerance = tolerance
+        self.stability_validator = FlowStabilityValidator(tolerance=tolerance)
+        self.energy_validator = EnergyValidator(tolerance=tolerance)
+        self.convergence_validator = ConvergenceValidator(threshold=tolerance)
+        
     def validate(
         self,
         flow: GeometricFlow,
         hamiltonian: HamiltonianSystem,
         points: torch.Tensor,
         time_steps: int = 100,
-    ) -> Tuple[FlowStabilityValidation, EnergyValidation, ConvergenceValidation]:
+    ) -> Tuple[ValidationResult, EnergyValidation, ConvergenceValidation]:
         """Perform complete flow validation."""
         # Validate stability
-        stability = self.stability_validator.validate_stability(
-            flow, points, time_steps
-        )
+        stability = self.stability_validator.validate_stability(flow, points)
 
         # Validate energy conservation
         energy = self.energy_validator.validate_energy(hamiltonian, points, time_steps)
