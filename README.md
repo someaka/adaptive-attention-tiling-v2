@@ -50,15 +50,37 @@ To run the current focus tests:
 venv/bin/python -m pytest tests/test_neural/test_attention/test_pattern/test_bifurcation.py -v
 ```
 
-## Development Timeline
-*Last Updated: 2024-12-10T14:22:34+01:00*
+### Test Dependencies and Ordering
+The test suite uses `pytest-dependency` and `pytest-order` to manage test execution order. Tests are organized in a hierarchical dependency structure to ensure proper validation:
 
-### Current Milestone: Geometric Operations Stabilization
-- [x] Hyperbolic Operations (Completed)
-  - Implemented stable exponential and logarithm maps
-  - Added robust parallel transport with Schild's ladder method
-  - Fixed numerical stability in distance calculations
-  - Full test coverage in `tests/core/attention/test_geometric.py`
+1. **Basic Components**: Core functionality tests that other tests depend on
+   ```python
+   @pytest.mark.dependency()
+   @pytest.mark.order(1)
+   def test_metric_computation():
+       # Basic metric tests that others depend on
+   ```
+
+2. **Flow Evolution**: Tests that depend on basic components
+   ```python
+   @pytest.mark.dependency(depends=["TestGeometricFlow::test_metric_computation"])
+   @pytest.mark.order(2)
+   def test_flow_step():
+       # Flow evolution tests
+   ```
+
+3. **Validation**: High-level tests that depend on flow evolution
+   ```python
+   @pytest.mark.dependency(depends=["TestGeometricFlow::test_flow_step"])
+   @pytest.mark.order(3)
+   def test_geometric_invariants():
+       # Validation tests
+   ```
+
+To run tests with dependency information:
+```bash
+venv/bin/pytest -v --order-dependencies tests/test_neural/test_flow/test_geometric_flow.py
+```
 
 ### Next Milestones
 1. **Quantum Framework Enhancement** (In Progress)
