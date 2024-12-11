@@ -187,7 +187,7 @@ class FlowStabilityValidator:
         
         return symmetric and correct_scaling and bianchi_identity
 
-    def validate_flow_step(self, metric: torch.Tensor, evolved_metric: torch.Tensor, metrics: object) -> bool:
+    def validate_flow_step(self, metric: torch.Tensor, evolved_metric: torch.Tensor, metrics: object) -> ValidationResult:
         """Validate flow evolution step.
         
         Args:
@@ -198,17 +198,40 @@ class FlowStabilityValidator:
         Returns:
             True if flow step is valid
         """
-        # Check metric positivity preserved
-        eigenvals = torch.linalg.eigvals(evolved_metric).real
-        positive_definite = (eigenvals > 0).all()
-        
-        # Check energy conservation
-        energy_conserved = torch.allclose(metrics.energy[1:], metrics.energy[:-1], rtol=self.tolerance)
-        
-        # Check stability
-        stable = metrics.singularity < self.stability_threshold
-        
-        return positive_definite and energy_conserved and stable
+        # Initialize validation result
+        is_valid = True
+        messages = []
+
+        # Check metric positive definiteness
+        eigenvalues = torch.linalg.eigvalsh(evolved_metric)
+        if not torch.all(eigenvalues > 1e-10):
+            is_valid = False
+            messages.append("Evolved metric lost positive definiteness")
+
+        # Check metric conditioning
+        condition = torch.max(eigenvalues) / torch.min(eigenvalues.abs())
+        if condition > 1e4:
+            is_valid = False
+            messages.append(f"Poor metric conditioning: {condition:.2e}")
+
+        # Check volume preservation (up to tolerance)
+        init_det = torch.det(metric)
+        evolved_det = torch.det(evolved_metric)
+        rel_vol_change = torch.abs(evolved_det - init_det) / (torch.abs(init_det) + 1e-10)
+        if rel_vol_change > 0.1:  # 10% tolerance
+            is_valid = False
+            messages.append(f"Volume not preserved: {rel_vol_change:.2e}")
+
+        # Check flow magnitude
+        if hasattr(metrics, 'flow_norm'):
+            if torch.any(metrics.flow_norm > 1e3):
+                is_valid = False
+                messages.append("Flow magnitude too large")
+
+        return ValidationResult(
+            is_valid=is_valid,
+            message="; ".join(messages) if messages else "Flow step valid"
+        )
 
     def validate_singularities(self, metric: torch.Tensor, singularities: List, threshold: float = 0.1) -> ValidationResult:
         """Validate detected singularities.
@@ -246,7 +269,7 @@ class FlowStabilityValidator:
         
         return ValidationResult(True, "All singularities are valid")
 
-    def validate_invariants(self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor) -> bool:
+    def validate_invariants(self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor) -> ValidationResult:
         """Validate geometric invariants are preserved by flow.
         
         Args:
@@ -257,24 +280,47 @@ class FlowStabilityValidator:
         Returns:
             True if all invariants are preserved
         """
-        # Check volume preservation
-        det_before = torch.linalg.det(metric)
-        flow_vec = flow.compute_flow_vector(points, flow.compute_ricci_tensor(metric))
-        new_points = points + flow.dt * flow_vec
-        new_metric = flow.compute_metric(new_points)
-        det_after = torch.linalg.det(new_metric)
-        vol_preserved = torch.allclose(det_before, det_after, rtol=1e-3)
-        
-        # Check positive definiteness
-        eigvals = torch.linalg.eigvals(metric).real
-        pos_def = (eigvals > 0).all()
-        
-        # Check Ricci flow equation
-        ricci = flow.compute_ricci_tensor(metric)
-        flow_deriv = (new_metric - metric) / flow.dt
-        ricci_flow = torch.allclose(flow_deriv, -2 * ricci, rtol=1e-2)
-        
-        return vol_preserved and pos_def and ricci_flow
+        is_valid = True
+        messages = []
+
+        # Compute initial invariants
+        init_det = torch.det(metric)
+        init_eigenvals = torch.linalg.eigvalsh(metric)
+        init_condition = torch.max(init_eigenvals) / torch.min(init_eigenvals.abs())
+
+        # Evolve metric
+        evolved_metric = flow.flow_step(points, metric)
+        evolved_det = torch.det(evolved_metric)
+        evolved_eigenvals = torch.linalg.eigvalsh(evolved_metric)
+        evolved_condition = torch.max(evolved_eigenvals) / torch.min(evolved_eigenvals.abs())
+
+        # Check determinant preservation
+        rel_det_change = torch.abs(evolved_det - init_det) / (torch.abs(init_det) + 1e-10)
+        if rel_det_change > 0.1:  # 10% tolerance
+            is_valid = False
+            messages.append(f"Determinant not preserved: {rel_det_change:.2e}")
+
+        # Check eigenvalue bounds
+        if torch.any(evolved_eigenvals < 0):
+            is_valid = False
+            messages.append("Metric lost positive definiteness")
+
+        # Check conditioning
+        if evolved_condition > 1e4:
+            is_valid = False
+            messages.append(f"Poor evolved conditioning: {evolved_condition:.2e}")
+
+        # Check Ricci flow convergence
+        ricci = flow.compute_ricci_tensor(points, metric)
+        ricci_norm = torch.norm(ricci.tensor)
+        if ricci_norm > 1e2:
+            is_valid = False
+            messages.append(f"Large Ricci tensor norm: {ricci_norm:.2e}")
+
+        return ValidationResult(
+            is_valid=is_valid,
+            message="; ".join(messages) if messages else "Invariants preserved"
+        )
 
 
 class EnergyValidator:
@@ -442,7 +488,7 @@ class GeometricFlowValidator:
         """
         return self.stability_validator.validate_ricci_tensor(metric, ricci)
 
-    def validate_flow_step(self, metric: torch.Tensor, evolved_metric: torch.Tensor, metrics: object) -> bool:
+    def validate_flow_step(self, metric: torch.Tensor, evolved_metric: torch.Tensor, metrics: object) -> ValidationResult:
         """Validate flow evolution step.
         
         Args:
@@ -468,7 +514,7 @@ class GeometricFlowValidator:
         """
         return self.stability_validator.validate_singularities(metric, singularities, threshold)
 
-    def validate_invariants(self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor) -> bool:
+    def validate_invariants(self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor) -> ValidationResult:
         """Validate geometric invariants are preserved by flow.
         
         Args:

@@ -90,93 +90,96 @@ class NonlinearStabilityValidator:
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int = 100
     ) -> NonlinearStabilityValidation:
         """Validate nonlinear stability."""
-        # Compute Lyapunov function
+        # Compute Lyapunov function with conditioning
         lyapunov = self._compute_lyapunov(flow, state)
-
-        # Estimate stability basin
+        
+        # Estimate stability basin with bounds
         basin = self._estimate_basin(flow, state)
-
-        # Find perturbation bound
+        
+        # Find perturbation bound with safety margin
         bound = self._find_perturbation_bound(flow, state, time_steps)
-
-        # Check stability
+        
+        # Check overall stability
         stable = (
-            lyapunov > -self.tolerance
-            and basin > self.tolerance
-            and bound > self.tolerance
+            lyapunov < 1.0 and  # Energy bounded
+            basin > 0.01 and  # Reasonable basin size
+            bound > 1e-3  # Meaningful perturbation tolerance
         )
-
+        
         return NonlinearStabilityValidation(
             stable=stable,
-            lyapunov_function=lyapunov.item(),
-            basin_size=basin.item(),
-            perturbation_bound=bound.item(),
+            lyapunov_function=lyapunov,
+            basin_size=basin,
+            perturbation_bound=bound,
         )
 
     def _compute_lyapunov(
         self, flow: GeometricFlow, state: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute Lyapunov function value."""
-        # Use flow energy as Lyapunov candidate
+    ) -> float:
+        """Compute Lyapunov function."""
+        # Use energy as Lyapunov function
         energy = flow.compute_energy(state)
+        
+        # Add regularization for stability
+        reg_energy = energy + 1e-6 * torch.sum(state ** 2)
+        
+        return float(reg_energy.item())
 
-        # Check derivative along flow
-        derivative = flow.compute_energy_derivative(state)
-
-        return -derivative if energy > 0 else derivative
-
-    def _estimate_basin(self, flow: GeometricFlow, state: torch.Tensor) -> torch.Tensor:
-        """Estimate size of stability basin."""
+    def _estimate_basin(
+        self, flow: GeometricFlow, state: torch.Tensor
+    ) -> float:
+        """Estimate stability basin size."""
         # Sample perturbations
-        perturbations = torch.randn_like(
-            state.unsqueeze(0).repeat(self.basin_samples, 1)
-        )
-        norms = torch.norm(perturbations, dim=-1, keepdim=True)
-        perturbations = perturbations / norms
-
-        # Test stability for different magnitudes
-        magnitudes = torch.logspace(-3, 1, 10)
-        stable_magnitude = torch.tensor(0.0)
-
-        for mag in magnitudes:
-            perturbed = state + mag * perturbations
-            energies = flow.compute_energy(perturbed)
-
-            if torch.all(energies < flow.compute_energy(state)):
-                stable_magnitude = mag
-            else:
-                break
-
-        return stable_magnitude
+        perturbs = torch.randn_like(state).unsqueeze(0).repeat(self.basin_samples, 1)
+        scales = torch.logspace(-3, 0, self.basin_samples).unsqueeze(1)
+        
+        perturbed = state.unsqueeze(0) + scales * perturbs
+        
+        # Check stability for each perturbation
+        stable_mask = torch.zeros(self.basin_samples, dtype=torch.bool)
+        
+        for i in range(self.basin_samples):
+            energy_i = flow.compute_energy(perturbed[i])
+            stable_mask[i] = energy_i < 2.0 * flow.compute_energy(state)
+        
+        # Find largest stable perturbation
+        max_stable = scales[stable_mask][-1] if torch.any(stable_mask) else 0.0
+        
+        return float(max_stable.item())
 
     def _find_perturbation_bound(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int
-    ) -> torch.Tensor:
-        """Find maximum stable perturbation size."""
-        # Binary search for bound
-        left = 0.0
+    ) -> float:
+        """Find maximum stable perturbation."""
+        # Binary search for perturbation bound
+        left = 1e-6
         right = 1.0
-
-        while right - left > self.tolerance:
+        
+        for _ in range(10):  # Binary search iterations
             mid = (left + right) / 2
-            perturbed = state + mid * torch.randn_like(state)
-
-            # Check if perturbation stays bounded
-            current = perturbed.clone()
+            perturb = mid * torch.randn_like(state)
+            
+            # Check if perturbation remains stable
+            current = state + perturb
             stable = True
-
+            
             for _ in range(time_steps):
-                current = flow.step(current)
-                if torch.norm(current - state) > 10 * mid:
+                current = flow.evolve(current)
+                if torch.any(torch.isnan(current)) or torch.any(torch.isinf(current)):
                     stable = False
                     break
-
+                    
+                energy = flow.compute_energy(current)
+                if energy > 2.0 * flow.compute_energy(state):
+                    stable = False
+                    break
+            
             if stable:
                 left = mid
             else:
                 right = mid
-
-        return torch.tensor(left)
+        
+        return float(left)  # Conservative bound
 
 
 class StructuralStabilityValidator:

@@ -214,36 +214,8 @@ class FlowStepNetwork(nn.Module):
             nn.Linear(hidden_dim // 2, 1)
         )
 
-    def compute_flow_vector(self, points: torch.Tensor, ricci: RicciTensor) -> torch.Tensor:
-        """Compute flow vector field at given points.
-        
-        Args:
-            points: Points tensor of shape (batch_size, manifold_dim)
-            ricci: Ricci tensor at points
-            
-        Returns:
-            Flow vector field of shape (batch_size, manifold_dim)
-        """
-        batch_size = points.shape[0]
-        
-        # Flatten tensors for network input
-        ricci_flat = ricci.tensor.reshape(batch_size, -1)
-        points_flat = points.reshape(batch_size, -1)
-        network_input = torch.cat([points_flat, ricci_flat], dim=1)
-        
-        # Compute flow vector field
-        flow = self.flow_network(network_input)
-        
-        # Normalize flow
-        flow = self.normalize_flow(flow, ricci.tensor)
-        
-        # Ensure output shape matches points shape
-        flow = flow.reshape(batch_size, points.shape[1])
-        
-        return flow
-        
     def normalize_flow(self, flow: torch.Tensor, metric: torch.Tensor) -> torch.Tensor:
-        """Normalize flow to preserve volume.
+        """Normalize flow to preserve volume and maintain stability.
         
         Args:
             flow: Flow vector field
@@ -255,27 +227,75 @@ class FlowStepNetwork(nn.Module):
         batch_size = flow.shape[0]
         n = flow.shape[1]
         
-        # Add small epsilon to prevent division by zero
-        epsilon = 1e-8
+        # Ensure metric is positive definite
+        epsilon = 1e-6
+        identity = torch.eye(n, device=flow.device).unsqueeze(0).expand(batch_size, -1, -1)
+        metric = metric + epsilon * identity
         
-        # Compute metric determinant
+        # Compute metric determinant with stability
         det = torch.det(metric)
-        det = torch.abs(det) + epsilon
+        det = torch.clamp(det, min=epsilon)
+        sqrt_det = torch.sqrt(det)
         
-        # Compute divergence using covariant derivative
+        # Compute inverse metric with stability
+        try:
+            metric_inv = torch.linalg.inv(metric)
+        except:
+            # If inversion fails, use more stable pseudo-inverse
+            metric_inv = torch.linalg.pinv(metric)
+        
+        # Compute covariant divergence properly
         div = torch.zeros(batch_size, device=flow.device)
         for i in range(n):
             for j in range(n):
-                div += metric[:, i, j] * flow[:, j]
-                
-        # Normalize flow to preserve volume
-        scale = div / (n * torch.sqrt(det))
+                div += metric_inv[:, i, j] * flow[:, j]
+        
+        # Normalize flow with bounded scale factor
+        scale = div / (n * sqrt_det)
+        scale = torch.clamp(scale, min=-1.0, max=1.0)
         scale = scale.unsqueeze(1)
         
-        # Apply normalization
-        normalized_flow = flow - scale * torch.diagonal(metric, dim1=1, dim2=2)
+        # Apply normalization with metric compatibility
+        metric_diag = torch.diagonal(metric, dim1=1, dim2=2)
+        normalized_flow = flow - scale * metric_diag
+        
+        # Ensure flow magnitude is bounded
+        flow_norm = torch.norm(normalized_flow, dim=1, keepdim=True)
+        max_norm = 1e3
+        scale_factor = torch.where(
+            flow_norm > max_norm,
+            max_norm / flow_norm,
+            torch.ones_like(flow_norm)
+        )
+        normalized_flow = normalized_flow * scale_factor
         
         return normalized_flow
+
+    def compute_flow_vector(self, points: torch.Tensor, ricci: RicciTensor) -> torch.Tensor:
+        """Compute flow vector field at given points with stability.
+        
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            ricci: Ricci tensor at points
+            
+        Returns:
+            Flow vector field of shape (batch_size, manifold_dim)
+        """
+        # Prepare input with proper scaling
+        points_scaled = points / (torch.norm(points, dim=1, keepdim=True) + 1e-6)
+        ricci_scaled = ricci.tensor / (torch.norm(ricci.tensor, dim=(1,2), keepdim=True) + 1e-6)
+        
+        # Flatten and concatenate inputs
+        ricci_flat = ricci_scaled.reshape(ricci.tensor.shape[0], -1)
+        input_tensor = torch.cat([points_scaled, ricci_flat], dim=1)
+        
+        # Compute flow with activation bounds
+        flow = torch.tanh(self.flow_network(input_tensor))
+        
+        # Scale flow to reasonable magnitude
+        flow = flow * 1e2  # Limit initial magnitude
+        
+        return flow
 
     def compute_energy(self, points: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
         """Compute flow energy.
@@ -602,7 +622,7 @@ class GeometricFlow:
             Ricci tensor
         """
         batch_size = metric.shape[0]
-        n = metric.shape[1]
+        n = self.manifold_dim
         
         # Compute Christoffel symbols
         christoffel = self.compute_connection(metric)
@@ -649,8 +669,13 @@ class GeometricFlow:
         # Compute flow vector field
         flow = self.flow_step.flow_network(network_input)
         
-        # Normalize flow
-        flow = self.flow_step.normalize_flow(flow, ricci.tensor)
+        # Scale flow to match metric scale
+        metric = self.compute_metric(points)
+        metric_scale = torch.sqrt(torch.abs(torch.det(metric)))
+        flow = flow / (metric_scale.unsqueeze(-1) + 1e-8)
+        
+        # Normalize flow to preserve volume
+        flow = self.flow_step.normalize_flow(flow, metric)
         
         # Ensure output shape matches points shape
         flow = flow.reshape(batch_size, self.manifold_dim)
@@ -673,13 +698,16 @@ class GeometricFlow:
         if timestep is None:
             timestep = self.timestep
             
-        # Choose flow type
+        # Choose flow type and ensure proper scaling
         if self.flow_type == "ricci":
-            flow = -ricci.tensor
+            # Scale Ricci tensor by metric determinant for better stability
+            det = torch.det(metric)
+            scale = torch.sqrt(torch.abs(det) + 1e-8).unsqueeze(-1).unsqueeze(-1)
+            flow = -ricci.tensor / scale
         else:  # mean_curvature
             flow = self.compute_mean_curvature(metric)
             
-        # Evolve metric
+        # Evolve metric with normalized flow
         evolved_metric = metric + timestep * flow
         
         # Compute flow metrics

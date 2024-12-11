@@ -18,6 +18,14 @@ from ...neural.flow.hamiltonian import HamiltonianSystem
 
 
 @dataclass
+class ValidationResult:
+    """Result of validation."""
+
+    is_valid: bool
+    message: str
+
+
+@dataclass
 class HamiltonianValidation:
     """Results of Hamiltonian validation."""
 
@@ -45,6 +53,97 @@ class PhaseSpaceValidation:
     mixing_rate: float  # Mixing time scale
     entropy: float  # KS entropy
     lyapunov: torch.Tensor  # Lyapunov spectrum
+
+
+class HamiltonianFlowValidator:
+    """Validation of Hamiltonian flow properties."""
+
+    def __init__(self, tolerance: float = 1e-6):
+        self.tolerance = tolerance
+        self.max_energy_drift = 0.01  # Maximum allowed energy drift
+        self.max_symplectic_error = 0.01  # Maximum symplectic form error
+
+    def validate_energy_conservation(self, flow: HamiltonianSystem, states: torch.Tensor, time_steps: int = 100) -> ValidationResult:
+        """Validate energy conservation along flow."""
+        is_valid = True
+        messages = []
+
+        # Compute initial energy
+        initial_energy = flow.compute_energy(states)
+        
+        # Evolve system
+        current_states = states
+        energies = [initial_energy]
+        
+        for _ in range(time_steps):
+            current_states = flow.evolve(current_states)
+            current_energy = flow.compute_energy(current_states)
+            energies.append(current_energy)
+        
+        energies = torch.stack(energies)
+        
+        # Check energy drift
+        energy_drift = torch.abs(energies - initial_energy) / (torch.abs(initial_energy) + 1e-10)
+        max_drift = torch.max(energy_drift)
+        
+        if max_drift > self.max_energy_drift:
+            is_valid = False
+            messages.append(f"Energy drift too large: {max_drift:.2e}")
+            
+        # Check energy fluctuations
+        energy_std = torch.std(energies)
+        if energy_std > self.tolerance:
+            is_valid = False
+            messages.append(f"Energy fluctuations too large: {energy_std:.2e}")
+
+        return ValidationResult(
+            is_valid=is_valid,
+            message="; ".join(messages) if messages else "Energy conserved"
+        )
+
+    def validate_symplectic_form(self, flow: HamiltonianSystem, states: torch.Tensor) -> ValidationResult:
+        """Validate preservation of symplectic form."""
+        is_valid = True
+        messages = []
+
+        # Get phase space dimension
+        dim = states.shape[1] // 2
+
+        # Construct symplectic form
+        omega = torch.zeros(2*dim, 2*dim, device=states.device)
+        omega[:dim, dim:] = torch.eye(dim, device=states.device)
+        omega[dim:, :dim] = -torch.eye(dim, device=states.device)
+
+        # Compute flow Jacobian
+        with torch.enable_grad():
+            states.requires_grad_(True)
+            evolved = flow.evolve(states)
+            jac = torch.autograd.functional.jacobian(flow.evolve, states)
+
+        # Check symplectic condition
+        symplectic_error = torch.norm(jac @ omega @ jac.transpose(-1, -2) - omega)
+        if symplectic_error > self.max_symplectic_error:
+            is_valid = False
+            messages.append(f"Symplectic form not preserved: {symplectic_error:.2e}")
+
+        return ValidationResult(
+            is_valid=is_valid, 
+            message="; ".join(messages) if messages else "Symplectic form preserved"
+        )
+
+    def validate_flow(self, flow: HamiltonianSystem, states: torch.Tensor, time_steps: int = 100) -> ValidationResult:
+        """Perform complete Hamiltonian flow validation."""
+        # Check energy conservation
+        energy_valid = self.validate_energy_conservation(flow, states, time_steps)
+        if not energy_valid.is_valid:
+            return energy_valid
+
+        # Check symplectic form
+        symplectic_valid = self.validate_symplectic_form(flow, states)
+        if not symplectic_valid.is_valid:
+            return symplectic_valid
+
+        return ValidationResult(True, "Hamiltonian flow valid")
 
 
 class HamiltonianValidator:
