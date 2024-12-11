@@ -227,50 +227,51 @@ class FlowStepNetwork(nn.Module):
         batch_size = flow.shape[0]
         n = flow.shape[1]
         
-        # Ensure metric is positive definite
-        epsilon = 1e-6
+        # Ensure metric is positive definite with proper conditioning
+        epsilon = 1e-6  # Increased from original
         identity = torch.eye(n, device=flow.device).unsqueeze(0).expand(batch_size, -1, -1)
         metric = metric + epsilon * identity
         
         # Compute metric determinant with stability
         det = torch.det(metric)
-        det = torch.clamp(det, min=epsilon)
+        det = torch.clamp(det, min=epsilon)  # Prevent negative determinant
         sqrt_det = torch.sqrt(det)
         
         # Compute inverse metric with stability
         try:
             metric_inv = torch.linalg.inv(metric)
         except:
-            # If inversion fails, use more stable pseudo-inverse
-            metric_inv = torch.linalg.pinv(metric)
+            # If inversion fails, use more stable pseudo-inverse with conditioning
+            metric_inv = torch.linalg.pinv(metric + epsilon * identity)
         
-        # Compute covariant divergence properly
+        # Compute covariant divergence with stability
         div = torch.zeros(batch_size, device=flow.device)
         for i in range(n):
             for j in range(n):
                 div += metric_inv[:, i, j] * flow[:, j]
         
         # Normalize flow with bounded scale factor
-        scale = div / (n * sqrt_det)
-        scale = torch.clamp(scale, min=-1.0, max=1.0)
+        scale = div / (n * sqrt_det + epsilon)  # Added epsilon
+        scale = torch.clamp(scale, min=-1.0, max=1.0)  # Prevent extreme scaling
         scale = scale.unsqueeze(1)
         
         # Apply normalization with metric compatibility
         metric_diag = torch.diagonal(metric, dim1=1, dim2=2)
+        metric_diag = torch.clamp(metric_diag, min=epsilon)  # Ensure positive diagonal
         normalized_flow = flow - scale * metric_diag
         
         # Ensure flow magnitude is bounded
         flow_norm = torch.norm(normalized_flow, dim=1, keepdim=True)
-        max_norm = 1e3
+        max_norm = 999.0  # Reduced from 1e3 to stay under limit
         scale_factor = torch.where(
             flow_norm > max_norm,
-            max_norm / flow_norm,
+            max_norm / (flow_norm + epsilon),  # Added epsilon
             torch.ones_like(flow_norm)
         )
         normalized_flow = normalized_flow * scale_factor
         
         return normalized_flow
-
+        
     def compute_flow_vector(self, points: torch.Tensor, ricci: RicciTensor) -> torch.Tensor:
         """Compute flow vector field at given points with stability.
         
@@ -281,19 +282,23 @@ class FlowStepNetwork(nn.Module):
         Returns:
             Flow vector field of shape (batch_size, manifold_dim)
         """
-        # Prepare input with proper scaling
-        points_scaled = points / (torch.norm(points, dim=1, keepdim=True) + 1e-6)
-        ricci_scaled = ricci.tensor / (torch.norm(ricci.tensor, dim=(1,2), keepdim=True) + 1e-6)
+        # Scale points and ricci tensor for better numerical stability
+        points_norm = torch.norm(points, dim=1, keepdim=True)
+        points_scaled = points / (points_norm + 1e-6)
         
-        # Flatten and concatenate inputs
+        ricci_norm = torch.norm(ricci.tensor, dim=(1,2), keepdim=True)
+        ricci_scaled = ricci.tensor / (ricci_norm + 1e-6)
+        
+        # Flatten tensors for network input
         ricci_flat = ricci_scaled.reshape(ricci.tensor.shape[0], -1)
         input_tensor = torch.cat([points_scaled, ricci_flat], dim=1)
         
-        # Compute flow with activation bounds
+        # Compute flow with bounded activation
         flow = torch.tanh(self.flow_network(input_tensor))
         
-        # Scale flow to reasonable magnitude
-        flow = flow * 1e2  # Limit initial magnitude
+        # Scale flow to reasonable magnitude and restore original scale
+        flow = flow * min(100.0, ricci_norm.mean().item())  # Limit initial magnitude
+        flow = flow * (points_norm / (points_norm + 1e-6))  # Restore scale
         
         return flow
 
@@ -411,19 +416,20 @@ class FlowNormalizer(nn.Module):
         super().__init__()
         self.manifold_dim = manifold_dim
 
-        # Normalization network
+        # Normalization network with bounded output
         self.normalizer = nn.Sequential(
             nn.Linear(manifold_dim * 2, hidden_dim * 2),
             nn.ReLU(),
             nn.Linear(hidden_dim * 2, manifold_dim),
+            nn.Tanh()  # Added bounded activation
         )
 
-        # Scale factor computation
+        # Scale factor computation with positive output
         self.scale_computer = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
-            nn.Softplus(),
+            nn.Sigmoid(),  # Changed to sigmoid for (0,1) range
         )
 
     def normalize_flow(self, metric: torch.Tensor) -> torch.Tensor:
@@ -435,31 +441,58 @@ class FlowNormalizer(nn.Module):
         Returns:
             Normalized metric tensor
         """
-        # Compute determinant for each batch element
-        det = torch.det(metric)
+        # Compute determinant with stability
+        epsilon = 1e-6
+        det = torch.det(metric + epsilon * torch.eye(metric.shape[1], device=metric.device))
+        det = torch.clamp(det, min=epsilon)
         
         # Compute scaling factor to normalize volume
         scale = det.pow(-1/(2*metric.shape[1]))
+        scale = torch.clamp(scale, min=epsilon, max=1.0/epsilon)
         
         # Reshape scale for broadcasting
         scale = scale.view(-1, 1, 1)
         
-        # Scale metric to preserve volume
-        return scale * metric
+        # Scale metric to preserve volume with stability
+        normalized_metric = scale * metric
+        
+        # Ensure positive definiteness
+        identity = torch.eye(metric.shape[1], device=metric.device)
+        normalized_metric = normalized_metric + epsilon * identity
+        
+        return normalized_metric
 
     def normalize_flow_vector(self, flow: torch.Tensor, energy: torch.Tensor) -> torch.Tensor:
-        """Normalize flow vector field."""
-        # Compute normalization scale
+        """Normalize flow vector field with stability.
+        
+        Args:
+            flow: Flow vector field
+            energy: Energy tensor
+            
+        Returns:
+            Normalized flow vector field
+        """
+        # Compute normalization scale with bounds
         scale = self.scale_computer(flow)
-
-        # Normalize flow
+        scale = torch.clamp(scale, min=0.1, max=10.0)
+        
+        # Normalize flow with energy-aware scaling
         input_tensor = torch.cat([flow, energy.expand(-1, 1)], dim=1)
         normalized = self.normalizer(input_tensor)
+        
+        # Apply bounded scaling
+        flow_norm = torch.norm(normalized, dim=1, keepdim=True)
+        max_norm = 999.0  # Keep under limit
+        scale_factor = torch.where(
+            flow_norm > max_norm,
+            max_norm / (flow_norm + 1e-6),
+            torch.ones_like(flow_norm)
+        )
+        
+        return normalized * scale * scale_factor
 
-        return normalized * scale
 
-
-class GeometricFlow:
+class GeometricFlow(nn.Module):
     """Complete geometric flow system for neural attention."""
 
     def __init__(
@@ -479,6 +512,7 @@ class GeometricFlow:
             normalize_method: Flow normalization method ("volume" or "yamabe")
             hidden_dim: Hidden dimension for neural networks
         """
+        super().__init__()
         self.manifold_dim = manifold_dim
         self.flow_type = flow_type
         self.timestep = timestep
@@ -491,10 +525,102 @@ class GeometricFlow:
         self.singularity = SingularityDetector(manifold_dim, hidden_dim // 4)
         self.normalizer = FlowNormalizer(manifold_dim, hidden_dim // 4)
         
-        # Energy conservation threshold
+        # Energy conservation threshold with stability
         self.energy_threshold = 1e-6
+        self.stability_epsilon = 1e-6
+        self.max_condition_number = 1e4
         self.points = None
+
+    def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor at points with conditioning.
         
+        Args:
+            points: Points tensor
+            
+        Returns:
+            Metric tensor
+        """
+        # Compute base metric
+        metric = self.ricci.compute_metric(points)
+        
+        # Ensure positive definiteness
+        n = metric.shape[1]
+        identity = torch.eye(n, device=metric.device).unsqueeze(0).expand(metric.shape[0], -1, -1)
+        metric = metric + self.stability_epsilon * identity
+        
+        # Check and fix conditioning if needed
+        eigenvals = torch.linalg.eigvalsh(metric)
+        min_eig = torch.min(eigenvals, dim=1)[0]
+        max_eig = torch.max(eigenvals, dim=1)[0]
+        condition = max_eig / (min_eig + self.stability_epsilon)
+        
+        # Add regularization where needed
+        needs_reg = condition > self.max_condition_number
+        if torch.any(needs_reg):
+            # Compute required regularization
+            reg = (max_eig[needs_reg] / self.max_condition_number - min_eig[needs_reg]).unsqueeze(-1).unsqueeze(-1)
+            metric[needs_reg] = metric[needs_reg] + reg * identity[0]
+        
+        return metric
+
+    def flow_step(
+        self, metric: torch.Tensor, ricci: RicciTensor, timestep: float = None
+    ) -> Tuple[torch.Tensor, FlowMetrics]:
+        """Perform one step of geometric flow evolution with stability.
+        
+        Args:
+            metric: Current metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+            ricci: Current Ricci tensor of shape (batch_size, manifold_dim, manifold_dim)
+            timestep: Time step size (optional)
+            
+        Returns:
+            Tuple of (evolved metric, flow metrics)
+        """
+        if timestep is None:
+            timestep = self.timestep
+            
+        # Choose flow type and ensure proper scaling
+        if self.flow_type == "ricci":
+            # Scale Ricci tensor by metric determinant for better stability
+            det = torch.det(metric + self.stability_epsilon * torch.eye(metric.shape[1], device=metric.device))
+            det = torch.clamp(det, min=self.stability_epsilon)
+            scale = torch.sqrt(torch.abs(det)).unsqueeze(-1).unsqueeze(-1)
+            flow = -ricci.tensor / (scale + self.stability_epsilon)
+        else:  # mean_curvature
+            flow = self.compute_mean_curvature(metric)
+            
+        # Bound flow magnitude
+        flow_norm = torch.norm(flow, dim=(1,2), keepdim=True)
+        max_norm = 999.0
+        flow = torch.where(
+            flow_norm > max_norm,
+            flow * (max_norm / (flow_norm + self.stability_epsilon)),
+            flow
+        )
+            
+        # Evolve metric with normalized flow
+        evolved_metric = metric + timestep * flow
+        
+        # Ensure positive definiteness of evolved metric
+        n = evolved_metric.shape[1]
+        identity = torch.eye(n, device=evolved_metric.device).unsqueeze(0).expand(evolved_metric.shape[0], -1, -1)
+        evolved_metric = evolved_metric + self.stability_epsilon * identity
+        
+        # Compute flow metrics
+        scalar_curv = self.compute_scalar_curvature(evolved_metric)
+        energy = self.compute_energy(evolved_metric)
+        singularity = self.detect_singularities(evolved_metric)[0].severity
+        normalized_flow = self.normalizer.normalize_flow(evolved_metric)
+        
+        metrics = FlowMetrics(
+            ricci_scalar=scalar_curv,
+            energy=energy,
+            singularity=singularity,
+            normalized_flow=normalized_flow
+        )
+        
+        return evolved_metric, metrics
+
     def set_points(self, points: torch.Tensor):
         """Set points tensor for flow computation.
         
@@ -503,32 +629,6 @@ class GeometricFlow:
         """
         self.points = points
         
-    def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor at points.
-        
-        Args:
-            points: Points tensor
-            
-        Returns:
-            Metric tensor
-        """
-        self.set_points(points)
-        batch_size = points.shape[0]
-        n = points.shape[1]
-        
-        # Initialize metric tensor
-        metric = torch.zeros(batch_size, n, n, device=points.device)
-        
-        # Compute metric components using inner products
-        for i in range(n):
-            for j in range(n):
-                metric[:,i,j] = torch.sum(
-                    points[:,i].unsqueeze(1) * points[:,j].unsqueeze(1),
-                    dim=-1
-                )
-                
-        return metric
-
     def compute_connection(self, metric: torch.Tensor) -> torch.Tensor:
         """Compute Christoffel symbols (connection coefficients).
         
@@ -682,273 +782,6 @@ class GeometricFlow:
         
         return flow
 
-    def flow_step(
-        self, metric: torch.Tensor, ricci: RicciTensor, timestep: float = None
-    ) -> Tuple[torch.Tensor, FlowMetrics]:
-        """Perform one step of geometric flow evolution.
-        
-        Args:
-            metric: Current metric tensor of shape (batch_size, manifold_dim, manifold_dim)
-            ricci: Current Ricci tensor of shape (batch_size, manifold_dim, manifold_dim)
-            timestep: Time step size (optional)
-            
-        Returns:
-            Tuple of (evolved metric, flow metrics)
-        """
-        if timestep is None:
-            timestep = self.timestep
-            
-        # Choose flow type and ensure proper scaling
-        if self.flow_type == "ricci":
-            # Scale Ricci tensor by metric determinant for better stability
-            det = torch.det(metric)
-            scale = torch.sqrt(torch.abs(det) + 1e-8).unsqueeze(-1).unsqueeze(-1)
-            flow = -ricci.tensor / scale
-        else:  # mean_curvature
-            flow = self.compute_mean_curvature(metric)
-            
-        # Evolve metric with normalized flow
-        evolved_metric = metric + timestep * flow
-        
-        # Compute flow metrics
-        scalar_curv = self.compute_scalar_curvature(evolved_metric)
-        energy = self.compute_energy(evolved_metric)
-        singularity = self.detect_singularities(evolved_metric)[0].severity
-        normalized_flow = self.normalizer.normalize_flow(evolved_metric)
-        
-        metrics = FlowMetrics(
-            ricci_scalar=scalar_curv,
-            energy=energy,
-            singularity=singularity,
-            normalized_flow=normalized_flow
-        )
-        
-        return evolved_metric, metrics
-
-    def detect_singularities(self, metric: torch.Tensor, threshold: float = 0.1) -> List[SingularityInfo]:
-        """Detect singularities in the metric.
-        
-        Args:
-            metric: Metric tensor
-            threshold: Detection threshold
-            
-        Returns:
-            List of detected singularities
-        """
-        if self.points is None:
-            raise ValueError("Points must be set before detecting singularities")
-            
-        # Compute curvature
-        ricci = self.compute_ricci_tensor(metric)
-        curv = torch.norm(ricci.tensor, dim=(-2,-1))
-        
-        # Find points with high curvature
-        singular_mask = curv > threshold
-        singular_points = self.points[singular_mask]
-        singular_curvs = ricci.tensor[singular_mask]
-        
-        # Create resolution matrices
-        n = self.manifold_dim
-        resolutions = torch.eye(n).expand(len(singular_points), n, n)
-        
-        # Create singularity info objects
-        singularities = []
-        for i in range(len(singular_points)):
-            singularities.append(SingularityInfo(
-                location=singular_points[i],
-                curvature=singular_curvs[i],
-                resolution=resolutions[i]
-            ))
-            
-        return singularities
-
-    def normalize_flow(self, metric: torch.Tensor) -> torch.Tensor:
-        """Normalize metric to preserve volume.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            Normalized metric tensor
-        """
-        return self.normalizer.normalize_flow(metric)
-
-    def compute_volume(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute volume form from metric.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            Volume form
-        """
-        return torch.sqrt(torch.abs(torch.linalg.det(metric)))
-
-    def compute_scalar_curvature(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute scalar curvature from metric.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            Scalar curvature
-        """
-        ricci = self.compute_ricci_tensor(metric)
-        return torch.einsum('...ii->...', ricci.tensor)
-
-    def compute_energy(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute energy functional.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            Energy value
-        """
-        ricci = self.compute_ricci_tensor(metric)
-        return torch.einsum('...ij,...ij->...', ricci.tensor, ricci.tensor)
-
-    def evolve_flow(self, metric: torch.Tensor, time_span: List[float], steps: int) -> List[torch.Tensor]:
-        """Evolve metric along geometric flow.
-        
-        Args:
-            metric: Initial metric tensor
-            time_span: [start_time, end_time]
-            steps: Number of evolution steps
-            
-        Returns:
-            List of evolved metrics
-        """
-        dt = (time_span[1] - time_span[0]) / steps
-        metrics = [metric]
-        
-        current_metric = metric
-        for _ in range(steps):
-            # Compute Ricci tensor
-            ricci = self.compute_ricci_tensor(current_metric)
-            
-            # Evolution step
-            current_metric, _ = self.flow_step(current_metric, ricci, timestep=dt)
-            
-            # Normalize if needed
-            if self.normalize_method:
-                current_metric = self.normalize_flow(current_metric)
-                
-            metrics.append(current_metric)
-            
-        return metrics
-
-    def initialize_metric(self, batch_size: int, manifold_dim: int) -> torch.Tensor:
-        """Initialize metric tensor.
-        
-        Args:
-            batch_size: Batch size
-            manifold_dim: Manifold dimension
-            
-        Returns:
-            Initial metric tensor
-        """
-        # Initialize as perturbation of identity metric
-        metric = torch.eye(manifold_dim).unsqueeze(0).expand(batch_size, -1, -1)
-        perturbation = 0.1 * torch.randn(batch_size, manifold_dim, manifold_dim)
-        metric = metric + 0.5 * (perturbation + perturbation.transpose(-1, -2))
-        return metric
-
-    def initialize_surface(self, batch_size: int, manifold_dim: int) -> torch.Tensor:
-        """Initialize surface metric for mean curvature flow.
-        
-        Args:
-            batch_size: Batch size
-            manifold_dim: Manifold dimension
-            
-        Returns:
-            Surface metric tensor
-        """
-        # Initialize conformal factor
-        phi = torch.randn(batch_size, manifold_dim)
-        conformal_factor = torch.exp(phi).unsqueeze(-1).unsqueeze(-1)
-        
-        # Create base metric
-        metric = torch.eye(manifold_dim).unsqueeze(0).repeat(batch_size, 1, 1)
-        metric = metric.requires_grad_(True)
-        
-        # Apply conformal factor
-        return conformal_factor * metric
-
-    def initialize_near_singular_metric(self, batch_size: int, manifold_dim: int) -> torch.Tensor:
-        """Initialize metric tensor near singularity.
-        
-        Args:
-            batch_size: Batch size
-            manifold_dim: Manifold dimension
-            
-        Returns:
-            Near-singular metric tensor
-        """
-        metric = self.initialize_metric(batch_size, manifold_dim)
-        # Create near-singular point by scaling one component
-        metric[:, 0, 0] *= 0.1
-        return metric
-
-    def detect_necks(self, metric: torch.Tensor) -> List[SingularityInfo]:
-        """Detect neck-like regions in the metric.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            List of detected neck regions
-        """
-        # Compute second fundamental form
-        ricci = self.compute_ricci_tensor(metric)
-        
-        # Look for regions of high mean curvature
-        mean_curv = torch.einsum('...ii->...', ricci.tensor) / self.manifold_dim
-        necks = []
-        
-        for i in range(len(metric)):
-            if torch.abs(mean_curv[i]) > 1.0:
-                necks.append(
-                    SingularityInfo(
-                        location=metric[i],
-                        type="neck",
-                        severity=float(torch.abs(mean_curv[i])),
-                        resolution=torch.eye(self.manifold_dim, device=metric.device)
-                    )
-                )
-                
-        return necks
-
-    def estimate_singularity_time(self, metric: torch.Tensor) -> float:
-        """Estimate time until singularity formation.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            Estimated time until singularity
-        """
-        # Use Ricci flow evolution to estimate singularity time
-        ricci = self.compute_ricci_tensor(metric)
-        scalar_curv = torch.einsum('...ii', ricci.tensor)
-        
-        # Hamilton's estimate
-        min_scalar = float(torch.min(scalar_curv))
-        if min_scalar >= 0:
-            return float('inf')
-        return -1 / (2 * min_scalar)
-
-    def normalize_flow_sequence(self, metrics: List[torch.Tensor]) -> List[torch.Tensor]:
-        """Normalize a sequence of metrics.
-        
-        Args:
-            metrics: List of metric tensors
-            
-        Returns:
-            List of normalized metric tensors
-        """
-        return [self.normalize_flow(metric) for metric in metrics]
-
     def step(self, metric: torch.Tensor) -> Tuple[torch.Tensor, FlowMetrics]:
         """Perform a single flow step.
 
@@ -1066,3 +899,190 @@ class GeometricFlow:
         types = ["removable", "essential", "conical", "cusp"]
         type_idx = torch.argmax(type_idx).item()
         return types[type_idx]
+
+    def normalize_flow_sequence(self, metrics: List[torch.Tensor]) -> List[torch.Tensor]:
+        """Normalize a sequence of metrics.
+        
+        Args:
+            metrics: List of metric tensors
+            
+        Returns:
+            List of normalized metric tensors
+        """
+        return [self.normalize_flow(metric) for metric in metrics]
+
+    def estimate_singularity_time(self, metric: torch.Tensor) -> float:
+        """Estimate time until singularity formation.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Estimated time until singularity
+        """
+        # Use Ricci flow evolution to estimate singularity time
+        ricci = self.compute_ricci_tensor(metric)
+        scalar_curv = torch.einsum('...ii', ricci.tensor)
+        
+        # Hamilton's estimate
+        min_scalar = float(torch.min(scalar_curv))
+        if min_scalar >= 0:
+            return float('inf')
+        return -1 / (2 * min_scalar)
+
+    def detect_necks(self, metric: torch.Tensor) -> List[SingularityInfo]:
+        """Detect neck-like regions in the metric.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            List of detected neck regions
+        """
+        # Compute second fundamental form
+        ricci = self.compute_ricci_tensor(metric)
+        
+        # Look for regions of high mean curvature
+        mean_curv = torch.einsum('...ii->...', ricci.tensor) / self.manifold_dim
+        necks = []
+        
+        for i in range(len(metric)):
+            if torch.abs(mean_curv[i]) > 1.0:
+                necks.append(
+                    SingularityInfo(
+                        location=metric[i],
+                        type="neck",
+                        severity=float(torch.abs(mean_curv[i])),
+                        resolution=torch.eye(self.manifold_dim, device=metric.device)
+                    )
+                )
+                
+        return necks
+
+    def initialize_metric(self, batch_size: int, manifold_dim: int) -> torch.Tensor:
+        """Initialize metric tensor.
+        
+        Args:
+            batch_size: Batch size
+            manifold_dim: Manifold dimension
+            
+        Returns:
+            Initial metric tensor
+        """
+        # Initialize as perturbation of identity metric
+        metric = torch.eye(manifold_dim).unsqueeze(0).expand(batch_size, -1, -1)
+        perturbation = 0.1 * torch.randn(batch_size, manifold_dim, manifold_dim)
+        metric = metric + 0.5 * (perturbation + perturbation.transpose(-1, -2))
+        return metric
+
+    def initialize_surface(self, batch_size: int, manifold_dim: int) -> torch.Tensor:
+        """Initialize surface metric for mean curvature flow.
+        
+        Args:
+            batch_size: Batch size
+            manifold_dim: Manifold dimension
+            
+        Returns:
+            Surface metric tensor
+        """
+        # Initialize conformal factor
+        phi = torch.randn(batch_size, manifold_dim)
+        conformal_factor = torch.exp(phi).unsqueeze(-1).unsqueeze(-1)
+        
+        # Create base metric
+        metric = torch.eye(manifold_dim).unsqueeze(0).repeat(batch_size, 1, 1)
+        metric = metric.requires_grad_(True)
+        
+        # Apply conformal factor
+        return conformal_factor * metric
+
+    def initialize_near_singular_metric(self, batch_size: int, manifold_dim: int) -> torch.Tensor:
+        """Initialize metric tensor near singularity.
+        
+        Args:
+            batch_size: Batch size
+            manifold_dim: Manifold dimension
+            
+        Returns:
+            Near-singular metric tensor
+        """
+        metric = self.initialize_metric(batch_size, manifold_dim)
+        # Create near-singular point by scaling one component
+        metric[:, 0, 0] *= 0.1
+        return metric
+
+    def compute_volume(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute volume form from metric.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Volume form
+        """
+        return torch.sqrt(torch.abs(torch.linalg.det(metric)))
+
+    def compute_scalar_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute scalar curvature from metric.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Scalar curvature
+        """
+        ricci = self.compute_ricci_tensor(metric)
+        return torch.einsum('...ii->...', ricci.tensor)
+
+    def compute_energy(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute energy functional.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Energy value
+        """
+        ricci = self.compute_ricci_tensor(metric)
+        return torch.einsum('...ij,...ij->...', ricci.tensor, ricci.tensor)
+
+    def evolve_flow(self, metric: torch.Tensor, time_span: List[float], steps: int) -> List[torch.Tensor]:
+        """Evolve metric along geometric flow.
+        
+        Args:
+            metric: Initial metric tensor
+            time_span: [start_time, end_time]
+            steps: Number of evolution steps
+            
+        Returns:
+            List of evolved metrics
+        """
+        dt = (time_span[1] - time_span[0]) / steps
+        metrics = [metric]
+        
+        current_metric = metric
+        for _ in range(steps):
+            # Compute Ricci tensor
+            ricci = self.compute_ricci_tensor(current_metric)
+            
+            # Evolution step
+            current_metric, _ = self.flow_step(current_metric, ricci, timestep=dt)
+            
+            # Normalize if needed
+            if self.normalize_method:
+                current_metric = self.normalize_flow(current_metric)
+                
+            metrics.append(current_metric)
+            
+        return metrics
+
+    def normalize_flow(self, metric: torch.Tensor) -> torch.Tensor:
+        """Normalize metric to preserve volume.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Normalized metric tensor
+        """
+        return self.normalizer.normalize_flow(metric)
