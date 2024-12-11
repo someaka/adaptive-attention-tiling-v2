@@ -44,9 +44,12 @@ class TestPatternFormation:
     @pytest.fixture
     def validator(self) -> PatternFormationValidator:
         return PatternFormationValidator(
-            emergence_threshold=0.1,
-            spatial_coherence_threshold=0.8,
-            temporal_stability_threshold=0.9,
+            tolerance=1e-6,
+            coherence_threshold=0.8,
+            symmetry_threshold=0.9,
+            defect_threshold=0.1,
+            frequency_threshold=0.1,
+            phase_threshold=0.1,
         )
 
     def test_pattern_emergence(
@@ -56,18 +59,15 @@ class TestPatternFormation:
         # Create test pattern evolution
         time_series = torch.randn(batch_size, spatial_dim, requires_grad=True)
         noise = 0.1 * torch.randn_like(time_series)
+        pattern = time_series + noise
 
         # Test emergence detection
-        emergence = validator.detect_emergence(time_series + noise)
-        assert isinstance(emergence, EmergenceMetrics)
-        assert hasattr(emergence, "emergence_time")
-        assert hasattr(emergence, "emergence_strength")
-
-        # Test emergence validation
-        result = validator.validate_emergence(emergence)
-        assert isinstance(result, bool)
-        assert hasattr(result, "metrics")
-        assert "emergence_score" in result.metrics
+        result = validator.emergence_validator.validate_emergence(pattern)
+        assert isinstance(result, EmergenceValidation)
+        assert hasattr(result, "emerged")
+        assert hasattr(result, "formation_time")
+        assert hasattr(result, "coherence")
+        assert hasattr(result, "stability")
 
         # Test gradual pattern formation
         def generate_growing_pattern(t: float) -> torch.Tensor:
@@ -77,9 +77,11 @@ class TestPatternFormation:
 
         times = torch.linspace(0, 10, 100)
         patterns = torch.stack([generate_growing_pattern(t) for t in times])
-        emergence_gradual = validator.detect_emergence(patterns)
-        assert emergence_gradual.emergence_time > 0
-        assert emergence_gradual.emergence_strength > 0
+        result_gradual = validator.emergence_validator.validate_emergence(patterns)
+        assert result_gradual.emerged
+        assert result_gradual.formation_time > 0
+        assert result_gradual.coherence > 0
+        assert result_gradual.stability > 0
 
     def test_spatial_organization(
         self, validator: PatternFormationValidator, batch_size: int, spatial_dim: int

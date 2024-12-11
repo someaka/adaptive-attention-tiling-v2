@@ -9,7 +9,7 @@ This module validates geometric properties:
 """
 
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any
 
 import torch
 
@@ -391,17 +391,38 @@ class GeometricMetricValidator:
     def __init__(
         self,
         manifold_dim: int,
-        curvature_bounds: Tuple[float, float] = (-1.0, 1.0),
         tolerance: float = 1e-6,
+        curvature_bounds: Tuple[float, float] = (-1.0, 1.0),
     ):
+        """Initialize geometric metric validator.
+        
+        Args:
+            manifold_dim: Dimension of the manifold
+            tolerance: Tolerance for validation checks
+            curvature_bounds: (lower, upper) bounds for curvature
+        """
         self.metric_validator = MetricValidator(manifold_dim, tolerance)
         self.connection_validator = ConnectionValidator(manifold_dim, tolerance)
         self.curvature_validator = CurvatureValidator(manifold_dim, curvature_bounds)
 
     def validate(
-        self, framework: RiemannianFramework, points: torch.Tensor
-    ) -> Tuple[MetricValidation, ConnectionValidation, CurvatureValidation]:
-        """Perform complete geometric validation."""
+        self, 
+        framework: RiemannianFramework, 
+        points: torch.Tensor
+    ) -> Dict[str, Any]:
+        """Perform complete geometric validation.
+        
+        Args:
+            framework: Riemannian framework for geometric analysis
+            points: Points tensor to validate at
+            
+        Returns:
+            Dictionary containing validation results:
+            - metric_validation: MetricValidation results
+            - connection_validation: ConnectionValidation results 
+            - curvature_validation: CurvatureValidation results
+            - is_valid: Overall validation status
+        """
         # Get geometric quantities
         metric = framework.compute_metric(points)
         connection = framework.compute_christoffel(points)
@@ -414,11 +435,36 @@ class GeometricMetricValidator:
         )
         curvature_valid = self.curvature_validator.validate_curvature(riemann, metric)
 
-        return metric_valid, connection_valid, curvature_valid
+        # Combine results
+        return {
+            "metric_validation": metric_valid,
+            "connection_validation": connection_valid,
+            "curvature_validation": curvature_valid,
+            "is_valid": (
+                metric_valid.positive_definite 
+                and connection_valid.compatible 
+                and curvature_valid.bounds_satisfied
+            ),
+            # Add bounds for framework consistency checks
+            "ricci_lower": float(curvature_valid.ricci.min()),
+            "ricci_upper": float(curvature_valid.ricci.max()),
+            "sectional_lower": float(curvature_valid.sectional.min()),
+            "sectional_upper": float(curvature_valid.sectional.max())
+        }
 
     def check_geodesic_completeness(
-        self, framework: RiemannianFramework, points: torch.Tensor
+        self, 
+        framework: RiemannianFramework, 
+        points: torch.Tensor
     ) -> bool:
-        """Check geodesic completeness of manifold."""
+        """Check if the metric is geodesically complete.
+        
+        Args:
+            framework: Riemannian framework
+            points: Points tensor
+            
+        Returns:
+            True if metric is geodesically complete
+        """
         metric = framework.compute_metric(points)
         return self.metric_validator.check_completeness(metric, points)

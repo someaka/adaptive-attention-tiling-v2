@@ -218,6 +218,14 @@ def pytest_configure(config: Any) -> None:
     Args:
         config: Pytest config object
     """
+    # Register markers
+    config.addinivalue_line("markers", "level0: base level tests with no dependencies")
+    config.addinivalue_line("markers", "level1: tests depending on level0 components")
+    config.addinivalue_line("markers", "level2: tests depending on level1 components")
+    config.addinivalue_line("markers", "level3: tests depending on level2 components")
+    config.addinivalue_line("markers", "level4: high-level integration tests")
+    config.addinivalue_line("markers", "validation: marks validation framework tests")
+    
     # Set up logging
     log_level = logging.WARNING
     
