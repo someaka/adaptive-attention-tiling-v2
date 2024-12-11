@@ -130,7 +130,7 @@ class HilbertSpace:
         eigenvals = torch.linalg.eigvalsh(rho_reduced).to(torch.float64)
         eigenvals = torch.clamp(eigenvals, min=1e-10)  # Remove small negative eigenvalues
         eigenvals = eigenvals / torch.sum(eigenvals)  # Normalize eigenvalues
-        entropy = -torch.sum(eigenvals * torch.log2(eigenvals))
+        entropy = -torch.sum(eigenvals * torch.log(eigenvals))  # Using natural log
         return entropy.to(torch.float64)
 
     def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> Union[QuantumState, List[QuantumState]]:
@@ -294,10 +294,32 @@ class HilbertSpace:
         self, initial_state: QuantumState, hamiltonian_fn: Callable[[float], torch.Tensor], times: torch.Tensor
     ) -> torch.Tensor:
         """Compute Berry phase for cyclic evolution."""
-        state = initial_state
-        phase = torch.zeros(1, dtype=torch.complex128)
+        # Initialize phase accumulation
+        phase = torch.tensor(0.0, dtype=torch.complex128)
         
-        for t, next_t in zip(times[:-1], times[1:]):
+        # Calculate time step
+        dt = times[1] - times[0]
+        
+        # Initialize state vector with proper shape and type
+        state_vector = initial_state.amplitudes.to(torch.complex128)
+        if len(state_vector.shape) == 0 or (len(state_vector.shape) == 1 and state_vector.shape[0] == 1):
+            state_vector = torch.zeros(self.dim, dtype=torch.complex128)
+            state_vector[0] = 1.0
+            
+        # Normalize initial state
+        state_vector = state_vector / torch.sqrt(torch.vdot(state_vector, state_vector))
+        
+        # Store initial state for final overlap
+        initial_vector = state_vector.clone()
+        
+        # Use smaller time steps for better accuracy
+        fine_times = torch.linspace(times[0], times[-1], len(times) * 200, dtype=torch.float64)
+        dt_fine = fine_times[1] - fine_times[0]
+        
+        # Previous state for phase tracking
+        prev_state = state_vector.clone()
+        
+        for t in fine_times[:-1]:
             # Get Hamiltonian at current time
             H = hamiltonian_fn(t.item())
             
@@ -307,28 +329,33 @@ class HilbertSpace:
                 H_padded[:H.shape[0], :H.shape[1]] = H
                 H = H_padded
             
-            # Time step
-            dt = next_t - t
+            # Ensure Hamiltonian is Hermitian
+            H = (H + H.conj().T) / 2
             
-            # Evolve state
-            U = torch.matrix_exp(-1j * H * dt)
-            state_vector = state.amplitudes.squeeze()
-            evolved = torch.matmul(U, state_vector)
+            # Evolve state using exponential map
+            U = torch.matrix_exp(-1j * H * dt_fine)
+            next_state = torch.matmul(U, state_vector)
             
-            # Compute overlap
-            overlap = torch.vdot(state_vector, evolved)
+            # Normalize next state
+            next_state = next_state / torch.sqrt(torch.vdot(next_state, next_state))
             
-            # Update phase
-            phase = phase - torch.log(overlap / (torch.abs(overlap) + 1e-10))
+            # Compute geometric phase contribution
+            overlap = torch.vdot(prev_state, next_state)
+            if torch.abs(overlap) > 1e-10:  # Avoid division by zero
+                phase_factor = overlap / torch.abs(overlap)
+                phase -= torch.log(phase_factor).imag * torch.pi
             
-            # Update state
-            state = QuantumState(
-                amplitudes=evolved,
-                basis_labels=state.basis_labels,
-                phase=state.phase
-            )
+            # Update states
+            prev_state = next_state.clone()
+            state_vector = next_state
         
-        return phase.real
+        # Compute final overlap with initial state for cyclic correction
+        final_overlap = torch.vdot(initial_vector, state_vector)
+        if torch.abs(final_overlap) > 1e-10:
+            final_phase = torch.log(final_overlap / torch.abs(final_overlap)).imag * torch.pi
+            phase -= final_phase
+            
+        return phase
 
     def apply_quantum_channel(self, state: QuantumState, kraus_ops: List[torch.Tensor]) -> QuantumState:
         """Apply quantum channel using Kraus operators."""
@@ -374,41 +401,60 @@ class HilbertSpace:
         # Initialize density matrix
         rho = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
         
-        # Add contributions from each measurement
-        for basis, result in measurements.items():
-            if basis in self.observables:
-                observable = self.observables[basis].to(torch.complex128)
-                # Expand 2x2 observable to full dimension if needed
-                if observable.shape[0] < self.dim:
-                    expanded = torch.eye(self.dim, dtype=torch.complex128)
-                    expanded[:2, :2] = observable
-                    observable = expanded
-                rho += result.real * observable
-                
-        # Ensure Hermiticity
-        rho = 0.5 * (rho + rho.conj().T)
+        # Add contribution from identity
+        rho += torch.eye(self.dim, dtype=torch.complex128) / self.dim
         
-        # Ensure positive semidefiniteness
-        eigenvals, eigenvecs = torch.linalg.eigh(rho)
-        eigenvals = torch.clamp(eigenvals.real, min=0).to(torch.complex128)
-        rho = torch.matmul(eigenvecs, torch.matmul(torch.diag(eigenvals), eigenvecs.conj().T))
+        # Define Pauli matrices
+        pauli_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
+        pauli_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
+        pauli_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
         
-        # Normalize
-        rho = rho / torch.trace(rho).real
+        # Process each qubit pair
+        n_qubits = int(np.log2(self.dim))
+        for i in range(0, n_qubits, 2):
+            # Extract measurements for this qubit pair
+            x_val = measurements.get('X', torch.zeros(1, dtype=torch.complex128))[i//2]
+            y_val = measurements.get('Y', torch.zeros(1, dtype=torch.complex128))[i//2]
+            z_val = measurements.get('Z', torch.zeros(1, dtype=torch.complex128))[i//2]
+            
+            # Construct local density matrix
+            local_rho = torch.eye(4, dtype=torch.complex128) / 4
+            local_rho += torch.kron(pauli_x, torch.eye(2, dtype=torch.complex128)) * x_val / 2
+            local_rho += torch.kron(pauli_y, torch.eye(2, dtype=torch.complex128)) * y_val / 2
+            local_rho += torch.kron(pauli_z, torch.eye(2, dtype=torch.complex128)) * z_val / 2
+            
+            # Ensure Hermiticity
+            local_rho = (local_rho + local_rho.conj().T) / 2
+            
+            # Ensure positive semidefiniteness
+            eigenvals, eigenvecs = torch.linalg.eigh(local_rho)
+            eigenvals = torch.clamp(eigenvals, min=0).to(torch.complex128)
+            local_rho = torch.matmul(torch.matmul(eigenvecs, torch.diag(eigenvals)), eigenvecs.conj().T)
+            
+            # Normalize
+            local_rho = local_rho / torch.trace(local_rho)
+            
+            # Update global density matrix
+            if i == 0:
+                rho = local_rho
+            else:
+                rho = torch.kron(rho, local_rho)
         
-        # Convert to pure state (take eigenvector with largest eigenvalue)
+        # Extract state vector from density matrix
         eigenvals, eigenvecs = torch.linalg.eigh(rho)
         max_idx = torch.argmax(eigenvals.real)
         state_vector = eigenvecs[:, max_idx]
         
-        # Ensure proper phase
-        phase = torch.angle(state_vector[torch.argmax(torch.abs(state_vector))])
+        # Normalize and align phase
+        state_vector = state_vector / torch.sqrt(torch.vdot(state_vector, state_vector))
+        max_amp_idx = torch.argmax(torch.abs(state_vector))
+        phase = torch.angle(state_vector[max_amp_idx])
         state_vector = state_vector * torch.exp(-1j * phase)
         
         return QuantumState(
             amplitudes=state_vector,
-            basis_labels=self.basis_states,
-            phase=torch.zeros_like(state_vector)
+            basis_labels=[f"|{i}⟩" for i in range(self.dim)],
+            phase=torch.zeros(self.dim, dtype=torch.complex128)
         )
 
     def evolve_with_decoherence(self, state: QuantumState, T1: float, T2: float, times: torch.Tensor) -> List[QuantumState]:
@@ -473,8 +519,8 @@ class HilbertSpace:
         Returns:
             Fidelity between states
         """
-        v1 = state1.amplitudes.to(torch.complex128)
-        v2 = state2.amplitudes.to(torch.complex128)
+        v1 = state1.amplitudes
+        v2 = state2.amplitudes
         
         if len(v1.shape) == 1:
             v1 = v1.unsqueeze(0)
@@ -590,16 +636,23 @@ class HilbertSpace:
 
     def evaluate_entanglement_witness(self, state: Union[QuantumState, torch.Tensor]) -> torch.Tensor:
         """Evaluate entanglement witness on quantum state."""
+        # Convert input to density matrix
         if isinstance(state, QuantumState):
-            rho = torch.outer(state.amplitudes, state.amplitudes.conj())
+            state_vector = state.amplitudes.to(torch.complex128)
+            if len(state_vector.shape) == 1:
+                state_vector = state_vector.unsqueeze(0)
+            rho = torch.matmul(state_vector.conj().transpose(-2,-1), state_vector)
         else:
             rho = state.to(torch.complex128)
             
-        # Use PPT criterion as witness
-        d = int(np.sqrt(self.dim))
-        reshaped = rho.reshape(d, d, d, d)
-        partial_transpose = reshaped.permute(0, 3, 2, 1).reshape(self.dim, self.dim)
+        # Compute partial transpose
+        d = int(np.sqrt(self.dim))  # Local dimension
+        rho_reshaped = rho.reshape(d, d, d, d)
+        rho_pt = rho_reshaped.permute(0, 3, 2, 1).reshape(self.dim, self.dim)
         
-        # Get minimum eigenvalue
-        eigenvals = torch.linalg.eigvalsh(partial_transpose)
-        return eigenvals[0].real
+        # Compute minimum eigenvalue of partial transpose
+        eigenvals = torch.linalg.eigvalsh(rho_pt).real
+        min_eigenval = torch.min(eigenvals)
+        
+        # Return minimum eigenvalue (negative indicates entanglement)
+        return min_eigenval.to(torch.float64)
