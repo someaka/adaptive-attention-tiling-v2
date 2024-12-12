@@ -826,8 +826,8 @@ class SpatialValidator:
         
         # Create mask for valid frequencies (exclude DC and above Nyquist)
         nyquist = 0.5
-        mask_x = (freqs_x.abs() > 0) & (freqs_x.abs() <= nyquist)
-        mask_y = (freqs_y.abs() > 0) & (freqs_y.abs() <= nyquist)
+        mask_x = (freqs_x.abs() > 0) & (freqs_x.abs() <= nyquist)  # Explicitly exclude DC
+        mask_y = (freqs_y.abs() > 0) & (freqs_y.abs() <= nyquist)  # Explicitly exclude DC
         mask = mask_x | mask_y  # Use OR to capture peaks in either direction
         
         # Get valid frequencies and reshape power
@@ -841,23 +841,19 @@ class SpatialValidator:
         peak_freq_x = freqs_x_valid[peak_idx]
         peak_freq_y = freqs_y_valid[peak_idx]
         
-        # Use the frequency component with larger magnitude
-        peak_freqs = torch.where(
-            peak_freq_x.abs() > peak_freq_y.abs(),
-            peak_freq_x.abs(),  # Use absolute value
-            peak_freq_y.abs()   # Use absolute value
-        )
+        # For 2D patterns, we need to consider that peaks can appear in either x or y direction
+        # The wavelength is determined by the highest frequency component
+        peak_freqs = torch.maximum(peak_freq_x.abs(), peak_freq_y.abs())
         
         # Convert to wavelength in pixels
-        # fftfreq gives frequencies in cycles per N samples
-        # To get cycles per pixel: f_pixel = f_fft * N
-        # Wavelength = N / (f_fft * N) = 1 / f_fft
-        wavelength = N / (peak_freqs * N)  # This simplifies to 1/peak_freqs
+        # fftfreq gives frequencies in cycles per N samples, normalized by N
+        # To get wavelength in pixels: wavelength = 1 / f_fft
+        wavelength = 1.0 / peak_freqs  # Since freqs are already normalized
         
         # Ensure output shape is correct for batched input
         if len(pattern.shape) == 4:  # Batch case
-            wavelength = wavelength.reshape(-1, 1)  # Make it (batch_size, 1)
-    
+            wavelength = wavelength.reshape(-1, 1, 1)  # Make it (batch_size, 1, 1)
+
         return wavelength
 
     def _analyze_symmetry(self, pattern: torch.Tensor) -> str:
