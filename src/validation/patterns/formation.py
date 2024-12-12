@@ -672,89 +672,99 @@ class BifurcationPoint:
 
 
 class EmergenceValidator:
-    """Validation of pattern emergence properties."""
+    """Validates pattern emergence properties."""
 
     def __init__(self, tolerance: float = 1e-6, coherence_threshold: float = 0.8):
+        """Initialize emergence validator.
+        
+        Args:
+            tolerance: Numerical tolerance for computations
+            coherence_threshold: Threshold for determining pattern emergence
+        """
         self.tolerance = tolerance
-        self.coherence_threshold = coherence_threshold
+        self.threshold = coherence_threshold
 
-    def validate_emergence(
-        self, dynamics: Optional[PatternDynamics], initial: torch.Tensor, time_steps: int = 1000
-    ) -> EmergenceValidation:
-        """Validate pattern emergence."""
-        # Track pattern evolution
-        trajectory = [initial.clone()]
-        current = initial.clone()
-
-        formation_time = 0
-        emerged = False
-
-        if dynamics is not None:
-            for t in range(time_steps):
-                current = dynamics.step(current)
-                trajectory.append(current.clone())
-
-                # Check for pattern emergence
-                if not emerged and self._check_emergence(trajectory):
-                    emerged = True
-                    formation_time = t
-        else:
-            # If no dynamics provided, just analyze the initial pattern
-            emerged = self._check_emergence([initial])
-            formation_time = 0
-
-        if len(trajectory) > 1:
-            trajectory = torch.stack(trajectory)
-            # Compute pattern properties
-            coherence = self._compute_coherence(trajectory)
-            stability = self._compute_stability(trajectory)
-        else:
-            # For single pattern, use simplified metrics
-            coherence = self._compute_coherence(initial.unsqueeze(0))
-            stability = torch.tensor(1.0)
+    def validate_emergence(self, trajectory: torch.Tensor) -> EmergenceValidation:
+        """Validate pattern emergence from trajectory.
+        
+        Args:
+            trajectory: Tensor of shape (time_steps, height, width) containing system states
+            
+        Returns:
+            EmergenceValidation containing emergence metrics
+        """
+        # Get initial and final states
+        initial_state = trajectory[0]
+        final_state = trajectory[-1]
+        
+        # Compute emergence metrics
+        coherence = self._compute_coherence(final_state)
+        stability = self._compute_stability(trajectory)
+        emerged = coherence > self.threshold
+        
+        # Compute formation time if emerged
+        formation_time = 0.0
+        if emerged:
+            formation_time = self._compute_formation_time(trajectory)
 
         return EmergenceValidation(
             emerged=emerged,
-            formation_time=float(formation_time),
-            coherence=coherence.item(),
-            stability=stability.item(),
+            formation_time=formation_time,
+            coherence=coherence,
+            stability=stability
         )
 
-    def _check_emergence(self, trajectory: List[torch.Tensor]) -> bool:
-        """Check if pattern has emerged."""
-        if len(trajectory) < 2:
-            return False
+    def _compute_coherence(self, state: torch.Tensor) -> float:
+        """Compute coherence of pattern.
 
-        # Compute spatial correlation
-        current = trajectory[-1]
-        previous = trajectory[-2]
+        Args:
+            state: Pattern state tensor
 
-        correlation = torch.corrcoef(current.reshape(-1), previous.reshape(-1))[0, 1]
+        Returns:
+            float: Coherence score
+        """
+        if state.ndim == 1:
+            state = state.unsqueeze(0)  # Add batch dimension if not present
+        
+        padding = 2
+        height, width = state.shape
+        padded = torch.nn.functional.pad(state, (padding, padding), mode="circular")
+        
+        # Compute local coherence using circular cross-correlation
+        coherence = 0.0
+        for i in range(padding * 2 + 1):
+            for j in range(padding * 2 + 1):
+                if i == padding and j == padding:
+                    continue
+                shifted = torch.roll(padded, shifts=(i - padding, j - padding), dims=(0, 1))
+                coherence += torch.nn.functional.cosine_similarity(
+                    padded[padding:-padding, padding:-padding].flatten(),
+                    shifted[padding:-padding, padding:-padding].flatten(),
+                    dim=0,
+                )
 
-        return correlation > self.coherence_threshold
+        return float(coherence / ((padding * 2 + 1) ** 2 - 1))
 
-    def _compute_coherence(self, trajectory: torch.Tensor) -> torch.Tensor:
-        """Compute pattern coherence."""
-        # Use spatial autocorrelation
-        final = trajectory[-1]
+    def _compute_stability(self, trajectory: torch.Tensor) -> float:
+        """Compute temporal stability of pattern."""
+        # Use normalized variance of final states as stability measure
+        final_states = trajectory[-10:]  # Look at last 10 states
+        variance = torch.var(final_states)
+        max_val = torch.max(torch.abs(final_states))
+        if max_val > 0:
+            stability = 1.0 - min(1.0, variance / max_val)
+        else:
+            stability = 1.0
+        return float(stability)
 
-        # Compute 2D autocorrelation
-        fft = torch.fft.fft2(final)
-        power = torch.abs(fft) ** 2
-        correlation = torch.fft.ifft2(power)
-
-        # Normalize
-        correlation = torch.real(correlation)
-        correlation = correlation / correlation[0, 0]
-
-        # Average over space
-        return torch.mean(correlation)
-
-    def _compute_stability(self, trajectory: torch.Tensor) -> torch.Tensor:
-        """Compute pattern formation stability."""
-        # Use temporal variation
-        variations = torch.std(trajectory, dim=0)
-        return 1.0 / (1.0 + torch.mean(variations))
+    def _compute_formation_time(self, trajectory: torch.Tensor) -> float:
+        """Compute time taken for pattern to emerge."""
+        # Find first time coherence exceeds threshold
+        for t in range(len(trajectory)):
+            coherence = self._compute_coherence(trajectory[t])
+            if coherence > self.threshold:
+                return float(t) / len(trajectory)
+        return 1.0
 
 
 class SpatialValidator:
@@ -793,13 +803,17 @@ class SpatialValidator:
 
         # Find dominant wavelength
         freqs = torch.fft.fftfreq(pattern.shape[0])
-        freq_grid = torch.meshgrid(freqs, freqs)
-        freq_magnitude = torch.sqrt(freq_grid[0] ** 2 + freq_grid[1] ** 2)
+        freq_x, freq_y = torch.meshgrid(freqs, freqs, indexing='ij')
+        freq_magnitude = torch.sqrt(freq_x ** 2 + freq_y ** 2)
+
+        # Ensure power spectrum matches frequency grid size
+        if power.shape != freq_magnitude.shape:
+            power = power[:freq_magnitude.shape[0], :freq_magnitude.shape[1]]
 
         # Weight by power spectrum
         weighted_freq = torch.sum(freq_magnitude * power) / torch.sum(power)
 
-        return 1.0 / weighted_freq
+        return 1.0 / weighted_freq if weighted_freq > 0 else torch.tensor(float('inf'))
 
     def _analyze_symmetry(self, pattern: torch.Tensor) -> str:
         """Analyze pattern symmetry."""
@@ -816,19 +830,22 @@ class SpatialValidator:
     def _check_translation(self, pattern: torch.Tensor) -> float:
         """Check translational symmetry."""
         shifted = torch.roll(pattern, shifts=1, dims=0)
-        correlation = torch.corrcoef(pattern.reshape(-1), shifted.reshape(-1))[0, 1]
+        x = torch.stack([pattern.reshape(-1), shifted.reshape(-1)])
+        correlation = torch.corrcoef(x)[0, 1]
         return correlation
 
     def _check_rotation(self, pattern: torch.Tensor) -> float:
         """Check rotational symmetry."""
         rotated = torch.rot90(pattern, k=1)
-        correlation = torch.corrcoef(pattern.reshape(-1), rotated.reshape(-1))[0, 1]
+        x = torch.stack([pattern.reshape(-1), rotated.reshape(-1)])
+        correlation = torch.corrcoef(x)[0, 1]
         return correlation
 
     def _check_reflection(self, pattern: torch.Tensor) -> float:
         """Check reflection symmetry."""
         reflected = torch.flip(pattern, dims=[0])
-        correlation = torch.corrcoef(pattern.reshape(-1), reflected.reshape(-1))[0, 1]
+        x = torch.stack([pattern.reshape(-1), reflected.reshape(-1)])
+        correlation = torch.corrcoef(x)[0, 1]
         return correlation
 
     def _count_defects(self, pattern: torch.Tensor) -> int:
@@ -837,10 +854,11 @@ class SpatialValidator:
         dx = pattern[1:, :] - pattern[:-1, :]
         dy = pattern[:, 1:] - pattern[:, :-1]
 
-        gradient_mag = torch.sqrt(
-            torch.nn.functional.pad(dx, (0, 0, 0, 1)) ** 2
-            + torch.nn.functional.pad(dy, (0, 1, 0, 0)) ** 2
-        )
+        # Pad gradients to match original size
+        dx = torch.nn.functional.pad(dx, (0, 0, 0, 1), mode='constant', value=0)
+        dy = torch.nn.functional.pad(dy, (0, 1, 0, 0), mode='constant', value=0)
+
+        gradient_mag = torch.sqrt(dx ** 2 + dy ** 2)
 
         # Count high gradient points
         defects = torch.sum(gradient_mag > self.defect_threshold)
@@ -850,22 +868,36 @@ class SpatialValidator:
         """Compute spatial correlation."""
         # Use average local correlation
         padding = 2
-        padded = torch.nn.functional.pad(
-            pattern, (padding, padding, padding, padding), mode="reflect"
-        )
-
+        height, width = pattern.shape
         correlations = []
-        for i in range(pattern.shape[0]):
-            for j in range(pattern.shape[1]):
-                patch = padded[i : i + 2 * padding + 1, j : j + 2 * padding + 1]
+
+        # Add explicit padding
+        padded = torch.zeros(height + 2*padding, width + 2*padding, device=pattern.device)
+        padded[padding:-padding, padding:-padding] = pattern
+        
+        # Mirror edges for padding
+        padded[:padding, padding:-padding] = torch.flip(pattern[:padding], [0])  # Top
+        padded[-padding:, padding:-padding] = torch.flip(pattern[-padding:], [0])  # Bottom
+        padded[padding:-padding, :padding] = torch.flip(pattern[:, :padding], [1])  # Left
+        padded[padding:-padding, -padding:] = torch.flip(pattern[:, -padding:], [1])  # Right
+
+        for i in range(height):
+            for j in range(width):
+                patch = padded[i:i + 2*padding + 1, j:j + 2*padding + 1]
                 center = pattern[i, j]
+                
+                x = torch.stack([patch.reshape(-1), torch.full_like(patch.reshape(-1), center)])
+                try:
+                    correlation = torch.corrcoef(x)[0, 1]
+                    if not torch.isnan(correlation):
+                        correlations.append(correlation)
+                except:
+                    continue
 
-                correlation = torch.corrcoef(
-                    patch.reshape(-1), torch.full_like(patch.reshape(-1), center)
-                )[0, 1]
-                correlations.append(correlation)
-
-        return torch.mean(torch.tensor(correlations))
+        # Return mean correlation, or 0 if no valid correlations
+        if correlations:
+            return torch.mean(torch.tensor(correlations))
+        return torch.tensor(0.0)
 
 
 class TemporalValidator:
@@ -969,59 +1001,54 @@ class BifurcationAnalyzer:
 
     def analyze_bifurcations(
         self,
-        dynamics: PatternDynamics,
+        dynamics: Optional[PatternDynamics],
         initial_state: torch.Tensor,
-        parameter_name: str,
+        parameter_name: Optional[str] = None,
     ) -> List[BifurcationPoint]:
-        """Analyze bifurcations in pattern dynamics.
-        
-        Args:
-            dynamics: Pattern dynamics system
-            initial_state: Initial pattern state
-            parameter_name: Name of bifurcation parameter
-            
-        Returns:
-            List of detected bifurcation points
-        """
-        # Generate parameter values
+        """Analyze bifurcations in pattern dynamics."""
+        if dynamics is None or parameter_name is None:
+            return []
+
+        # Sample parameter values
         param_values = torch.linspace(
-            self.parameter_range[0],
-            self.parameter_range[1],
-            self.num_points
+            self.parameter_range[0], self.parameter_range[1], self.num_points
         )
-        
-        # Scan through parameter values
+
+        # Track states and eigenvalues
         prev_state = None
         prev_eigenvals = None
-        
-        for param in param_values:
-            # Set parameter value
-            setattr(dynamics, parameter_name, param.item())
-            
+        current_param = getattr(dynamics, parameter_name)
+
+        for param_value in param_values:
+            # Update parameter
+            setattr(dynamics, parameter_name, param_value)
+
             # Evolve to steady state
             state = self._evolve_to_steady_state(dynamics, initial_state)
-            
+
             # Compute stability
             eigenvals, eigenvecs = self._compute_stability(dynamics, state)
-            
+
             # Check for bifurcation
-            if prev_state is not None:
-                if self._detect_bifurcation(state, prev_state, eigenvals, prev_eigenvals):
-                    # Classify bifurcation
-                    pattern_type = self._classify_pattern(state)
-                    
-                    # Record bifurcation point
-                    point = BifurcationPoint(
-                        parameter_value=param.item(),
+            if prev_state is not None and self._detect_bifurcation(
+                state, prev_state, eigenvals, prev_eigenvals
+            ):
+                pattern_type = self._classify_pattern(state)
+                self.bifurcation_points.append(
+                    BifurcationPoint(
+                        parameter_value=float(param_value),
                         pattern_type=pattern_type,
                         eigenvalues=eigenvals,
-                        eigenvectors=eigenvecs
+                        eigenvectors=eigenvecs,
                     )
-                    self.bifurcation_points.append(point)
-            
+                )
+
             prev_state = state
             prev_eigenvals = eigenvals
-            
+
+        # Restore original parameter
+        setattr(dynamics, parameter_name, current_param)
+
         return self.bifurcation_points
 
     def _evolve_to_steady_state(
@@ -1139,26 +1166,35 @@ class PatternFormationValidator:
         )
 
     def validate(
-        self, dynamics: PatternDynamics, initial: torch.Tensor, time_steps: int = 1000
-    ) -> Tuple[EmergenceValidation, SpatialValidation, TemporalValidation]:
+        self,
+        dynamics: Optional[PatternDynamics],
+        initial: torch.Tensor,
+        time_steps: int = 1000,
+    ):
         """Perform complete pattern formation validation."""
-        # Validate pattern emergence
-        emergence = self.emergence_validator.validate_emergence(
-            dynamics, initial, time_steps
-        )
+        # Initialize trajectory with initial state
+        current = initial
+        trajectory = [current]
 
-        # Generate trajectory
-        trajectory = []
-        current = initial.clone()
-        for _ in range(time_steps):
-            current = dynamics.step(current)
-            trajectory.append(current.clone())
+        # Evolve system if dynamics provided
+        if dynamics is not None:
+            for _ in range(time_steps - 1):
+                current = dynamics.step(current)
+                trajectory.append(current)
+        else:
+            # If no dynamics, use initial state for validation
+            trajectory = [initial] * time_steps
+
+        # Convert to tensor
         trajectory = torch.stack(trajectory)
 
-        # Validate spatial properties
+        # Validate emergence
+        emergence = self.emergence_validator.validate_emergence(trajectory)
+
+        # Validate spatial organization
         spatial = self.spatial_validator.validate_spatial(trajectory[-1])
 
-        # Validate temporal properties
+        # Validate temporal evolution
         temporal = self.temporal_validator.validate_temporal(trajectory)
 
         return emergence, spatial, temporal

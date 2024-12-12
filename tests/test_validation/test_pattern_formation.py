@@ -68,7 +68,7 @@ class TestPatternFormation:
             pattern[i] = torch.sin(x) + 0.1 * torch.randn_like(x)
 
         # Test emergence validation
-        result = validator.emergence_validator.validate_emergence(None, pattern)
+        result = validator.emergence_validator.validate_emergence(pattern)
         assert isinstance(result, EmergenceValidation)
         assert hasattr(result, "emerged")
         assert hasattr(result, "formation_time")
@@ -175,7 +175,7 @@ class TestPatternFormation:
                 trajectory[t, i] = torch.sin(x + phase) + 0.1 * torch.randn_like(x)
 
         # Test emergence validation
-        emergence = validator.emergence_validator.validate_emergence(None, trajectory[-1])
+        emergence = validator.emergence_validator.validate_emergence(trajectory[-1])
         assert isinstance(emergence, EmergenceValidation)
 
         # Test spatial validation
@@ -211,7 +211,7 @@ class TestPatternFormation:
                 trajectory[t, i] = u - v
 
         # Test emergence validation
-        emergence = validator.emergence_validator.validate_emergence(None, trajectory[-1])
+        emergence = validator.emergence_validator.validate_emergence(trajectory[-1])
         assert isinstance(emergence, EmergenceValidation)
         assert hasattr(emergence, "emerged")
         assert hasattr(emergence, "formation_time")
@@ -265,7 +265,7 @@ class TestPatternFormation:
                 trajectory[t, i] = torch.sin(x + phase) + 0.1 * torch.randn_like(x)
 
         # Test emergence validation
-        emergence = validator.emergence_validator.validate_emergence(None, trajectory[-1])
+        emergence = validator.emergence_validator.validate_emergence(trajectory[-1])
         assert isinstance(emergence, EmergenceValidation)
         assert hasattr(emergence, "stability")
 
