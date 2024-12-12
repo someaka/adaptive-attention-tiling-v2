@@ -4,11 +4,38 @@ import torch
 import torch.nn as nn
 import pytest
 import logging
-from typing import Dict, List, Optional, Protocol
+from typing import Dict, Protocol, Optional, Tuple, Union, List, Iterator, Any
 from dataclasses import dataclass
 
-from src.validation.geometric.model import ModelGeometricValidator
+from src.validation.geometric.model import ValidationResult, ModelGeometricValidator
 from src.core.patterns.riemannian import PatternRiemannianStructure
+
+
+def tensor_repr(value: Any, max_elements: int = 8) -> str:
+    """Create a shortened string representation of tensors and other values."""
+    if value is None:
+        return "None"
+    if isinstance(value, torch.Tensor):
+        shape = list(value.shape)
+        if len(shape) == 0:
+            return f"tensor({value.item():.4f})"
+        if sum(shape) <= max_elements:
+            return str(value)
+        return f"tensor(shape={shape}, mean={value.mean():.4f}, std={value.std():.4f})"
+    return str(value)
+
+
+def format_validation_result(result: ValidationResult) -> str:
+    """Format validation result for readable output."""
+    data_repr = {}
+    for k, v in result.data.items():
+        if isinstance(v, dict):
+            data_repr[k] = {sk: tensor_repr(sv) for sk, sv in v.items()}
+        elif isinstance(v, list):
+            data_repr[k] = [tensor_repr(item) for item in v]
+        else:
+            data_repr[k] = tensor_repr(v)
+    return f"ValidationResult(is_valid={result.is_valid}, data={data_repr}, message='{result.message}')"
 
 
 class ModelGeometry(Protocol):
@@ -28,39 +55,14 @@ class ModelGeometry(Protocol):
     def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
         """Compute sectional curvature."""
         ...
-
-
-@dataclass        
-class ValidationResult:
-    """Validation result."""
-    is_valid: bool
-    data: Dict[str, torch.Tensor]
-    message: str
-
-
-def tensor_repr(tensor: Optional[torch.Tensor], max_elements: int = 8) -> str:
-    """Create a shortened string representation of tensors."""
-    if tensor is None:
-        return "None"
-    shape = list(tensor.shape)
-    if len(shape) == 0:
-        return f"tensor({tensor.item():.4f})"
-    if sum(shape) <= max_elements:
-        return str(tensor)
-    return f"tensor(shape={shape}, mean={tensor.mean():.4f}, std={tensor.std():.4f})"
-
-
-def format_validation_result(result: ValidationResult) -> str:
-    """Format validation result for readable output."""
-    data_repr = {}
-    for k, v in result.data.items():
-        if isinstance(v, dict):
-            data_repr[k] = {sk: tensor_repr(sv) for sk, sv in v.items()}
-        elif isinstance(v, list):
-            data_repr[k] = [tensor_repr(item) for item in v]
-        else:
-            data_repr[k] = tensor_repr(v)
-    return f"ValidationResult(is_valid={result.is_valid}, data={data_repr}, message='{result.message}')"
+        
+    def connection(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute connection."""
+        ...
+        
+    def parameters(self) -> Iterator[nn.Parameter]:
+        """Get model parameters."""
+        ...
 
 
 class MockLayer(nn.Module):
@@ -142,19 +144,24 @@ class MockModelGeometry(ModelGeometry):
         
     def metric(self, points: torch.Tensor) -> torch.Tensor:
         """Compute metric tensor for the model."""
-        batch_size = points.shape[0]
-        # Return identity metric for testing
-        return torch.eye(self.manifold_dim).unsqueeze(0).expand(batch_size, -1, -1)
+        return self.layers['input'].metric(points)
         
     def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
         """Compute sectional curvature."""
-        batch_size = points.shape[0]
-        # Return zero curvature for testing
-        return torch.zeros(batch_size, self.manifold_dim, self.manifold_dim)
-
-    def get_layer(self, layer_name: str) -> 'MockLayer':
+        return torch.zeros_like(points)
+        
+    def get_layer(self, layer_name: str) -> MockLayer:
         """Get layer by name."""
         return self.layers[layer_name]
+        
+    def connection(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute connection."""
+        return self.layers['input'].riemannian_framework.compute_christoffel(points)
+        
+    def parameters(self) -> Iterator[nn.Parameter]:
+        """Get model parameters."""
+        for layer in self.layers.values():
+            yield from layer.riemannian_framework.parameters()
 
 
 class TestModelGeometricValidator:
