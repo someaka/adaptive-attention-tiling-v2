@@ -720,12 +720,23 @@ class EmergenceValidator:
         Returns:
             float: Coherence score
         """
-        if state.ndim == 1:
-            state = state.unsqueeze(0)  # Add batch dimension if not present
+        # Ensure we have a 2D tensor by taking the first batch and channel if present
+        if state.ndim > 2:
+            state = state.squeeze()  # Remove singleton dimensions
+            if state.ndim > 2:
+                state = state[0]  # Take first batch if still > 2D
+                if state.ndim > 2:
+                    state = state[0]  # Take first channel if still > 2D
         
         padding = 2
         height, width = state.shape
-        padded = torch.nn.functional.pad(state, (padding, padding), mode="circular")
+        # Add padding for circular boundary conditions
+        # For 2D input, pad needs to be specified as (left, right, top, bottom)
+        padded = torch.nn.functional.pad(
+            state.unsqueeze(0).unsqueeze(0),  # Add batch and channel dims for padding
+            (padding, padding, padding, padding),
+            mode="circular"
+        ).squeeze()  # Remove the extra dimensions
         
         # Compute local coherence using circular cross-correlation
         coherence = 0.0
@@ -734,12 +745,12 @@ class EmergenceValidator:
                 if i == padding and j == padding:
                     continue
                 shifted = torch.roll(padded, shifts=(i - padding, j - padding), dims=(0, 1))
-                coherence += torch.nn.functional.cosine_similarity(
-                    padded[padding:-padding, padding:-padding].flatten(),
-                    shifted[padding:-padding, padding:-padding].flatten(),
-                    dim=0,
-                )
-
+                
+                # Compute correlation by stacking tensors
+                stacked = torch.stack([padded[padding:-padding, padding:-padding].flatten(), shifted[padding:-padding, padding:-padding].flatten()])
+                correlation = torch.corrcoef(stacked)[0, 1]
+                coherence += correlation
+                
         return float(coherence / ((padding * 2 + 1) ** 2 - 1))
 
     def _compute_stability(self, trajectory: torch.Tensor) -> float:
@@ -793,24 +804,61 @@ class SpatialValidator:
         )
 
     def _compute_wavelength(self, pattern: torch.Tensor) -> torch.Tensor:
-        """Compute pattern wavelength."""
-        # Use Fourier spectrum
+        """Compute dominant wavelength from pattern.
+
+        Args:
+            pattern: Pattern tensor of shape (batch_size, channels, height, width)
+
+        Returns:
+            Wavelength tensor of shape (batch_size, channels)
+        """
+        # Get size and create frequency grid
+        N = pattern.shape[-1]
+        freqs = torch.fft.fftfreq(N, dtype=torch.float32, device=pattern.device)
+        
+        # Create 2D frequency grids for x and y separately
+        freqs_x = freqs[None, :].expand(N, N)
+        freqs_y = freqs[:, None].expand(N, N)
+        
+        # Compute power spectrum
         fft = torch.fft.fft2(pattern)
-        power = torch.abs(fft) ** 2
-
-        # Find dominant wavelength
-        freqs = torch.fft.fftfreq(pattern.shape[0])
-        freq_x, freq_y = torch.meshgrid(freqs, freqs, indexing='ij')
-        freq_magnitude = torch.sqrt(freq_x ** 2 + freq_y ** 2)
-
-        # Ensure power spectrum matches frequency grid size
-        if power.shape != freq_magnitude.shape:
-            power = power[:freq_magnitude.shape[0], :freq_magnitude.shape[1]]
-
-        # Weight by power spectrum
-        weighted_freq = torch.sum(freq_magnitude * power) / torch.sum(power)
-
-        return 1.0 / weighted_freq if weighted_freq > 0 else torch.tensor(float('inf'))
+        power = torch.abs(fft).pow(2)
+        
+        # Create mask for valid frequencies (exclude DC and above Nyquist)
+        nyquist = 0.5
+        mask_x = (freqs_x.abs() > 0) & (freqs_x.abs() <= nyquist)
+        mask_y = (freqs_y.abs() > 0) & (freqs_y.abs() <= nyquist)
+        mask = mask_x | mask_y  # Use OR to capture peaks in either direction
+        
+        # Get valid frequencies and reshape power
+        batch_shape = power.shape[:-2]  # (batch_size, channels)
+        power_valid = power.reshape(*batch_shape, -1)[..., mask.reshape(-1)]
+        freqs_x_valid = freqs_x[mask]
+        freqs_y_valid = freqs_y[mask]
+        
+        # Find peak frequency for each batch and channel
+        peak_idx = torch.argmax(power_valid, dim=-1)  # Shape: (batch_size, channels)
+        peak_freq_x = freqs_x_valid[peak_idx]
+        peak_freq_y = freqs_y_valid[peak_idx]
+        
+        # Use the frequency component with larger magnitude
+        peak_freqs = torch.where(
+            peak_freq_x.abs() > peak_freq_y.abs(),
+            peak_freq_x.abs(),  # Use absolute value
+            peak_freq_y.abs()   # Use absolute value
+        )
+        
+        # Convert to wavelength in pixels
+        # fftfreq gives frequencies in cycles per N samples
+        # To get cycles per pixel: f_pixel = f_fft * N
+        # Wavelength = N / (f_fft * N) = 1 / f_fft
+        wavelength = N / (peak_freqs * N)  # This simplifies to 1/peak_freqs
+        
+        # Ensure output shape is correct for batched input
+        if len(pattern.shape) == 4:  # Batch case
+            wavelength = wavelength.reshape(-1, 1)  # Make it (batch_size, 1)
+    
+        return wavelength
 
     def _analyze_symmetry(self, pattern: torch.Tensor) -> str:
         """Analyze pattern symmetry."""
@@ -846,15 +894,24 @@ class SpatialValidator:
         return correlation
 
     def _count_defects(self, pattern: torch.Tensor) -> int:
-        """Count pattern defects."""
+        """Count number of defects in pattern."""
+        # Ensure pattern is 2D
+        if pattern.ndim > 2:
+            pattern = pattern.squeeze()  # Remove singleton dimensions
+            if pattern.ndim > 2:
+                pattern = pattern[0]  # Take first batch if still > 2D
+                if pattern.ndim > 2:
+                    pattern = pattern[0]  # Take first channel if still > 2D
+
         # Use gradient magnitude
-        dx = pattern[1:, :] - pattern[:-1, :]
-        dy = pattern[:, 1:] - pattern[:, :-1]
+        dx = pattern[1:, :] - pattern[:-1, :]  # Shape: [H-1, W]
+        dy = pattern[:, 1:] - pattern[:, :-1]  # Shape: [H, W-1]
 
         # Pad gradients to match original size
-        dx = torch.nn.functional.pad(dx, (0, 0, 0, 1), mode='constant', value=0)
-        dy = torch.nn.functional.pad(dy, (0, 1, 0, 0), mode='constant', value=0)
+        dx = torch.nn.functional.pad(dx, (0, 0, 0, 1), mode='constant', value=0)  # Pad height
+        dy = torch.nn.functional.pad(dy, (0, 1, 0, 0), mode='constant', value=0)  # Pad width
 
+        # Now dx and dy should both be [H, W]
         gradient_mag = torch.sqrt(dx ** 2 + dy ** 2)
 
         # Count high gradient points
@@ -863,38 +920,35 @@ class SpatialValidator:
 
     def _compute_correlation(self, pattern: torch.Tensor) -> torch.Tensor:
         """Compute spatial correlation."""
+        # Ensure pattern is 2D
+        if pattern.ndim > 2:
+            pattern = pattern.squeeze()  # Remove singleton dimensions
+            if pattern.ndim > 2:
+                pattern = pattern[0]  # Take first batch if still > 2D
+                if pattern.ndim > 2:
+                    pattern = pattern[0]  # Take first channel if still > 2D
+                    
         # Use average local correlation
         padding = 2
         height, width = pattern.shape
         correlations = []
 
-        # Add explicit padding
-        padded = torch.zeros(height + 2*padding, width + 2*padding, device=pattern.device)
-        padded[padding:-padding, padding:-padding] = pattern
-        
-        # Mirror edges for padding
-        padded[:padding, padding:-padding] = torch.flip(pattern[:padding], [0])  # Top
-        padded[-padding:, padding:-padding] = torch.flip(pattern[-padding:], [0])  # Bottom
-        padded[padding:-padding, :padding] = torch.flip(pattern[:, :padding], [1])  # Left
-        padded[padding:-padding, -padding:] = torch.flip(pattern[:, -padding:], [1])  # Right
-
-        for i in range(height):
-            for j in range(width):
-                patch = padded[i:i + 2*padding + 1, j:j + 2*padding + 1]
-                center = pattern[i, j]
-                
-                x = torch.stack([patch.reshape(-1), torch.full_like(patch.reshape(-1), center)])
-                try:
-                    correlation = torch.corrcoef(x)[0, 1]
-                    if not torch.isnan(correlation):
-                        correlations.append(correlation)
-                except:
+        # Compute correlations at different offsets
+        for i in range(-padding, padding + 1):
+            for j in range(-padding, padding + 1):
+                if i == 0 and j == 0:
                     continue
 
-        # Return mean correlation, or 0 if no valid correlations
-        if correlations:
-            return torch.mean(torch.tensor(correlations))
-        return torch.tensor(0.0)
+                # Shift pattern
+                shifted = torch.roll(pattern, shifts=(i, j), dims=(0, 1))
+                
+                # Compute correlation by stacking tensors
+                stacked = torch.stack([pattern[padding:-padding, padding:-padding].flatten(), shifted[padding:-padding, padding:-padding].flatten()])
+                correlation = torch.corrcoef(stacked)[0, 1]
+                correlations.append(correlation.item())
+
+        # Return average correlation
+        return torch.tensor(sum(correlations) / len(correlations))
 
 
 class TemporalValidator:
@@ -930,12 +984,17 @@ class TemporalValidator:
         # Use temporal Fourier transform
         fft = torch.fft.fft(trajectory, dim=0)
         power = torch.mean(torch.abs(fft) ** 2, dim=(1, 2))
-
-        # Find dominant frequency
-        freqs = torch.fft.fftfreq(len(trajectory))
-        dominant_idx = torch.argmax(power[1:]) + 1
-
-        return torch.abs(freqs[dominant_idx])
+        
+        # Get frequencies and find dominant frequency
+        freqs = torch.fft.fftfreq(trajectory.size(0))
+        # Only look at positive frequencies (excluding DC)
+        positive_freqs = freqs[1:len(freqs)//2]  # Exclude DC and negative frequencies
+        positive_power = power[1:len(freqs)//2]   # Corresponding power spectrum
+        
+        # Find dominant frequency index
+        dominant_idx = torch.argmax(positive_power)
+        
+        return torch.abs(positive_freqs[dominant_idx])
 
     def _check_phase_locking(self, trajectory: torch.Tensor) -> bool:
         """Check if pattern is phase locked."""
