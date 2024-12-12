@@ -93,7 +93,14 @@ class ModelGeometricValidator:
             
         Returns:
             Validation results for the layer
+            
+        Raises:
+            ValueError: If layer_name does not exist in the model
         """
+        # Check if layer exists
+        if layer_name not in self.model_geometry.layers:
+            raise ValueError(f"Layer '{layer_name}' not found in model")
+
         # Get geometric tensors from model geometry
         metric_tensor = getattr(self.model_geometry, 'metric')(points)
         sectional_curvature = getattr(self.model_geometry, 'sectional_curvature')(points)
@@ -222,7 +229,7 @@ class ModelGeometricValidator:
         batch_size: int = 16,
         manifold_dim: Optional[int] = None,
         max_memory_gb: float = 1.0,
-    ) -> Dict[str, ValidationResult]:
+    ) -> ValidationResult:
         """Validate the geometric properties of the model.
         
         Args:
@@ -231,20 +238,59 @@ class ModelGeometricValidator:
             max_memory_gb: Maximum memory usage in GB
             
         Returns:
-            Dictionary mapping layer names to validation results
+            Validation results for the model
+            
+        Raises:
+            ValueError: If validation would exceed memory limit
         """
         if manifold_dim is None:
             manifold_dim = self.model_geometry.manifold_dim
             if not isinstance(manifold_dim, int):
                 raise ValueError("model_geometry.manifold_dim must be an integer")
 
+        # Check memory requirements
+        num_layers = len(self.layer_validators)
+        num_heads = len(self.model_geometry.attention_heads)
+        memory_bytes = (
+            # Points storage
+            batch_size * manifold_dim * 4 +
+            # Metric tensors (one per layer)
+            num_layers * batch_size * manifold_dim * manifold_dim * 4 +
+            # Attention scores (one per head)
+            num_heads * batch_size * batch_size * 4
+        )
+        memory_gb = memory_bytes / (1024 * 1024 * 1024)
+        if memory_gb > max_memory_gb:
+            raise ValueError(
+                f"Validation would require {memory_gb:.2f}GB memory, "
+                f"exceeding limit of {max_memory_gb}GB"
+            )
+
         # Generate random points for validation
         points = torch.randn(batch_size, manifold_dim, device=next(self.model_geometry.parameters()).device)
         
         # Validate each layer
         layer_validations = {}
+        all_valid = True
+        messages = []
+        
         for layer_name in self.layer_validators:
-            layer_validations[layer_name] = self.validate_layer_geometry(layer_name, points)
+            # Get layer validation
+            layer_validation = self.validate_layer_geometry(layer_name, points)
+            
+            # Check curvature bounds
+            curvature_valid = self._check_layer_curvature(layer_name, points)
+            
+            # Update validation data
+            layer_validation.data.update({
+                'complete': True,  # Mark validation as complete
+                'curvature_valid': curvature_valid
+            })
+            
+            layer_validations[layer_name] = layer_validation
+            all_valid = all_valid and layer_validation.is_valid
+            if not layer_validation.is_valid:
+                messages.append(f"Layer {layer_name}: {layer_validation.message}")
             
         # Validate attention heads
         attention_validations = {}
@@ -258,13 +304,17 @@ class ModelGeometricValidator:
         # Validate global properties
         global_props = self._validate_global_properties(points)
         
-        # Combine all validations
-        validations = {}
-        validations.update(layer_validations)
-        validations.update(attention_validations)
-        validations['global'] = global_props
-        
-        return validations
+        # Return combined validation result
+        return ValidationResult(
+            is_valid=all_valid,
+            data={
+                'layers': layer_validations,
+                'attention': attention_validations,
+                'global': global_props,
+                'complete': True
+            },
+            message="; ".join(messages) if messages else "Model geometry validation successful"
+        )
 
     def _validate_attention_compatibility(
         self, head: nn.Module, query_points: torch.Tensor, key_points: torch.Tensor
@@ -362,10 +412,43 @@ class ModelGeometricValidator:
         Returns:
             True if geometric structure is preserved
         """
-        # Check if attention scores preserve distances
-        query_distances = torch.cdist(query_metric, query_metric)
-        key_distances = torch.cdist(key_metric, key_metric)
-        score_distances = torch.cdist(attention_scores, attention_scores)
+        batch_size = query_metric.shape[0]
+        
+        # Compute distances in query space
+        query_distances = torch.zeros(batch_size, batch_size, device=query_metric.device)
+        for i in range(batch_size):
+            for j in range(batch_size):
+                # For identity metrics, this reduces to Euclidean distance
+                diff = query_metric[i] - query_metric[j]
+                query_distances[i,j] = torch.sqrt((diff * query_metric[i]).sum())
+        
+        # Compute distances in key space
+        key_distances = torch.zeros(batch_size, batch_size, device=key_metric.device)
+        for i in range(batch_size):
+            for j in range(batch_size):
+                diff = key_metric[i] - key_metric[j]
+                key_distances[i,j] = torch.sqrt((diff * key_metric[i]).sum())
+        
+        # Compute distances in attention score space
+        # First normalize scores to probabilities
+        attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
+        score_distances = torch.zeros(batch_size, batch_size, device=attention_scores.device)
+        for i in range(batch_size):
+            for j in range(batch_size):
+                # Use Jensen-Shannon divergence for symmetric distance
+                m = 0.5 * (attention_probs[i] + attention_probs[j])
+                kl_i = torch.nn.functional.kl_div(
+                    attention_probs[i].log(), m, reduction='sum', log_target=False
+                )
+                kl_j = torch.nn.functional.kl_div(
+                    attention_probs[j].log(), m, reduction='sum', log_target=False
+                )
+                score_distances[i,j] = torch.sqrt(0.5 * (kl_i + kl_j))
+        
+        # Normalize distances for comparison
+        query_distances = query_distances / query_distances.max()
+        key_distances = key_distances / key_distances.max()
+        score_distances = score_distances / score_distances.max()
         
         # Compare distance matrices
         query_key_diff = torch.abs(query_distances - key_distances).mean()

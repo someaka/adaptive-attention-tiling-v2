@@ -25,8 +25,16 @@ def tensor_repr(value: Any, max_elements: int = 8) -> str:
     return str(value)
 
 
-def format_validation_result(result: ValidationResult) -> str:
+def format_validation_result(result: Union[ValidationResult, Dict[str, ValidationResult]]) -> str:
     """Format validation result for readable output."""
+    if isinstance(result, dict):
+        # Handle dictionary of validation results
+        formatted = {}
+        for k, v in result.items():
+            formatted[k] = format_validation_result(v)
+        return str(formatted)
+    
+    # Handle single ValidationResult
     data_repr = {}
     for k, v in result.data.items():
         if isinstance(v, dict):
