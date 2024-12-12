@@ -6,61 +6,67 @@ including metric tensors, connections, and curvature computations.
 """
 
 from dataclasses import dataclass
-from typing import Generic, Optional, Protocol, Tuple, TypeVar
-
+from typing import Optional, Protocol, Tuple, Union
 import torch
-from torch import nn
+from torch import Tensor
+import torch.nn as nn
 
-T = TypeVar("T")
-
+T = Union[Tensor]
 
 @dataclass
-class ChristoffelSymbols(Generic[T]):
+class ChristoffelSymbols:
     """Christoffel symbols of the Levi-Civita connection."""
-
-    first_kind: T  # Γijk
-    second_kind: T  # Γij^k
-
+    first_kind: Tensor
+    second_kind: Tensor
 
 @dataclass
 class CurvatureTensor:
     """Riemann curvature tensor components."""
-
-    riemann: T
-    ricci: T
-    scalar: T
+    riemann: Tensor
+    ricci: Tensor
+    scalar: Tensor
     dimension: int
 
-
-class RiemannianFramework(Protocol[T]):
+class RiemannianFramework(Protocol):
     """Protocol for Riemannian geometric structure."""
-
-    def metric_tensor(self, point: T, vectors: Tuple[T, T]) -> T:
+    
+    def metric_tensor(self, point: Tensor, vectors: Optional[Tuple[Tensor, Tensor]] = None) -> Tensor:
         """Computes the metric tensor at a point."""
         ...
 
-    def christoffel_symbols(self, chart: T) -> ChristoffelSymbols[T]:
+    def compute_metric(self, points: Tensor) -> Tensor:
+        """Compute the metric tensor at points."""
+        ...
+
+    def compute_christoffel(self, points: Tensor) -> Tensor:
+        """Compute Christoffel symbols at points."""
+        ...
+
+    def compute_riemann(self, points: Tensor) -> Tensor:
+        """Compute Riemann curvature tensor at points."""
+        ...
+
+    def christoffel_symbols(self, chart: Tensor) -> ChristoffelSymbols:
         """Computes Christoffel symbols in a chart."""
         ...
 
-    def covariant_derivative(self, vector_field: T, direction: T) -> T:
+    def covariant_derivative(self, vector_field: Tensor, direction: Tensor) -> Tensor:
         """Computes covariant derivative of a vector field."""
         ...
 
-    def geodesic_flow(self, initial_point: T, initial_velocity: T) -> T:
+    def geodesic_flow(self, initial_point: Tensor, initial_velocity: Tensor) -> Tensor:
         """Computes geodesic flow from initial conditions."""
         ...
 
-    def curvature_tensor(self, point: T) -> CurvatureTensor:
+    def curvature_tensor(self, point: Tensor) -> CurvatureTensor:
         """Computes various curvature tensors at a point."""
         ...
-
 
 class PatternRiemannianStructure(nn.Module):
     """Concrete implementation of Riemannian structure for pattern spaces."""
 
     def __init__(
-        self, manifold_dim: int, rank: Optional[int] = None, device: torch.device = None
+        self, manifold_dim: int, rank: Optional[int] = None, device: Optional[torch.device] = None
     ):
         super().__init__()
         self.manifold_dim = manifold_dim
@@ -81,9 +87,9 @@ class PatternRiemannianStructure(nn.Module):
 
     def metric_tensor(
         self,
-        point: torch.Tensor,
-        vectors: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> torch.Tensor:
+        point: Tensor,
+        vectors: Optional[Tuple[Tensor, Tensor]] = None,
+    ) -> Tensor:
         """Computes the metric tensor or its action on vectors."""
         # Compute full metric tensor: g = I + V^T V for stability
         metric = torch.eye(self.manifold_dim, device=self.device).unsqueeze(
@@ -99,106 +105,105 @@ class PatternRiemannianStructure(nn.Module):
             torch.matmul(metric, v1.unsqueeze(-1)) * v2.unsqueeze(-1), dim=-1
         )
 
-    def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor at given points.
-        
+    def compute_metric(self, points: Tensor) -> Tensor:
+        """Compute the metric tensor at the given points.
+
         Args:
-            points: Points tensor of shape (batch_size, manifold_dim)
-            
+            points: Points to compute metric at, shape (batch_size, manifold_dim)
+
         Returns:
-            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+            Metric tensor at points, shape (batch_size, manifold_dim, manifold_dim)
         """
         batch_size = points.shape[0]
+        manifold_dim = points.shape[1]
         
-        # Ensure points require gradients
+        # Create identity matrix of correct shape
+        identity = torch.eye(manifold_dim, device=points.device).unsqueeze(0)
+        identity = identity.expand(batch_size, manifold_dim, manifold_dim)
+        
+        # Compute position-dependent factors
+        position_factors = self._compute_position_factors(points)  # (batch, manifold_dim, manifold_dim)
+        
+        # Ensure shapes match for the addition
+        perturbation = position_factors.view(batch_size, manifold_dim, manifold_dim)
+        
+        return identity + perturbation
+
+    def _compute_position_factors(self, points: Tensor) -> Tensor:
+        """Compute position-dependent factors for the metric.
+        
+        Args:
+            points: Points to compute factors at, shape (batch_size, manifold_dim)
+            
+        Returns:
+            Position factors, shape (batch_size, manifold_dim, manifold_dim)
+        """
+        batch_size = points.shape[0]
+        manifold_dim = points.shape[1]
+        
+        # Ensure points requires grad for computing factors
         if not points.requires_grad:
             points = points.detach().requires_grad_(True)
         
         # Compute position-dependent factors
-        position_factors = torch.einsum('bi,rj->brij', points, self.metric_factors)
+        factors = torch.zeros(batch_size, manifold_dim, manifold_dim, device=points.device)
         
-        # Compute metric using factors: g = I + V^T V where V are the metric factors
-        identity = torch.eye(
-            self.manifold_dim, 
-            device=points.device
-        ).expand(batch_size, -1, -1)
+        for i in range(manifold_dim):
+            for j in range(manifold_dim):
+                # Compute coupling between dimensions i and j
+                coupling = torch.sum(points[:, i] * points[:, j])
+                factors[:, i, j] = torch.sigmoid(coupling) * 0.001  # Small perturbation
         
-        perturbation = torch.einsum(
-            'brij,brkj->bik', 
-            position_factors, 
-            position_factors
-        )
-        
-        return identity + perturbation
+        return factors
 
-    def compute_christoffel(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute Christoffel symbols using Levi-Civita connection.
+    def compute_christoffel(self, points: Tensor) -> Tensor:
+        """Compute Christoffel symbols of the second kind.
         
         Args:
-            points: Points tensor (batch_size x manifold_dim)
+            points: Points to compute at, shape (batch_size, manifold_dim)
             
         Returns:
-            Christoffel symbols (batch_size x manifold_dim x manifold_dim x manifold_dim)
+            Christoffel symbols, shape (batch_size, manifold_dim, manifold_dim, manifold_dim)
         """
-        batch_size = points.shape[0]
-        
-        # Resource guard - check input dimensions
-        if points.dim() != 2 or points.shape[1] != self.manifold_dim:
-            raise ValueError(f"Expected points shape (batch_size, {self.manifold_dim}), got {points.shape}")
-            
-        # Memory guard - check if computation is feasible
-        expected_memory = batch_size * (self.manifold_dim ** 3) * 4  # 4 bytes per float
-        if expected_memory > 1e9:  # 1GB limit
-            raise RuntimeError(f"Computation would require {expected_memory/1e9:.2f}GB memory")
-        
-        # Ensure points require gradients
         if not points.requires_grad:
             points = points.detach().requires_grad_(True)
+            
+        batch_size = points.shape[0]
+        manifold_dim = points.shape[1]
         
-        # Get metric and its inverse
-        metric = self.compute_metric(points)
-        metric_inv = torch.linalg.inv(metric)
+        # Compute metric and its inverse
+        metric = self.compute_metric(points)  # (batch, dim, dim)
+        metric_inv = torch.inverse(metric)    # (batch, dim, dim)
         
-        # Compute metric gradients more efficiently
-        metric_flat = metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
+        # Initialize storage for Christoffel symbols
+        christoffel = torch.zeros(batch_size, manifold_dim, manifold_dim, manifold_dim,
+                                device=points.device)
         
-        # Guard against too many gradient computations
-        max_grad_ops = 1000
-        if metric_flat.shape[1] > max_grad_ops:
-            raise RuntimeError(f"Too many gradient operations required: {metric_flat.shape[1]} > {max_grad_ops}")
-        
-        # Compute all gradients at once
-        grads = []
-        with torch.no_grad():
-            for i in range(metric_flat.shape[1]):
-                grad = torch.autograd.grad(
-                    metric_flat[:, i].sum(),
-                    points,
-                    create_graph=True,
-                    retain_graph=True
-                )[0]
-                grads.append(grad)
-        
-        # Stack gradients and reshape
-        metric_grad = torch.stack(grads, dim=1)
-        metric_grad = metric_grad.reshape(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
-        
-        # Compute Christoffel symbols using metric and its derivatives
-        christoffel = torch.einsum(
-            'bim,bjkm->bijk',
-            metric_inv,
-            0.5 * (
-                metric_grad.transpose(-2, -1) +
-                metric_grad.transpose(-2, -1).transpose(-3, -2) -
-                metric_grad
-            )
-        )
+        # Compute derivatives of metric components
+        for k in range(manifold_dim):
+            # Compute derivative of metric with respect to coordinate k
+            metric_k = metric[:, :, k]  # (batch, dim)
+            metric_deriv = torch.autograd.grad(
+                metric_k.sum(), points,
+                create_graph=True, retain_graph=True
+            )[0]  # (batch, dim)
+            
+            # Reshape for proper broadcasting
+            metric_deriv = metric_deriv.view(batch_size, manifold_dim, 1)
+            
+            # Contract with inverse metric to get Christoffel symbols
+            for i in range(manifold_dim):
+                for j in range(manifold_dim):
+                    christoffel[:, i, j, k] = 0.5 * torch.sum(
+                        metric_inv[:, i, :] * metric_deriv[:, j, :],
+                        dim=1
+                    )
         
         return christoffel
 
     def christoffel_symbols(
-        self, chart: torch.Tensor
-    ) -> ChristoffelSymbols[torch.Tensor]:
+        self, chart: Tensor
+    ) -> ChristoffelSymbols:
         """Computes Christoffel symbols in a chart."""
         # Get metric and its derivatives
         metric = self.metric_tensor(chart)
@@ -231,8 +236,8 @@ class PatternRiemannianStructure(nn.Module):
         )
 
     def covariant_derivative(
-        self, vector_field: torch.Tensor, direction: torch.Tensor
-    ) -> torch.Tensor:
+        self, vector_field: Tensor, direction: Tensor
+    ) -> Tensor:
         """Computes covariant derivative of a vector field."""
         # Get Christoffel symbols
         christoffel = self.christoffel_symbols(direction)
@@ -254,11 +259,11 @@ class PatternRiemannianStructure(nn.Module):
 
     def geodesic_flow(
         self,
-        initial_point: torch.Tensor,
-        initial_velocity: torch.Tensor,
+        initial_point: Tensor,
+        initial_velocity: Tensor,
         num_steps: int = 100,
         step_size: float = 0.01,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Computes geodesic flow using numerical integration."""
         # Initialize trajectory
         trajectory = [initial_point]
@@ -286,68 +291,57 @@ class PatternRiemannianStructure(nn.Module):
         return torch.stack(trajectory, dim=0)
 
     def compute_riemann(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute Riemann curvature tensor.
+        """Compute the Riemann curvature tensor.
         
         Args:
-            points: Points tensor (batch_size x manifold_dim)
+            points: Input points tensor of shape (batch_size, dim)
             
         Returns:
-            Riemann curvature tensor (batch_size x manifold_dim x manifold_dim x manifold_dim x manifold_dim)
+            Riemann curvature tensor of shape (batch_size, dim, dim, dim, dim)
         """
         batch_size = points.shape[0]
+        dim = points.shape[1]
+        device = points.device
         
-        # Get Christoffel symbols and their derivatives
-        christoffel = self.compute_christoffel(points)
+        # Initialize tensors
+        christoffel = self.compute_christoffel(points)  # Shape: (batch_size, dim, dim, dim)
+        christoffel_grad = torch.zeros((batch_size, dim, dim, dim, dim), device=device)
         
-        # Enable gradients for computing Christoffel derivatives
-        points.requires_grad_(True)
-        christoffel_with_grad = self.compute_christoffel(points)
-        
-        # Initialize storage for Christoffel derivatives
-        christoffel_grad = torch.zeros(
-            batch_size,
-            self.manifold_dim,
-            self.manifold_dim,
-            self.manifold_dim,
-            self.manifold_dim,
-            device=points.device
-        )
-        
-        # Compute partial derivatives of Christoffel symbols
-        for l in range(self.manifold_dim):
+        # Compute gradients for each component
+        for l in range(dim):
             grad_l = torch.autograd.grad(
-                christoffel_with_grad[..., l].sum(),
+                christoffel[..., l].sum(),
                 points,
                 create_graph=True,
-                allow_unused=True,
                 retain_graph=True
-            )[0]
-            if grad_l is not None:
-                christoffel_grad[..., l] = grad_l
-        
-        points.requires_grad_(False)
-        
-        # Compute Riemann tensor
-        # R^i_jkl = ∂_k Γ^i_jl - ∂_l Γ^i_jk + Γ^i_mk Γ^m_jl - Γ^i_ml Γ^m_jk
+            )[0]  # Shape: (batch_size, dim)
+            
+            # Expand grad_l to match the desired shape
+            grad_l = grad_l.unsqueeze(1).unsqueeze(2).expand(-1, dim, dim, -1)
+            christoffel_grad[..., l, :] = grad_l
+            
+        # Compute Riemann tensor components
         riemann = (
-            christoffel_grad[..., :, None, :] 
-            - christoffel_grad[..., None, :, :]
+            christoffel_grad.transpose(-2, -1) - 
+            christoffel_grad.transpose(-3, -1).transpose(-2, -1)
         )
         
-        # Add contraction terms
-        riemann = riemann + torch.einsum(
-            'bimk,bmjl->bijkl',
-            christoffel,
-            christoffel
-        ) - torch.einsum(
-            'biml,bmjk->bijkl',
-            christoffel,
-            christoffel
-        )
-        
+        # Add Christoffel terms
+        for m in range(dim):
+            for n in range(dim):
+                riemann[..., m, n] += torch.einsum(
+                    'bijk,bikl->bijl',
+                    christoffel[..., m].unsqueeze(1),
+                    christoffel[..., n].unsqueeze(1)
+                ) - torch.einsum(
+                    'bijk,bikl->bijl',
+                    christoffel[..., n].unsqueeze(1),
+                    christoffel[..., m].unsqueeze(1)
+                )
+                
         return riemann
 
-    def curvature_tensor(self, point: torch.Tensor) -> CurvatureTensor:
+    def curvature_tensor(self, point: Tensor) -> CurvatureTensor:
         """Computes curvature tensors at a point."""
         # Get Christoffel symbols and their derivatives
         christoffel = self.christoffel_symbols(point)
@@ -386,8 +380,8 @@ class PatternRiemannianStructure(nn.Module):
         )
 
     def sectional_curvature(
-        self, point: torch.Tensor, plane: Tuple[torch.Tensor, torch.Tensor]
-    ) -> torch.Tensor:
+        self, point: Tensor, plane: Tuple[Tensor, Tensor]
+    ) -> Tensor:
         """Computes sectional curvature for a 2-plane at a point."""
         v1, v2 = plane
 
