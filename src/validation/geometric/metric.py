@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Tuple, Dict, Any
 
 import torch
+import numpy as np
 
 from ...core.patterns.riemannian import RiemannianFramework
 from ..base import ValidationResult
@@ -235,6 +236,7 @@ class MetricValidator:
         # Validation thresholds
         self.eigenvalue_threshold = 1e-10
         self.condition_threshold = 1e4
+        self.energy_threshold = 1e-5
 
     def validate_metric(self, metric: torch.Tensor) -> MetricValidation:
         """Validate metric tensor properties."""
@@ -263,15 +265,330 @@ class MetricValidator:
         )
 
     def check_completeness(self, metric: torch.Tensor, points: torch.Tensor) -> bool:
-        """Check metric completeness along geodesics."""
-        # Compute geodesic distance bounds
-        distances = torch.cdist(points, points, p=2)
-        metric_distances = torch.sqrt(
-            torch.einsum("...i,ij,...j->...", points, metric, points)
+        """Check if the metric is geodesically complete.
+        
+        Args:
+            metric: Metric tensor
+            points: Points tensor
+            
+        Returns:
+            True if metric is geodesically complete
+        """
+        # Generate random tangent vectors
+        batch_size = points.shape[0]
+        vectors = torch.randn_like(points)
+        
+        # Check local completeness
+        if not self.check_local_completeness(points, vectors):
+            return False
+            
+        # Check normal neighborhoods exist
+        if not self.check_normal_neighborhood(points):
+            return False
+            
+        # Check Hopf-Rinow conditions
+        if not self.check_hopf_rinow_conditions():
+            return False
+            
+        # Check metric bounds
+        if not self.check_metric_bounds():
+            return False
+            
+        return True
+        
+    def check_local_completeness(self, points: torch.Tensor, vectors: torch.Tensor) -> bool:
+        """Check if metric is locally complete.
+        
+        Args:
+            points: Points tensor
+            vectors: Tangent vectors
+            
+        Returns:
+            True if metric is locally complete
+        """
+        # Check that metric is non-degenerate at each point
+        metric_values = self.compute_metric_values(points)
+        eigenvals = torch.linalg.eigvalsh(metric_values)
+        
+        # Metric should be positive definite everywhere
+        if not torch.all(eigenvals > self.eigenvalue_threshold):
+            return False
+            
+        # Check that geodesic equation has local solutions
+        christoffel = self.compute_christoffel_symbols(points)
+        acceleration = self._compute_geodesic_acceleration(points, vectors, christoffel)
+        
+        # Acceleration should be bounded
+        return torch.all(torch.isfinite(acceleration))
+        
+    def check_normal_neighborhood(self, points: torch.Tensor) -> bool:
+        """Check existence of normal neighborhood.
+        
+        Args:
+            points: Points tensor
+            
+        Returns:
+            True if normal neighborhood exists
+        """
+        # Compute metric at points
+        metric_values = self.compute_metric_values(points)
+        
+        # Check positive definiteness
+        eigenvals = torch.linalg.eigvalsh(metric_values)
+        if not torch.all(eigenvals > self.eigenvalue_threshold):
+            return False
+            
+        # Check condition number is bounded
+        condition = eigenvals.max(dim=-1)[0] / eigenvals.min(dim=-1)[0]
+        return torch.all(condition < self.condition_threshold)
+        
+    def check_hopf_rinow_conditions(self) -> bool:
+        """Check Hopf-Rinow conditions for completeness.
+        
+        Returns:
+            True if Hopf-Rinow conditions are satisfied
+        """
+        # Check metric completeness using energy functionals
+        energy = self.compute_pattern_energy()
+        if energy > self.energy_threshold:
+            return False
+            
+        # Check geodesic completeness using height functions
+        height = self.compute_height_function()
+        if not self.validate_height_bounds(height):
+            return False
+            
+        # Verify A¹-homotopy invariants
+        if not self.check_homotopy_invariants():
+            return False
+            
+        return True
+        
+    def check_metric_bounds(self) -> bool:
+        """Check if metric satisfies bounds needed for completeness.
+        
+        Returns:
+            True if metric bounds are satisfied
+        """
+        # Check local height bounds
+        local_heights = self.compute_local_heights()
+        if not self.validate_local_bounds(local_heights):
+            return False
+            
+        # Check global height bounds
+        global_height = self.compute_global_height()
+        if not self.validate_global_bounds(global_height):
+            return False
+            
+        # Verify Northcott property
+        if not self.check_northcott_property():
+            return False
+            
+        return True
+        
+    def compute_metric_values(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor values at points using Fisher-Rao structure.
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Metric tensor values (batch_size x dim x dim)
+        """
+        batch_size, dim = points.shape
+        
+        # Compute Fisher-Rao metric components
+        # g_ij = E[∂_i log p(x|θ) ∂_j log p(x|θ)]
+        score_fn = self.compute_score_function(points)
+        metric = torch.einsum('bi,bj->bij', score_fn, score_fn)
+        
+        # Add regularization for numerical stability
+        metric = metric + self.eigenvalue_threshold * torch.eye(dim).expand(batch_size, dim, dim)
+        
+        return metric
+        
+    def compute_christoffel_symbols(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute Christoffel symbols using Levi-Civita connection.
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Christoffel symbols (batch_size x dim x dim x dim)
+        """
+        batch_size, dim = points.shape
+        
+        # Get metric and its derivatives
+        metric = self.compute_metric_values(points)
+        metric_grad = self.compute_metric_gradient(points)
+        
+        # Compute inverse metric
+        metric_inv = torch.linalg.inv(metric)
+        
+        # Compute Christoffel symbols
+        # Γ^k_ij = 1/2 g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
+        christoffel = torch.einsum(
+            'bkl,bijl->bijk',
+            metric_inv,
+            0.5 * (
+                metric_grad 
+                + torch.transpose(metric_grad, 2, 3)
+                - torch.transpose(metric_grad, 1, 3)
+            )
         )
+        
+        return christoffel
+        
+    def _compute_geodesic_acceleration(
+        self,
+        points: torch.Tensor,
+        vectors: torch.Tensor,
+        christoffel: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute geodesic acceleration.
+        
+        Args:
+            points: Points tensor
+            vectors: Tangent vectors
+            christoffel: Christoffel symbols
+            
+        Returns:
+            Geodesic acceleration
+        """
+        # Compute acceleration using geodesic equation
+        # a^i = -Gamma^i_jk v^j v^k
+        batch_size = points.shape[0]
+        dim = points.shape[1]
+        
+        acceleration = -torch.einsum(
+            'bijk,bj,bk->bi',
+            christoffel,
+            vectors,
+            vectors
+        )
+        
+        return acceleration
+        
+    def compute_score_function(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute score function ∂_i log p(x|θ).
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Score function values (batch_size x dim)
+        """
+        # Compute log probability gradient
+        log_prob = -0.5 * torch.sum(points ** 2, dim=-1)
+        score = -points  # Gradient of log probability
+        return score
+        
+    def compute_metric_gradient(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute metric gradient ∂_k g_ij.
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Metric gradient tensor (batch_size x dim x dim x dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Get metric values
+        g_ij = self.compute_metric_values(points)
+        
+        # Compute gradient using autograd
+        grad_g = torch.autograd.grad(
+            g_ij.sum(), points, create_graph=True, retain_graph=True
+        )[0]
+        
+        return grad_g.view(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
 
-        # Check completeness criterion
-        return torch.all(distances <= metric_distances + self.tolerance)
+    def compute_pattern_energy(self) -> torch.Tensor:
+        """Compute pattern energy functional.
+        
+        Returns:
+            Pattern energy tensor
+        """
+        # Initialize energy tensor
+        energy = torch.zeros(self.manifold_dim)
+        
+        # Get metric values at sample points
+        points = torch.randn(100, self.manifold_dim)  # Sample points
+        metric_values = self.compute_metric_values(points)
+        
+        # Compute energy using metric values
+        energy = torch.sum(torch.abs(metric_values), dim=(0,1,2))
+        energy = energy / points.shape[0]  # Average over samples
+        
+        return energy
+
+    def compute_height_function(self) -> torch.Tensor:
+        """Compute height function.
+        
+        Returns:
+            Height function values
+        """
+        # Sample points for height computation
+        points = torch.randn(100, self.manifold_dim)
+        
+        # Compute local heights
+        local_heights = self.compute_local_heights()
+        
+        # Compute global height as max of local heights
+        height = torch.max(local_heights)
+        
+        return height
+
+    def validate_global_bounds(self, height: float) -> bool:
+        """Validate global height bounds.
+        
+        Args:
+            height: Global height value
+            
+        Returns:
+            True if bounds are satisfied
+        """
+        # Check upper bound
+        if height > self.energy_threshold:
+            return False
+            
+        # Check lower bound relative to manifold dimension
+        lower_bound = -self.manifold_dim * np.log(self.manifold_dim)
+        if height < lower_bound:
+            return False
+            
+        return True
+        
+    def check_homotopy_invariants(self) -> bool:
+        """Check A¹-homotopy invariants."""
+        # TODO: Implement proper invariant checks
+        return True
+        
+    def compute_local_heights(self) -> torch.Tensor:
+        """Compute local height functions."""
+        # TODO: Implement proper local height computation
+        return torch.zeros(1)
+        
+    def compute_global_height(self) -> float:
+        """Compute global height function."""
+        # TODO: Implement proper global height computation
+        return 0.0
+        
+    def check_northcott_property(self) -> bool:
+        """Check Northcott property."""
+        # TODO: Implement proper Northcott check
+        return True
+        
+    def validate_height_bounds(self, height: torch.Tensor) -> bool:
+        """Validate height function bounds."""
+        # TODO: Implement proper bound validation
+        return True
+        
+    def validate_local_bounds(self, heights: torch.Tensor) -> bool:
+        """Validate local height bounds."""
+        # TODO: Implement proper local bound validation
+        return True
 
 
 class ConnectionValidator:

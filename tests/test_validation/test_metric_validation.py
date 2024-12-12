@@ -418,3 +418,96 @@ class TestMetricValidation:
             return chern, pont
 
         chern, pont = test_characteristic_classes()
+
+    def test_geodesic_completeness(self, validator: MetricValidator, batch_size: int, dim: int):
+        """Test geodesic completeness of the metric."""
+        
+        # Test local completeness
+        def test_local_completeness():
+            """Test local geodesic completeness."""
+            # Get random point and direction
+            p = torch.randn(batch_size, dim)
+            v = torch.randn(batch_size, dim)
+            
+            # Verify that geodesics can be extended locally
+            assert validator.check_local_completeness(p, v), "Metric should be locally complete"
+            
+            # Check existence of normal neighborhood
+            assert validator.check_normal_neighborhood(p), "Should have normal neighborhood"
+            
+            return p, v
+            
+        p, v = test_local_completeness()
+        
+        # Test global completeness
+        def test_global_completeness():
+            """Test global geodesic completeness."""
+            # Verify Hopf-Rinow conditions
+            assert validator.check_hopf_rinow_conditions(), "Should satisfy Hopf-Rinow conditions"
+            
+            # Check metric bounds
+            assert validator.check_metric_bounds(), "Metric should be bounded"
+            
+            # Verify completeness of geodesic flow
+            assert validator.check_geodesic_completeness(), "Metric should be geodesically complete"
+            
+        test_global_completeness()
+
+    def test_score_function(self, validator: MetricValidator, batch_size: int, dim: int):
+        """Test score function computation."""
+        points = torch.randn(batch_size, dim)
+        score = validator.compute_score_function(points)
+        
+        # Check shape
+        assert score.shape == (batch_size, dim)
+        
+        # Check gradient relationship
+        expected_score = -points  # For Gaussian distribution
+        assert torch.allclose(score, expected_score, atol=1e-5)
+
+    def test_metric_gradient(self, validator: MetricValidator, batch_size: int, dim: int):
+        """Test metric gradient computation."""
+        points = torch.randn(batch_size, dim, requires_grad=True)
+        grad = validator.compute_metric_gradient(points)
+        
+        # Check shape
+        assert grad.shape == (batch_size, dim, dim, dim)
+        
+        # Check symmetry in i,j indices
+        assert torch.allclose(
+            grad.transpose(1, 2), grad, atol=1e-5
+        )
+
+    def test_pattern_energy(self, validator: MetricValidator, dim: int):
+        """Test pattern energy computation."""
+        energy = validator.compute_pattern_energy()
+        
+        # Check shape
+        assert energy.shape == (dim,)
+        
+        # Check non-negativity
+        assert torch.all(energy >= 0)
+
+    def test_height_function(self, validator: MetricValidator):
+        """Test height function computation."""
+        height = validator.compute_height_function()
+        
+        # Check shape
+        assert height.shape == torch.Size([])
+        
+        # Validate bounds
+        assert validator.validate_global_bounds(height.item())
+
+    def test_global_bounds(self, validator: MetricValidator):
+        """Test global bound validation."""
+        # Test valid height
+        valid_height = 0.5 * validator.energy_threshold
+        assert validator.validate_global_bounds(valid_height)
+        
+        # Test invalid upper bound
+        invalid_upper = 2.0 * validator.energy_threshold
+        assert not validator.validate_global_bounds(invalid_upper)
+        
+        # Test invalid lower bound
+        invalid_lower = -100.0 * validator.manifold_dim
+        assert not validator.validate_global_bounds(invalid_lower)

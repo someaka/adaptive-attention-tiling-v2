@@ -99,6 +99,94 @@ class PatternRiemannianStructure(nn.Module):
             torch.matmul(metric, v1.unsqueeze(-1)) * v2.unsqueeze(-1), dim=-1
         )
 
+    def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor at given points.
+        
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Compute metric using factors: g = I + V^T V where V are the metric factors
+        identity = torch.eye(
+            self.manifold_dim, 
+            device=points.device,
+            requires_grad=True
+        ).expand(batch_size, -1, -1)
+        
+        # Ensure metric factors require grad
+        if not self.metric_factors.requires_grad:
+            self.metric_factors.requires_grad_(True)
+            
+        perturbation = torch.einsum(
+            'ri,rj->ij', 
+            self.metric_factors, 
+            self.metric_factors
+        ).expand(batch_size, -1, -1)
+        
+        metric = identity + perturbation
+        metric.requires_grad_(True)
+        return metric
+
+    def compute_christoffel(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute Christoffel symbols using Levi-Civita connection.
+        
+        Args:
+            points: Points tensor (batch_size x manifold_dim)
+            
+        Returns:
+            Christoffel symbols (batch_size x manifold_dim x manifold_dim x manifold_dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Get metric and its inverse
+        metric = self.compute_metric(points)
+        metric_inv = torch.linalg.inv(metric)
+        
+        # Compute metric gradient using autograd
+        points.requires_grad_(True)
+        metric_with_grad = self.compute_metric(points)
+        
+        # Initialize storage for metric derivatives
+        metric_grad = torch.zeros(
+            batch_size, 
+            self.manifold_dim, 
+            self.manifold_dim,
+            self.manifold_dim,
+            device=points.device
+        )
+        
+        # Compute partial derivatives
+        for k in range(self.manifold_dim):
+            grad_k = torch.autograd.grad(
+                metric_with_grad[..., k].sum(),
+                points,
+                create_graph=True,
+                allow_unused=True,
+                retain_graph=True
+            )[0]
+            if grad_k is not None:
+                metric_grad[..., k] = grad_k
+        
+        points.requires_grad_(False)
+        
+        # Compute Christoffel symbols
+        # Γ^k_ij = 1/2 g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
+        christoffel = torch.einsum(
+            'bkl,bijl->bijk',
+            metric_inv,
+            0.5 * (
+                metric_grad 
+                + torch.transpose(metric_grad, 2, 3)
+                - torch.transpose(metric_grad, 1, 3)
+            )
+        )
+        
+        return christoffel
+
     def christoffel_symbols(
         self, chart: torch.Tensor
     ) -> ChristoffelSymbols[torch.Tensor]:
@@ -187,6 +275,68 @@ class PatternRiemannianStructure(nn.Module):
             trajectory.append(new_point)
 
         return torch.stack(trajectory, dim=0)
+
+    def compute_riemann(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute Riemann curvature tensor.
+        
+        Args:
+            points: Points tensor (batch_size x manifold_dim)
+            
+        Returns:
+            Riemann curvature tensor (batch_size x manifold_dim x manifold_dim x manifold_dim x manifold_dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Get Christoffel symbols and their derivatives
+        christoffel = self.compute_christoffel(points)
+        
+        # Enable gradients for computing Christoffel derivatives
+        points.requires_grad_(True)
+        christoffel_with_grad = self.compute_christoffel(points)
+        
+        # Initialize storage for Christoffel derivatives
+        christoffel_grad = torch.zeros(
+            batch_size,
+            self.manifold_dim,
+            self.manifold_dim,
+            self.manifold_dim,
+            self.manifold_dim,
+            device=points.device
+        )
+        
+        # Compute partial derivatives of Christoffel symbols
+        for l in range(self.manifold_dim):
+            grad_l = torch.autograd.grad(
+                christoffel_with_grad[..., l].sum(),
+                points,
+                create_graph=True,
+                allow_unused=True,
+                retain_graph=True
+            )[0]
+            if grad_l is not None:
+                christoffel_grad[..., l] = grad_l
+        
+        points.requires_grad_(False)
+        
+        # Compute Riemann tensor
+        # R^i_jkl = ∂_k Γ^i_jl - ∂_l Γ^i_jk + Γ^i_mk Γ^m_jl - Γ^i_ml Γ^m_jk
+        riemann = (
+            christoffel_grad[..., :, None, :] 
+            - christoffel_grad[..., None, :, :]
+        )
+        
+        # Add contraction terms
+        riemann = riemann + torch.einsum(
+            'bimk,bmjl->bijkl',
+            christoffel,
+            christoffel
+        ) - torch.einsum(
+            'biml,bmjk->bijkl',
+            christoffel,
+            christoffel
+        )
+        
+        return riemann
 
     def curvature_tensor(self, point: torch.Tensor) -> CurvatureTensor:
         """Computes curvature tensors at a point."""
