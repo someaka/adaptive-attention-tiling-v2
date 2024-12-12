@@ -218,9 +218,12 @@ class TestModelGeometricValidator:
         assert result.is_valid
         
         # Check results structure
-        assert 'query_validation' in result.data
-        assert 'key_validation' in result.data
-        assert 'compatibility' in result.data
+        assert isinstance(result.data, dict)
+        assert 'query_metric' in result.data
+        assert 'key_metric' in result.data
+        assert 'attention_scores' in result.data
+        assert 'preserves_geometry' in result.data
+        assert 'compatible' in result.data
 
     def test_validate_cross_layer_geometry(
         self, validator: ModelGeometricValidator, batch_size: int
@@ -246,14 +249,22 @@ class TestModelGeometricValidator:
         """Test complete model geometry validation."""
         result = validator.validate_model_geometry(batch_size=batch_size)
         
+        # Check result type
+        assert isinstance(result, ValidationResult)
+        assert result.is_valid
+        assert isinstance(result.data, dict)
+        
         # Check layer validations
-        assert isinstance(result, dict)
-        assert 'input' in result
-        assert 'hidden' in result
-        assert 'output' in result
+        assert 'layers' in result.data
+        layer_results = result.data.get('layers', {})
+        assert isinstance(layer_results, dict)
+        
+        # Check required layers exist
+        required_layers = {'input', 'hidden', 'output'}
+        assert all(layer in layer_results for layer in required_layers)
         
         # Check validation results
-        for layer_name, validation in result.items():
+        for layer_name, validation in layer_results.items():
             assert isinstance(validation, ValidationResult)
             assert validation.is_valid
             assert isinstance(validation.data, dict)

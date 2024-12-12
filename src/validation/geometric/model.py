@@ -97,49 +97,40 @@ class ModelGeometricValidator:
         Raises:
             ValueError: If layer_name does not exist in the model
         """
-        # Check if layer exists
-        if layer_name not in self.model_geometry.layers:
-            raise ValueError(f"Layer '{layer_name}' not found in model")
-
-        # Get geometric tensors from model geometry
-        metric_tensor = getattr(self.model_geometry, 'metric')(points)
+        if layer_name not in self.layer_validators:
+            raise ValueError(f"Layer {layer_name} not found in model")
+            
+        validator = self.layer_validators[layer_name]
+        layer = self.model_geometry.get_layer(layer_name)
+        
+        # Get metric tensor and validate it
+        metric = layer.metric(points)
+        metric_valid = validator.metric_validator.validate_metric(metric)
+        
+        # Get sectional curvature 
         sectional_curvature = getattr(self.model_geometry, 'sectional_curvature')(points)
         
-        # Check metric properties
-        is_valid = True
-        message = []
-        
-        # Check positive definiteness
-        eigenvals = torch.linalg.eigvalsh(metric_tensor)
-        if not (eigenvals > 0).all():
-            is_valid = False
-            message.append(f"Metric tensor is not positive definite")
-            
-        # Check symmetry
-        if not torch.allclose(metric_tensor, metric_tensor.transpose(-2, -1), atol=self.tolerance):
-            is_valid = False
-            message.append(f"Metric tensor is not symmetric")
-            
         # Check curvature bounds
-        lower_bound, upper_bound = self.curvature_bounds
-        if not ((sectional_curvature >= lower_bound - self.tolerance) & 
-                (sectional_curvature <= upper_bound + self.tolerance)).all():
-            is_valid = False
-            message.append(
-                f"Sectional curvature exceeds bounds [{lower_bound}, {upper_bound}]"
-            )
+        curvature_valid = self._check_layer_curvature(layer_name, points)
         
-        # Prepare validation data
-        data = {
-            "metric_tensor": metric_tensor,
-            "sectional_curvature": sectional_curvature,
-            "eigenvalues": eigenvals
-        }
+        # Check energy bounds
+        energy_valid = self._check_global_energy(points)
         
+        # Get eigenvalues using torch.linalg
+        eigenvalues = torch.linalg.eigvalsh(metric)  # Using eigvalsh for symmetric matrices
+        
+        # Prepare validation result
         return ValidationResult(
-            is_valid=is_valid,
-            data=data,
-            message="; ".join(message) if message else "Layer geometry is valid"
+            is_valid=metric_valid and curvature_valid and energy_valid,
+            data={
+                'metric_tensor': metric,
+                'sectional_curvature': sectional_curvature,
+                'eigenvalues': eigenvalues,
+                'complete': metric_valid,
+                'curvature_valid': curvature_valid,
+                'energy_valid': energy_valid
+            },
+            message='Layer geometry is valid'
         )
 
     def validate_attention_geometry(
@@ -414,28 +405,31 @@ class ModelGeometricValidator:
         """
         batch_size = query_metric.shape[0]
         
-        # Compute distances in query space
+        # Generate random points for distance computation
+        query_points = torch.randn(batch_size, query_metric.shape[1], device=query_metric.device)
+        key_points = torch.randn(batch_size, key_metric.shape[1], device=key_metric.device)
+        
+        # Compute distances in query space using metric
         query_distances = torch.zeros(batch_size, batch_size, device=query_metric.device)
         for i in range(batch_size):
             for j in range(batch_size):
-                # For identity metrics, this reduces to Euclidean distance
-                diff = query_metric[i] - query_metric[j]
-                query_distances[i,j] = torch.sqrt((diff * query_metric[i]).sum())
+                diff = query_points[i] - query_points[j]
+                query_distances[i,j] = torch.sqrt((diff @ query_metric[i] @ diff).sum())
         
-        # Compute distances in key space
+        # Compute distances in key space using metric
         key_distances = torch.zeros(batch_size, batch_size, device=key_metric.device)
         for i in range(batch_size):
             for j in range(batch_size):
-                diff = key_metric[i] - key_metric[j]
-                key_distances[i,j] = torch.sqrt((diff * key_metric[i]).sum())
+                # Handle key_metric shape - if it has extra dimension, use the first slice
+                key_m = key_metric[i] if key_metric.dim() == 3 else key_metric[i,0]
+                diff = key_points[i] - key_points[j]
+                key_distances[i,j] = torch.sqrt((diff @ key_m @ diff).sum())
         
-        # Compute distances in attention score space
-        # First normalize scores to probabilities
+        # Compute distances in attention score space using Jensen-Shannon divergence
         attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
         score_distances = torch.zeros(batch_size, batch_size, device=attention_scores.device)
         for i in range(batch_size):
             for j in range(batch_size):
-                # Use Jensen-Shannon divergence for symmetric distance
                 m = 0.5 * (attention_probs[i] + attention_probs[j])
                 kl_i = torch.nn.functional.kl_div(
                     attention_probs[i].log(), m, reduction='sum', log_target=False
