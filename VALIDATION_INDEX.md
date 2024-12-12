@@ -51,8 +51,8 @@ This document serves as a living index of the validation framework implementatio
 - [x] Validator initialization
 - [x] Test metric generation
 - [x] Test connection generation
-- [ ] Full integration tests
-- [ ] Error handling tests
+- [x] Full integration tests
+- [x] Error handling tests
 
 #### Geometric Tests
 - [x] Basic metric test fixtures

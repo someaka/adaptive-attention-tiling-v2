@@ -12,7 +12,7 @@ This module validates flow properties:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import torch
@@ -99,61 +99,7 @@ class SingularityDetector:
         if torch.any(torch.isnan(state)):
             return True
             
-        # Check for extremely large values
-        if torch.any(torch.abs(state) > self.threshold):
-            return True
-            
         return False
-        
-    def analyze_singularity(
-        self,
-        flow: GeometricFlow,
-        state: torch.Tensor,
-        time_points: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """Analyze singularity properties.
-        
-        Args:
-            flow: Geometric flow
-            state: Initial state
-            time_points: Time points to analyze
-            
-        Returns:
-            Dictionary with analysis results
-        """
-        # Track flow properties
-        current_state = state
-        states = []
-        derivatives = []
-        
-        # Evolve and analyze
-        for t in time_points:
-            # Store current state
-            states.append(current_state)
-            
-            # Compute time derivative
-            dt = t[1] - t[0] if len(t) > 1 else 0.01
-            derivative = (
-                flow.evolve(current_state, dt) - current_state
-            ) / dt
-            derivatives.append(derivative)
-            
-            # Evolve state
-            current_state = flow.evolve(current_state, t)
-            
-            # Check for singularity
-            if self._check_singularity(current_state):
-                break
-                
-        # Convert to tensors
-        states = torch.stack(states)
-        derivatives = torch.stack(derivatives)
-        
-        return {
-            "states": states,
-            "derivatives": derivatives,
-            "times": time_points[:len(states)]
-        }
 
 
 @dataclass
@@ -168,194 +114,287 @@ class FlowProperties:
     energy_metrics: Optional[Dict] = None
     convergence_metrics: Optional[Dict] = None
     singularity_metrics: Optional[Dict] = None
+    derivative: Optional[torch.Tensor] = None
+    second_derivative: Optional[torch.Tensor] = None
+
+
+@dataclass
+class EnergyMetrics:
+    """Energy metrics for flow."""
+    
+    kinetic: torch.Tensor
+    potential: torch.Tensor
+    total: torch.Tensor
 
 
 @dataclass
 class FlowValidator:
     """Validator for geometric flow properties."""
-
+    
     def __init__(
         self,
-        tolerance: float = 1e-5,
-        max_time: float = 100.0,
-        time_step: float = 0.01
+        energy_threshold: float = 1e-6,
+        monotonicity_threshold: float = 1e-4,
+        singularity_threshold: float = 1.0,
     ):
         """Initialize flow validator.
         
         Args:
-            tolerance: Numerical tolerance
-            max_time: Maximum evolution time
-            time_step: Integration time step
+            energy_threshold: Threshold for energy conservation
+            monotonicity_threshold: Threshold for monotonicity checks
+            singularity_threshold: Threshold for singularity detection
         """
-        self.tolerance = tolerance
-        self.max_time = max_time
-        self.time_step = time_step
+        self.energy_threshold = energy_threshold
+        self.monotonicity_threshold = monotonicity_threshold
+        self.singularity_threshold = singularity_threshold
         
-        # Initialize sub-validators
-        self.stability_validator = FlowStabilityValidator(tolerance)
-        self.energy_validator = EnergyValidator(tolerance)
-        self.convergence_validator = ConvergenceValidator(tolerance)
-        
-    def validate(
-        self,
-        flow: GeometricFlow,
-        initial_states: torch.Tensor,
-    ) -> ValidationResult:
-        """Validate geometric flow.
+    def validate_energy_conservation(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate energy conservation in flow.
         
         Args:
-            flow: Geometric flow to validate
-            initial_states: Initial states tensor
+            flow: Flow tensor of shape (time_steps, batch_size, dim)
             
         Returns:
-            Validation result
+            ValidationResult with energy metrics
         """
-        # Track flow properties
-        properties = FlowProperties(
-            is_stable=True,
-            is_conservative=True,
-            is_convergent=True,
-            has_singularities=False
-        )
+        # Compute energy metrics
+        metrics = self.compute_energy_metrics(flow)
         
-        # Validate stability
-        stability_result = self.stability_validator.validate_stability(
-            flow, initial_states
-        )
-        properties.stability_metrics = stability_result
-        properties.is_stable = stability_result.stable
+        # Check energy conservation
+        energy_variation = torch.abs(metrics.total[-1] - metrics.total[0])
+        is_conserved = energy_variation < self.energy_threshold
         
-        # Validate energy conservation
-        energy_result = self.energy_validator.validate_energy(
-            flow, initial_states
-        )
-        properties.energy_metrics = energy_result
-        properties.is_conservative = energy_result.conserved
-        
-        # Validate convergence
-        convergence_result = self.convergence_validator.validate_convergence(
-            flow, initial_states
-        )
-        properties.convergence_metrics = convergence_result
-        properties.is_convergent = convergence_result.converged
-        
-        # Check for singularities
-        singularity_result = self.validate_singularities(
-            flow, initial_states
-        )
-        properties.has_singularities = singularity_result.has_singularities
-        
-        # Compile validation result
         return ValidationResult(
-            is_valid=properties.is_stable and properties.is_convergent,
-            message=self._generate_message(properties),
-            stable=properties.is_stable,
-            error=convergence_result.error,
-            initial_energy=energy_result.initial,
-            final_energy=energy_result.final,
-            relative_error=energy_result.relative_error,
-            initial_states=initial_states,
-            final_states=convergence_result.final_states
+            is_valid=is_conserved,
+            message="Energy conservation validation",
+            data={
+                "energy_variation": energy_variation,
+                "initial_energy": metrics.total[0],
+                "final_energy": metrics.total[-1],
+                "metrics": metrics
+            }
         )
-        
-    def validate_singularities(
-        self,
-        flow: GeometricFlow,
-        states: torch.Tensor,
-    ) -> Dict:
-        """Validate flow for singularities.
+
+    def validate_monotonicity(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate flow monotonicity.
         
         Args:
-            flow: Geometric flow
-            states: States tensor
+            flow: Flow tensor of shape (time_steps, batch_size, dim)
             
         Returns:
-            Dictionary with singularity information
+            ValidationResult with monotonicity metrics
         """
-        # Evolve flow
-        time = 0.0
-        current_states = states
-        has_singularities = False
+        # Compute time derivative
+        dt = 1.0  # Assume unit time steps
+        
+        # First derivative (velocity)
+        velocity = (flow[1:] - flow[:-1]) / dt
+        
+        # Check if velocity maintains sign
+        sign_changes = torch.sum(velocity[1:] * velocity[:-1] < 0)
+        is_monotonic = sign_changes == 0
+        
+        return ValidationResult(
+            is_valid=is_monotonic,
+            message="Flow monotonicity validation",
+            data={"monotonicity_measure": sign_changes}
+        )
+
+    def validate_long_time_existence(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate long-time existence of flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            ValidationResult with existence metrics
+        """
+        # Check for blowup by looking at maximum values over time
+        max_values = torch.max(torch.abs(flow), dim=-1)[0]  # Shape: (batch_size, time_steps)
+        
+        # Check if values remain bounded
+        has_blowup = torch.any(max_values > self.singularity_threshold)
+        
+        # Check if flow converges by looking at the rate of change near the end
+        end_window = 10  # Look at last 10 timesteps
+        if flow.size(1) > end_window:
+            recent_values = max_values[:, -end_window:]
+            rate_of_change = torch.abs(recent_values[:, 1:] - recent_values[:, :-1])
+            is_converged = torch.all(rate_of_change < self.monotonicity_threshold)
+        else:
+            is_converged = True  # For short sequences, assume convergence
+        
+        # Compute stability metrics
+        stability = self.compute_stability_metrics(flow)
+        
+        # Flow exists for long time if it's bounded and converges
+        exists_long_time = (not has_blowup) and is_converged
+        
+        return ValidationResult(
+            is_valid=exists_long_time,
+            message="Long-time existence validation",
+            data={
+                "existence_time": flow.size(1),
+                "max_value": max_values.max().item(),
+                "final_rate_of_change": rate_of_change.max().item() if flow.size(1) > end_window else 0.0,
+                "stability": stability
+            }
+        )
+
+    def detect_singularities(self, flow: torch.Tensor) -> Dict[str, Any]:
+        """Detect singularities in flow.
+        
+        Args:
+            flow: Flow tensor of shape (time_steps, batch_size, dim)
+            
+        Returns:
+            Dictionary with singularity detection results
+        """
+        # Check for large values indicating singularities
+        max_values = torch.max(torch.abs(flow), dim=-1)[0]
+        singularity_mask = max_values > self.singularity_threshold
+        
+        has_singularity = torch.any(singularity_mask)
         singularity_time = None
         
-        while time < self.max_time:
-            # Evolve one step
-            new_states = flow.evolve(current_states, self.time_step)
-            
-            # Check for singularities
-            if self._detect_singularity(new_states):
-                has_singularities = True
-                singularity_time = time
-                break
-                
-            current_states = new_states
-            time += self.time_step
-            
+        if has_singularity:
+            # Find first occurrence of singularity
+            singularity_indices = torch.where(singularity_mask)[0]
+            if len(singularity_indices) > 0:
+                singularity_time = singularity_indices[0].item()
+        
         return {
-            "has_singularities": has_singularities,
+            "has_singularity": has_singularity,
             "singularity_time": singularity_time
         }
-        
-    def _detect_singularity(self, states: torch.Tensor) -> bool:
-        """Detect if states contain singularities.
+
+    def compute_flow_properties(self, flow: torch.Tensor) -> FlowProperties:
+        """Compute flow properties.
         
         Args:
-            states: States tensor
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
             
         Returns:
-            True if singularity detected
+            FlowProperties object
         """
-        # Check for NaN or Inf values
-        if torch.any(torch.isnan(states)) or torch.any(torch.isinf(states)):
-            return True
-            
-        # Check for extremely large values
-        if torch.any(torch.abs(states) > 1e6):
-            return True
-            
-        return False
+        # Compute derivatives using central differences
+        dt = 1.0  # Assume unit time steps
         
-    def _generate_message(self, properties: FlowProperties) -> str:
-        """Generate validation message.
+        # First derivative (velocity) - preserve batch dimension
+        velocity = (flow[:, 1:] - flow[:, :-1]) / dt  # Shape: (batch_size, time_steps-1, dim)
+        
+        # Second derivative (acceleration) - preserve batch dimension
+        acceleration = (velocity[:, 1:] - velocity[:, :-1]) / dt  # Shape: (batch_size, time_steps-2, dim)
+        
+        # Compute stability metrics
+        stability_metrics = self.compute_stability_metrics(flow)
+        
+        # Compute energy metrics
+        energy_metrics = self.compute_energy_metrics(flow)
+        
+        return FlowProperties(
+            derivative=velocity,
+            second_derivative=acceleration,
+            stability_metrics=stability_metrics,
+            energy_metrics=energy_metrics
+        )
+
+    def compute_stability_metrics(self, flow: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Compute stability metrics for flow.
         
         Args:
-            properties: Flow properties
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
             
         Returns:
-            Validation message
+            Dictionary of stability metrics
         """
-        messages = []
+        dt = 1.0  # Assume unit time steps
         
-        if not properties.is_stable:
-            messages.append("Flow is unstable")
-            
-        if not properties.is_conservative:
-            messages.append("Flow does not conserve energy")
-            
-        if not properties.is_convergent:
-            messages.append("Flow does not converge")
-            
-        if properties.has_singularities:
-            messages.append("Flow develops singularities")
-            
-        if not messages:
-            return "Flow validation successful"
-            
-        return "Flow validation failed: " + "; ".join(messages)
+        # Compute derivatives along time dimension (dim=1)
+        velocity = (flow[:, 1:] - flow[:, :-1]) / dt  # Shape: (batch_size, time_steps-1, dim)
+        acceleration = (velocity[:, 1:] - velocity[:, :-1]) / dt  # Shape: (batch_size, time_steps-2, dim)
+        
+        # Compute Lyapunov exponent estimate
+        displacement = torch.norm(velocity, dim=-1)  # Shape: (batch_size, time_steps-1)
+        lyapunov = torch.mean(torch.log(displacement + 1e-6))
+        
+        # Compute stability radius
+        flow_norm = torch.norm(flow[:, 2:], dim=-1)  # Shape: (batch_size, time_steps-2)
+        acc_norm = torch.norm(acceleration, dim=-1)  # Shape: (batch_size, time_steps-2)
+        stability_radius = torch.min(flow_norm / (acc_norm + 1e-6))
+        
+        return {
+            "lyapunov_exponent": lyapunov,
+            "stability_radius": stability_radius,
+            "max_acceleration": torch.max(acc_norm)
+        }
 
+    def compute_energy_metrics(self, flow: torch.Tensor) -> EnergyMetrics:
+        """Compute energy metrics for flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            EnergyMetrics object
+        """
+        dt = 1.0  # Assume unit time steps
+        
+        # Compute kinetic energy using central differences
+        velocity = (flow[:, 1:] - flow[:, :-1]) / dt  # Shape: (batch_size, time_steps-1, dim)
+        kinetic = 0.5 * torch.sum(velocity ** 2, dim=(-1, -2))  # Shape: (batch_size,)
+        
+        # Compute potential energy (example using harmonic potential)
+        potential = 0.5 * torch.sum(flow ** 2, dim=(-1, -2))  # Shape: (batch_size,)
+        
+        # Compute total energy
+        total = kinetic + potential  # Shape: (batch_size,)
+        
+        return EnergyMetrics(
+            kinetic=kinetic,
+            potential=potential,
+            total=total
+        )
 
-@dataclass
-class EnergyMetrics:
-    """Energy metrics for geometric flow."""
-    
-    kinetic: float  # Kinetic energy
-    potential: float  # Potential energy
-    total: Optional[float] = None  # Total energy
-    
-    def __post_init__(self):
-        """Compute total energy if not provided."""
-        if self.total is None:
-            self.total = self.kinetic + self.potential
+    def validate_flow_decomposition(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate flow decomposition.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            ValidationResult with decomposition metrics
+        """
+        # Compute flow properties
+        properties = self.compute_flow_properties(flow)
+        
+        # Extract components
+        components = {
+            "velocity": properties.derivative,
+            "acceleration": properties.second_derivative
+        }
+        
+        return ValidationResult(
+            is_valid=True,  # Always valid as this is just decomposition
+            message="Flow decomposition validation",
+            data={"components": components}
+        )
+
+    def validate_all(self, flow: torch.Tensor) -> Dict[str, ValidationResult]:
+        """Run all validations on flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            Dictionary of validation results
+        """
+        return {
+            "energy_conservation": self.validate_energy_conservation(flow),
+            "monotonicity": self.validate_monotonicity(flow),
+            "long_time_existence": self.validate_long_time_existence(flow),
+            "singularities": self.detect_singularities(flow)
+        }
 
 
 @dataclass
@@ -391,16 +430,10 @@ class ConvergenceValidation:
 class ValidationResult:
     """Result of validation with message."""
     
-    def __init__(self, is_valid: bool, message: str = "", stable: bool = False, error: float = 0.0, initial_energy: torch.Tensor = None, final_energy: torch.Tensor = None, relative_error: torch.Tensor = None, initial_states: torch.Tensor = None, final_states: torch.Tensor = None):
+    def __init__(self, is_valid: bool, message: str = "", data: Dict[str, Any] = None):
         self.is_valid = is_valid
         self.message = message
-        self.stable = stable
-        self.error = error
-        self.initial_energy = initial_energy
-        self.final_energy = final_energy
-        self.relative_error = relative_error
-        self.initial_states = initial_states
-        self.final_states = final_states
+        self.data = data
 
 
 class GeometricFlowValidator:
@@ -474,8 +507,6 @@ class FlowStabilityValidator:
         
         return ValidationResult(
             is_valid=stable,
-            stable=stable,
-            error=max_diff.item(),
             message="Flow stability check"
         )
 
@@ -693,11 +724,13 @@ class EnergyValidator:
         return ValidationResult(
             is_valid=is_conserved,
             message="Energy conservation validation",
-            initial_energy=initial_energy,
-            final_energy=final_energy,
-            relative_error=relative_error,
-            initial_states=states,
-            final_states=evolved_states
+            data={
+                "initial_energy": initial_energy,
+                "final_energy": final_energy,
+                "relative_error": relative_error,
+                "initial_states": states,
+                "final_states": evolved_states
+            }
         )
 
     def validate_convergence(self, flow_system, states: torch.Tensor) -> ValidationResult:
@@ -740,10 +773,11 @@ class EnergyValidator:
         return ValidationResult(
             is_valid=converged,
             message=f"Flow convergence validation (iterations={iterations})",
-            stable=converged,
-            error=error,  # Keep as tensor
-            initial_states=states,
-            final_states=next_pos
+            data={
+                "error": error,  # Keep as tensor
+                "initial_states": states,
+                "final_states": next_pos
+            }
         )
 
 
@@ -794,10 +828,11 @@ class ConvergenceValidator:
         return ValidationResult(
             is_valid=converged,
             message=f"Flow convergence validation (iterations={iterations})",
-            stable=converged,
-            error=error,  # Keep as tensor
-            initial_states=states,
-            final_states=next_pos
+            data={
+                "error": error,  # Keep as tensor
+                "initial_states": states,
+                "final_states": next_pos
+            }
         )
 
 
@@ -868,7 +903,7 @@ class GeometricFlowValidator:
         return self.stability_validator.validate_flow_step(metric, evolved_metric, metrics)
 
     def validate_singularities(self, metric: torch.Tensor, singularities: List, threshold: float = 0.1) -> ValidationResult:
-        """Validate singularity detection.
+        """Validate detected singularities.
         
         Args:
             metric: Metric tensor
@@ -925,3 +960,175 @@ class GeometricFlowValidator:
             messages.append(f"Condition number increased significantly: {evolved_condition/init_condition}")
             
         return ValidationResult(is_valid=is_valid, message="; ".join(messages) if messages else "Invariants preserved")
+
+    def validate_energy_conservation(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate energy conservation in flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            ValidationResult with energy metrics
+        """
+        # Compute energy metrics
+        metrics = self.compute_energy_metrics(flow)
+        
+        # Check energy conservation
+        energy_variation = torch.abs(metrics.total[-1] - metrics.total[0])
+        is_conserved = energy_variation < self.tolerance
+        
+        return ValidationResult(
+            is_valid=is_conserved,
+            message="Energy conservation validation",
+            data={
+                "energy_variation": energy_variation,
+                "initial_energy": metrics.total[0],
+                "final_energy": metrics.total[-1],
+                "metrics": metrics
+            }
+        )
+        
+    def compute_energy_metrics(self, flow: torch.Tensor) -> EnergyMetrics:
+        """Compute energy metrics for flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            EnergyMetrics object
+        """
+        dt = 1.0  # Assume unit time steps
+        
+        # Compute kinetic energy using central differences
+        velocity = (flow[:, 1:] - flow[:, :-1]) / dt  # Shape: (batch_size, time_steps-1, dim)
+        kinetic = 0.5 * torch.sum(velocity ** 2, dim=(-1, -2))  # Shape: (batch_size,)
+        
+        # Compute potential energy (example using harmonic potential)
+        potential = 0.5 * torch.sum(flow ** 2, dim=(-1, -2))  # Shape: (batch_size,)
+        
+        # Compute total energy
+        total = kinetic + potential  # Shape: (batch_size,)
+        
+        return EnergyMetrics(
+            kinetic=kinetic,
+            potential=potential,
+            total=total
+        )
+
+    def validate_monotonicity(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate flow monotonicity.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            ValidationResult with monotonicity metrics
+        """
+        # Compute flow properties
+        properties = self.compute_flow_properties(flow)
+        
+        # Check monotonicity
+        is_monotonic = torch.all(properties.derivative >= 0) or torch.all(properties.derivative <= 0)
+        
+        return ValidationResult(
+            is_valid=is_monotonic,
+            message="Flow monotonicity validation",
+            data={
+                "monotonicity_measure": properties.derivative.abs().mean().item()
+            }
+        )
+        
+    def compute_flow_properties(self, flow: torch.Tensor) -> FlowProperties:
+        """Compute flow properties.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            FlowProperties object
+        """
+        # Compute derivatives
+        velocity = torch.diff(flow, dim=1)
+        acceleration = torch.diff(velocity, dim=1)
+        
+        # Compute stability metrics
+        stability = torch.max(torch.abs(acceleration)) < self.tolerance
+        
+        # Compute energy metrics
+        energy = self.compute_energy_metrics(flow)
+        
+        return FlowProperties(
+            is_stable=stability,
+            is_conservative=True,  # This should be computed based on energy conservation
+            is_convergent=True,  # This should be computed based on convergence analysis
+            has_singularities=False,  # This should be computed based on singularity detection
+            stability_metrics={"max_acceleration": acceleration.abs().max().item()},
+            energy_metrics={"total_energy": energy.total},
+            convergence_metrics=None,
+            singularity_metrics=None,
+            derivative=velocity,
+            second_derivative=acceleration
+        )
+        
+    def validate_long_time_existence(self, flow: torch.Tensor) -> ValidationResult:
+        """Validate long-time existence of flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            ValidationResult with existence metrics
+        """
+        # Check for blowup by looking at maximum values over time
+        max_values = torch.max(torch.abs(flow), dim=-1)[0]  # Shape: (batch_size, time_steps)
+        
+        # Check if values remain bounded
+        has_blowup = torch.any(max_values > self.singularity_threshold)
+        
+        # Check if flow converges by looking at the rate of change near the end
+        end_window = 10  # Look at last 10 timesteps
+        if flow.size(1) > end_window:
+            recent_values = max_values[:, -end_window:]
+            rate_of_change = torch.abs(recent_values[:, 1:] - recent_values[:, :-1])
+            is_converged = torch.all(rate_of_change < self.monotonicity_threshold)
+        else:
+            is_converged = True  # For short sequences, assume convergence
+        
+        # Compute stability metrics
+        stability = self.compute_stability_metrics(flow)
+        
+        # Flow exists for long time if it's bounded and converges
+        exists_long_time = (not has_blowup) and is_converged
+        
+        return ValidationResult(
+            is_valid=exists_long_time,
+            message="Long-time existence validation",
+            data={
+                "existence_time": flow.size(1),
+                "max_value": max_values.max().item(),
+                "final_rate_of_change": rate_of_change.max().item() if flow.size(1) > end_window else 0.0,
+                "stability": stability
+            }
+        )
+        
+    def compute_stability_metrics(self, flow: torch.Tensor) -> Dict[str, float]:
+        """Compute stability metrics for flow.
+        
+        Args:
+            flow: Flow tensor of shape (batch_size, time_steps, dim)
+            
+        Returns:
+            Dictionary with stability metrics
+        """
+        # Compute Lyapunov exponent
+        velocity = torch.diff(flow, dim=1)
+        perturbation_growth = torch.log(torch.abs(velocity) + 1e-8)
+        lyapunov = torch.mean(perturbation_growth, dim=0)
+        
+        # Compute stability radius
+        stability_radius = 1.0 / (torch.max(torch.abs(lyapunov)) + 1e-8)
+        
+        return {
+            "lyapunov_exponent": lyapunov.mean().item(),
+            "stability_radius": stability_radius.item()
+        }

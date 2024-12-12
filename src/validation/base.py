@@ -12,11 +12,16 @@ class ValidationResult:
 
     is_valid: bool
     message: str
-    stable: bool
-    error: float
-    initial_energy: Optional[float] = None
-    final_energy: Optional[float] = None
-    relative_error: Optional[float] = None
-    initial_states: Optional[torch.Tensor] = None
-    final_states: Optional[torch.Tensor] = None
-    metrics: Optional[Dict[str, Any]] = None
+    data: Dict[str, Any]
+
+    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+        """Initialize validation result.
+        
+        Args:
+            is_valid: Whether validation passed
+            message: Description of validation result
+            data: Optional dictionary of validation metrics/data
+        """
+        self.is_valid = is_valid
+        self.message = message
+        self.data = data if data is not None else {}
