@@ -165,7 +165,13 @@ class FlowValidator:
             
             # Compute energy statistics
             mean_energy = torch.mean(energy).item()
-            std_energy = torch.std(energy).item()
+            
+            # Handle std dev computation carefully
+            if energy.numel() > 1:
+                std_energy = torch.std(energy, unbiased=True).item()
+            else:
+                std_energy = 0.0
+                
             max_variation = torch.max(torch.abs(energy - mean_energy)).item()
             relative_variation = max_variation / (mean_energy + self.energy_threshold)
             
@@ -361,10 +367,10 @@ class FlowValidator:
         
         # Compute kinetic energy using central differences
         velocity = (flow[:, 1:] - flow[:, :-1]) / dt  # Shape: (batch_size, time_steps-1, dim)
-        kinetic = 0.5 * torch.sum(velocity ** 2, dim=(-1, -2))  # Shape: (batch_size,)
+        kinetic = 0.5 * torch.sum(velocity**2, dim=(1,2))  # Shape: (batch_size,)
         
         # Compute potential energy (example using harmonic potential)
-        potential = 0.5 * torch.sum(flow ** 2, dim=(-1, -2))  # Shape: (batch_size,)
+        potential = 0.5 * torch.sum(flow**2, dim=(1,2))  # Shape: (batch_size,)
         
         # Compute total energy
         total = kinetic + potential  # Shape: (batch_size,)
@@ -507,7 +513,13 @@ class GeometricFlowValidator:
             
             # Compute energy statistics
             mean_energy = torch.mean(energy).item()
-            std_energy = torch.std(energy).item()
+            
+            # Handle std dev computation carefully
+            if energy.numel() > 1:
+                std_energy = torch.std(energy, unbiased=True).item()
+            else:
+                std_energy = 0.0
+                
             max_variation = torch.max(torch.abs(energy - mean_energy)).item()
             relative_variation = max_variation / (mean_energy + self.tolerance)
             
@@ -1360,7 +1372,13 @@ class GeometricFlowValidator:
             
             # Compute energy statistics
             mean_energy = torch.mean(energy).item()
-            std_energy = torch.std(energy).item()
+            
+            # Handle std dev computation carefully
+            if energy.numel() > 1:
+                std_energy = torch.std(energy, unbiased=True).item()
+            else:
+                std_energy = 0.0
+                
             max_variation = torch.max(torch.abs(energy - mean_energy)).item()
             relative_variation = max_variation / (mean_energy + self.tolerance)
             
