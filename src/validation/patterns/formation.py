@@ -679,7 +679,7 @@ class EmergenceValidator:
         self.coherence_threshold = coherence_threshold
 
     def validate_emergence(
-        self, dynamics: PatternDynamics, initial: torch.Tensor, time_steps: int = 1000
+        self, dynamics: Optional[PatternDynamics], initial: torch.Tensor, time_steps: int = 1000
     ) -> EmergenceValidation:
         """Validate pattern emergence."""
         # Track pattern evolution
@@ -689,20 +689,29 @@ class EmergenceValidator:
         formation_time = 0
         emerged = False
 
-        for t in range(time_steps):
-            current = dynamics.step(current)
-            trajectory.append(current.clone())
+        if dynamics is not None:
+            for t in range(time_steps):
+                current = dynamics.step(current)
+                trajectory.append(current.clone())
 
-            # Check for pattern emergence
-            if not emerged and self._check_emergence(trajectory):
-                emerged = True
-                formation_time = t
+                # Check for pattern emergence
+                if not emerged and self._check_emergence(trajectory):
+                    emerged = True
+                    formation_time = t
+        else:
+            # If no dynamics provided, just analyze the initial pattern
+            emerged = self._check_emergence([initial])
+            formation_time = 0
 
-        trajectory = torch.stack(trajectory)
-
-        # Compute pattern properties
-        coherence = self._compute_coherence(trajectory)
-        stability = self._compute_stability(trajectory)
+        if len(trajectory) > 1:
+            trajectory = torch.stack(trajectory)
+            # Compute pattern properties
+            coherence = self._compute_coherence(trajectory)
+            stability = self._compute_stability(trajectory)
+        else:
+            # For single pattern, use simplified metrics
+            coherence = self._compute_coherence(initial.unsqueeze(0))
+            stability = torch.tensor(1.0)
 
         return EmergenceValidation(
             emerged=emerged,
