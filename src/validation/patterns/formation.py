@@ -4,22 +4,19 @@ This module validates pattern formation:
 - Pattern emergence
 - Spatial organization
 - Temporal evolution
-- Bifurcation analysis
-- Mode decomposition
 """
 
+from typing import Optional, List, Tuple, Dict, Any
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
 import torch
+import numpy as np
 from scipy import signal
 from scipy.fft import fft2, ifft2
 from scipy.ndimage import measurements
 
-from ...neural.flow.geometric_flow import GeometricFlow
-from ...neural.flow.hamiltonian import HamiltonianSystem
-from ...neural.attention.pattern_dynamics import PatternDynamics
+from src.neural.attention.pattern.dynamics import PatternDynamics
+from src.neural.flow.geometric_flow import GeometricFlow
+from src.neural.flow.hamiltonian import HamiltonianSystem
 
 
 @dataclass
@@ -1147,6 +1144,20 @@ class BifurcationAnalyzer:
         return "unknown"
 
 
+@dataclass
+class ValidationResult:
+    """Result of validation."""
+    
+    is_valid: bool
+    """Whether validation passed."""
+    
+    metrics: Dict[str, float]
+    """Validation metrics."""
+    
+    details: Dict[str, Any]
+    """Additional validation details."""
+
+
 class PatternFormationValidator:
     """Complete pattern formation validation system."""
 
@@ -1159,19 +1170,38 @@ class PatternFormationValidator:
         frequency_threshold: float = 0.1,
         phase_threshold: float = 0.1,
     ):
+        """Initialize validator.
+        
+        Args:
+            tolerance: Numerical tolerance
+            coherence_threshold: Threshold for pattern coherence
+            symmetry_threshold: Threshold for pattern symmetry
+            defect_threshold: Threshold for pattern defects
+            frequency_threshold: Threshold for temporal frequency
+            phase_threshold: Threshold for phase locking
+        """
         self.emergence_validator = EmergenceValidator(tolerance, coherence_threshold)
         self.spatial_validator = SpatialValidator(symmetry_threshold, defect_threshold)
         self.temporal_validator = TemporalValidator(
             frequency_threshold, phase_threshold
         )
-
+        
     def validate(
         self,
         dynamics: Optional[PatternDynamics],
         initial: torch.Tensor,
         time_steps: int = 1000,
-    ):
-        """Perform complete pattern formation validation."""
+    ) -> ValidationResult:
+        """Perform complete pattern formation validation.
+        
+        Args:
+            dynamics: Pattern dynamics system (optional)
+            initial: Initial pattern state
+            time_steps: Number of time steps to simulate
+            
+        Returns:
+            ValidationResult with is_valid=True if pattern formation is valid
+        """
         # Initialize trajectory with initial state
         current = initial
         trajectory = [current]
@@ -1191,10 +1221,33 @@ class PatternFormationValidator:
         # Validate emergence
         emergence = self.emergence_validator.validate_emergence(trajectory)
 
-        # Validate spatial organization
+        # Validate spatial organization  
         spatial = self.spatial_validator.validate_spatial(trajectory[-1])
 
         # Validate temporal evolution
         temporal = self.temporal_validator.validate_temporal(trajectory)
-
-        return emergence, spatial, temporal
+        
+        # Combine validation results
+        is_valid = (
+            emergence.emerged and
+            spatial.correlation > self.spatial_validator.symmetry_threshold and
+            temporal.persistence > self.temporal_validator.phase_threshold
+        )
+        
+        return ValidationResult(
+            is_valid=is_valid,
+            metrics={
+                "emergence_time": emergence.formation_time,
+                "coherence": emergence.coherence,
+                "stability": emergence.stability,
+                "wavelength": spatial.wavelength,
+                "correlation": spatial.correlation,
+                "frequency": temporal.frequency,
+                "persistence": temporal.persistence
+            },
+            details={
+                "emergence": emergence,
+                "spatial": spatial,
+                "temporal": temporal
+            }
+        )

@@ -1,6 +1,6 @@
 """Implementation of stability analysis."""
 
-from typing import Union, Callable, Optional
+from typing import Union, Callable, Optional, Tuple
 import torch
 from torch import nn
 
@@ -21,14 +21,14 @@ class StabilityAnalyzer:
     def is_stable(
         self,
         state: torch.Tensor,
-        reaction_term: Callable[[torch.Tensor], torch.Tensor],
+        reaction_term: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         threshold: float = 0.1
     ) -> bool:
         """Check if a state is stable under the given dynamics.
         
         Args:
             state (torch.Tensor): State to check stability for
-            reaction_term (Callable): Reaction function
+            reaction_term (Callable, optional): Reaction function. If None, uses system reaction.
             threshold (float): Stability threshold
             
         Returns:
@@ -37,6 +37,10 @@ class StabilityAnalyzer:
         # Check if state is numerically valid
         if torch.isnan(state).any() or torch.isinf(state).any():
             return False
+            
+        # Use system reaction if none provided
+        if reaction_term is None:
+            reaction_term = self.pattern_system.reaction.compute_reaction
             
         # Compute stability value using reaction term
         stability = self.compute_stability(state, reaction_term=reaction_term)
@@ -50,79 +54,167 @@ class StabilityAnalyzer:
     def compute_stability(
         self,
         state: torch.Tensor,
-        reaction_term: Optional[Callable] = None,
-        max_iter: int = 100,
-        tolerance: float = 1e-6
-    ) -> float:
-        """Compute stability value for a state using power iteration.
+        reaction_term: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Compute stability value for a state.
         
         Args:
             state (torch.Tensor): State to compute stability for
-            reaction_term (Optional[Callable]): Optional reaction term function
-            max_iter (int): Maximum power iteration steps
-            tolerance (float): Convergence tolerance
+            reaction_term (Callable, optional): Reaction function. If None, uses system reaction.
             
         Returns:
-            float: Stability value
+            torch.Tensor: Stability value
         """
-        # Initialize random perturbation
-        perturbation = torch.randn_like(state)
-        perturbation = perturbation / torch.norm(perturbation)
+        # Use system reaction if none provided
+        if reaction_term is None:
+            reaction_term = self.pattern_system.reaction.compute_reaction
+            
+        # Get Jacobian
+        jacobian = self.compute_jacobian(state)
         
-        # Power iteration to find largest eigenvalue
-        prev_lambda = 0.0
-        for _ in range(max_iter):
-            # Apply Jacobian-vector product
-            Av = self._apply_jacobian(state, perturbation, reaction_term)
-            
-            # Normalize
-            lambda_i = torch.norm(Av)
-            if lambda_i == 0:
-                return 0.0
-                
-            perturbation = Av / lambda_i
-            
-            # Check convergence
-            if abs(lambda_i - prev_lambda) < tolerance:
-                break
-                
-            prev_lambda = lambda_i
-            
-        return prev_lambda.item()
-
-    def _apply_jacobian(
+        # Compute eigenvalues
+        eigenvalues = torch.linalg.eigvals(jacobian)
+        
+        # Get maximum real part
+        max_real = torch.max(eigenvalues.real)
+        
+        return max_real
+        
+    def compute_jacobian(
         self,
         state: torch.Tensor,
-        vector: torch.Tensor,
-        reaction_term: Optional[Callable] = None,
-        eps: float = 1e-7
+        eps: float = 1e-6
     ) -> torch.Tensor:
-        """Apply Jacobian matrix to vector using finite differences.
+        """Compute Jacobian matrix for pattern dynamics.
         
         Args:
-            state (torch.Tensor): State point to evaluate Jacobian at
-            vector (torch.Tensor): Vector to multiply with Jacobian
-            reaction_term (Optional[Callable]): Optional reaction term function
-            eps (float): Finite difference step size
+            state (torch.Tensor): State to compute Jacobian at
+            eps (float): Finite difference epsilon
             
         Returns:
-            torch.Tensor: Result of Jacobian-vector product
+            torch.Tensor: Jacobian matrix
         """
-        # Forward evaluation with reaction term only
-        state_plus = state + eps * vector
-        state_minus = state - eps * vector
+        # Get pattern shape
+        batch_size = state.shape[0]
+        n = torch.prod(torch.tensor(state.shape[1:]))
         
-        if reaction_term is not None:
-            state_plus = reaction_term(state_plus)
-            state_minus = reaction_term(state_minus)
-        else:
-            state_plus = self.pattern_system.reaction.reaction_term(state_plus)
-            state_minus = self.pattern_system.reaction.reaction_term(state_minus)
+        # Reshape pattern for Jacobian computation
+        state_flat = state.reshape(batch_size, -1)
         
-        # Compute finite difference approximation
-        diff = (state_plus - state_minus) / (2 * eps)
+        # Initialize Jacobian
+        J = torch.zeros((batch_size, n, n), dtype=torch.float64)
         
-        return diff
+        # Compute Jacobian using finite differences
+        for i in range(n):
+            perturb = torch.zeros_like(state_flat)
+            perturb[:, i] = eps
+            
+            # Forward difference
+            state_plus = state_flat + perturb
+            state_plus = state_plus.reshape(state.shape)
+            forward = self.pattern_system.step(state_plus)
+            forward = forward.reshape(batch_size, -1)
+            
+            # Backward difference  
+            state_minus = state_flat - perturb
+            state_minus = state_minus.reshape(state.shape)
+            backward = self.pattern_system.step(state_minus)
+            backward = backward.reshape(batch_size, -1)
+            
+            # Central difference
+            J[:, :, i] = (forward - backward) / (2 * eps)
+            
+        # Average over batch
+        J = torch.mean(J, dim=0)
+        
+        return J
+        
+    def compute_eigenvalues(
+        self,
+        state: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute eigenvalues and eigenvectors of linearized dynamics.
+        
+        Args:
+            state (torch.Tensor): State to compute eigenvalues at
+            
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Eigenvalues and eigenvectors
+        """
+        # Get Jacobian
+        jacobian = self.compute_jacobian(state)
+        
+        # Compute eigendecomposition
+        eigenvalues, eigenvectors = torch.linalg.eig(jacobian)
+        
+        return eigenvalues, eigenvectors
+        
+    def find_bifurcation(
+        self,
+        state: torch.Tensor,
+        parameter_range: torch.Tensor,
+        parameter_name: str = 'dt',
+        threshold: float = 0.1
+    ) -> Optional[float]:
+        """Find bifurcation point by varying parameter.
+        
+        Args:
+            state (torch.Tensor): Initial state
+            parameter_range (torch.Tensor): Range of parameter values to check
+            parameter_name (str): Name of parameter to vary
+            threshold (float): Stability threshold
+            
+        Returns:
+            Optional[float]: Bifurcation point if found, None otherwise
+        """
+        # Store original parameter value
+        original_value = getattr(self.pattern_system, parameter_name)
+        
+        # Check stability across parameter range
+        for value in parameter_range:
+            # Set parameter value
+            setattr(self.pattern_system, parameter_name, value.item())
+            
+            # Check stability
+            if not self.is_stable(state, threshold=threshold):
+                # Reset parameter
+                setattr(self.pattern_system, parameter_name, original_value)
+                return value.item()
+                
+        # Reset parameter
+        setattr(self.pattern_system, parameter_name, original_value)
+        return None
+
+    def analyze_stability(
+        self,
+        state: torch.Tensor,
+        perturbation: torch.Tensor
+    ) -> StabilityMetrics:
+        """Analyze stability of a state under perturbation.
+        
+        Args:
+            state: State to analyze stability for
+            perturbation: Perturbation to apply
+            
+        Returns:
+            StabilityMetrics: Stability analysis results
+        """
+        # Compute linear stability using eigenvalue analysis
+        stability_matrix = self.pattern_system.compute_stability_matrix(state)
+        eigenvals = torch.linalg.eigvals(stability_matrix)
+        linear_stability = torch.max(eigenvals.real).item()
+        
+        # Compute nonlinear stability using perturbation
+        perturbed_state = state + perturbation
+        nonlinear_stability = self.compute_stability(perturbed_state)
+        
+        # Return metrics
+        return StabilityMetrics(
+            linear_stability=linear_stability,
+            nonlinear_stability=nonlinear_stability,
+            lyapunov_spectrum=eigenvals,
+            structural_stability=float(nonlinear_stability / linear_stability)
+        )
 
     def compute_lyapunov_spectrum(
         self,
@@ -171,33 +263,30 @@ class StabilityAnalyzer:
         
         return lyap.to(torch.float64)
 
-    def analyze_stability(
+    def _apply_jacobian(
         self,
         state: torch.Tensor,
-        perturbation: torch.Tensor
-    ) -> StabilityMetrics:
-        """Analyze stability of a state under perturbation.
+        vector: torch.Tensor,
+        eps: float = 1e-7
+    ) -> torch.Tensor:
+        """Apply Jacobian matrix to vector using finite differences.
         
         Args:
-            state: State to analyze stability for
-            perturbation: Perturbation to apply
+            state (torch.Tensor): State point to evaluate Jacobian at
+            vector (torch.Tensor): Vector to multiply with Jacobian
+            eps (float): Finite difference step size
             
         Returns:
-            StabilityMetrics: Stability analysis results
+            torch.Tensor: Result of Jacobian-vector product
         """
-        # Compute linear stability using eigenvalue analysis
-        stability_matrix = self.pattern_system.compute_stability_matrix(state)
-        eigenvals = torch.linalg.eigvals(stability_matrix)
-        linear_stability = torch.max(eigenvals.real).item()
+        # Forward evaluation with reaction term only
+        state_plus = state + eps * vector
+        state_minus = state - eps * vector
         
-        # Compute nonlinear stability using perturbation
-        perturbed_state = state + perturbation
-        nonlinear_stability = self.compute_stability(perturbed_state)
+        state_plus = self.pattern_system.step(state_plus)
+        state_minus = self.pattern_system.step(state_minus)
         
-        # Return metrics
-        return StabilityMetrics(
-            linear_stability=linear_stability,
-            nonlinear_stability=nonlinear_stability,
-            lyapunov_spectrum=eigenvals,
-            structural_stability=float(nonlinear_stability / linear_stability)
-        )
+        # Compute finite difference approximation
+        diff = (state_plus - state_minus) / (2 * eps)
+        
+        return diff

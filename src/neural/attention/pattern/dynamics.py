@@ -2,6 +2,7 @@
 
 from typing import Optional, Union, Tuple, List, Callable
 import torch
+import numpy as np
 
 from .models import (
     ReactionDiffusionState,
@@ -47,7 +48,189 @@ class PatternDynamics:
         self.diffusion = DiffusionSystem(self.size)
         self.reaction = ReactionSystem(self.size)
         self.stability = StabilityAnalyzer(self)
-    
+
+    def step(self, state: torch.Tensor) -> torch.Tensor:
+        """Perform one step of pattern dynamics.
+        
+        Args:
+            state (torch.Tensor): Current state
+            
+        Returns:
+            torch.Tensor: Next state
+        """
+        # Apply reaction and diffusion
+        reaction = self.reaction.compute_reaction(state)
+        diffusion = self.diffusion.compute_diffusion(state)
+        
+        # Combine using timestep
+        next_state = state + self.dt * (reaction + diffusion)
+        
+        return next_state
+
+    def evolve_pattern(
+        self,
+        pattern: torch.Tensor,
+        diffusion_coefficient: float = 0.1,
+        steps: int = 100
+    ) -> List[torch.Tensor]:
+        """Evolve pattern forward in time.
+        
+        Args:
+            pattern: Initial pattern
+            diffusion_coefficient: Diffusion coefficient
+            steps: Number of timesteps
+            
+        Returns:
+            List of evolved patterns
+        """
+        trajectory = []
+        current = pattern
+        
+        for _ in range(steps):
+            trajectory.append(current)
+            current = self.step(current)
+            
+        return trajectory
+        
+    def compute_jacobian(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute Jacobian matrix of dynamics.
+        
+        Args:
+            state: Current state
+            
+        Returns:
+            Jacobian matrix
+        """
+        return self.compute_stability_matrix(state)
+        
+    def compute_stability_matrix(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute stability matrix for a given state.
+        
+        This computes the Jacobian of the dynamics with respect to the state.
+        
+        Args:
+            state (torch.Tensor): State to compute stability for
+            
+        Returns:
+            torch.Tensor: Stability matrix (Jacobian)
+        """
+        # Get state shape and ensure proper dimensions
+        if len(state.shape) == 4:  # [batch, channels, height, width]
+            batch_size = state.shape[0]
+            n = state.shape[1] * state.shape[2] * state.shape[3]
+            state = state.reshape(batch_size, n)
+        else:  # [channels, height, width]
+            batch_size = 1
+            n = state.numel()
+            state = state.reshape(1, n)
+        
+        # Initialize Jacobian efficiently
+        J = torch.zeros((n, n), dtype=state.dtype, device=state.device)
+        
+        # Use vectorized operations for efficiency
+        eps = 1e-6
+        for i in range(0, n, 10):  # Process in chunks of 10 for memory efficiency
+            end_idx = min(i + 10, n)
+            chunk_size = end_idx - i
+            
+            # Create perturbations for this chunk
+            perturb = torch.zeros((chunk_size, n), dtype=state.dtype, device=state.device)
+            perturb[range(chunk_size), range(i, end_idx)] = eps
+            
+            # Forward differences (vectorized)
+            states_plus = (state + perturb).reshape(-1, self.dim, self.size, self.size)
+            forward = self.step(states_plus).reshape(chunk_size, n)
+            
+            # Backward differences (vectorized)
+            states_minus = (state - perturb).reshape(-1, self.dim, self.size, self.size)
+            backward = self.step(states_minus).reshape(chunk_size, n)
+            
+            # Central differences
+            J[i:end_idx] = (forward - backward) / (2 * eps)
+        
+        return J
+
+    def compute_eigenvalues(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute eigenvalues of linearized dynamics.
+        
+        Args:
+            state (torch.Tensor): State to compute eigenvalues at
+            
+        Returns:
+            torch.Tensor: Eigenvalues
+        """
+        # Compute Jacobian efficiently using chunks
+        jacobian = self.compute_stability_matrix(state, chunk_size=100)
+        
+        # Use a more efficient eigenvalue computation method
+        try:
+            # Try using eigvals first with GPU if available
+            if torch.cuda.is_available():
+                jacobian = jacobian.cuda()
+                eigenvalues = torch.linalg.eigvals(jacobian)
+                eigenvalues = eigenvalues.cpu()
+            else:
+                # Use numpy for CPU computation which is generally faster
+                eigenvalues = torch.from_numpy(
+                    np.linalg.eigvals(jacobian.numpy())
+                ).to(torch.complex64)
+        except Exception:
+            # Fallback to a more stable but slower method
+            eigenvalues, _ = torch.linalg.eig(jacobian)
+            
+        return eigenvalues
+
+    def compute_energy(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute energy of pattern state.
+        
+        Args:
+            state (torch.Tensor): Pattern state
+            
+        Returns:
+            torch.Tensor: Energy value
+        """
+        # Ensure proper dimensions
+        if len(state.shape) == 4:  # [batch, channels, height, width]
+            state = state.reshape(state.shape[0], -1)
+        else:  # [channels, height, width]
+            state = state.reshape(1, -1)
+        
+        # Compute kinetic energy efficiently
+        kinetic = 0.5 * torch.sum(state * state, dim=1)
+        
+        # Compute field terms
+        reaction = self.reaction.compute_reaction(state.reshape(-1, self.dim, self.size, self.size))
+        diffusion = self.diffusion.compute_diffusion(state.reshape(-1, self.dim, self.size, self.size))
+        
+        # Reshape fields
+        reaction = reaction.reshape(state.shape)
+        diffusion = diffusion.reshape(state.shape)
+        
+        # Compute potential energy efficiently
+        potential = -0.5 * torch.sum(state * (reaction + diffusion), dim=1)
+        
+        # Return total energy (averaged over batch if needed)
+        total_energy = kinetic + potential
+        return total_energy.mean() if len(total_energy) > 1 else total_energy[0]
+
+    def is_stable(self, state: torch.Tensor, threshold: float = 0.1) -> bool:
+        """Check if a state is stable.
+        
+        Args:
+            state (torch.Tensor): State to check stability for
+            threshold (float): Stability threshold
+            
+        Returns:
+            bool: True if state is stable
+        """
+        # Compute eigenvalues
+        eigenvalues = self.compute_eigenvalues(state)
+        
+        # Check if all real parts are negative
+        max_real = torch.max(eigenvalues.real)
+        
+        return max_real < threshold
+
     def apply_diffusion(
         self,
         state: torch.Tensor,
@@ -110,225 +293,6 @@ class PatternDynamics:
         # Convert back to original dtype
         return reacted.to(orig_dtype)
         
-    def evolve_pattern(
-        self,
-        state: torch.Tensor,
-        diffusion_coefficient: float,
-        reaction_term: Optional[Callable] = None,
-        dt: Optional[float] = None,
-        t_span: Optional[Tuple[float, float]] = None,
-        *,
-        steps: int = 100,
-    ) -> List[torch.Tensor]:
-        """Evolve pattern with reaction-diffusion dynamics.
-        
-        Args:
-            state: Initial state tensor
-            diffusion_coefficient: Diffusion coefficient
-            reaction_term: Optional reaction term function
-            dt: Optional time step override
-            t_span: Optional time span (start, end)
-            steps: Number of evolution steps
-            
-        Returns:
-            List of evolved states
-        """
-        dt = dt if dt is not None else self.dt
-        
-        if t_span is not None:
-            t_start, t_end = t_span
-            t = t_start
-            dt = (t_end - t_start) / steps
-        else:
-            t = 0.0
-            
-        evolution = [state]
-        current_state = state
-        
-        for _ in range(steps):
-            # Apply diffusion
-            diffused = self.apply_diffusion(current_state, diffusion_coefficient, dt)
-            
-            # Apply reaction if provided
-            if reaction_term is not None:
-                diffused = self.apply_reaction(diffused, reaction_term)
-                
-            evolution.append(diffused)
-            current_state = diffused
-            t += dt
-            
-        return evolution
-    
-    def test_convergence(
-        self,
-        state: torch.Tensor,
-        max_iter: int = 1000,
-        tol: float = 1e-6
-    ) -> bool:
-        """Test if pattern has converged to steady state.
-        
-        Args:
-            state: Input state tensor
-            max_iter: Maximum iterations to test
-            tol: Convergence tolerance
-            
-        Returns:
-            True if converged, False otherwise
-        """
-        # Convert to double for stability
-        state = state.to(torch.float64)
-        prev_state = state
-        
-        for _ in range(max_iter):
-            # Apply diffusion with small time step
-            curr_state = self.apply_diffusion(prev_state, 0.1, 0.01)
-            
-            # Check convergence
-            diff = torch.abs(curr_state - prev_state).max()
-            if diff < tol:
-                return True
-                
-            prev_state = curr_state
-            
-        return False
-    
-    def reaction_diffusion(
-        self,
-        state: torch.Tensor,
-        reaction_term: Optional[Callable] = None,
-        max_iterations: int = 100,
-        dt: float = 0.1
-    ) -> torch.Tensor:
-        """Compute one step of reaction-diffusion dynamics.
-        
-        Args:
-            state: Current state tensor
-            reaction_term: Optional custom reaction term
-            max_iterations: Maximum iterations for numerical integration
-            dt: Time step for numerical integration
-            
-        Returns:
-            Updated state tensor
-        """
-        # Ensure state has batch dimension
-        if len(state.shape) == 3:
-            state = state.unsqueeze(0)  # Add batch dimension
-            
-        # Apply reaction term
-        if reaction_term is not None:
-            reaction = reaction_term(state)
-        else:
-            reaction = self.reaction.reaction_term(state)
-            
-        # Scale up reaction term for stronger dynamics
-        reaction = reaction * 200.0  # Increased scaling
-            
-        # Apply diffusion with proper shape
-        diffused = self.diffusion.apply_diffusion(state, 0.5, dt)  # Increased diffusion coefficient
-        
-        # Combine reaction and diffusion with proper time step
-        updated = state + dt * (reaction + diffused)
-        
-        # Clamp with wider bounds
-        updated = torch.clamp(updated, min=-1000.0, max=1000.0)
-        
-        # Remove batch dimension if it was added
-        if len(state.shape) == 4 and state.shape[0] == 1:
-            updated = updated.squeeze(0)
-            
-        return updated
-    
-    def stability_analysis(
-        self,
-        fixed_point: Union[ReactionDiffusionState, torch.Tensor],
-        perturbation: torch.Tensor,
-    ) -> StabilityMetrics:
-        """Analyze stability around fixed point."""
-        return self.stability.analyze_stability(fixed_point, perturbation)
-    
-    def find_reaction_fixed_points(
-        self,
-        state: torch.Tensor
-    ) -> torch.Tensor:
-        """Find fixed points of the reaction term."""
-        return self.reaction.find_reaction_fixed_points(state)
-
-    def find_homogeneous_state(self) -> torch.Tensor:
-        """Find homogeneous steady state.
-        
-        Returns:
-            Homogeneous state tensor
-        """
-        # Initialize with small random values for better convergence
-        state = torch.rand(1, self.dim, self.size, self.size, dtype=torch.float64) * 0.1
-        
-        max_iter = 100  # Reduced iterations
-        tol = 1e-4  # Relaxed tolerance
-        min_change = torch.finfo(torch.float64).eps * 100  # Minimum meaningful change
-        
-        prev_state = state.clone()
-        for _ in range(max_iter):
-            # Apply strong diffusion with numerical bounds
-            state = self.apply_diffusion(state, diffusion_coefficient=1.0, dt=0.1)
-            state = torch.clamp(state, min=0.0, max=100.0)
-            
-            # Check convergence with robust metric
-            mean = state.mean(dim=(-2, -1), keepdim=True)
-            max_diff = torch.max(torch.abs(state - mean))
-            
-            # Also check if state has stopped changing
-            state_change = torch.max(torch.abs(state - prev_state))
-            if max_diff < tol or state_change < min_change:
-                break
-                
-            prev_state = state.clone()
-        
-        return state.to(torch.float32)  # Return in standard precision
-
-    def pattern_control(
-        self,
-        current: torch.Tensor,
-        target: torch.Tensor,
-        constraints: List[Callable]
-    ) -> ControlSignal:
-        """Compute control signal to drive system towards target state.
-        
-        Args:
-            current: Current state tensor
-            target: Target state tensor
-            constraints: List of constraint functions
-            
-        Returns:
-            Control signal
-        """
-        # Initialize control signal
-        control = torch.zeros_like(current)
-        
-        # Compute error
-        error = target - current
-        
-        # Scale control by error and constraints
-        for constraint in constraints:
-            # Evaluate constraint
-            violation = constraint(current)
-            
-            # Add gradient-based correction
-            if violation > 0:
-                # Use autograd to get constraint gradient
-                current.requires_grad_(True)
-                c = constraint(current)
-                c.backward()
-                grad = current.grad
-                current.requires_grad_(False)
-                
-                # Update control to reduce violation
-                control = control - 0.1 * violation * grad
-        
-        # Add error correction
-        control = control + 0.1 * error
-        
-        return ControlSignal(control)
-
     def evolve_spatiotemporal(
         self,
         initial: torch.Tensor,
@@ -688,3 +652,165 @@ class PatternDynamics:
                     return "saddle-node"
         
         return "unknown"
+
+    def step(
+        self,
+        state: torch.Tensor,
+        diffusion_coefficient: float = 0.1,
+        reaction_term: Optional[Callable] = None
+    ) -> torch.Tensor:
+        """Take a single timestep in pattern evolution.
+        
+        Args:
+            state: Current state tensor [batch, channels, height, width]
+            diffusion_coefficient: Diffusion coefficient
+            reaction_term: Optional reaction term function
+            
+        Returns:
+            Next state tensor
+        """
+        # Apply diffusion
+        next_state = self.apply_diffusion(state, diffusion_coefficient, self.dt)
+        
+        # Apply reaction if provided
+        if reaction_term is not None:
+            next_state = self.apply_reaction(next_state, reaction_term)
+            
+        return next_state
+
+    def reaction_diffusion(
+        self,
+        state: torch.Tensor,
+        reaction_term: Optional[Callable] = None,
+        max_iterations: int = 100,
+        dt: float = 0.1
+    ) -> torch.Tensor:
+        """Compute one step of reaction-diffusion dynamics.
+        
+        Args:
+            state: Current state tensor
+            reaction_term: Optional custom reaction term
+            max_iterations: Maximum iterations for numerical integration
+            dt: Time step for numerical integration
+            
+        Returns:
+            Updated state tensor
+        """
+        # Ensure state has batch dimension
+        if len(state.shape) == 3:
+            state = state.unsqueeze(0)  # Add batch dimension
+            
+        # Apply reaction term
+        if reaction_term is not None:
+            reaction = reaction_term(state)
+        else:
+            reaction = self.reaction.reaction_term(state)
+            
+        # Scale up reaction term for stronger dynamics
+        reaction = reaction * 200.0  # Increased scaling
+            
+        # Apply diffusion with proper shape
+        diffused = self.diffusion.apply_diffusion(state, 0.5, dt)  # Increased diffusion coefficient
+        
+        # Combine reaction and diffusion with proper time step
+        updated = state + dt * (reaction + diffused)
+        
+        # Clamp with wider bounds
+        updated = torch.clamp(updated, min=-1000.0, max=1000.0)
+        
+        # Remove batch dimension if it was added
+        if len(state.shape) == 4 and state.shape[0] == 1:
+            updated = updated.squeeze(0)
+            
+        return updated
+    
+    def stability_analysis(
+        self,
+        fixed_point: Union[ReactionDiffusionState, torch.Tensor],
+        perturbation: torch.Tensor,
+    ) -> StabilityMetrics:
+        """Analyze stability around fixed point."""
+        return self.stability.analyze_stability(fixed_point, perturbation)
+    
+    def find_reaction_fixed_points(
+        self,
+        state: torch.Tensor
+    ) -> torch.Tensor:
+        """Find fixed points of the reaction term."""
+        return self.reaction.find_reaction_fixed_points(state)
+
+    def find_homogeneous_state(self) -> torch.Tensor:
+        """Find homogeneous steady state.
+        
+        Returns:
+            Homogeneous state tensor
+        """
+        # Initialize with small random values for better convergence
+        state = torch.rand(1, self.dim, self.size, self.size, dtype=torch.float64) * 0.1
+        
+        max_iter = 100  # Reduced iterations
+        tol = 1e-4  # Relaxed tolerance
+        min_change = torch.finfo(torch.float64).eps * 100  # Minimum meaningful change
+        
+        prev_state = state.clone()
+        for _ in range(max_iter):
+            # Apply strong diffusion with numerical bounds
+            state = self.apply_diffusion(state, diffusion_coefficient=1.0, dt=0.1)
+            state = torch.clamp(state, min=0.0, max=100.0)
+            
+            # Check convergence with robust metric
+            mean = state.mean(dim=(-2, -1), keepdim=True)
+            max_diff = torch.max(torch.abs(state - mean))
+            
+            # Also check if state has stopped changing
+            state_change = torch.max(torch.abs(state - prev_state))
+            if max_diff < tol or state_change < min_change:
+                break
+                
+            prev_state = state.clone()
+        
+        return state.to(torch.float32)  # Return in standard precision
+
+    def pattern_control(
+        self,
+        current: torch.Tensor,
+        target: torch.Tensor,
+        constraints: List[Callable]
+    ) -> ControlSignal:
+        """Compute control signal to drive system towards target state.
+        
+        Args:
+            current: Current state tensor
+            target: Target state tensor
+            constraints: List of constraint functions
+            
+        Returns:
+            Control signal
+        """
+        # Initialize control signal
+        control = torch.zeros_like(current)
+        
+        # Compute error
+        error = target - current
+        
+        # Scale control by error and constraints
+        for constraint in constraints:
+            # Evaluate constraint
+            violation = constraint(current)
+            
+            # Add gradient-based correction
+            if violation > 0:
+                # Use autograd to get constraint gradient
+                current.requires_grad_(True)
+                c = constraint(current)
+                c.backward()
+                grad = current.grad
+                current.requires_grad_(False)
+                
+                # Update control to reduce violation
+                control = control - 0.1 * violation * grad
+        
+        # Add error correction
+        control = control + 0.1 * error
+        
+        return ControlSignal(control)
