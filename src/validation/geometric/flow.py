@@ -188,7 +188,9 @@ class FlowValidator:
                     "energy_std": std_energy,
                     "max_variation": max_variation,
                     "relative_variation": relative_variation,
-                    "energy_trajectory": energy.tolist()
+                    "energy_trajectory": energy.tolist(),
+                    "total_energy": mean_energy,  # Add total_energy field
+                    "energy_variation": relative_variation  # Add energy_variation field
                 }
             )
             return result
@@ -197,7 +199,10 @@ class FlowValidator:
             return ValidationResult(
                 is_valid=False,
                 message=f"Energy validation failed: {str(e)}",
-                data={}
+                data={
+                    "total_energy": 0.0,
+                    "energy_variation": float('inf')
+                }
             )
         
     def validate_monotonicity(self, flow: torch.Tensor) -> ValidationResult:
@@ -536,7 +541,9 @@ class GeometricFlowValidator:
                     "energy_std": std_energy,
                     "max_variation": max_variation,
                     "relative_variation": relative_variation,
-                    "energy_trajectory": energy.tolist()
+                    "energy_trajectory": energy.tolist(),
+                    "total_energy": mean_energy,  # Add total_energy field
+                    "energy_variation": relative_variation  # Add energy_variation field
                 }
             )
             return result
@@ -545,7 +552,10 @@ class GeometricFlowValidator:
             return ValidationResult(
                 is_valid=False,
                 message=f"Energy validation failed: {str(e)}",
-                data={}
+                data={
+                    "total_energy": 0.0,
+                    "energy_variation": float('inf')
+                }
             )
         
     def validate_long_time_existence(self, flow: torch.Tensor) -> ValidationResult:
@@ -1155,7 +1165,9 @@ class GeometricFlowValidator:
                     "mean_energy": mean_energy.item(),
                     "energy_std": std_energy.item(),
                     "max_variation": max_variation.item(),
-                    "relative_variation": relative_variation.item()
+                    "relative_variation": relative_variation.item(),
+                    "total_energy": mean_energy.item(),  # Add total_energy field
+                    "energy_variation": relative_variation.item()  # Add energy_variation field
                 }
             )
             return result
@@ -1164,7 +1176,10 @@ class GeometricFlowValidator:
             return ValidationResult(
                 is_valid=False,
                 message=f"Energy validation failed: {str(e)}",
-                data={}
+                data={
+                    "total_energy": 0.0,
+                    "energy_variation": float('inf')
+                }
             )
         
     def compute_energy(self, flow: torch.Tensor) -> torch.Tensor:
@@ -1395,7 +1410,9 @@ class GeometricFlowValidator:
                     "energy_std": std_energy,
                     "max_variation": max_variation,
                     "relative_variation": relative_variation,
-                    "energy_trajectory": energy.tolist()
+                    "energy_trajectory": energy.tolist(),
+                    "total_energy": mean_energy,  # Add total_energy field
+                    "energy_variation": relative_variation  # Add energy_variation field
                 }
             )
             return result
@@ -1404,7 +1421,10 @@ class GeometricFlowValidator:
             return ValidationResult(
                 is_valid=False,
                 message=f"Energy validation failed: {str(e)}",
-                data={}
+                data={
+                    "total_energy": 0.0,
+                    "energy_variation": float('inf')
+                }
             )
         
     def compute_flow_properties(

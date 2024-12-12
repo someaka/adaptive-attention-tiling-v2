@@ -159,8 +159,8 @@ class PatternDynamics:
         Returns:
             torch.Tensor: Eigenvalues
         """
-        # Compute Jacobian efficiently using chunks
-        jacobian = self.compute_stability_matrix(state, chunk_size=100)
+        # Compute Jacobian efficiently
+        jacobian = self.compute_jacobian(state)
         
         # Use a more efficient eigenvalue computation method
         try:

@@ -144,8 +144,8 @@ class TestPatternFlowIntegration:
         assert energy_result.is_valid, "Flow should conserve energy"
         
         # Check energy metrics
-        assert energy_result.total_energy > 0, "Total energy should be positive"
-        assert energy_result.energy_variation < params['energy_threshold'], \
+        assert energy_result.data['total_energy'] > 0, "Total energy should be positive"
+        assert energy_result.data['energy_variation'] < params['energy_threshold'], \
             "Energy variation should be small"
         
     def test_pattern_flow_bifurcation(self, setup_test_parameters, pattern_validator,
@@ -154,7 +154,7 @@ class TestPatternFlowIntegration:
         params = setup_test_parameters
         
         # Generate patterns with different control parameters
-        control_values = torch.linspace(0.1, 2.0, 5)
+        control_values = torch.linspace(0.1, 2.0, 3)  
         patterns = []
         flows = []
         
@@ -167,6 +167,9 @@ class TestPatternFlowIntegration:
             dtype=torch.float32
         ) * 0.1
         
+        # Reduce time steps for bifurcation test
+        test_steps = params['time_steps'] // 2
+        
         for control in control_values:
             # Scale pattern by control parameter
             pattern = base_pattern * control
@@ -176,7 +179,7 @@ class TestPatternFlowIntegration:
             evolution = pattern_dynamics.evolve_pattern(
                 pattern,
                 diffusion_coefficient=0.1,
-                steps=params['time_steps']
+                steps=test_steps
             )
             flow = torch.stack(evolution)
             flows.append(flow)

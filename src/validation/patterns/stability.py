@@ -20,19 +20,15 @@ from src.neural.flow.geometric_flow import GeometricFlow
 from src.neural.flow.hamiltonian import HamiltonianSystem
 
 
-@dataclass
 class ValidationResult:
-    """Result of validation."""
+    """Result of validation with message."""
     
-    is_valid: bool
-    """Whether validation passed."""
+    def __init__(self, is_valid: bool, message: str = "", data: Dict[str, Any] = None):
+        self.is_valid = is_valid
+        self.message = message
+        self.error_message = "" if is_valid else message
+        self.data = data or {}
     
-    message: str
-    """Validation message."""
-    
-    data: Dict[str, Any]
-    """Validation data."""
-
 
 @dataclass
 class StabilitySpectrum:
