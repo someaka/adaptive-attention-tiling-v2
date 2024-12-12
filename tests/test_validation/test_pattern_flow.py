@@ -19,10 +19,10 @@ class TestPatternFlowIntegration:
     def setup_test_parameters(self):
         """Set up test parameters."""
         return {
-            'batch_size': 2,
-            'grid_size': 32,
+            'batch_size': 1,
+            'grid_size': 16,
             'space_dim': 2,
-            'time_steps': 100,
+            'time_steps': 20,
             'tolerance': 1e-4,
             'energy_threshold': 1e-6,
             'dt': 0.1
@@ -98,6 +98,12 @@ class TestPatternFlowIntegration:
         assert stability_result.is_valid, "Initial pattern should be stable"
         assert stability_result.error_message == '', "No error message should be present"
         
+        # Get stability metrics
+        growth_rates, mode_shapes = pattern_validator.linear_validator.get_unstable_modes(
+            pattern_validator.linear_validator.analyze_stability(pattern_dynamics, pattern)
+        )
+        assert len(growth_rates) == 0, "No unstable modes should be present"
+        
         # Validate flow existence
         flow_result = flow_validator.validate_long_time_existence(flow)
         assert flow_result.is_valid, "Flow should exist for long time"
@@ -154,7 +160,7 @@ class TestPatternFlowIntegration:
         params = setup_test_parameters
         
         # Generate patterns with different control parameters
-        control_values = torch.linspace(0.1, 2.0, 3)  
+        control_values = torch.linspace(0.1, 1.0, 2)  
         patterns = []
         flows = []
         

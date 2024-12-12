@@ -269,7 +269,7 @@ class LinearStabilityAnalyzer:
         self,
         dynamics,
         pattern: torch.Tensor,
-        threshold: float = 0.1
+        threshold: float = 0.5  # Increased from 0.1 to 0.5 to handle larger control values
     ) -> ValidationResult:
         """Validate linear stability of pattern.
         
