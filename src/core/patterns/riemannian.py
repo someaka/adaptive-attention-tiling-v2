@@ -71,12 +71,12 @@ class PatternRiemannianStructure(nn.Module):
 
         # Initialize metric as identity plus low-rank perturbation
         self.metric_factors = nn.Parameter(
-            torch.randn(self.rank, manifold_dim, device=self.device) * 0.1
+            torch.randn(self.rank, manifold_dim, device=self.device, requires_grad=True) * 0.1
         )
 
         # Initialize connection coefficients
         self.connection_coeffs = nn.Parameter(
-            torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device)
+            torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, requires_grad=True)
         )
 
     def metric_tensor(
@@ -110,26 +110,26 @@ class PatternRiemannianStructure(nn.Module):
         """
         batch_size = points.shape[0]
         
+        # Ensure points require gradients
+        if not points.requires_grad:
+            points = points.detach().requires_grad_(True)
+        
+        # Compute position-dependent factors
+        position_factors = torch.einsum('bi,rj->brij', points, self.metric_factors)
+        
         # Compute metric using factors: g = I + V^T V where V are the metric factors
         identity = torch.eye(
             self.manifold_dim, 
-            device=points.device,
-            requires_grad=True
+            device=points.device
         ).expand(batch_size, -1, -1)
         
-        # Ensure metric factors require grad
-        if not self.metric_factors.requires_grad:
-            self.metric_factors.requires_grad_(True)
-            
         perturbation = torch.einsum(
-            'ri,rj->ij', 
-            self.metric_factors, 
-            self.metric_factors
-        ).expand(batch_size, -1, -1)
+            'brij,brkj->bik', 
+            position_factors, 
+            position_factors
+        )
         
-        metric = identity + perturbation
-        metric.requires_grad_(True)
-        return metric
+        return identity + perturbation
 
     def compute_christoffel(self, points: torch.Tensor) -> torch.Tensor:
         """Compute Christoffel symbols using Levi-Civita connection.
@@ -142,46 +142,55 @@ class PatternRiemannianStructure(nn.Module):
         """
         batch_size = points.shape[0]
         
+        # Resource guard - check input dimensions
+        if points.dim() != 2 or points.shape[1] != self.manifold_dim:
+            raise ValueError(f"Expected points shape (batch_size, {self.manifold_dim}), got {points.shape}")
+            
+        # Memory guard - check if computation is feasible
+        expected_memory = batch_size * (self.manifold_dim ** 3) * 4  # 4 bytes per float
+        if expected_memory > 1e9:  # 1GB limit
+            raise RuntimeError(f"Computation would require {expected_memory/1e9:.2f}GB memory")
+        
+        # Ensure points require gradients
+        if not points.requires_grad:
+            points = points.detach().requires_grad_(True)
+        
         # Get metric and its inverse
         metric = self.compute_metric(points)
         metric_inv = torch.linalg.inv(metric)
         
-        # Compute metric gradient using autograd
-        points.requires_grad_(True)
-        metric_with_grad = self.compute_metric(points)
+        # Compute metric gradients more efficiently
+        metric_flat = metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
         
-        # Initialize storage for metric derivatives
-        metric_grad = torch.zeros(
-            batch_size, 
-            self.manifold_dim, 
-            self.manifold_dim,
-            self.manifold_dim,
-            device=points.device
-        )
+        # Guard against too many gradient computations
+        max_grad_ops = 1000
+        if metric_flat.shape[1] > max_grad_ops:
+            raise RuntimeError(f"Too many gradient operations required: {metric_flat.shape[1]} > {max_grad_ops}")
         
-        # Compute partial derivatives
-        for k in range(self.manifold_dim):
-            grad_k = torch.autograd.grad(
-                metric_with_grad[..., k].sum(),
-                points,
-                create_graph=True,
-                allow_unused=True,
-                retain_graph=True
-            )[0]
-            if grad_k is not None:
-                metric_grad[..., k] = grad_k
+        # Compute all gradients at once
+        grads = []
+        with torch.no_grad():
+            for i in range(metric_flat.shape[1]):
+                grad = torch.autograd.grad(
+                    metric_flat[:, i].sum(),
+                    points,
+                    create_graph=True,
+                    retain_graph=True
+                )[0]
+                grads.append(grad)
         
-        points.requires_grad_(False)
+        # Stack gradients and reshape
+        metric_grad = torch.stack(grads, dim=1)
+        metric_grad = metric_grad.reshape(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
         
-        # Compute Christoffel symbols
-        # Γ^k_ij = 1/2 g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
+        # Compute Christoffel symbols using metric and its derivatives
         christoffel = torch.einsum(
-            'bkl,bijl->bijk',
+            'bim,bjkm->bijk',
             metric_inv,
             0.5 * (
-                metric_grad 
-                + torch.transpose(metric_grad, 2, 3)
-                - torch.transpose(metric_grad, 1, 3)
+                metric_grad.transpose(-2, -1) +
+                metric_grad.transpose(-2, -1).transpose(-3, -2) -
+                metric_grad
             )
         )
         

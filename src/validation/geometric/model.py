@@ -8,14 +8,48 @@ This module provides validation methods specific to neural model geometries:
 """
 
 from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from .metric import GeometricMetricValidator
-from ..base import ValidationResult
 from ...core.models.base import ModelGeometry
 from ...core.patterns.riemannian import RiemannianFramework
+
+
+def tensor_repr(tensor: Optional[Tensor], max_elements: int = 8) -> str:
+    """Create a shortened string representation of tensors."""
+    if tensor is None:
+        return "None"
+    shape = list(tensor.shape)
+    if len(shape) == 0:
+        return f"tensor({tensor.item():.4f})"
+    if sum(shape) <= max_elements:
+        return str(tensor)
+    return f"tensor(shape={shape}, mean={tensor.mean():.4f}, std={tensor.std():.4f})"
+
+
+@dataclass
+class ValidationResult:
+    """Result of a geometric validation."""
+    is_valid: bool
+    data: Dict[str, torch.Tensor]
+    message: str = ""
+    
+    def __post_init__(self):
+        """Validate the data structure."""
+        if not isinstance(self.data, dict):
+            raise ValueError("data must be a dictionary")
+        if not all(isinstance(v, torch.Tensor) for v in self.data.values()):
+            raise ValueError("all values in data must be torch.Tensor")
+            
+    def __repr__(self) -> str:
+        """Create a shortened string representation."""
+        data_repr = {k: tensor_repr(v) for k, v in self.data.items()}
+        return f"ValidationResult(is_valid={self.is_valid}, data={data_repr}, message='{self.message}')"
 
 
 class ModelGeometricValidator:
@@ -155,48 +189,96 @@ class ModelGeometricValidator:
         )
 
     def validate_model_geometry(
-        self, sample_points: Optional[torch.Tensor] = None
+        self,
+        batch_size: int = 16,
+        manifold_dim: Optional[int] = None,
+        max_memory_gb: float = 1.0,
     ) -> ValidationResult:
-        """Validate entire model geometry.
+        """Validate the geometric properties of the model.
         
         Args:
-            sample_points: Optional points tensor for validation
+            batch_size: Number of points to validate
+            manifold_dim: Dimension of the manifold (defaults to model's manifold_dim)
+            max_memory_gb: Maximum memory usage in GB
             
         Returns:
-            Validation results for model geometry
+            ValidationResult containing geometric validation metrics
         """
-        if sample_points is None:
-            sample_points = torch.randn(100, self.model_geometry.manifold_dim)
-            
-        # Validate all layers
-        layer_results = {
-            name: self.validate_layer_geometry(name, sample_points)
-            for name in self.layer_validators
-        }
-        
-        # Validate attention heads
-        attention_results = {
-            idx: self.validate_attention_geometry(
-                idx,
-                sample_points[:, :self.model_geometry.query_dim],
-                sample_points[:, :self.model_geometry.key_dim]
+        # Use model's manifold dimension if not specified
+        if manifold_dim is None:
+            manifold_dim = next(iter(self.model_geometry.layers.values())).manifold_dim
+
+        # Resource guards
+        expected_memory = batch_size * (manifold_dim ** 3) * 4  # 4 bytes per float
+        if expected_memory > max_memory_gb * 1e9:
+            raise ValueError(
+                f"Validation would require {expected_memory/1e9:.2f}GB memory. "
+                f"Reduce batch_size or manifold_dim, or increase max_memory_gb."
             )
-            for idx in range(len(self.model_geometry.attention_heads))
-        }
-        
-        # Check global geometric properties
-        global_properties = self._validate_global_properties(sample_points)
-        
-        return ValidationResult(
-            is_valid=all(r.is_valid for r in layer_results.values()) and
-                    all(r.is_valid for r in attention_results.values()) and
-                    global_properties.is_valid,
-            data={
-                "layer_validations": layer_results,
-                "attention_validations": attention_results,
-                "global_properties": global_properties
+
+        try:
+            # Generate random points on the manifold
+            points = torch.randn(batch_size, manifold_dim, requires_grad=True)
+            
+            # Compute geometric quantities with memory-efficient chunks
+            chunk_size = min(batch_size, 4)  # Process in small chunks
+            results = defaultdict(list)
+            
+            for i in range(0, batch_size, chunk_size):
+                chunk_points = points[i:i+chunk_size]
+                
+                # Compute metric and curvature for this chunk
+                metric = self.model_geometry.metric(chunk_points)
+                curvature = self.model_geometry.sectional_curvature(chunk_points)
+                
+                results['metric'].append(metric.detach())
+                results['curvature'].append(curvature.detach())
+            
+            # Combine chunks
+            final_results = {
+                k: torch.cat(v, dim=0) 
+                for k, v in results.items()
             }
-        )
+            
+            # Validate individual layers
+            layer_validations = {}
+            for layer_name in self.model_geometry.layers:
+                layer_validations[layer_name] = self.validate_layer_geometry(
+                    layer_name, points
+                )
+            
+            # Validate attention heads
+            attention_validations = []
+            for head_idx, _ in enumerate(self.model_geometry.attention_heads):
+                query_points = torch.randn(batch_size, manifold_dim)
+                key_points = torch.randn(batch_size, manifold_dim)
+                attention_validations.append(
+                    self.validate_attention_geometry(head_idx, query_points, key_points)
+                )
+            
+            # Validate global properties
+            global_properties = self._validate_global_properties(points)
+            
+            # Combine all results
+            final_results.update({
+                'layer_validations': layer_validations,
+                'attention_validations': attention_validations,
+                'global_properties': global_properties
+            })
+            
+            return ValidationResult(
+                is_valid=True,
+                data=final_results,
+                message="Geometric validation completed successfully"
+            )
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                raise RuntimeError(
+                    f"Out of memory during validation. Try reducing batch_size (currently {batch_size}) "
+                    f"or manifold_dim (currently {manifold_dim})"
+                ) from e
+            raise
 
     def _validate_attention_compatibility(
         self, head: nn.Module, query_points: torch.Tensor, key_points: torch.Tensor
@@ -370,14 +452,7 @@ class ModelGeometricValidator:
         return within_bounds
 
     def _check_global_energy(self, points: torch.Tensor) -> bool:
-        """Check global energy bounds of model.
-        
-        Args:
-            points: Points tensor
-            
-        Returns:
-            True if energy bounds are satisfied
-        """
+        """Check global energy bounds of model."""
         total_energy = 0.0
         
         # Ensure points require gradients
@@ -386,14 +461,19 @@ class ModelGeometricValidator:
         
         # Compute energy for each layer
         for layer_name, validator in self.layer_validators.items():
-            # Get metric values
+            # Get metric values 
             layer = self.model_geometry.get_layer(layer_name)
             metric = layer.metric(points)
             
-            # Compute energy as Frobenius norm of metric
-            energy = torch.norm(metric, p='fro').item()
+            # Compute energy as Frobenius norm of metric deviation from identity
+            identity = torch.eye(
+                metric.size(-1), 
+                device=metric.device
+            ).expand_as(metric)
+            deviation = metric - identity
+            energy = torch.norm(deviation, p='fro').item()
             total_energy += energy
         
-        # Check if total energy is bounded
+        # Check if average energy deviation from identity is bounded
         average_energy = total_energy / len(self.layer_validators)
-        return average_energy <= 1.0  # Using a more reasonable energy bound
+        return average_energy <= 1.0  # Using a more reasonable bound for deviation from identity

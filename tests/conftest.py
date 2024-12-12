@@ -20,6 +20,73 @@ import torch
 root_logger = logging.getLogger()
 root_logger.handlers = []  # Remove any existing handlers
 
+# Add tensor formatting for pytest output
+def tensor_repr(tensor, max_elements=4):
+    """Create a shortened representation of a tensor."""
+    if not isinstance(tensor, torch.Tensor):
+        return str(tensor)
+    
+    shape_str = f"shape={tuple(tensor.shape)}"
+    if tensor.numel() == 0:
+        return f"tensor([], {shape_str})"
+    
+    # Get a flat view and limit elements
+    flat = tensor.detach().flatten()
+    if flat.numel() <= max_elements:
+        elements = flat.tolist()
+    else:
+        elements = flat[:max_elements//2].tolist() + ["..."] + flat[-max_elements//2:].tolist()
+    
+    return f"tensor({elements}, {shape_str})"
+
+# Override tensor representation globally
+torch.Tensor.__repr__ = tensor_repr
+torch.Tensor.__str__ = tensor_repr
+
+class TensorReprPlugin:
+    """Pytest plugin to format tensor representations."""
+    
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(self, item: pytest.Item, call):
+        outcome = yield
+        report = outcome.get_result()
+        
+        if report.longrepr:
+            # Convert tensor representations in the output
+            report.longrepr = str(report.longrepr).replace(
+                str(torch.Tensor), tensor_repr(torch.Tensor)
+            )
+
+def pytest_configure(config):
+    """Register the tensor formatting plugin."""
+    config.pluginmanager.register(TensorReprPlugin())
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Custom hook to format test output."""
+    outcome = yield
+    report = outcome.get_result()
+    
+    if report.longrepr:
+        # Convert any tensor representations in the output
+        longrepr = str(report.longrepr)
+        if isinstance(longrepr, str):
+            # Replace any tensor debug output with shortened versions
+            import re
+            tensor_pattern = r'tensor\(\[\[.*?\]\](?:,\s*requires_grad=\w+)?\)'
+            
+            def shorten_tensor(match):
+                try:
+                    # Safely evaluate the tensor string to get a tensor object
+                    tensor_str = match.group(0)
+                    # Just return a shortened version
+                    return "tensor([...], shape=...)"
+                except:
+                    return tensor_str
+                    
+            longrepr = re.sub(tensor_pattern, shorten_tensor, longrepr, flags=re.DOTALL)
+            report.longrepr = longrepr
+
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -354,25 +421,34 @@ def pytest_collect_file(file_path: Path, parent: Any) -> Optional[pytest.Item]:
 
 @pytest.fixture(autouse=True)
 def setup_logging(request: pytest.FixtureRequest) -> None:
-    """Set up logging for each test.
-
-    Args:
-        request: Pytest request object
-    """
-    logger = logging.getLogger(request.node.name)
-    logger.setLevel(logging.INFO)
-
-    # Add test-specific log file
-    log_file = Path("logs") / f"{request.node.name}.log"
-    handler = logging.FileHandler(log_file, mode="w")
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    """Set up logging for each test."""
+    # Get the test name
+    test_name = request.node.name
+    
+    # Create a test-specific logger
+    logger = logging.getLogger(test_name)
+    logger.setLevel(logging.DEBUG)
+    
+    # Add a handler that uses tensor_repr for tensor formatting
+    class TensorFormattingHandler(logging.StreamHandler):
+        def format(self, record):
+            if isinstance(record.msg, torch.Tensor):
+                record.msg = tensor_repr(record.msg)
+            elif isinstance(record.args, tuple):
+                record.args = tuple(
+                    tensor_repr(arg) if isinstance(arg, torch.Tensor) else arg
+                    for arg in record.args
+                )
+            return super().format(record)
+    
+    handler = TensorFormattingHandler()
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
-
-    yield logger
-
-    # Clean up
-    handler.close()
-    logger.removeHandler(handler)
+    
+    return logger
 
 
 @pytest.fixture(scope="session")

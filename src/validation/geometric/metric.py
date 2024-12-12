@@ -57,8 +57,12 @@ class SmoothnessMetrics:
                 current = torch.autograd.grad(
                     current.sum(),
                     coords,
-                    create_graph=True
+                    create_graph=True,
+                    allow_unused=True
                 )[0]
+                if current is None:
+                    # If gradient is None (unused), return zero tensor
+                    current = torch.zeros_like(coords)
             derivatives.append(current)
             
         return torch.stack(derivatives)
