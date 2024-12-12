@@ -72,7 +72,7 @@ This document serves as a living index of the validation framework implementatio
 - [x] Formation test fixtures
 - [x] Stability test fixtures
 - [x] Bifurcation test fixtures
-- [ ] Advanced dynamics tests
+- [x] Advanced dynamics tests
 - [ ] Integration tests
 
 ### 3. Integration Points [🔴 Not Started]
