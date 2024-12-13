@@ -18,6 +18,7 @@ from torch import Tensor
 from src.neural.attention.pattern.dynamics import PatternDynamics
 from src.neural.flow.geometric_flow import GeometricFlow
 from src.neural.flow.hamiltonian import HamiltonianSystem
+from src.validation.base import ValidationResult
 
 T = TypeVar('T', bound=Union[float, bool, torch.Tensor])
 
@@ -1007,13 +1008,7 @@ class BifurcationAnalyzer:
         num_points: int = 100,
         tolerance: float = 1e-6
     ):
-        """Initialize bifurcation analyzer.
-        
-        Args:
-            parameter_range: Range of bifurcation parameter to scan
-            num_points: Number of points to sample
-            tolerance: Numerical tolerance
-        """
+        """Initialize bifurcation analyzer."""
         self.parameter_range = parameter_range
         self.num_points = num_points
         self.tolerance = tolerance
@@ -1145,36 +1140,206 @@ class BifurcationAnalyzer:
         return bool(state_change or stability_change.item())
 
     def _classify_pattern(self, state: torch.Tensor) -> str:
-        """Classify pattern type.
+        """Classify pattern type based on spatial structure.
         
         Args:
-            state: Pattern state
+            state: Pattern state tensor
             
         Returns:
-            Pattern classification
+            String describing pattern type
         """
-        # Implement pattern classification logic
-        # This is a placeholder - extend with actual classification
-        return "unknown"
+        # Compute basic statistics
+        mean = torch.mean(state)
+        std = torch.std(state)
+        
+        # Compute spatial FFT
+        fft = torch.fft.fft2(state)
+        power = torch.abs(fft)
+        
+        # Analyze symmetry
+        rotated = torch.rot90(state)
+        reflected = torch.flip(state, [0])
+        rot_sim = torch.mean((state - rotated) ** 2)
+        ref_sim = torch.mean((state - reflected) ** 2)
+        
+        # Classify based on properties
+        if std < 0.1 * mean:
+            return "homogeneous"
+        elif rot_sim < 0.1 and ref_sim < 0.1:
+            return "symmetric"
+        elif torch.max(power[1:]) > 2 * torch.mean(power[1:]):
+            return "periodic"
+        else:
+            return "irregular"
 
 
 @dataclass
-class ValidationResult:
-    """Result of validation."""
+class FormationValidationResult(ValidationResult[Dict[str, Any]]):
+    """Validation result for pattern formation that wraps spatial and temporal metrics."""
     
-    is_valid: bool
-    """Whether validation passed."""
+    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+        """Initialize formation validation result.
+        
+        Args:
+            is_valid: Whether validation passed
+            message: Description of validation result
+            data: Optional validation data or metrics
+        """
+        super().__init__(is_valid, message, data)
     
-    metrics: Dict[str, float]
-    """Validation metrics."""
+    def merge(self, other: ValidationResult) -> 'FormationValidationResult':
+        """Merge with another validation result."""
+        if not isinstance(other, FormationValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+            
+        # Merge metrics dictionaries carefully
+        merged_data = {**(self.data or {})}
+        other_data = other.data or {}
+        
+        # Special handling for metrics
+        for key, value in other_data.items():
+            if key in merged_data and isinstance(value, dict):
+                merged_data[key].update(value)
+            else:
+                merged_data[key] = value
+        
+        return FormationValidationResult(
+            is_valid=bool(self.is_valid and other.is_valid),
+            message=f"{self.message}; {other.message}",
+            data=merged_data
+        )
     
-    details: Dict[str, Any]
-    """Additional validation details."""
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "is_valid": bool(self.is_valid),
+            "message": self.message,
+            "data": self.data or {}
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'FormationValidationResult':
+        """Create from dictionary representation."""
+        return cls(
+            is_valid=bool(data["is_valid"]),
+            message=data["message"],
+            data=data.get("data", {})
+        )
 
+@dataclass
+class FormationValidator:
+    """Main validator that combines spatial and temporal metrics with the validation interface."""
+    
+    spatial_metrics: SpatialMetrics
+    temporal_metrics: TemporalMetrics
+    
+    def __init__(
+        self,
+        spatial_threshold: float = 0.1,
+        min_size: int = 5,
+        window_size: int = 10,
+        overlap: int = 5
+    ):
+        """Initialize formation validator with both metrics systems."""
+        self.spatial_metrics = SpatialMetrics(
+            threshold=spatial_threshold,
+            min_size=min_size
+        )
+        self.temporal_metrics = TemporalMetrics(
+            window_size=window_size,
+            overlap=overlap
+        )
+    
+    def validate_formation(
+        self,
+        pattern: torch.Tensor,
+        dt: float = 1.0
+    ) -> ValidationResult:
+        """Validate pattern formation using both spatial and temporal metrics."""
+        try:
+            # Compute spatial metrics
+            spatial_stats = self.spatial_metrics.analyze_spatial_structure(pattern)
+            
+            # Compute temporal metrics if pattern has time dimension
+            temporal_stats = {}
+            if len(pattern.shape) > 2:  # Has time dimension
+                temporal_stats = self.temporal_metrics.compute_temporal_statistics(pattern, dt)
+            
+            # Determine validity based on metrics
+            has_features = bool(spatial_stats.get("num_features", 0) > 0)
+            has_structure = bool(spatial_stats.get("characteristic_length", 0) > 0)
+            
+            # Prepare validation message
+            if has_features and has_structure:
+                msg = (
+                    f"Valid pattern formation with {spatial_stats['num_features']} features "
+                    f"and characteristic length {spatial_stats['characteristic_length']:.2f}"
+                )
+            else:
+                msg = "Pattern lacks sufficient spatial organization"
+            
+            # Return validation result with all metrics
+            return FormationValidationResult(
+                is_valid=bool(has_features and has_structure),
+                message=msg,
+                data={
+                    "spatial_metrics": spatial_stats,
+                    "temporal_metrics": temporal_stats
+                }
+            )
+            
+        except Exception as e:
+            return FormationValidationResult(
+                is_valid=False,
+                message=f"Formation validation failed: {str(e)}",
+                data={}
+            )
+    
+    def validate_spatial(self, pattern: torch.Tensor) -> ValidationResult:
+        """Validate only spatial aspects of pattern formation."""
+        try:
+            stats = self.spatial_metrics.analyze_spatial_structure(pattern)
+            has_features = bool(stats.get("num_features", 0) > 0)
+            
+            return FormationValidationResult(
+                is_valid=has_features,
+                message=f"Pattern has {stats['num_features']} features",
+                data={"spatial_metrics": stats}
+            )
+            
+        except Exception as e:
+            return FormationValidationResult(
+                is_valid=False,
+                message=f"Spatial validation failed: {str(e)}",
+                data={}
+            )
+    
+    def validate_temporal(
+        self,
+        pattern: torch.Tensor,
+        dt: float = 1.0
+    ) -> ValidationResult:
+        """Validate only temporal aspects of pattern formation."""
+        try:
+            stats = self.temporal_metrics.compute_temporal_statistics(pattern, dt)
+            has_dynamics = bool(stats.get("mean_rate", 0) > 0)
+            
+            return FormationValidationResult(
+                is_valid=has_dynamics,
+                message=f"Pattern has mean rate {stats['mean_rate']:.3f}",
+                data={"temporal_metrics": stats}
+            )
+            
+        except Exception as e:
+            return FormationValidationResult(
+                is_valid=False,
+                message=f"Temporal validation failed: {str(e)}",
+                data={}
+            )
 
 class PatternFormationValidator:
     """Complete pattern formation validation system."""
-
+    
     def __init__(
         self,
         tolerance: float = 1e-6,
@@ -1199,7 +1364,7 @@ class PatternFormationValidator:
         self.temporal_validator = TemporalValidator(
             frequency_threshold, phase_threshold
         )
-        
+    
     def validate(
         self,
         dynamics: Optional[PatternDynamics],
@@ -1248,21 +1413,27 @@ class PatternFormationValidator:
             temporal.persistence > self.temporal_validator.phase_threshold
         )
         
-        return ValidationResult(
+        return FormationValidationResult(
             is_valid=is_valid,
-            metrics={
-                "emergence_time": emergence.formation_time,
-                "coherence": emergence.coherence,
-                "stability": emergence.stability,
-                "wavelength": spatial.wavelength,
-                "correlation": spatial.correlation,
-                "frequency": temporal.frequency,
-                "persistence": temporal.persistence
-            },
-            details={
-                "emergence": emergence,
-                "spatial": spatial,
-                "temporal": temporal
+            message=f"Pattern formation validation: {'passed' if is_valid else 'failed'}",
+            data={
+                "emergence": {
+                    "formation_time": emergence.formation_time,
+                    "coherence": emergence.coherence,
+                    "stability": emergence.stability
+                },
+                "spatial": {
+                    "wavelength": spatial.wavelength,
+                    "symmetry": spatial.symmetry,
+                    "defects": spatial.defects,
+                    "correlation": spatial.correlation
+                },
+                "temporal": {
+                    "frequency": temporal.frequency,
+                    "phase_locked": temporal.phase_locked,
+                    "drift_rate": temporal.drift_rate,
+                    "persistence": temporal.persistence
+                }
             }
         )
 

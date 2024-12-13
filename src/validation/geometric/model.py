@@ -7,7 +7,7 @@ This module provides validation methods specific to neural model geometries:
 - Model-specific curvature bounds
 """
 
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple, Union, Any, Protocol, TypeVar, cast, runtime_checkable
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -16,10 +16,19 @@ import torch.nn as nn
 from torch import Tensor
 import torch.nn.functional as F
 
-from ..base import ValidationResult as BaseValidationResult
+from ..base import ValidationResult
 from .metric import GeometricMetricValidator
 from ...core.models.base import ModelGeometry
 from ...core.patterns.riemannian import RiemannianFramework
+
+
+T = TypeVar('T', bound=Union[Dict[str, Any], Tensor])
+
+
+@runtime_checkable
+class TensorConvertible(Protocol):
+    """Protocol for objects that can be converted to tensors."""
+    def to_tensor(self) -> Tensor: ...
 
 
 def tensor_repr(tensor: Optional[Tensor], max_elements: int = 8) -> str:
@@ -34,41 +43,136 @@ def tensor_repr(tensor: Optional[Tensor], max_elements: int = 8) -> str:
     return f"tensor(shape={shape}, mean={tensor.mean():.4f}, std={tensor.std():.4f})"
 
 
+def convert_tensor_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert tensor data to serializable format."""
+    result = {}
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor):
+            # Convert tensor to list while preserving precision
+            result[key] = value.detach().cpu().tolist()
+        elif isinstance(value, dict):
+            # Recursively convert nested dictionaries
+            result[key] = convert_tensor_data(value)
+        elif isinstance(value, (list, tuple)):
+            # Handle lists/tuples that might contain tensors
+            result[key] = [
+                v.detach().cpu().tolist() if isinstance(v, torch.Tensor) else v
+                for v in value
+            ]
+        elif isinstance(value, TensorConvertible):
+            # Handle objects that can be converted to tensors
+            result[key] = value.to_tensor().detach().cpu().tolist()
+        else:
+            # Keep other types as is
+            result[key] = value
+    return result
+
+
 @dataclass
-class GeometricValidationResult(BaseValidationResult[Dict[str, Any]]):
-    """Result of a geometric validation."""
+class GeometricValidationResult(ValidationResult[Dict[str, Any]]):
+    """Result of a geometric validation.
     
-    def merge(self, other: BaseValidationResult) -> 'GeometricValidationResult':
-        """Merge with another validation result."""
-        if not isinstance(other, BaseValidationResult):
-            raise ValueError("Can only merge with another ValidationResult")
+    This class handles validation results specific to geometric properties,
+    with special handling for tensor data and geometric metrics.
+    """
+    
+    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+        """Initialize geometric validation result.
+        
+        Args:
+            is_valid: Whether the validation passed
+            message: Description of validation result
+            data: Optional validation data containing geometric metrics and tensors
+        """
+        super().__init__(is_valid, message, data)
+    
+    def merge(self, other: ValidationResult) -> 'GeometricValidationResult':
+        """Merge with another validation result.
+        
+        Args:
+            other: Another validation result to merge with
             
-        merged_data = {**(self.data or {}), **(other.data or {})}
+        Returns:
+            New GeometricValidationResult combining both results
+            
+        Raises:
+            TypeError: If other is not a ValidationResult
+        """
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+            
+        # Merge metrics dictionaries carefully
+        merged_data = {**(self.data or {})}
+        other_data = other.data or {}
+        
+        # Special handling for tensor metrics
+        for key, value in other_data.items():
+            if key in merged_data and isinstance(value, dict):
+                if isinstance(merged_data[key], dict):
+                    merged_data[key].update(value)
+                else:
+                    merged_data[key] = value
+            else:
+                merged_data[key] = value
+        
         return GeometricValidationResult(
-            is_valid=self.is_valid and other.is_valid,
+            is_valid=bool(self.is_valid and other.is_valid),
             message=f"{self.message}; {other.message}",
             data=merged_data
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
+        """Convert to dictionary with proper tensor handling."""
         return {
-            "is_valid": self.is_valid,
+            "is_valid": bool(self.is_valid),
             "message": self.message,
-            "data": {
-                k: v.tolist() if isinstance(v, torch.Tensor) else v
-                for k, v in (self.data or {}).items()
-            }
+            "data": convert_tensor_data(self.data or {})
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GeometricValidationResult':
-        """Create from dictionary."""
+        """Create from dictionary.
+        
+        Args:
+            data: Dictionary containing validation data
+            
+        Returns:
+            New GeometricValidationResult instance
+            
+        Raises:
+            ValueError: If required fields are missing
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        required_fields = {"is_valid", "message"}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
         return cls(
-            is_valid=data["is_valid"],
+            is_valid=bool(data["is_valid"]),
             message=data["message"],
             data=data.get("data", {})
         )
+
+    def __str__(self) -> str:
+        """String representation with tensor summary."""
+        tensor_summaries = []
+        if self.data:
+            for key, value in self.data.items():
+                if isinstance(value, torch.Tensor):
+                    tensor_summaries.append(f"{key}: {tensor_repr(value)}")
+                elif isinstance(value, dict):
+                    nested_tensors = [
+                        f"{k}: {tensor_repr(v)}" 
+                        for k, v in value.items() 
+                        if isinstance(v, torch.Tensor)
+                    ]
+                    if nested_tensors:
+                        tensor_summaries.append(f"{key}: {{{', '.join(nested_tensors)}}}")
+        
+        tensor_info = f" [{', '.join(tensor_summaries)}]" if tensor_summaries else ""
+        return f"GeometricValidationResult(valid={self.is_valid}, message='{self.message}'{tensor_info})"
 
 
 class ModelGeometricValidator:
@@ -119,40 +223,61 @@ class ModelGeometricValidator:
             ValueError: If layer_name does not exist in the model
         """
         if layer_name not in self.layer_validators:
-            raise ValueError(f"Layer {layer_name} not found in model")
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"Layer {layer_name} not found in model",
+                data={"layer_name": layer_name}
+            )
             
         validator = self.layer_validators[layer_name]
         layer = self.model_geometry.get_layer(layer_name)
         
-        # Get metric tensor and validate it
-        metric = layer.metric(points)
-        metric_valid = validator.metric_validator.validate_metric(metric)
-        
-        # Get sectional curvature 
-        sectional_curvature = getattr(self.model_geometry, 'sectional_curvature')(points)
-        
-        # Check curvature bounds
-        curvature_valid = self._check_layer_curvature(layer_name, points)
-        
-        # Check energy bounds
-        energy_valid = self._check_global_energy(points)
-        
-        # Get eigenvalues using torch.linalg
-        eigenvalues = torch.linalg.eigvalsh(metric)  # Using eigvalsh for symmetric matrices
-        
-        # Prepare validation result
-        return GeometricValidationResult(
-            is_valid=metric_valid and curvature_valid and energy_valid,
-            data={
+        try:
+            # Get metric tensor and validate it
+            metric = layer.metric(points)
+            metric_valid = validator.metric_validator.validate_metric(metric)
+            
+            # Get sectional curvature 
+            sectional_curvature = getattr(self.model_geometry, 'sectional_curvature')(points)
+            
+            # Check curvature bounds
+            curvature_valid = self._check_layer_curvature(layer_name, points)
+            
+            # Check energy bounds
+            energy_valid = self._check_global_energy(points)
+            
+            # Get eigenvalues using torch.linalg
+            eigenvalues = torch.linalg.eigvalsh(metric)  # Using eigvalsh for symmetric matrices
+            
+            # Prepare validation data
+            validation_data = {
                 'metric_tensor': metric,
                 'sectional_curvature': sectional_curvature,
                 'eigenvalues': eigenvalues,
                 'complete': metric_valid,
                 'curvature_valid': curvature_valid,
-                'energy_valid': energy_valid
-            },
-            message='Layer geometry is valid'
-        )
+                'energy_valid': energy_valid,
+                'layer_name': layer_name
+            }
+            
+            is_valid = metric_valid and curvature_valid and energy_valid
+            message = (
+                f"Layer {layer_name} geometry validation {'passed' if is_valid else 'failed'}: "
+                f"metric_valid={metric_valid}, curvature_valid={curvature_valid}, energy_valid={energy_valid}"
+            )
+            
+            return GeometricValidationResult(
+                is_valid=is_valid,
+                message=message,
+                data=validation_data
+            )
+            
+        except Exception as e:
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"Error validating layer {layer_name}: {str(e)}",
+                data={"layer_name": layer_name, "error": str(e)}
+            )
 
     def validate_attention_geometry(
         self, head_idx: int, query_points: torch.Tensor, key_points: torch.Tensor
@@ -167,35 +292,51 @@ class ModelGeometricValidator:
         Returns:
             Validation results for attention geometry
         """
-        head = self.model_geometry.attention_heads[head_idx]
-        
-        # Get metrics for query and key spaces
-        query_metric = getattr(head, 'query_metric')(query_points)
-        key_metric = getattr(head, 'key_metric')(key_points)
-        
-        # Compute attention scores
-        attention_scores = getattr(head, 'compute_attention')(query_points, key_points)
-        
-        # Check geometric preservation
-        preserves_geometry = self._check_geometric_preservation(query_points, query_metric, attention_scores)
-        
-        # Check compatibility between query and key spaces
-        compatible = self._validate_attention_compatibility(head, query_points, key_points)
-        
-        # Validation is successful if spaces are compatible and geometry is preserved
-        is_valid = compatible and preserves_geometry
-        
-        return GeometricValidationResult(
-            is_valid=is_valid,
-            data={
+        try:
+            head = self.model_geometry.attention_heads[head_idx]
+            
+            # Get metrics for query and key spaces
+            query_metric = getattr(head, 'query_metric')(query_points)
+            key_metric = getattr(head, 'key_metric')(key_points)
+            
+            # Compute attention scores
+            attention_scores = getattr(head, 'compute_attention')(query_points, key_points)
+            
+            # Check geometric preservation
+            preserves_geometry = self._check_geometric_preservation(query_points, query_metric, attention_scores)
+            
+            # Check compatibility between query and key spaces
+            compatible = self._validate_attention_compatibility(head, query_points, key_points)
+            
+            # Validation is successful if spaces are compatible and geometry is preserved
+            is_valid = compatible and preserves_geometry
+            
+            validation_data = {
+                'head_idx': head_idx,
                 'query_metric': query_metric,
                 'key_metric': key_metric,
                 'attention_scores': attention_scores,
                 'preserves_geometry': preserves_geometry,
                 'compatible': compatible
-            },
-            message='Attention geometry validation'
-        )
+            }
+            
+            message = (
+                f"Attention head {head_idx} validation {'passed' if is_valid else 'failed'}: "
+                f"geometry_preserved={preserves_geometry}, spaces_compatible={compatible}"
+            )
+            
+            return GeometricValidationResult(
+                is_valid=is_valid,
+                message=message,
+                data=validation_data
+            )
+            
+        except Exception as e:
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"Error validating attention head {head_idx}: {str(e)}",
+                data={"head_idx": head_idx, "error": str(e)}
+            )
 
     def validate_cross_layer_geometry(
         self, layer1: str, layer2: str, points: torch.Tensor
@@ -210,31 +351,60 @@ class ModelGeometricValidator:
         Returns:
             Validation results for cross-layer geometry
         """
-        # Validate individual layers
-        result1 = self.validate_layer_geometry(layer1, points)
-        result2 = self.validate_layer_geometry(layer2, points)
-        
-        # Check metric compatibility
-        metric_compatible = self._check_metric_compatibility(
-            layer1, layer2, points
-        )
-        
-        # Check connection compatibility
-        connection_compatible = self._check_connection_compatibility(
-            layer1, layer2, points
-        )
-        
-        return GeometricValidationResult(
-            is_valid=result1.is_valid and result2.is_valid and 
-                    metric_compatible and connection_compatible,
-            message=f"Cross-layer validation between {layer1} and {layer2}",
-            data={
+        try:
+            # Validate individual layers
+            result1 = self.validate_layer_geometry(layer1, points)
+            result2 = self.validate_layer_geometry(layer2, points)
+            
+            # Check metric compatibility
+            metric_compatible = self._check_metric_compatibility(
+                layer1, layer2, points
+            )
+            
+            # Check connection compatibility
+            connection_compatible = self._check_connection_compatibility(
+                layer1, layer2, points
+            )
+            
+            is_valid = (
+                result1.is_valid and 
+                result2.is_valid and 
+                metric_compatible and 
+                connection_compatible
+            )
+            
+            validation_data = {
+                'layer1': layer1,
+                'layer2': layer2,
                 f"{layer1}_validation": result1,
                 f"{layer2}_validation": result2,
                 "metric_compatibility": metric_compatible,
                 "connection_compatibility": connection_compatible
             }
-        )
+            
+            message = (
+                f"Cross-layer validation between {layer1} and {layer2} "
+                f"{'passed' if is_valid else 'failed'}: "
+                f"metric_compatible={metric_compatible}, "
+                f"connection_compatible={connection_compatible}"
+            )
+            
+            return GeometricValidationResult(
+                is_valid=is_valid,
+                message=message,
+                data=validation_data
+            )
+            
+        except Exception as e:
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"Error validating cross-layer geometry: {str(e)}",
+                data={
+                    "layer1": layer1,
+                    "layer2": layer2,
+                    "error": str(e)
+                }
+            )
 
     def validate_model_geometry(
         self,
@@ -255,84 +425,111 @@ class ModelGeometricValidator:
         Raises:
             ValueError: If validation would exceed memory limit
         """
-        if manifold_dim is None:
-            manifold_dim = self.model_geometry.manifold_dim
-            if not isinstance(manifold_dim, int):
-                raise ValueError("model_geometry.manifold_dim must be an integer")
+        try:
+            if manifold_dim is None:
+                manifold_dim = self.model_geometry.manifold_dim
+                if not isinstance(manifold_dim, int):
+                    return GeometricValidationResult(
+                        is_valid=False,
+                        message="model_geometry.manifold_dim must be an integer",
+                        data={"manifold_dim": manifold_dim}
+                    )
 
-        # Check memory requirements
-        num_layers = len(self.layer_validators)
-        num_heads = len(self.model_geometry.attention_heads)
-        memory_bytes = (
-            # Points storage
-            batch_size * manifold_dim * 4 +
-            # Metric tensors (one per layer)
-            num_layers * batch_size * manifold_dim * manifold_dim * 4 +
-            # Attention scores (one per head)
-            num_heads * batch_size * batch_size * 4
-        )
-        memory_gb = memory_bytes / (1024 * 1024 * 1024)
-        if memory_gb > max_memory_gb:
-            raise ValueError(
-                f"Validation would require {memory_gb:.2f}GB memory, "
-                f"exceeding limit of {max_memory_gb}GB"
+            # Check memory requirements
+            num_layers = len(self.layer_validators)
+            num_heads = len(self.model_geometry.attention_heads)
+            memory_bytes = (
+                # Points storage
+                batch_size * manifold_dim * 4 +
+                # Metric tensors (one per layer)
+                num_layers * batch_size * manifold_dim * manifold_dim * 4 +
+                # Attention scores (one per head)
+                num_heads * batch_size * batch_size * 4
             )
+            memory_gb = memory_bytes / (1024 * 1024 * 1024)
+            if memory_gb > max_memory_gb:
+                return GeometricValidationResult(
+                    is_valid=False,
+                    message=(
+                        f"Validation would require {memory_gb:.2f}GB memory, "
+                        f"exceeding limit of {max_memory_gb}GB"
+                    ),
+                    data={
+                        "required_memory_gb": memory_gb,
+                        "max_memory_gb": max_memory_gb
+                    }
+                )
 
-        # Generate random points for validation
-        points = torch.randn(batch_size, manifold_dim, device=next(self.model_geometry.parameters()).device)
-        
-        # Validate each layer
-        layer_validations = {}
-        all_valid = True
-        messages = []
-        
-        for layer_name in self.layer_validators:
-            # Get layer validation
-            layer_validation = self.validate_layer_geometry(layer_name, points)
+            # Generate random points for validation
+            points = torch.randn(
+                batch_size, manifold_dim,
+                device=next(self.model_geometry.parameters()).device
+            )
             
-            # Check curvature bounds
-            curvature_valid = self._check_layer_curvature(layer_name, points)
+            # Validate each layer
+            layer_validations = {}
+            all_valid = True
+            messages = []
             
-            # Update validation data
-            if layer_validation.data is not None:
-                layer_validation.data.update({
-                    'complete': True,  # Mark validation as complete
-                    'curvature_valid': curvature_valid
-                })
-            else:
-                layer_validation.data = {
+            for layer_name in self.layer_validators:
+                # Get layer validation
+                layer_validation = self.validate_layer_geometry(layer_name, points)
+                
+                # Check curvature bounds
+                curvature_valid = self._check_layer_curvature(layer_name, points)
+                
+                # Update validation data
+                if layer_validation.data is not None:
+                    layer_validation.data.update({
+                        'complete': True,  # Mark validation as complete
+                        'curvature_valid': curvature_valid
+                    })
+                else:
+                    layer_validation.data = {
+                        'complete': True,
+                        'curvature_valid': curvature_valid
+                    }
+                
+                layer_validations[layer_name] = layer_validation
+                all_valid = all_valid and layer_validation.is_valid
+                if not layer_validation.is_valid:
+                    messages.append(f"Layer {layer_name}: {layer_validation.message}")
+                
+            # Validate attention heads
+            attention_validations = {}
+            for head_idx in range(len(self.model_geometry.attention_heads)):
+                query_points = torch.randn(batch_size, self.model_geometry.query_dim)
+                key_points = torch.randn(batch_size, self.model_geometry.key_dim)
+                attention_validations[f'head_{head_idx}'] = self.validate_attention_geometry(
+                    head_idx, query_points, key_points
+                )
+                
+            # Validate global properties
+            global_props = self._validate_global_properties(points)
+            
+            # Return combined validation result
+            return GeometricValidationResult(
+                is_valid=all_valid,
+                data={
+                    'layers': layer_validations,
+                    'attention': attention_validations,
+                    'global': global_props,
                     'complete': True,
-                    'curvature_valid': curvature_valid
-                }
-            
-            layer_validations[layer_name] = layer_validation
-            all_valid = all_valid and layer_validation.is_valid
-            if not layer_validation.is_valid:
-                messages.append(f"Layer {layer_name}: {layer_validation.message}")
-            
-        # Validate attention heads
-        attention_validations = {}
-        for head_idx in range(len(self.model_geometry.attention_heads)):
-            query_points = torch.randn(batch_size, self.model_geometry.query_dim)
-            key_points = torch.randn(batch_size, self.model_geometry.key_dim)
-            attention_validations[f'head_{head_idx}'] = self.validate_attention_geometry(
-                head_idx, query_points, key_points
+                    'manifold_dim': manifold_dim,
+                    'batch_size': batch_size
+                },
+                message=(
+                    "; ".join(messages) if messages else 
+                    "Model geometry validation successful"
+                )
             )
             
-        # Validate global properties
-        global_props = self._validate_global_properties(points)
-        
-        # Return combined validation result
-        return GeometricValidationResult(
-            is_valid=all_valid,
-            data={
-                'layers': layer_validations,
-                'attention': attention_validations,
-                'global': global_props,
-                'complete': True
-            },
-            message="; ".join(messages) if messages else "Model geometry validation successful"
-        )
+        except Exception as e:
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"Error validating model geometry: {str(e)}",
+                data={"error": str(e)}
+            )
 
     def _validate_attention_compatibility(
         self, head: nn.Module, query_points: torch.Tensor, key_points: torch.Tensor
@@ -414,8 +611,19 @@ class ModelGeometricValidator:
         # Check if connections are close enough
         return torch.allclose(c1, c2, rtol=self.tolerance)
 
-    def _check_geometric_preservation(self, points: torch.Tensor, base_metric: torch.Tensor, scores: torch.Tensor) -> bool:
-        """Check if attention scores preserve geometric structure."""
+    def _check_geometric_preservation(
+        self, points: torch.Tensor, base_metric: torch.Tensor, scores: torch.Tensor
+    ) -> bool:
+        """Check if attention scores preserve geometric structure.
+        
+        Args:
+            points: Points tensor
+            base_metric: Base metric tensor
+            scores: Attention scores tensor
+            
+        Returns:
+            True if geometric structure is preserved
+        """
         # Normalize points to unit norm for stable distance computation
         points = F.normalize(points, p=2, dim=-1)
         
@@ -454,15 +662,20 @@ class ModelGeometricValidator:
             
         return distance_preserved
 
-    def _compute_distribution_distance(self, p: torch.Tensor, q: torch.Tensor, metric: str = 'quantum') -> torch.Tensor:
+    def _compute_distribution_distance(
+        self, p: torch.Tensor, q: torch.Tensor, metric: str = 'quantum'
+    ) -> torch.Tensor:
         """Compute distance between probability distributions p and q.
         
         Args:
             p, q: Probability distributions (batch_size, n) that sum to 1 along dim=1
-            metric: Distance metric to use
+            metric: Distance metric to use ('quantum', 'fisher', or 'flow')
                    
         Returns:
             Distance tensor of shape (batch_size, batch_size)
+            
+        Raises:
+            ValueError: If unknown metric is specified
         """
         n = p.size(0)
         distances = torch.zeros(n, n, device=p.device)
@@ -547,7 +760,9 @@ class ModelGeometricValidator:
             
         return distances
         
-    def _compute_pairwise_distances(self, points: torch.Tensor, metric: torch.Tensor, normalize: bool = True) -> torch.Tensor:
+    def _compute_pairwise_distances(
+        self, points: torch.Tensor, metric: torch.Tensor, normalize: bool = True
+    ) -> torch.Tensor:
         """Compute pairwise distances between points using a given metric.
         
         Args:
@@ -627,31 +842,48 @@ class ModelGeometricValidator:
         Returns:
             Validation results for global properties
         """
-        # Check completeness
-        complete = True
-        for layer_name in self.layer_validators:
-            if not self._check_layer_curvature(layer_name, points):
-                complete = False
-                break
-                
-        # Check curvature bounds
-        curvature_valid = all(
-            self._check_layer_curvature(name, points)
-            for name in self.layer_validators
-        )
-        
-        # Check energy bounds
-        energy_valid = self._check_global_energy(points)
-        
-        return GeometricValidationResult(
-            is_valid=complete and curvature_valid and energy_valid,
-            data={
+        try:
+            # Check completeness
+            complete = True
+            for layer_name in self.layer_validators:
+                if not self._check_layer_curvature(layer_name, points):
+                    complete = False
+                    break
+                    
+            # Check curvature bounds
+            curvature_valid = all(
+                self._check_layer_curvature(name, points)
+                for name in self.layer_validators
+            )
+            
+            # Check energy bounds
+            energy_valid = self._check_global_energy(points)
+            
+            validation_data = {
                 'complete': complete,
                 'curvature_valid': curvature_valid,
-                'energy_valid': energy_valid
-            },
-            message="Global geometric properties validation"
-        )
+                'energy_valid': energy_valid,
+                'points': points
+            }
+            
+            message = (
+                "Global geometric properties validation "
+                f"{'passed' if complete and curvature_valid and energy_valid else 'failed'}: "
+                f"complete={complete}, curvature_valid={curvature_valid}, energy_valid={energy_valid}"
+            )
+            
+            return GeometricValidationResult(
+                is_valid=complete and curvature_valid and energy_valid,
+                message=message,
+                data=validation_data
+            )
+            
+        except Exception as e:
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"Error validating global properties: {str(e)}",
+                data={"error": str(e)}
+            )
 
     def _check_layer_curvature(
         self, layer_name: str, points: torch.Tensor
@@ -665,21 +897,38 @@ class ModelGeometricValidator:
         Returns:
             True if curvature bounds are satisfied
         """
-        # Compute sectional curvature
-        sectional_curvature = getattr(self.model_geometry, 'sectional_curvature')(points)
-        
-        lower_bound, upper_bound = self.curvature_bounds
-        return bool(sectional_curvature.ge(lower_bound).all() and sectional_curvature.le(upper_bound).all())
+        try:
+            # Compute sectional curvature
+            sectional_curvature = getattr(self.model_geometry, 'sectional_curvature')(points)
+            
+            lower_bound, upper_bound = self.curvature_bounds
+            return bool(sectional_curvature.ge(lower_bound).all() and sectional_curvature.le(upper_bound).all())
+            
+        except Exception as e:
+            print(f"Warning: Error checking curvature for layer {layer_name}: {str(e)}")
+            return False
 
     def _check_global_energy(self, points: torch.Tensor) -> bool:
-        """Check global energy bounds of model."""
-        total_energy = 0.0
-        for layer_name in self.layer_validators:
-            layer = self.model_geometry.layers[layer_name]
-            metric_tensor = getattr(self.model_geometry, 'metric')(points)
-            total_energy += float(metric_tensor.abs().mean().item())
+        """Check global energy bounds of model.
+        
+        Args:
+            points: Points tensor
             
-        return total_energy < 1e3  # Arbitrary threshold for demonstration
+        Returns:
+            True if energy bounds are satisfied
+        """
+        try:
+            total_energy = 0.0
+            for layer_name in self.layer_validators:
+                layer = self.model_geometry.layers[layer_name]
+                metric_tensor = getattr(self.model_geometry, 'metric')(points)
+                total_energy += float(metric_tensor.abs().mean().item())
+                
+            return total_energy < 1e3  # Arbitrary threshold for demonstration
+            
+        except Exception as e:
+            print(f"Warning: Error checking global energy: {str(e)}")
+            return False
 
     def _compute_sectional_curvature(
         self, riemann: torch.Tensor, metric: torch.Tensor

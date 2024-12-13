@@ -209,11 +209,12 @@ class GeometricFlow(nn.Module):
                 for k in range(self.manifold_dim):
                     for l in range(self.manifold_dim):
                         # R^i_jkl component
-                        riemann[:, i, j, k, l] = torch.sum(
-                            christoffel[:, i, k, m] * christoffel[:, m, j, l], dim=1
-                        ) - torch.sum(
-                            christoffel[:, i, l, m] * christoffel[:, m, j, k], dim=1
-                        )
+                        # Sum over the contracted index m
+                        for m in range(self.manifold_dim):
+                            riemann[:, i, j, k, l] += (
+                                christoffel[:, i, k, m] * christoffel[:, m, j, l]
+                                - christoffel[:, i, l, m] * christoffel[:, m, j, k]
+                            )
 
         # Contract to Ricci tensor
         ricci = torch.einsum("bijkl->bjl", riemann)
@@ -320,7 +321,7 @@ class GeometricFlow(nn.Module):
         metrics = {
             "curvature": ricci.norm(dim=-1).mean().item(),
             "energy": energy.item(),
-            "entropy": F.softmax(x_manifold, dim=-1).entropy().mean().item(),
+            "entropy": (-F.softmax(x_manifold, dim=-1) * F.log_softmax(x_manifold, dim=-1)).sum(-1).mean().item(),
             "stability": stability,
         }
 
@@ -355,7 +356,8 @@ class GeometricFlow(nn.Module):
 
         # Ensure metric is symmetric and positive definite
         metric = 0.5 * (metric + metric.transpose(-2, -1))
-        metric = metric + torch.eye(self.hidden_dim, device=x.device) * self.eps
+        eps_tensor = torch.eye(self.hidden_dim, device=x.device) * 1e-6  # Define eps as a small constant
+        metric = metric + eps_tensor
 
         return metric
 

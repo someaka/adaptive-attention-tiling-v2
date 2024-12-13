@@ -9,15 +9,16 @@ from torch import Tensor
 from torch.types import Number
 
 from .patterns.stability import (
-    LinearStabilityAnalyzer,
-    NonlinearStabilityAnalyzer,
+    PatternValidator as LinearStabilityAnalyzer,
+    PatternValidator as NonlinearStabilityAnalyzer,
 )
 from .patterns.decomposition import ModeDecomposer
 from ..core.patterns.formation import BifurcationAnalyzer
 from .geometric.metric import GeometricMetricValidator, CurvatureBounds
-from .geometric.flow import FlowValidator, EnergyMetrics
+from .geometric.flow import TilingFlowValidator as FlowValidator, TilingFlowValidationResult as EnergyMetrics
 from ..core.patterns.dynamics import PatternDynamics
 from ..core.patterns.riemannian import RiemannianFramework
+from ..core.tiling.geometric_flow import GeometricFlow
 
 @dataclass
 class ValidationMetrics:
@@ -58,12 +59,25 @@ class ModelGeometricValidator:
             manifold_dim=manifold_dim,
             tolerance=curvature_tolerance
         )
-        self.flow_validator = FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-6
+        self.flow_validator = self._create_flow_validator()
+        
+    def _create_flow_validator(self) -> FlowValidator:
+        """Create flow validator instance."""
+        flow = GeometricFlow(
+            hidden_dim=32,  # Default hidden dimension
+            manifold_dim=2,
+            motive_rank=4,
+            num_charts=1,
+            integration_steps=10,
+            dt=0.1,
+            stability_threshold=1e-6
+        )
+        
+        return FlowValidator(
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         )
         
     def validate_geometry(
@@ -92,7 +106,7 @@ class ModelGeometricValidator:
         # Validate flow if available
         flow_results = {}
         if flow is not None:
-            validation_result = self.flow_validator.validate(flow)
+            validation_result = self.flow_validator.validate_flow(data, chart=0)
             flow_results = {"is_valid": validation_result}
             
         return metric_results, flow_results

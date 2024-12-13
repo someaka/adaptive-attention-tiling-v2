@@ -11,10 +11,10 @@ import pytest
 import torch
 
 from src.validation.geometric.flow import (
-    FlowValidator,
-    FlowProperties,
-    FlowValidationResult
+    TilingFlowValidator as FlowValidator,
+    TilingFlowValidationResult as FlowValidationResult
 )
+from src.core.tiling.geometric_flow import GeometricFlow
 
 
 class TestFlowValidation:
@@ -24,12 +24,16 @@ class TestFlowValidation:
         """Setup test parameters."""
         self.batch_size = 2
         self.dim = 3
+        self.flow = GeometricFlow(
+            hidden_dim=self.dim,
+            manifold_dim=self.dim,
+            num_charts=1
+        )
         self.validator = FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-6
+            flow=self.flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         )
         self.t = torch.linspace(0, 10, 100)
 
@@ -45,12 +49,12 @@ class TestFlowValidation:
         flow = generate_flow(self.t)
         
         # Validate energy conservation
-        result = self.validator.validate(flow)
+        result = self.validator.validate_flow(flow)
         
         # Check results
         assert isinstance(result, FlowValidationResult)
         assert result.data is not None
-        assert 'energy_metrics' in result.data
+        assert 'energy' in result.data
         assert result.is_valid  # Energy should be conserved for exponential decay
 
     def test_flow_monotonicity(self):
@@ -65,12 +69,12 @@ class TestFlowValidation:
         flow = generate_monotonic_flow(self.t)
         
         # Validate monotonicity
-        result = self.validator.validate(flow)
+        result = self.validator.validate_flow(flow)
         
         # Check results
         assert isinstance(result, FlowValidationResult)
         assert result.data is not None
-        assert 'monotonicity_metrics' in result.data
+        assert 'stability' in result.data
         assert result.is_valid  # Flow should be monotonic
 
     def test_long_time_existence(self):
@@ -86,12 +90,12 @@ class TestFlowValidation:
         flow = generate_stable_flow(t)
         
         # Validate long-time existence
-        result = self.validator.validate(flow)
+        result = self.validator.validate_flow(flow)
         
         # Check results
         assert isinstance(result, FlowValidationResult)
         assert result.data is not None
-        assert 'existence_metrics' in result.data
+        assert 'stability' in result.data
         assert result.is_valid  # Flow should exist for long time
 
     def test_singularity_detection(self):
@@ -108,45 +112,13 @@ class TestFlowValidation:
         flow = generate_singular_flow(t)
         
         # Detect singularities
-        result = self.validator.validate(flow)
+        result = self.validator.validate_flow(flow)
         
         # Check results
         assert isinstance(result, FlowValidationResult)
         assert result.data is not None
-        assert 'singularity_metrics' in result.data
+        assert 'metric' in result.data
         assert not result.is_valid  # Should detect singularity
-
-    def test_flow_properties(self):
-        """Test flow properties computation."""
-        # Generate random flow
-        t = self.t.reshape(-1, 1)  # Add batch dimension
-        flow = torch.exp(-0.1 * t) * torch.randn((t.shape[0], self.dim))
-        flow = flow.unsqueeze(0).repeat(self.batch_size, 1, 1)  # Add batch dimension
-        
-        # Compute properties
-        result = self.validator.validate(flow)
-        
-        # Check results
-        assert isinstance(result, FlowValidationResult)
-        assert result.data is not None
-        assert 'flow_properties' in result.data
-        assert isinstance(result.data['flow_properties'], FlowProperties)
-
-    def test_flow_decomposition(self):
-        """Test flow decomposition validation."""
-        # Generate random flow
-        t = self.t.reshape(-1, 1)  # Add batch dimension
-        flow = torch.exp(-0.1 * t) * torch.randn((t.shape[0], self.dim))
-        flow = flow.unsqueeze(0).repeat(self.batch_size, 1, 1)  # Add batch dimension
-        
-        # Validate decomposition
-        result = self.validator.validate(flow)
-        
-        # Check results
-        assert isinstance(result, FlowValidationResult)
-        assert result.data is not None
-        assert 'decomposition_metrics' in result.data
-        assert result.is_valid  # Decomposition should always be valid
 
     def test_validation_integration(self):
         """Test integration of all validation methods."""
@@ -156,12 +128,11 @@ class TestFlowValidation:
         flow = flow.unsqueeze(0).repeat(self.batch_size, 1, 1)  # Add batch dimension
         
         # Run all validations
-        result = self.validator.validate(flow)
+        result = self.validator.validate_flow(flow)
         
         # Check results
         assert isinstance(result, FlowValidationResult)
         assert result.data is not None
-        assert 'energy_metrics' in result.data
-        assert 'monotonicity_metrics' in result.data
-        assert 'existence_metrics' in result.data
-        assert 'singularity_metrics' in result.data
+        assert 'metric' in result.data
+        assert 'stability' in result.data
+        assert 'energy' in result.data

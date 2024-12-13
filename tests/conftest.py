@@ -16,10 +16,11 @@ import black
 import numpy as np
 import pytest
 import torch
-from src.validation.geometric.flow import FlowValidator
+from src.validation.geometric.flow import TilingFlowValidator as FlowValidator
 from src.validation.framework import PatternValidator
 from src.validation.quantum.state import QuantumStateValidator
 from src.validation.framework import ValidationFramework
+from src.core.tiling.geometric_flow import GeometricFlow
 
 # Configure logging
 root_logger = logging.getLogger()
@@ -490,14 +491,24 @@ def pattern_dynamics(pattern_system):
 
 # Validation fixtures
 @pytest.fixture(scope="session")
-def flow_validator():
+def flow_validator(setup_test_parameters):
     """Get flow validator for testing."""
+    # Create a mock geometric flow for testing
+    flow = GeometricFlow(
+        hidden_dim=32,  # Match hidden_dim fixture
+        manifold_dim=2,
+        motive_rank=4,
+        num_charts=1,
+        integration_steps=10,
+        dt=0.1,
+        stability_threshold=1e-6
+    )
+    
     return FlowValidator(
-        energy_threshold=1e-6,
-        monotonicity_threshold=1e-4,
-        singularity_threshold=1.0,
-        max_iterations=1000,
-        tolerance=1e-6
+        flow=flow,
+        stability_threshold=1e-6,
+        curvature_bounds=(-1.0, 1.0),
+        max_energy=1e3
     )
 
 @pytest.fixture(scope="session")
