@@ -172,7 +172,7 @@ class TestGeometricFlow:
         # Validate geometric invariants
         result = geometric_validator.validate_invariants(flow, points, evolved_metric)
         assert isinstance(result, FlowValidationResult)
-        assert result.passed
+        assert result.is_valid
 
     @pytest.mark.dependency(depends=["TestGeometricFlow::test_geometric_invariants"])
     def test_energy_conservation(self, flow, random_states, energy_validator):
@@ -225,7 +225,7 @@ class TestGeometricFlow:
         # Validate convergence
         result = convergence_validator.validate_convergence(flow, points, metric)
         assert isinstance(result, FlowValidationResult)
-        assert result.passed
+        assert result.is_valid
 
     def test_metric_conditioning(self, flow, points):
         """Test metric tensor conditioning."""

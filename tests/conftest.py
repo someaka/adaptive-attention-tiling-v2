@@ -17,38 +17,37 @@ import numpy as np
 import pytest
 import torch
 from src.validation.geometric.flow import FlowValidator
-from src.validation.framework import PatternValidator, QuantumStateValidator, ValidationFramework
+from src.validation.framework import PatternValidator
+from src.validation.quantum.state import QuantumStateValidator
+from src.validation.framework import ValidationFramework
 
 # Configure logging
 root_logger = logging.getLogger()
 root_logger.handlers = []  # Remove any existing handlers
 
-# Add tensor formatting for pytest output
-def tensor_repr(tensor: torch.Tensor, max_elements: int = 4) -> str:
-    """Create a shortened representation of a tensor."""
-    if not isinstance(tensor, torch.Tensor):
-        return str(tensor)
-    
-    shape_str = f"shape={tuple(tensor.shape)}"
+def tensor_repr(tensor: torch.Tensor) -> str:
+    """Format tensor representation."""
     if tensor.numel() == 0:
-        return f"tensor([], {shape_str})"
-    
-    # Get a flat view and limit elements
-    flat = tensor.detach().flatten()
-    if flat.numel() <= max_elements:
-        elements = flat.tolist()
-    else:
-        elements = flat[:max_elements//2].tolist() + ["..."] + flat[-max_elements//2:].tolist()
-    
-    return f"tensor({elements}, {shape_str})"
+        return "tensor([])"
+    return f"tensor(shape={list(tensor.shape)}, dtype={tensor.dtype})"
 
-# Override tensor representation globally for string conversion
 def _tensor_str(self: torch.Tensor) -> str:
+    """Format tensor string representation."""
     return tensor_repr(self)
 
-def _tensor_repr(self: torch.Tensor) -> str:
+def _tensor_repr(self: torch.Tensor, *, tensor_contents: Optional[Any] = None) -> str:
+    """Format tensor repr.
+    
+    Args:
+        self: The tensor to format
+        tensor_contents: Optional contents to use for representation
+    
+    Returns:
+        Formatted string representation
+    """
     return tensor_repr(self)
 
+# Patch tensor representations
 torch.Tensor.__str__ = _tensor_str
 torch.Tensor.__repr__ = _tensor_repr
 
@@ -63,16 +62,11 @@ class TensorReprPlugin:
         if report.longrepr:
             # Convert tensor representations in the output
             report.longrepr = str(report.longrepr).replace(
-                str(torch.Tensor), tensor_repr(torch.Tensor)
+                str(torch.Tensor([])), tensor_repr(torch.Tensor([]))
             )
 
 def pytest_configure(config: Any) -> None:
-    """Configure pytest.
-
-    Args:
-        config: Pytest config object
-    """
-    # Register the tensor formatting plugin
+    """Configure pytest."""
     config.pluginmanager.register(TensorReprPlugin())
 
     # Register markers
@@ -218,13 +212,9 @@ def _run_black_format(file_path: Path, content: str) -> str:
     try:
         formatted = black.format_str(content, mode=mode)
         return formatted  # File formatted successfully
-    except (black.InvalidInput, ValueError) as e:
+    except (ValueError, Exception) as e:
         pytest.fail(f"Black formatting failed for {file_path}: {e}")
-    except Exception as e:
-        # Handle any other exceptions without using private APIs
-        if "NothingChanged" in str(e.__class__.__name__):
-            return content  # File already formatted correctly
-        pytest.fail(f"Black formatting failed for {file_path}: {e}")
+    return content  # Return original content if formatting fails
 
 
 def _run_ruff_commands(ruff_path: Path, file_path: Path) -> None:

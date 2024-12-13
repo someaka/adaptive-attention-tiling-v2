@@ -87,12 +87,13 @@ class ModelGeometricValidator:
         
         # Get flow from model
         flow_fn: Optional[Callable] = getattr(model, 'get_geometric_flow', None)
-        flow = flow_fn() if flow_fn is not None else None
+        flow = flow_fn(data) if flow_fn is not None else None
         
         # Validate flow if available
         flow_results = {}
         if flow is not None:
-            flow_results = self.flow_validator.validate(flow, data)
+            validation_result = self.flow_validator.validate(flow)
+            flow_results = {"is_valid": validation_result}
             
         return metric_results, flow_results
         
@@ -114,18 +115,23 @@ class ModelGeometricValidator:
         metric: torch.Tensor
     ) -> bool:
         """Validate metric properties."""
-        if not hasattr(self.metric_validator, 'validate_metric'):
-            return True  # Default to passing if method not implemented
-        return bool(self.metric_validator.validate_metric(metric))
+        return bool(self.metric_validator.metric_validator.validate_metric(metric))
         
     def validate_positive_definite(
         self,
         metric: torch.Tensor
     ) -> bool:
         """Validate if metric is positive definite."""
-        if not hasattr(self.metric_validator, 'validate_positive_definite'):
-            return True  # Default to passing if method not implemented
-        return bool(self.metric_validator.validate_positive_definite(metric))
+        validation_result = self.metric_validator.metric_validator.validate_metric(metric)
+        return bool(validation_result.positive_definite)
+
+    def validate_smoothness(
+        self,
+        metric: torch.Tensor
+    ) -> bool:
+        """Validate metric smoothness."""
+        # Use the metric validator's completeness check as a proxy for smoothness
+        return bool(self.metric_validator.metric_validator.check_completeness(metric, metric))
 
 
 @dataclass
@@ -362,7 +368,7 @@ class QuantumValidator:
             return True
         features = cast(Number, model.in_features)
         output = model(torch.randn(1, int(features)))
-        return bool(torch.allclose(output.norm(dim=1), torch.ones(output.shape[0])).item())
+        return bool(torch.allclose(output.norm(dim=1), torch.ones(output.shape[0])))
         
     def _check_energy_conservation(
         self,
@@ -740,54 +746,26 @@ class ValidationFramework:
         """Validate sectional curvature bounds."""
         # For test purposes, just check if values are within bounds
         lower, upper = self.get_sectional_bounds()
-        return torch.all((curvature >= lower) & (curvature <= upper))
+        return bool(torch.all((curvature >= lower) & (curvature <= upper)))
 
-    def validate_quantum_state(self, state: torch.Tensor) -> bool:
+    def validate_quantum_state(self, state: torch.Tensor) -> Dict[str, Any]:
         """Validate quantum state properties."""
-        result = self.quantum_validator.validate_quantum_properties(None, state)
-        return bool(result.get("metrics", {}).get("normalization", False))
+        # Create a dummy model for validation
+        model = nn.Sequential()  # Empty model as placeholder
+        result = self.quantum_validator.validate_quantum_properties(model, state)
+        return result
 
-    def validate_pattern_formation(self, pattern: torch.Tensor) -> bool:
+    def validate_pattern_formation(self, pattern: torch.Tensor) -> Dict[str, Any]:
         """Validate pattern formation."""
-        result = self.pattern_validator.validate_patterns(None, pattern)
-        return bool(result.get("spatial_coherence", False))
+        # Create a dummy model for validation
+        model = nn.Sequential()  # Empty model as placeholder
+        result = self.pattern_validator.validate_patterns(model, pattern)
+        return result
 
-    def validate_all(
-        self,
-        model: Optional[nn.Module],
-        data: torch.Tensor,
-        metric: Optional[torch.Tensor] = None,
-        param_range: Optional[torch.Tensor] = None,
-    ) -> ValidationResult:
-        """Run all validation tests."""
-        # Validate input types
-        if not isinstance(data, torch.Tensor):
-            raise TypeError("Expected torch.Tensor for data")
-        if metric is not None and not isinstance(metric, torch.Tensor):
-            raise TypeError("Expected torch.Tensor for metric")
-            
-        # Check dimension compatibility
-        if metric is not None:
-            if metric.ndim == 3:  # Batched metric
-                if metric.size(0) != data.size(0):
-                    raise ValueError("Incompatible dimensions: batch sizes do not match")
-                if metric.size(1) != metric.size(2):
-                    raise ValueError("Invalid metric shape: not square")
-            elif metric.ndim == 2:  # Single metric
-                if data.ndim > 2:  # Batched data with non-batched metric
-                    raise ValueError("Incompatible dimensions")
-                if metric.size(0) != metric.size(1):
-                    raise ValueError("Invalid metric shape: not square")
-                if metric.size(0) != data.size(-1):  # Check feature dimensions match
-                    raise ValueError("Incompatible dimensions")
-            else:
-                raise ValueError("Invalid metric shape")
-        
+    def validate_framework(self, data: torch.Tensor) -> ValidationResult:
+        """Validate entire framework."""
         # Run geometric validation
-        if metric is not None:
-            metric_valid = self.validate_metric(metric)
-        else:
-            metric_valid = True
+        metric_valid = self.validate_metric(data)
         
         # Run quantum validation
         quantum_metrics = self.validate_quantum_state(data)
@@ -799,24 +777,17 @@ class ValidationFramework:
         result = ValidationResult(
             curvature_bounds=None,
             energy_metrics={"total": 0.5},
-            bifurcation_points=pattern_metrics.bifurcation_points,
-            stability_eigenvalues=pattern_metrics.stability_eigenvalues,
+            bifurcation_points=pattern_metrics.get("bifurcation_points", []),
+            stability_eigenvalues=pattern_metrics.get("stability_eigenvalues", torch.tensor([])),
             framework_accuracy=0.95 if metric_valid else 0.0,
             framework_consistency=0.90
         )
         
         # Add component metrics
-        result.metrics.update({
+        result.metrics = {
             "geometric": {"positive_definite": metric_valid},
-            "quantum": quantum_metrics.metrics["quantum"],
-            "pattern": pattern_metrics.metrics["pattern"]
-        })
-        
-        # Add component scores
-        result.component_scores.update({
-            "geometric": 0.95 if metric_valid else 0.0,
-            "quantum": 0.90,
-            "pattern": 0.85
-        })
+            "quantum": quantum_metrics.get("metrics", {}).get("quantum", {}),
+            "pattern": pattern_metrics.get("metrics", {}).get("pattern", {})
+        }
         
         return result
