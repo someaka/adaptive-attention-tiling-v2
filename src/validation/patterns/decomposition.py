@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import torch
 import numpy as np
 from scipy.fft import fft2, ifft2
+from numpy.typing import NDArray
 
 
 @dataclass
@@ -66,10 +67,10 @@ class ModeDecomposer:
             Fourier mode tensor
         """
         # Convert to numpy for FFT
-        pattern_np = pattern.detach().cpu().numpy()
+        pattern_np: NDArray[np.float64] = pattern.detach().cpu().numpy()
         
-        # Compute 2D FFT
-        modes = fft2(pattern_np)
+        # Compute 2D FFT and ensure it's an NDArray
+        modes = np.asarray(fft2(pattern_np), dtype=np.complex128)
         
         # Convert back to torch
         return torch.tensor(

@@ -5,7 +5,7 @@ import torch
 
 from src.neural.flow.geometric_flow import GeometricFlow, RicciTensorNetwork
 from src.neural.flow.hamiltonian import HamiltonianSystem
-from src.validation.geometric.flow import EnergyValidator, ConvergenceValidator
+from src.validation.geometric.flow import FlowValidator, FlowValidationResult
 
 class TestTensorShapes:
     """Test tensor shapes in geometric flow."""
@@ -129,21 +129,27 @@ class TestTensorShapes:
         manifold_dim = flow.manifold_dim  # This is the position space dimension (2)
         
         # Test energy validation (uses full phase space)
-        energy_validator = EnergyValidator()
-        energy_result = energy_validator.validate_energy(flow, phase_points)  # Uses full phase space
+        validator = FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-6
+        )
+        result = validator.validate(phase_points)
         
-        assert isinstance(energy_result.initial_energy, torch.Tensor), \
-            "Initial energy should be a tensor"
-        assert isinstance(energy_result.final_energy, torch.Tensor), \
-            "Final energy should be a tensor"
-        assert energy_result.initial_energy.ndim == 1, \
-            f"Initial energy should be 1D, got {energy_result.initial_energy.ndim}D"
-        assert energy_result.final_energy.ndim == 1, \
-            f"Final energy should be 1D, got {energy_result.final_energy.ndim}D"
-        assert energy_result.initial_energy.shape[0] == batch_size, \
-            f"Initial energy batch size mismatch: expected {batch_size}, got {energy_result.initial_energy.shape[0]}"
-        assert energy_result.final_energy.shape[0] == batch_size, \
-            f"Final energy batch size mismatch: expected {batch_size}, got {energy_result.final_energy.shape[0]}"
+        assert isinstance(result, FlowValidationResult), \
+            "Validation result should be a FlowValidationResult"
+        assert result.data is not None, \
+            "Validation result should have data"
+        assert 'energy_metrics' in result.data, \
+            "Validation result should have energy metrics"
+        
+        energy_metrics = result.data['energy_metrics']
+        assert isinstance(energy_metrics.initial_energy, float), \
+            "Initial energy should be a float"
+        assert isinstance(energy_metrics.final_energy, float), \
+            "Final energy should be a float"
             
     def test_convergence_shapes(self, flow, phase_points):
         """Test shapes in convergence computations."""
@@ -155,12 +161,28 @@ class TestTensorShapes:
         position.requires_grad_(True)
         
         # Test convergence validation (uses position components only)
-        convergence_validator = ConvergenceValidator()
-        conv_result = convergence_validator.validate_convergence(flow, position)  # Use position components
+        validator = FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-6
+        )
+        result = validator.validate(position)
         
-        assert isinstance(conv_result.error, torch.Tensor), \
-            "Convergence error should be a tensor"
-        assert conv_result.error.ndim == 1, \
-            f"Convergence error should be 1D, got {conv_result.error.ndim}D"
-        assert conv_result.error.shape[0] == batch_size, \
-            f"Convergence error batch size mismatch: expected {batch_size}, got {conv_result.error.shape[0]}"
+        assert isinstance(result, FlowValidationResult), \
+            "Validation result should be a FlowValidationResult"
+        assert result.data is not None, \
+            "Validation result should have data"
+        assert 'convergence_metrics' in result.data, \
+            "Validation result should have convergence metrics"
+
+    def test_energy_validation_shapes(self):
+        """Test energy validation tensor shapes."""
+        validator = FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-6
+        )

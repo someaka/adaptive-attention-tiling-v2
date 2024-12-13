@@ -13,7 +13,7 @@ import torch
 from src.validation.geometric.flow import (
     FlowValidator,
     FlowProperties,
-    EnergyMetrics
+    FlowValidationResult
 )
 
 
@@ -24,7 +24,13 @@ class TestFlowValidation:
         """Setup test parameters."""
         self.batch_size = 2
         self.dim = 3
-        self.validator = FlowValidator()
+        self.validator = FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-6
+        )
         self.t = torch.linspace(0, 10, 100)
 
     def test_energy_conservation(self):
@@ -39,13 +45,12 @@ class TestFlowValidation:
         flow = generate_flow(self.t)
         
         # Validate energy conservation
-        result = self.validator.validate_energy_conservation(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(result.data, dict)
-        assert "energy_variation" in result.data
-        assert "initial_energy" in result.data
-        assert "final_energy" in result.data
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'energy_metrics' in result.data
         assert result.is_valid  # Energy should be conserved for exponential decay
 
     def test_flow_monotonicity(self):
@@ -60,11 +65,12 @@ class TestFlowValidation:
         flow = generate_monotonic_flow(self.t)
         
         # Validate monotonicity
-        result = self.validator.validate_monotonicity(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(result.data, dict)
-        assert "monotonicity_measure" in result.data
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'monotonicity_metrics' in result.data
         assert result.is_valid  # Flow should be monotonic
 
     def test_long_time_existence(self):
@@ -80,12 +86,12 @@ class TestFlowValidation:
         flow = generate_stable_flow(t)
         
         # Validate long-time existence
-        result = self.validator.validate_long_time_existence(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(result.data, dict)
-        assert "existence_time" in result.data
-        assert "max_value" in result.data
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'existence_metrics' in result.data
         assert result.is_valid  # Flow should exist for long time
 
     def test_singularity_detection(self):
@@ -102,13 +108,13 @@ class TestFlowValidation:
         flow = generate_singular_flow(t)
         
         # Detect singularities
-        result = self.validator.detect_singularities(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(result, dict)
-        assert "has_singularity" in result
-        assert "singularity_time" in result
-        assert result["has_singularity"]  # Should detect singularity
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'singularity_metrics' in result.data
+        assert not result.is_valid  # Should detect singularity
 
     def test_flow_properties(self):
         """Test flow properties computation."""
@@ -118,12 +124,13 @@ class TestFlowValidation:
         flow = flow.unsqueeze(0).repeat(self.batch_size, 1, 1)  # Add batch dimension
         
         # Compute properties
-        properties = self.validator.compute_flow_properties(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(properties, FlowProperties)
-        assert properties.derivative is not None
-        assert properties.second_derivative is not None
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'flow_properties' in result.data
+        assert isinstance(result.data['flow_properties'], FlowProperties)
 
     def test_flow_decomposition(self):
         """Test flow decomposition validation."""
@@ -133,11 +140,12 @@ class TestFlowValidation:
         flow = flow.unsqueeze(0).repeat(self.batch_size, 1, 1)  # Add batch dimension
         
         # Validate decomposition
-        result = self.validator.validate_flow_decomposition(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(result.data, dict)
-        assert "components" in result.data
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'decomposition_metrics' in result.data
         assert result.is_valid  # Decomposition should always be valid
 
     def test_validation_integration(self):
@@ -148,11 +156,12 @@ class TestFlowValidation:
         flow = flow.unsqueeze(0).repeat(self.batch_size, 1, 1)  # Add batch dimension
         
         # Run all validations
-        results = self.validator.validate_all(flow)
+        result = self.validator.validate(flow)
         
         # Check results
-        assert isinstance(results, dict)
-        assert "energy_conservation" in results
-        assert "monotonicity" in results
-        assert "long_time_existence" in results
-        assert "singularities" in results
+        assert isinstance(result, FlowValidationResult)
+        assert result.data is not None
+        assert 'energy_metrics' in result.data
+        assert 'monotonicity_metrics' in result.data
+        assert 'existence_metrics' in result.data
+        assert 'singularity_metrics' in result.data

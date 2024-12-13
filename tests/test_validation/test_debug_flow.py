@@ -15,9 +15,10 @@ from src.validation.patterns.stability import (
     StabilitySpectrum
 )
 from src.validation.geometric.flow import (
-    GeometricFlowValidator,
+    FlowValidator,
     FlowProperties,
-    EnergyMetrics
+    EnergyMetrics,
+    FlowValidationResult
 )
 from src.neural.attention.pattern.dynamics import PatternDynamics
 
@@ -74,7 +75,13 @@ class TestEnergyValidation:
     def setup_energy(self):
         """Set up energy validation components."""
         return {
-            'validator': GeometricFlowValidator(tolerance=1e-5),
+            'validator': FlowValidator(
+                energy_threshold=1e-6,
+                monotonicity_threshold=1e-4,
+                singularity_threshold=1.0,
+                max_iterations=1000,
+                tolerance=1e-5
+            ),
             'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                               TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
         }
@@ -111,7 +118,13 @@ class TestFlowProperties:
     def setup_flow(self):
         """Set up flow validation components."""
         return {
-            'validator': GeometricFlowValidator(tolerance=1e-5),
+            'validator': FlowValidator(
+                energy_threshold=1e-6,
+                monotonicity_threshold=1e-4,
+                singularity_threshold=1.0,
+                max_iterations=1000,
+                tolerance=1e-5
+            ),
             'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                               TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
         }
@@ -136,3 +149,31 @@ class TestFlowProperties:
         
         assert hasattr(properties, 'total_energy'), "Should have total energy"
         assert hasattr(properties, 'energy_variation'), "Should have energy variation"
+
+def setup_energy_validation():
+    """Set up energy validation components."""
+    return {
+        'validator': FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-5
+        ),
+        'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
+                          TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
+    }
+
+def setup_flow_validation():
+    """Set up flow validation components."""
+    return {
+        'validator': FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-5
+        ),
+        'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
+                          TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
+    }

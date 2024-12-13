@@ -22,7 +22,7 @@ from src.validation.patterns.formation import (
     SpatialValidator,
     TemporalValidator,
     BifurcationAnalyzer,
-    ModeDecomposer,
+    PatternModeAnalyzer,
     EmergenceValidation,
     SpatialValidation,
     TemporalValidation,
@@ -151,7 +151,7 @@ class TestPatternFormation:
             pattern[i] = torch.sin(x) + 0.5 * torch.sin(2 * x) + 0.1 * torch.randn_like(x)
 
         # Test mode decomposition
-        decomposer = ModeDecomposer()
+        decomposer = PatternModeAnalyzer()
         modes = decomposer.analyze_modes(pattern)
         assert isinstance(modes, dict)
         assert "modes" in modes

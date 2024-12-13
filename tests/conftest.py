@@ -6,6 +6,7 @@ import os
 import random
 import resource
 import signal
+import subprocess
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,13 +16,15 @@ import black
 import numpy as np
 import pytest
 import torch
+from src.validation.geometric.flow import FlowValidator
+from src.validation.framework import PatternValidator, QuantumStateValidator, ValidationFramework
 
 # Configure logging
 root_logger = logging.getLogger()
 root_logger.handlers = []  # Remove any existing handlers
 
 # Add tensor formatting for pytest output
-def tensor_repr(tensor, max_elements=4):
+def tensor_repr(tensor: torch.Tensor, max_elements: int = 4) -> str:
     """Create a shortened representation of a tensor."""
     if not isinstance(tensor, torch.Tensor):
         return str(tensor)
@@ -39,9 +42,15 @@ def tensor_repr(tensor, max_elements=4):
     
     return f"tensor({elements}, {shape_str})"
 
-# Override tensor representation globally
-torch.Tensor.__repr__ = tensor_repr
-torch.Tensor.__str__ = tensor_repr
+# Override tensor representation globally for string conversion
+def _tensor_str(self: torch.Tensor) -> str:
+    return tensor_repr(self)
+
+def _tensor_repr(self: torch.Tensor) -> str:
+    return tensor_repr(self)
+
+torch.Tensor.__str__ = _tensor_str
+torch.Tensor.__repr__ = _tensor_repr
 
 class TensorReprPlugin:
     """Pytest plugin to format tensor representations."""
@@ -57,35 +66,50 @@ class TensorReprPlugin:
                 str(torch.Tensor), tensor_repr(torch.Tensor)
             )
 
-def pytest_configure(config):
-    """Register the tensor formatting plugin."""
+def pytest_configure(config: Any) -> None:
+    """Configure pytest.
+
+    Args:
+        config: Pytest config object
+    """
+    # Register the tensor formatting plugin
     config.pluginmanager.register(TensorReprPlugin())
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    """Custom hook to format test output."""
-    outcome = yield
-    report = outcome.get_result()
+    # Register markers
+    config.addinivalue_line("markers", "level0: base level tests with no dependencies")
+    config.addinivalue_line("markers", "level1: tests depending on level0 components")
+    config.addinivalue_line("markers", "level2: tests depending on level1 components")
+    config.addinivalue_line("markers", "level3: tests depending on level2 components")
+    config.addinivalue_line("markers", "level4: high-level integration tests")
+    config.addinivalue_line("markers", "validation: marks validation framework tests")
     
-    if report.longrepr:
-        # Convert any tensor representations in the output
-        longrepr = str(report.longrepr)
-        if isinstance(longrepr, str):
-            # Replace any tensor debug output with shortened versions
-            import re
-            tensor_pattern = r'tensor\(\[\[.*?\]\](?:,\s*requires_grad=\w+)?\)'
-            
-            def shorten_tensor(match):
-                try:
-                    # Safely evaluate the tensor string to get a tensor object
-                    tensor_str = match.group(0)
-                    # Just return a shortened version
-                    return "tensor([...], shape=...)"
-                except:
-                    return tensor_str
-                    
-            longrepr = re.sub(tensor_pattern, shorten_tensor, longrepr, flags=re.DOTALL)
-            report.longrepr = longrepr
+    # Set up logging
+    log_level = logging.WARNING
+    
+    # Configure console output
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    
+    # Configure file output
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "test.log"
+    
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    
+    # Remove any existing handlers and add new ones
+    root_logger = logging.getLogger()
+    root_logger.handlers = []  # Remove any existing handlers
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -193,15 +217,14 @@ def _run_black_format(file_path: Path, content: str) -> str:
     mode = black.FileMode(line_length=100)
     try:
         formatted = black.format_str(content, mode=mode)
-    except black.NothingChanged:
-        return content  # File already formatted correctly
+        return formatted  # File formatted successfully
     except (black.InvalidInput, ValueError) as e:
         pytest.fail(f"Black formatting failed for {file_path}: {e}")
-
-    # Only write if we got here (successful formatting)
-    if formatted != content:
-        file_path.write_text(formatted)
-    return formatted
+    except Exception as e:
+        # Handle any other exceptions without using private APIs
+        if "NothingChanged" in str(e.__class__.__name__):
+            return content  # File already formatted correctly
+        pytest.fail(f"Black formatting failed for {file_path}: {e}")
 
 
 def _run_ruff_commands(ruff_path: Path, file_path: Path) -> None:
@@ -277,49 +300,6 @@ def pytest_collection_modifyitems(items):
         level = get_test_level(item)
         marker = getattr(pytest.mark, f'level{level}')
         item.add_marker(marker)
-
-
-def pytest_configure(config: Any) -> None:
-    """Configure pytest.
-
-    Args:
-        config: Pytest config object
-    """
-    # Register markers
-    config.addinivalue_line("markers", "level0: base level tests with no dependencies")
-    config.addinivalue_line("markers", "level1: tests depending on level0 components")
-    config.addinivalue_line("markers", "level2: tests depending on level1 components")
-    config.addinivalue_line("markers", "level3: tests depending on level2 components")
-    config.addinivalue_line("markers", "level4: high-level integration tests")
-    config.addinivalue_line("markers", "validation: marks validation framework tests")
-    
-    # Set up logging
-    log_level = logging.WARNING
-    
-    # Configure console output
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    ))
-    
-    # Configure file output
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "test.log"
-    
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    ))
-    
-    # Remove any existing handlers and add new ones
-    root_logger = logging.getLogger()
-    root_logger.handlers = []  # Remove any existing handlers
-    root_logger.setLevel(log_level)
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -420,7 +400,7 @@ def pytest_collect_file(file_path: Path, parent: Any) -> Optional[pytest.Item]:
 
 
 @pytest.fixture(autouse=True)
-def setup_logging(request: pytest.FixtureRequest) -> None:
+def setup_logging(request: pytest.FixtureRequest) -> logging.Logger:
     """Set up logging for each test."""
     # Get the test name
     test_name = request.node.name
@@ -520,50 +500,46 @@ def pattern_dynamics(pattern_system):
 
 # Validation fixtures
 @pytest.fixture(scope="session")
-def flow_stability_validator():
-    """Get flow stability validator for testing."""
-    from src.validation.geometric.flow import FlowStabilityValidator
-    return FlowStabilityValidator(tolerance=1e-6, stability_threshold=0.1)
-
-@pytest.fixture(scope="session")
-def energy_validator():
-    """Get energy validator for testing."""
-    from src.validation.geometric.flow import EnergyValidator
-    return EnergyValidator(tolerance=1e-6, drift_threshold=0.01)
-
-@pytest.fixture(scope="session")
-def convergence_validator():
-    """Get convergence validator for testing."""
-    from src.validation.geometric.flow import ConvergenceValidator
-    return ConvergenceValidator(tolerance=1e-6, max_iterations=1000)
-
-@pytest.fixture(scope="session")
-def geometric_flow_validator(
-    flow_stability_validator,
-    energy_validator,
-    convergence_validator
-):
-    """Get complete geometric flow validator for testing."""
-    from src.validation.geometric.flow import GeometricFlowValidator
-    return GeometricFlowValidator(
-        tolerance=1e-6,
-        stability_threshold=0.1,
-        drift_threshold=0.01,
-        max_iterations=1000
+def flow_validator():
+    """Get flow validator for testing."""
+    return FlowValidator(
+        energy_threshold=1e-6,
+        monotonicity_threshold=1e-4,
+        singularity_threshold=1.0,
+        max_iterations=1000,
+        tolerance=1e-6
     )
+
+@pytest.fixture(scope="session")
+def stability_validator(flow_validator):
+    """Get flow stability validator for testing."""
+    return flow_validator
+
+@pytest.fixture(scope="session")
+def energy_validator(flow_validator):
+    """Get energy validator for testing."""
+    return flow_validator
+
+@pytest.fixture(scope="session")
+def convergence_validator(flow_validator):
+    """Get convergence validator for testing."""
+    return flow_validator
+
+@pytest.fixture(scope="session")
+def geometric_flow_validator(flow_validator):
+    """Get complete geometric flow validator for testing."""
+    return flow_validator
 
 # Pattern validation fixtures
 @pytest.fixture(scope="session")
 def pattern_validator():
     """Get pattern validator for testing."""
-    from src.validation.patterns.validation import PatternValidator
     return PatternValidator()
 
 # Quantum validation fixtures
 @pytest.fixture(scope="session")
 def quantum_validator():
     """Get quantum validator for testing."""
-    from src.validation.quantum.validation import QuantumStateValidator
     return QuantumStateValidator()
 
 # Combined validation framework
@@ -574,7 +550,6 @@ def validation_framework(
     quantum_validator
 ):
     """Get complete validation framework for testing."""
-    from src.validation.framework import ValidationFramework
     return ValidationFramework(
         geometric_validator=geometric_flow_validator,
         pattern_validator=pattern_validator,

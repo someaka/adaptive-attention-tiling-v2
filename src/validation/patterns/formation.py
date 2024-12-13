@@ -6,23 +6,48 @@ This module validates pattern formation:
 - Temporal evolution
 """
 
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Union, cast, Mapping, TypeVar, Protocol
 from dataclasses import dataclass
 import torch
 import numpy as np
-from scipy import signal
+from scipy import signal, ndimage
 from scipy.fft import fft2, ifft2
-from scipy.ndimage import measurements
+from numpy.typing import NDArray, ArrayLike
+from torch import Tensor
 
 from src.neural.attention.pattern.dynamics import PatternDynamics
 from src.neural.flow.geometric_flow import GeometricFlow
 from src.neural.flow.hamiltonian import HamiltonianSystem
 
+T = TypeVar('T', bound=Union[float, bool, torch.Tensor])
+
+class MetricsDict(Protocol[T]):
+    def __getitem__(self, key: str) -> T: ...
+    def __setitem__(self, key: str, value: T) -> None: ...
+    def update(self, other: Mapping[str, T]) -> None: ...
+
+def _ensure_tensor(x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+    """Convert numpy array to tensor if needed."""
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x)
+    return x
+
+def _ensure_numpy(x: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
+    """Convert tensor to numpy array if needed."""
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x
+
+def _convert_to_float(x: Union[torch.Tensor, np.ndarray, float, int]) -> float:
+    """Convert tensor/array to float."""
+    if isinstance(x, (torch.Tensor, np.ndarray)):
+        return float(x.item()) if x.size == 1 else float(x)
+    return float(x)
 
 @dataclass
 class SpatialMetrics:
     """Metrics for spatial pattern properties."""
-
+    
     def __init__(
         self,
         threshold: float = 0.1,
@@ -40,7 +65,7 @@ class SpatialMetrics:
     def compute_spatial_statistics(
         self,
         data: torch.Tensor
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Union[float, Tensor]]:
         """Compute spatial statistics of pattern.
         
         Args:
@@ -50,25 +75,50 @@ class SpatialMetrics:
             Dictionary with spatial statistics
         """
         # Convert to numpy
-        data_np = data.detach().cpu().numpy()
+        data_np = _ensure_numpy(data)
         
         # Threshold data
         binary = data_np > self.threshold
         
-        # Label connected components
-        labels, num_features = measurements.label(binary)
+        # Create structure for labeling (cross-shaped for 2D)
+        structure = np.array([
+            [0, 1, 0],
+            [1, 1, 1],
+            [0, 1, 0]
+        ], dtype=np.int32)
         
-        # Compute feature properties
-        areas = measurements.sum(
-            binary,
-            labels,
-            index=range(1, num_features + 1)
+        # Ensure binary array is proper type
+        binary = binary.astype(np.int32)
+        
+        # Label connected components
+        labels_arr, num_features = cast(
+            Tuple[NDArray[np.int32], int],
+            ndimage.label(binary, structure=structure)
         )
         
-        centers = measurements.center_of_mass(
+        if num_features == 0:
+            return {
+                "num_features": 0,
+                "mean_area": 0.0,
+                "std_area": 0.0,
+                "total_area": 0.0,
+                "density": 0.0
+            }
+        
+        # Create index array for feature properties
+        feature_indices = np.arange(1, num_features + 1, dtype=np.int32)
+        
+        # Compute feature properties using binary array
+        areas = ndimage.sum(
+            binary.astype(np.float32),  # Ensure float type for sum
+            labels_arr,
+            index=feature_indices
+        )
+        
+        centers = ndimage.center_of_mass(
             data_np,
-            labels,
-            index=range(1, num_features + 1)
+            labels_arr,
+            index=feature_indices
         )
         
         # Filter small features
@@ -108,26 +158,14 @@ class SpatialMetrics:
         data: torch.Tensor,
         max_distance: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute spatial correlations.
-        
-        Args:
-            data: Input data tensor
-            max_distance: Maximum distance for correlations
-            
-        Returns:
-            Tuple of (distances, correlations)
-        """
-        # Convert to numpy
+        """Compute spatial correlations."""
         data_np = data.detach().cpu().numpy()
-        
-        # Get dimensions
         height, width = data_np.shape[-2:]
-        if max_distance is None:
-            max_distance = min(height, width) // 2
+        max_dist = max_distance if max_distance is not None else min(height, width) // 2
             
-        # Initialize arrays
-        distances = np.arange(max_distance)
-        correlations = np.zeros_like(distances, dtype=float)
+        # Initialize arrays with explicit types
+        distances: NDArray[np.int32] = np.arange(max_dist, dtype=np.int32)
+        correlations: NDArray[np.float32] = np.zeros_like(distances, dtype=np.float32)
         
         # Compute correlations at each distance
         for d in distances:
@@ -156,15 +194,8 @@ class SpatialMetrics:
     def analyze_spatial_structure(
         self,
         data: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """Analyze spatial structure of pattern.
-        
-        Args:
-            data: Input data tensor
-            
-        Returns:
-            Dictionary with analysis results
-        """
+    ) -> Dict[str, Union[torch.Tensor, float]]:
+        """Analyze spatial structure of pattern."""
         # Compute statistics
         stats = self.compute_spatial_statistics(data)
         
@@ -172,15 +203,14 @@ class SpatialMetrics:
         distances, correlations = self.compute_spatial_correlations(data)
         
         # Find characteristic length
+        char_length = 0.0
         if len(correlations) > 1:
             # Find first minimum in correlations
-            mins = signal.find_peaks(-correlations)[0]
+            mins = signal.find_peaks(-correlations.cpu().numpy())[0]
             if len(mins) > 0:
-                char_length = float(distances[mins[0]])
+                char_length = float(distances[mins[0]].item())
             else:
-                char_length = float(distances[-1])
-        else:
-            char_length = 0.0
+                char_length = float(distances[-1].item())
             
         return {
             **stats,
@@ -199,12 +229,7 @@ class TemporalMetrics:
         window_size: int = 10,
         overlap: int = 5
     ):
-        """Initialize temporal metrics.
-        
-        Args:
-            window_size: Size of sliding window
-            overlap: Overlap between windows
-        """
+        """Initialize temporal metrics."""
         self.window_size = window_size
         self.overlap = overlap
         
@@ -212,30 +237,22 @@ class TemporalMetrics:
         self,
         data: torch.Tensor,
         dt: float = 1.0
-    ) -> Dict[str, float]:
-        """Compute temporal statistics of pattern evolution.
-        
-        Args:
-            data: Input data tensor [time, ...]
-            dt: Time step size
-            
-        Returns:
-            Dictionary with temporal statistics
-        """
-        # Convert to numpy
+    ) -> Dict[str, Union[float, Tensor]]:
+        """Compute temporal statistics."""
+        # Convert to numpy for gradient calculation
         data_np = data.detach().cpu().numpy()
-        
-        # Compute time derivatives
         grad = np.gradient(data_np, dt, axis=0)
         
-        # Compute statistics
-        stats = {
-            "mean_rate": float(np.mean(np.abs(grad))),
-            "max_rate": float(np.max(np.abs(grad))),
-            "std_rate": float(np.std(grad)),
-            "mean_amplitude": float(np.mean(np.abs(data_np))),
-            "max_amplitude": float(np.max(np.abs(data_np))),
-            "std_amplitude": float(np.std(data_np))
+        # Convert back to tensor for operations
+        grad_tensor = torch.from_numpy(grad).to(data.device)
+        
+        stats: Dict[str, Union[float, Tensor]] = {
+            "mean_rate": float(torch.mean(torch.abs(grad_tensor)).item()),
+            "max_rate": float(torch.max(torch.abs(grad_tensor)).item()),
+            "std_rate": float(torch.std(grad_tensor).item()),
+            "mean_amplitude": float(torch.mean(torch.abs(data)).item()),
+            "max_amplitude": float(torch.max(torch.abs(data)).item()),
+            "std_amplitude": float(torch.std(data).item())
         }
         
         return stats
@@ -246,110 +263,81 @@ class TemporalMetrics:
         dt: float = 1.0,
         max_lag: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute temporal autocorrelations.
-        
-        Args:
-            data: Input data tensor [time, ...]
-            dt: Time step size
-            max_lag: Maximum time lag
-            
-        Returns:
-            Tuple of (lags, correlations)
-        """
-        # Convert to numpy
-        data_np = data.detach().cpu().numpy()
-        
-        # Get dimensions
-        time_steps = data_np.shape[0]
+        """Compute temporal autocorrelations."""
         if max_lag is None:
-            max_lag = time_steps // 4
+            max_lag = data.shape[0] // 4
             
-        # Initialize arrays
-        lags = np.arange(max_lag) * dt
-        correlations = np.zeros_like(lags)
+        # Initialize arrays with explicit types
+        lags: NDArray[np.int_] = np.arange(max_lag, dtype=np.int_)
+        correlations = torch.zeros(max_lag, device=data.device)
         
         # Compute correlations at each lag
-        for i, lag in enumerate(range(max_lag)):
-            if lag == 0:
-                correlations[i] = 1.0
-                continue
+        data_flat = data.reshape(data.shape[0], -1)
+        mean = torch.mean(data_flat, dim=1, keepdim=True)
+        std = torch.std(data_flat, dim=1, keepdim=True)
+        normalized = (data_flat - mean) / (std + 1e-8)
+        
+        for lag in range(max_lag):
+            if lag < data.shape[0]:
+                corr = torch.mean(
+                    normalized[:-lag if lag > 0 else None] * 
+                    normalized[lag:],
+                    dim=1
+                ).mean()
+                correlations[lag] = corr
                 
-            # Create shifted arrays
-            x1 = data_np[:-lag].reshape(-1)
-            x2 = data_np[lag:].reshape(-1)
-            
-            # Compute correlation
-            correlations[i] = np.corrcoef(x1, x2)[0, 1]
-            
-        return (
-            torch.tensor(lags, device=data.device),
-            torch.tensor(correlations, device=data.device)
-        )
+        return torch.tensor(lags, device=data.device), correlations
         
     def analyze_temporal_structure(
         self,
         data: torch.Tensor,
         dt: float = 1.0
-    ) -> Dict[str, torch.Tensor]:
-        """Analyze temporal structure of pattern evolution.
-        
-        Args:
-            data: Input data tensor [time, ...]
-            dt: Time step size
-            
-        Returns:
-            Dictionary with analysis results
-        """
+    ) -> Dict[str, Union[float, Tensor, bool]]:
+        """Analyze temporal structure of pattern."""
         # Compute statistics
-        stats = self.compute_temporal_statistics(data, dt)
+        stats = self.compute_temporal_statistics(data)
         
         # Compute correlations
         lags, correlations = self.compute_temporal_correlations(data, dt)
         
         # Find characteristic time
+        char_time = 0.0
         if len(correlations) > 1:
-            # Find first minimum or zero crossing
-            mins = signal.find_peaks(-correlations)[0]
-            zeros = np.where(np.diff(np.signbit(correlations)))[0]
-            
+            # Find first minimum in correlations
+            corr_np = correlations.cpu().numpy()
+            mins = signal.find_peaks(-corr_np)[0]
             if len(mins) > 0:
-                char_time = float(lags[mins[0]])
-            elif len(zeros) > 0:
-                char_time = float(lags[zeros[0]])
+                char_time = float(lags[mins[0]].item()) * dt
             else:
-                char_time = float(lags[-1])
-        else:
-            char_time = 0.0
+                char_time = float(lags[-1].item()) * dt
+                
+        # Detect oscillations
+        is_oscillatory = False
+        if len(correlations) > 1:
+            # Look for sign changes in derivative
+            corr_grad = torch.gradient(correlations)[0]
+            sign_changes = torch.where(corr_grad[:-1] * corr_grad[1:] < 0)[0]
+            is_oscillatory = len(sign_changes) > 1
             
-        # Compute power spectrum
-        freqs = np.fft.fftfreq(len(data), dt)
-        power = np.abs(np.fft.fft(data.mean(axis=tuple(range(1, data.ndim))).cpu().numpy()))**2
-        
         return {
             **stats,
-            "lags": lags,
+            "lags": lags * dt,
             "correlations": correlations,
             "characteristic_time": char_time,
-            "frequencies": torch.tensor(freqs[1:len(freqs)//2], device=data.device),
-            "power_spectrum": torch.tensor(power[1:len(freqs)//2], device=data.device)
+            "is_oscillatory": bool(is_oscillatory)
         }
 
 
 @dataclass
-class ModeDecomposer:
-    """Decompose patterns into spatial modes."""
-
+class PatternModeAnalyzer:
+    """Analyze patterns into spatial modes."""
+    
     def __init__(
         self,
         num_modes: int = 10,
         threshold: float = 0.1
     ):
-        """Initialize mode decomposer.
-        
-        Args:
-            num_modes: Number of modes to extract
-            threshold: Threshold for mode significance
-        """
+        """Initialize mode analyzer."""
         self.num_modes = num_modes
         self.threshold = threshold
         
@@ -357,16 +345,12 @@ class ModeDecomposer:
         self,
         data: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute spatial modes using FFT.
+        """Compute spatial modes using FFT."""
+        # Convert to numpy for FFT
+        data_np: NDArray[np.float64] = data.detach().cpu().numpy()
         
-        Args:
-            data: Input data tensor
-            
-        Returns:
-            Tuple of (modes, amplitudes)
-        """
         # Compute 2D FFT
-        fft_data = fft2(data.detach().cpu().numpy())
+        fft_data = np.asarray(fft2(data_np), dtype=np.complex128)
         
         # Get magnitudes
         magnitudes = np.abs(fft_data)
@@ -396,7 +380,7 @@ class ModeDecomposer:
             mode[peak] = fft_data[peak]
             
             # Convert back to spatial domain
-            spatial_mode = ifft2(mode).real
+            spatial_mode = np.asarray(ifft2(mode), dtype=np.complex128).real
             
             # Compute amplitude
             amplitude = np.abs(fft_data[peak])
@@ -406,16 +390,16 @@ class ModeDecomposer:
                 amplitudes.append(amplitude)
                 
         # Convert to tensors
-        modes = torch.tensor(
+        modes_tensor = torch.tensor(
             np.stack(modes),
             device=data.device
         )
-        amplitudes = torch.tensor(
+        amplitudes_tensor = torch.tensor(
             amplitudes,
             device=data.device
         )
         
-        return modes, amplitudes
+        return modes_tensor, amplitudes_tensor
         
     def reconstruct_pattern(
         self,
@@ -516,15 +500,7 @@ class EmergenceMetrics:
         data: torch.Tensor,
         time_axis: int = -1
     ) -> bool:
-        """Detect if pattern has emerged in data.
-        
-        Args:
-            data: Input data tensor
-            time_axis: Axis representing time dimension
-            
-        Returns:
-            True if pattern detected
-        """
+        """Detect if pattern has emerged in data."""
         # Compute temporal average
         mean = torch.mean(data, dim=time_axis, keepdim=True)
         
@@ -532,7 +508,7 @@ class EmergenceMetrics:
         var = torch.var(data, dim=time_axis, keepdim=True)
         
         # Check if variance exceeds threshold
-        return torch.any(var > self.threshold * mean)
+        return bool(torch.any(var > self.threshold * mean).item())
         
     def find_peaks(
         self,
@@ -597,16 +573,8 @@ class EmergenceMetrics:
         self,
         data: torch.Tensor,
         time_points: torch.Tensor
-    ) -> Dict[str, bool]:
-        """Validate pattern emergence.
-        
-        Args:
-            data: Input data tensor
-            time_points: Time points corresponding to data
-            
-        Returns:
-            Dictionary with validation results
-        """
+    ) -> Dict[str, Union[bool, Optional[float]]]:
+        """Validate pattern emergence."""
         # Check for pattern presence
         has_pattern = self.detect_pattern(data)
         
@@ -757,8 +725,8 @@ class EmergenceValidator:
         """Compute temporal stability of pattern."""
         # Use normalized variance of final states as stability measure
         final_states = trajectory[-10:]  # Look at last 10 states
-        variance = torch.var(final_states)
-        max_val = torch.max(torch.abs(final_states))
+        variance = float(torch.var(final_states).item())
+        max_val = float(torch.max(torch.abs(final_states)).item())
         if max_val > 0:
             stability = 1.0 - min(1.0, variance / max_val)
         else:
@@ -873,21 +841,21 @@ class SpatialValidator:
         shifted = torch.roll(pattern, shifts=1, dims=0)
         x = torch.stack([pattern.reshape(-1), shifted.reshape(-1)])
         correlation = torch.corrcoef(x)[0, 1]
-        return correlation
+        return float(correlation.item())
 
     def _check_rotation(self, pattern: torch.Tensor) -> float:
         """Check rotational symmetry."""
         rotated = torch.rot90(pattern, k=1)
         x = torch.stack([pattern.reshape(-1), rotated.reshape(-1)])
         correlation = torch.corrcoef(x)[0, 1]
-        return correlation
+        return float(correlation.item())
 
     def _check_reflection(self, pattern: torch.Tensor) -> float:
         """Check reflection symmetry."""
         reflected = torch.flip(pattern, dims=[0])
         x = torch.stack([pattern.reshape(-1), reflected.reshape(-1)])
         correlation = torch.corrcoef(x)[0, 1]
-        return correlation
+        return float(correlation.item())
 
     def _count_defects(self, pattern: torch.Tensor) -> int:
         """Count number of defects in pattern."""
@@ -1002,7 +970,7 @@ class TemporalValidator:
         phase_diff = phase[1:] - phase[:-1]
         coherence = torch.std(phase_diff)
 
-        return coherence < self.phase_threshold
+        return bool((coherence < self.phase_threshold).item())
 
     def _compute_drift(self, trajectory: torch.Tensor) -> torch.Tensor:
         """Compute pattern drift rate."""
@@ -1082,18 +1050,19 @@ class BifurcationAnalyzer:
             eigenvals, eigenvecs = self._compute_stability(dynamics, state)
 
             # Check for bifurcation
-            if prev_state is not None and self._detect_bifurcation(
-                state, prev_state, eigenvals, prev_eigenvals
-            ):
-                pattern_type = self._classify_pattern(state)
-                self.bifurcation_points.append(
-                    BifurcationPoint(
-                        parameter_value=float(param_value),
-                        pattern_type=pattern_type,
-                        eigenvalues=eigenvals,
-                        eigenvectors=eigenvecs,
+            if prev_state is not None and prev_eigenvals is not None:
+                if self._detect_bifurcation(
+                    state, prev_state, eigenvals, prev_eigenvals
+                ):
+                    pattern_type = self._classify_pattern(state)
+                    self.bifurcation_points.append(
+                        BifurcationPoint(
+                            parameter_value=float(param_value),
+                            pattern_type=pattern_type,
+                            eigenvalues=eigenvals,
+                            eigenvectors=eigenvecs,
+                        )
                     )
-                )
 
             prev_state = state
             prev_eigenvals = eigenvals
@@ -1161,17 +1130,7 @@ class BifurcationAnalyzer:
         eigenvals: torch.Tensor,
         prev_eigenvals: torch.Tensor
     ) -> bool:
-        """Detect if bifurcation occurred.
-        
-        Args:
-            state: Current pattern state
-            prev_state: Previous pattern state
-            eigenvals: Current eigenvalues
-            prev_eigenvals: Previous eigenvalues
-            
-        Returns:
-            True if bifurcation detected
-        """
+        """Detect if bifurcation occurred."""
         # Check for qualitative changes
         state_change = not torch.allclose(
             state, prev_state,
@@ -1183,7 +1142,7 @@ class BifurcationAnalyzer:
             torch.sign(eigenvals.real) != torch.sign(prev_eigenvals.real)
         )
         
-        return state_change or stability_change
+        return bool(state_change or stability_change.item())
 
     def _classify_pattern(self, state: torch.Tensor) -> str:
         """Classify pattern type.
@@ -1306,3 +1265,203 @@ class PatternFormationValidator:
                 "temporal": temporal
             }
         )
+
+def _detect_bifurcation(
+    eigenvals: torch.Tensor,
+    prev_eigenvals: torch.Tensor,
+    threshold: float = 0.1
+) -> bool:
+    """Detect bifurcation from eigenvalue changes."""
+    if prev_eigenvals is None:
+        return False
+        
+    # Convert to real values and compute changes
+    real_curr = eigenvals.real
+    real_prev = prev_eigenvals.real
+    
+    # Compute relative changes
+    changes = torch.abs(real_curr - real_prev) / (torch.abs(real_prev) + 1e-8)
+    
+    # Detect significant changes
+    return bool((changes > threshold).any().item())
+
+def _compute_pattern_metrics(
+    data: torch.Tensor,
+    threshold: float = 0.1
+) -> Dict[str, Union[float, bool]]:
+    """Compute pattern formation metrics."""
+    # Convert to numpy for processing
+    data_np = data.detach().cpu().numpy()
+    
+    # Compute basic statistics
+    mean_val = float(np.mean(data_np))
+    std_val = float(np.std(data_np))
+    max_val = float(np.max(data_np))
+    min_val = float(np.min(data_np))
+    
+    # Detect pattern formation
+    has_pattern = bool(std_val > threshold * (max_val - min_val))
+    
+    return {
+        "mean": mean_val,
+        "std": std_val,
+        "max": max_val,
+        "min": min_val,
+        "has_pattern": has_pattern
+    }
+
+def _convert_metrics_to_float(metrics: Dict[str, Any]) -> Dict[str, Union[float, bool]]:
+    """Convert metric values to float or bool."""
+    result = {}
+    for key, value in metrics.items():
+        if isinstance(value, (torch.Tensor, np.ndarray)):
+            if value.size == 1:  # Single value
+                result[key] = float(value.item())
+            else:
+                continue  # Skip non-scalar tensors
+        elif isinstance(value, (bool, float)):
+            result[key] = value
+        elif isinstance(value, (int, np.number)):
+            result[key] = float(value)
+    return result
+
+def _merge_metrics(
+    base: Dict[str, Any],
+    update: Dict[str, Any]
+) -> Dict[str, Union[float, bool, torch.Tensor]]:
+    """Merge metric dictionaries with type conversion."""
+    result = dict(base)  # Make a copy
+    
+    for key, value in update.items():
+        if isinstance(value, (torch.Tensor, np.ndarray)):
+            if value.size == 1:  # Single value
+                result[key] = float(value.item())
+            else:
+                result[key] = torch.as_tensor(value) if isinstance(value, np.ndarray) else value
+        elif isinstance(value, (bool, float)):
+            result[key] = value
+        elif isinstance(value, (int, np.number)):
+            result[key] = float(value)
+            
+    return result
+
+def analyze_pattern_formation(
+    data: torch.Tensor,
+    dt: float = 1.0,
+    threshold: float = 0.1
+) -> Dict[str, Union[float, bool, torch.Tensor]]:
+    """Analyze pattern formation in data."""
+    # Initialize metrics with type hints
+    metrics: Dict[str, Union[float, bool, torch.Tensor]] = {}
+    
+    # Compute basic metrics
+    basic_metrics = _compute_pattern_metrics(data, threshold)
+    metrics.update(basic_metrics)
+    
+    # Compute temporal evolution
+    if data.dim() > 3:  # Has time dimension
+        temporal = TemporalMetrics()
+        time_metrics = temporal.analyze_temporal_structure(data, dt)
+        for key, value in time_metrics.items():
+            if isinstance(value, (torch.Tensor, float, bool)):
+                metrics[key] = value
+    
+    # Compute spatial structure
+    if data.dim() > 1:  # Has spatial dimensions
+        spatial = SpatialMetrics(threshold=threshold)
+        space_metrics = spatial.analyze_spatial_structure(data)
+        for key, value in space_metrics.items():
+            if isinstance(value, (torch.Tensor, float, bool)):
+                metrics[key] = value
+    
+    return metrics
+
+def _detect_pattern_coherence(
+    data: torch.Tensor,
+    threshold: float = 0.1
+) -> bool:
+    """Detect pattern coherence."""
+    # Use torch operations for better type safety
+    data_flat = data.reshape(-1)
+    mean = torch.mean(data_flat)
+    std = torch.std(data_flat)
+    normalized = (data_flat - mean) / (std + 1e-8)
+    coherence = torch.max(torch.abs(normalized))
+    
+    return bool(coherence > threshold)
+
+def _compute_eigenvalue_metrics(
+    eigenvals: torch.Tensor,
+    prev_eigenvals: Optional[torch.Tensor] = None,
+    threshold: float = 0.1
+) -> Dict[str, Union[float, bool]]:
+    """Compute eigenvalue-based metrics."""
+    # Convert to numpy for processing
+    eig_np = eigenvals.detach().cpu().numpy()
+    
+    # Compute basic statistics using numpy for complex operations
+    max_real = float(np.max(np.real(eig_np)))
+    min_real = float(np.min(np.real(eig_np)))
+    max_imag = float(np.max(np.abs(np.imag(eig_np))))
+    
+    # Detect bifurcation if previous eigenvalues available
+    has_bifurcation = False
+    if prev_eigenvals is not None:
+        prev_np = prev_eigenvals.detach().cpu().numpy()
+        real_change = np.abs(np.real(eig_np) - np.real(prev_np))
+        has_bifurcation = bool(np.any(real_change > threshold))
+    
+    return {
+        "max_real": max_real,
+        "min_real": min_real,
+        "max_imag": max_imag,
+        "has_bifurcation": has_bifurcation
+    }
+
+def _compute_energy_metrics(
+    data: torch.Tensor,
+    dt: float = 1.0
+) -> Dict[str, float]:
+    """Compute energy-based metrics."""
+    # Convert to numpy for processing
+    data_np = data.detach().cpu().numpy()
+    
+    # Compute energy metrics
+    energy = np.sum(data_np**2, axis=tuple(range(1, data_np.ndim)))
+    grad = np.gradient(energy, dt)
+    
+    return {
+        "mean_energy": float(np.mean(energy)),
+        "max_energy": float(np.max(energy)),
+        "energy_rate": float(np.mean(np.abs(grad)))
+    }
+
+def analyze_pattern_stability(
+    data: torch.Tensor,
+    eigenvals: Optional[torch.Tensor] = None,
+    prev_eigenvals: Optional[torch.Tensor] = None,
+    dt: float = 1.0,
+    threshold: float = 0.1
+) -> Dict[str, Union[float, bool]]:
+    """Analyze pattern stability."""
+    # Initialize metrics with type hints
+    metrics: Dict[str, Union[float, bool]] = {}
+    
+    # Compute pattern coherence
+    metrics["is_coherent"] = _detect_pattern_coherence(data, threshold)
+    
+    # Compute energy metrics
+    energy_metrics = _compute_energy_metrics(data, dt)
+    for key, value in energy_metrics.items():
+        metrics[key] = float(value)
+    
+    # Compute eigenvalue metrics if available
+    if eigenvals is not None:
+        eig_metrics = _compute_eigenvalue_metrics(eigenvals, prev_eigenvals, threshold)
+        for key, value in eig_metrics.items():
+            if isinstance(value, bool):
+                metrics[key] = value
+            else:
+                metrics[key] = float(value)
+    
+    return metrics

@@ -27,11 +27,8 @@ from src.neural.flow.geometric_flow import (
     SingularityInfo as Singularity,
 )
 from src.validation.geometric.flow import (
-    FlowStabilityValidator,
-    EnergyValidator,
-    ConvergenceValidator,
-    GeometricFlowValidator,
-    ValidationResult,
+    FlowValidator,
+    FlowValidationResult,
 )
 
 # Mark test class for dependency management
@@ -70,19 +67,30 @@ class TestGeometricFlow:
         return flow.compute_metric(points)
 
     @pytest.fixture
-    def geometric_validator(self):
+    def validator():
+        """Create flow validator."""
+        return FlowValidator(
+            energy_threshold=1e-6,
+            monotonicity_threshold=1e-4,
+            singularity_threshold=1.0,
+            max_iterations=1000,
+            tolerance=1e-6
+        )
+
+    @pytest.fixture
+    def geometric_validator(self, validator):
         """Create geometric flow validator fixture."""
-        return GeometricFlowValidator()
+        return validator
 
     @pytest.fixture
-    def energy_validator(self):
+    def energy_validator(self, validator):
         """Create energy conservation validator fixture."""
-        return EnergyValidator()
+        return validator
 
     @pytest.fixture
-    def convergence_validator(self):
+    def convergence_validator(self, validator):
         """Create convergence validator fixture."""
-        return ConvergenceValidator()
+        return validator
 
     @pytest.mark.dependency()
     def test_metric_computation(self, flow, points):
@@ -163,7 +171,7 @@ class TestGeometricFlow:
         
         # Validate geometric invariants
         result = geometric_validator.validate_invariants(flow, points, evolved_metric)
-        assert isinstance(result, ValidationResult)
+        assert isinstance(result, FlowValidationResult)
         assert result.passed
 
     @pytest.mark.dependency(depends=["TestGeometricFlow::test_geometric_invariants"])
@@ -171,7 +179,6 @@ class TestGeometricFlow:
         """Test that energy is conserved during flow evolution."""
         # Create flow and validator
         flow = GeometricFlow(phase_dim=4)  # 2D manifold = 4D phase space
-        validator = EnergyValidator()
         
         # Set initial states with non-zero momentum
         initial_energy = flow.compute_energy(random_states)
@@ -217,7 +224,7 @@ class TestGeometricFlow:
             
         # Validate convergence
         result = convergence_validator.validate_convergence(flow, points, metric)
-        assert isinstance(result, ValidationResult)
+        assert isinstance(result, FlowValidationResult)
         assert result.passed
 
     def test_metric_conditioning(self, flow, points):

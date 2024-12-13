@@ -7,7 +7,7 @@ This module provides validation methods specific to neural model geometries:
 - Model-specific curvature bounds
 """
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch import Tensor
 import torch.nn.functional as F
 
+from ..base import ValidationResult as BaseValidationResult
 from .metric import GeometricMetricValidator
 from ...core.models.base import ModelGeometry
 from ...core.patterns.riemannian import RiemannianFramework
@@ -34,21 +35,40 @@ def tensor_repr(tensor: Optional[Tensor], max_elements: int = 8) -> str:
 
 
 @dataclass
-class ValidationResult:
+class GeometricValidationResult(BaseValidationResult[Dict[str, Any]]):
     """Result of a geometric validation."""
-    is_valid: bool
-    data: Dict[str, Union[torch.Tensor, bool, str, 'ValidationResult', Dict[str, Union[torch.Tensor, bool, str, 'ValidationResult']]]]
-    message: str = ""
     
-    def __post_init__(self):
-        """Validate the data structure."""
-        if not isinstance(self.data, dict):
-            raise ValueError("data must be a dictionary")
+    def merge(self, other: BaseValidationResult) -> 'GeometricValidationResult':
+        """Merge with another validation result."""
+        if not isinstance(other, BaseValidationResult):
+            raise ValueError("Can only merge with another ValidationResult")
             
-    def __repr__(self) -> str:
-        """Create a shortened string representation."""
-        data_repr = {k: tensor_repr(v) if isinstance(v, torch.Tensor) else str(v) for k, v in self.data.items()}
-        return f"ValidationResult(valid={self.is_valid}, data={data_repr}, message='{self.message}')"
+        merged_data = {**(self.data or {}), **(other.data or {})}
+        return GeometricValidationResult(
+            is_valid=self.is_valid and other.is_valid,
+            message=f"{self.message}; {other.message}",
+            data=merged_data
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "is_valid": self.is_valid,
+            "message": self.message,
+            "data": {
+                k: v.tolist() if isinstance(v, torch.Tensor) else v
+                for k, v in (self.data or {}).items()
+            }
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GeometricValidationResult':
+        """Create from dictionary."""
+        return cls(
+            is_valid=data["is_valid"],
+            message=data["message"],
+            data=data.get("data", {})
+        )
 
 
 class ModelGeometricValidator:
@@ -85,7 +105,7 @@ class ModelGeometricValidator:
 
     def validate_layer_geometry(
         self, layer_name: str, points: torch.Tensor
-    ) -> ValidationResult:
+    ) -> GeometricValidationResult:
         """Validate geometry of a specific layer.
         
         Args:
@@ -121,7 +141,7 @@ class ModelGeometricValidator:
         eigenvalues = torch.linalg.eigvalsh(metric)  # Using eigvalsh for symmetric matrices
         
         # Prepare validation result
-        return ValidationResult(
+        return GeometricValidationResult(
             is_valid=metric_valid and curvature_valid and energy_valid,
             data={
                 'metric_tensor': metric,
@@ -136,7 +156,7 @@ class ModelGeometricValidator:
 
     def validate_attention_geometry(
         self, head_idx: int, query_points: torch.Tensor, key_points: torch.Tensor
-    ) -> ValidationResult:
+    ) -> GeometricValidationResult:
         """Validate attention head geometry.
         
         Args:
@@ -165,7 +185,7 @@ class ModelGeometricValidator:
         # Validation is successful if spaces are compatible and geometry is preserved
         is_valid = compatible and preserves_geometry
         
-        return ValidationResult(
+        return GeometricValidationResult(
             is_valid=is_valid,
             data={
                 'query_metric': query_metric,
@@ -179,7 +199,7 @@ class ModelGeometricValidator:
 
     def validate_cross_layer_geometry(
         self, layer1: str, layer2: str, points: torch.Tensor
-    ) -> ValidationResult:
+    ) -> GeometricValidationResult:
         """Validate geometric compatibility between layers.
         
         Args:
@@ -204,9 +224,10 @@ class ModelGeometricValidator:
             layer1, layer2, points
         )
         
-        return ValidationResult(
+        return GeometricValidationResult(
             is_valid=result1.is_valid and result2.is_valid and 
                     metric_compatible and connection_compatible,
+            message=f"Cross-layer validation between {layer1} and {layer2}",
             data={
                 f"{layer1}_validation": result1,
                 f"{layer2}_validation": result2,
@@ -220,7 +241,7 @@ class ModelGeometricValidator:
         batch_size: int = 16,
         manifold_dim: Optional[int] = None,
         max_memory_gb: float = 1.0,
-    ) -> ValidationResult:
+    ) -> GeometricValidationResult:
         """Validate the geometric properties of the model.
         
         Args:
@@ -273,10 +294,16 @@ class ModelGeometricValidator:
             curvature_valid = self._check_layer_curvature(layer_name, points)
             
             # Update validation data
-            layer_validation.data.update({
-                'complete': True,  # Mark validation as complete
-                'curvature_valid': curvature_valid
-            })
+            if layer_validation.data is not None:
+                layer_validation.data.update({
+                    'complete': True,  # Mark validation as complete
+                    'curvature_valid': curvature_valid
+                })
+            else:
+                layer_validation.data = {
+                    'complete': True,
+                    'curvature_valid': curvature_valid
+                }
             
             layer_validations[layer_name] = layer_validation
             all_valid = all_valid and layer_validation.is_valid
@@ -296,7 +323,7 @@ class ModelGeometricValidator:
         global_props = self._validate_global_properties(points)
         
         # Return combined validation result
-        return ValidationResult(
+        return GeometricValidationResult(
             is_valid=all_valid,
             data={
                 'layers': layer_validations,
@@ -591,7 +618,7 @@ class ModelGeometricValidator:
 
     def _validate_global_properties(
         self, points: torch.Tensor
-    ) -> ValidationResult:
+    ) -> GeometricValidationResult:
         """Validate global geometric properties of model.
         
         Args:
@@ -616,7 +643,7 @@ class ModelGeometricValidator:
         # Check energy bounds
         energy_valid = self._check_global_energy(points)
         
-        return ValidationResult(
+        return GeometricValidationResult(
             is_valid=complete and curvature_valid and energy_valid,
             data={
                 'complete': complete,

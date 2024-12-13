@@ -5,7 +5,7 @@ from __future__ import annotations
 import gc
 import logging
 import time
-from typing import Callable, TypeVar
+from typing import Callable, TypeVar, Any, Protocol, Optional
 
 import numpy as np
 import torch
@@ -14,6 +14,40 @@ from torch import nn
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=torch.Tensor)
+
+
+def has_vulkan() -> bool:
+    """Check if Vulkan is available."""
+    return hasattr(torch, 'vulkan') and getattr(torch, 'vulkan').is_available()
+
+
+def vulkan_sync() -> None:
+    """Synchronize Vulkan device if available."""
+    if has_vulkan():
+        getattr(torch, 'vulkan').synchronize()
+
+
+def vulkan_empty_cache() -> None:
+    """Empty Vulkan cache if available."""
+    if has_vulkan():
+        getattr(torch, 'vulkan').empty_cache()
+
+
+def vulkan_memory_stats() -> tuple[int, int]:
+    """Get Vulkan memory stats if available.
+    
+    Returns:
+        tuple[int, int]: (allocated memory, reserved memory) in bytes
+    """
+    if has_vulkan():
+        try:
+            vulkan = getattr(torch, 'vulkan')
+            allocated = vulkan.memory_allocated()
+            reserved = vulkan.max_memory_allocated()
+            return allocated, reserved
+        except RuntimeError as e:
+            logger.warning("Failed to get Vulkan memory stats: %s", e)
+    return 0, 0
 
 
 def assert_manifold_properties(tensor: torch.Tensor) -> bool:
@@ -27,14 +61,15 @@ def assert_manifold_properties(tensor: torch.Tensor) -> bool:
         bool: True if properties are satisfied
     """
     # Check smoothness (finite values)
-    assert torch.all(torch.isfinite(tensor)), "Tensor contains non-finite values"
+    assert torch.all(torch.isfinite(tensor)).item(), "Tensor contains non-finite values"
     
     # Check differentiability (gradients can be computed)
     if tensor.requires_grad:
         try:
             loss = tensor.sum()
             loss.backward()
-            assert torch.all(torch.isfinite(tensor.grad)), "Non-finite gradients"
+            if tensor.grad is not None:
+                assert torch.all(torch.isfinite(tensor.grad)).item(), "Non-finite gradients"
         except Exception as e:
             raise AssertionError(f"Differentiability check failed: {e}")
     
@@ -44,7 +79,7 @@ def assert_manifold_properties(tensor: torch.Tensor) -> bool:
 def generate_random_tensor(
     shape: tuple[int, ...],
     device: str = "cpu",
-    dtype: torch.dtype | None = None,
+    dtype: Optional[torch.dtype] = None,
     *,  # Force requires_grad to be keyword-only
     requires_grad: bool = False,
 ) -> torch.Tensor:
@@ -69,62 +104,24 @@ def assert_tensor_equal(
         raise AssertionError(error_msg)
 
 
-def synchronize_device():
-    """Synchronize device operations."""
-    if hasattr(torch, "vulkan") and torch.vulkan.is_available():
-        try:
-            torch.vulkan.synchronize()
-        except RuntimeError as e:
-            logger.warning("Failed to synchronize device: %s", e)
-
-
-def empty_cache():
-    """Empty device memory cache."""
-    if hasattr(torch, "vulkan") and torch.vulkan.is_available():
-        try:
-            torch.vulkan.empty_cache()
-        except RuntimeError as e:
-            logger.warning("Failed to empty cache: %s", e)
-
-
-def get_memory_stats():
-    """Get current memory statistics.
-
-    Returns:
-        tuple: (allocated memory, reserved memory) in bytes
-    """
-    if hasattr(torch, "vulkan") and torch.vulkan.is_available():
-        try:
-            allocated = torch.vulkan.memory_allocated()
-            reserved = (
-                torch.vulkan.max_memory_allocated()
-            )  # Use max allocated as reserved for Vulkan
-        except RuntimeError as e:
-            logger.warning("Failed to get memory stats: %s", e)
-            return 0, 0
-        else:
-            return allocated, reserved
-    return 0, 0  # Return 0 for CPU-only mode
-
-
-def check_memory_usage(fn):
+def check_memory_usage(fn: Callable[[], Any]) -> tuple[int, int, Any]:
     """Check memory usage before and after function execution.
 
     Args:
         fn: Function to check memory usage for
 
     Returns:
-        tuple: (memory allocated, memory reserved) in bytes
+        tuple: (memory allocated, memory reserved, function result) in bytes
     """
-    empty_cache()
-    synchronize_device()
+    vulkan_empty_cache()
+    vulkan_sync()
 
-    start_allocated, start_reserved = get_memory_stats()
+    start_allocated, start_reserved = vulkan_memory_stats()
 
     result = fn()
 
-    synchronize_device()
-    end_allocated, end_reserved = get_memory_stats()
+    vulkan_sync()
+    end_allocated, end_reserved = vulkan_memory_stats()
 
     return (end_allocated - start_allocated, end_reserved - start_reserved, result)
 
@@ -159,10 +156,10 @@ def benchmark_forward_backward(
     for _ in range(num_iterations):
         # Forward pass
         if device == "vulkan":
-            synchronize_device()
+            vulkan_sync()
             start_time = time.perf_counter()
             out = model(x)
-            synchronize_device()
+            vulkan_sync()
             forward_times.append(time.perf_counter() - start_time)
         else:
             start_time = time.perf_counter()
@@ -172,10 +169,10 @@ def benchmark_forward_backward(
         # Backward pass
         loss = out.mean()
         if device == "vulkan":
-            synchronize_device()
+            vulkan_sync()
             start_time = time.perf_counter()
             loss.backward()  # type: ignore[no-untyped-call]
-            synchronize_device()
+            vulkan_sync()
             backward_times.append(time.perf_counter() - start_time)
         else:
             start_time = time.perf_counter()
@@ -199,21 +196,21 @@ def measure_memory_usage(func: Callable[[], torch.Tensor]) -> tuple[int, int]:
     """
     # Run garbage collection to get accurate memory measurements
     gc.collect()
-    empty_cache()
-    synchronize_device()  # Add synchronization before measurement
+    vulkan_empty_cache()
+    vulkan_sync()
 
     # Get initial memory stats
-    start_allocated, start_reserved = get_memory_stats()
+    start_allocated, start_reserved = vulkan_memory_stats()
 
     # Run the function
     func()
-    synchronize_device()  # Add synchronization after function execution
+    vulkan_sync()
 
     # Get final memory stats
-    end_allocated, end_reserved = get_memory_stats()
+    end_allocated, end_reserved = vulkan_memory_stats()
 
     # For Vulkan, ensure we capture the peak memory usage
-    if hasattr(torch, "vulkan") and torch.vulkan.is_available():
-        end_reserved = max(end_reserved, torch.vulkan.max_memory_allocated())
+    if has_vulkan():
+        end_reserved = max(end_reserved, getattr(torch, 'vulkan').max_memory_allocated())
 
     return (end_allocated - start_allocated, end_reserved - start_reserved)

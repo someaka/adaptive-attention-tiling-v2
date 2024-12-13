@@ -5,7 +5,160 @@ This module implements pattern formation dynamics and analysis tools.
 
 import torch
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple, Union
+
+class BifurcationAnalyzer:
+    """Analyzer for bifurcation points in pattern dynamics."""
+    
+    def __init__(
+        self,
+        threshold: float = 0.1,
+        window_size: int = 10
+    ):
+        """Initialize bifurcation analyzer.
+        
+        Args:
+            threshold: Threshold for detecting bifurcations
+            window_size: Window size for temporal analysis
+        """
+        self.threshold = threshold
+        self.window_size = window_size
+        
+    def detect_bifurcations(
+        self,
+        pattern: torch.Tensor,
+        parameter: torch.Tensor
+    ) -> List[float]:
+        """Detect bifurcation points in pattern evolution.
+        
+        Args:
+            pattern: Pattern evolution tensor [time, ...]
+            parameter: Control parameter values
+            
+        Returns:
+            List of bifurcation points
+        """
+        # Compute stability metrics along parameter range
+        stability_metrics = []
+        for i in range(len(parameter)):
+            metrics = self._compute_stability_metrics(pattern[i])
+            stability_metrics.append(metrics)
+            
+        # Detect significant changes in stability
+        bifurcations = []
+        for i in range(1, len(stability_metrics)):
+            if self._is_bifurcation(
+                stability_metrics[i-1],
+                stability_metrics[i]
+            ):
+                bifurcations.append(float(parameter[i].item()))
+                
+        return bifurcations
+        
+    def _compute_stability_metrics(
+        self,
+        pattern: torch.Tensor
+    ) -> Dict[str, float]:
+        """Compute stability metrics for pattern state."""
+        # Compute temporal derivatives
+        if pattern.dim() > 1:
+            grad = torch.gradient(pattern)[0]
+            mean_rate = torch.mean(torch.abs(grad)).item()
+            max_rate = torch.max(torch.abs(grad)).item()
+        else:
+            mean_rate = 0.0
+            max_rate = 0.0
+            
+        # Compute amplitude metrics
+        mean_amp = torch.mean(torch.abs(pattern)).item()
+        max_amp = torch.max(torch.abs(pattern)).item()
+        
+        return {
+            "mean_rate": mean_rate,
+            "max_rate": max_rate,
+            "mean_amplitude": mean_amp,
+            "max_amplitude": max_amp
+        }
+        
+    def _is_bifurcation(
+        self,
+        metrics1: Dict[str, float],
+        metrics2: Dict[str, float]
+    ) -> bool:
+        """Check if transition between states is a bifurcation."""
+        # Check for significant changes in metrics
+        for key in metrics1:
+            if abs(metrics2[key] - metrics1[key]) > self.threshold:
+                return True
+        return False
+        
+    def analyze_stability(
+        self,
+        pattern: torch.Tensor,
+        parameter_range: Tuple[float, float],
+        num_points: int = 100
+    ) -> Dict[str, Any]:
+        """Analyze pattern stability across parameter range.
+        
+        Args:
+            pattern: Initial pattern state
+            parameter_range: Range of parameter values
+            num_points: Number of points to sample
+            
+        Returns:
+            Dictionary with stability analysis results
+        """
+        # Generate parameter values
+        parameters = torch.linspace(
+            parameter_range[0],
+            parameter_range[1],
+            num_points
+        )
+        
+        # Evolve pattern across parameter range
+        evolution = []
+        for param in parameters:
+            state = self._evolve_pattern(pattern, param)
+            evolution.append(state)
+            
+        evolution = torch.stack(evolution)
+        
+        # Find bifurcation points
+        bifurcations = self.detect_bifurcations(evolution, parameters)
+        
+        # Compute stability metrics
+        stability = []
+        for state in evolution:
+            metrics = self._compute_stability_metrics(state)
+            stability.append(metrics)
+            
+        return {
+            "bifurcation_points": bifurcations,
+            "stability_metrics": stability,
+            "parameter_values": parameters,
+            "evolution": evolution
+        }
+        
+    def _evolve_pattern(
+        self,
+        pattern: torch.Tensor,
+        parameter: Union[float, torch.Tensor],
+        time_steps: int = 100
+    ) -> torch.Tensor:
+        """Evolve pattern for given parameter value.
+        
+        Args:
+            pattern: Initial pattern state
+            parameter: Evolution parameter (float or tensor)
+            time_steps: Number of time steps
+            
+        Returns:
+            Evolved pattern state
+        """
+        if isinstance(parameter, torch.Tensor):
+            parameter = parameter.item()
+        evolved = pattern + parameter * torch.randn_like(pattern)
+        return evolved
 
 class PatternFormation:
     """Class for pattern formation dynamics."""
@@ -105,8 +258,12 @@ class PatternFormation:
             pattern
         )
         
+        # Convert jacobian to proper tensor shape
+        if isinstance(jac, tuple):
+            jac = torch.stack(list(jac))
+        
         # Compute eigenvalues
-        eigenvals = torch.linalg.eigvals(jac.squeeze())
+        eigenvals = torch.linalg.eigvals(jac)
         
         # Compute stability metrics
         max_eigenval = torch.max(eigenvals.real)

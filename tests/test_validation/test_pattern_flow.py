@@ -14,7 +14,7 @@ import numpy as np
 import math
 from src.validation.patterns.formation import SpatialValidator
 from src.validation.patterns.stability import PatternStabilityValidator
-from src.validation.geometric.flow import GeometricFlowValidator
+from src.validation.geometric.flow import FlowValidator, FlowValidationResult
 from src.neural.attention.pattern.dynamics import PatternDynamics
 
 logger = logging.getLogger(__name__)
@@ -424,8 +424,12 @@ def pattern_validator(setup_test_parameters):
 
 @pytest.fixture
 def flow_validator(setup_test_parameters):
-    """Create geometric flow validator."""
-    return GeometricFlowValidator(
+    """Create flow validator."""
+    return FlowValidator(
+        energy_threshold=1e-6,
+        monotonicity_threshold=1e-4,
+        singularity_threshold=1.0,
+        max_iterations=1000,
         tolerance=setup_test_parameters['tolerance']
     )
 
