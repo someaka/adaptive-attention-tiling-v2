@@ -441,8 +441,11 @@ class UnifiedMetrics:
 
         # Pattern evolution metrics
         if "pattern_history" in data:
+            pattern_history = data["pattern_history"]
+            if not isinstance(pattern_history, list):
+                pattern_history = [pattern_history]  # Convert single tensor to list
             metrics["pattern_evolution"] = self.compute_pattern_evolution(
-                data["pattern_history"], context
+                pattern_history, context
             )
 
         return metrics

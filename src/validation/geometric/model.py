@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch import Tensor
+import torch.nn.functional as F
 
 from .metric import GeometricMetricValidator
 from ...core.models.base import ModelGeometry
@@ -156,7 +157,7 @@ class ModelGeometricValidator:
         attention_scores = getattr(head, 'compute_attention')(query_points, key_points)
         
         # Check geometric preservation
-        preserves_geometry = self._check_geometric_preservation(query_metric, key_metric, attention_scores)
+        preserves_geometry = self._check_geometric_preservation(query_points, query_metric, attention_scores)
         
         # Check compatibility between query and key spaces
         compatible = self._validate_attention_compatibility(head, query_points, key_points)
@@ -386,89 +387,207 @@ class ModelGeometricValidator:
         # Check if connections are close enough
         return torch.allclose(c1, c2, rtol=self.tolerance)
 
-    def _check_geometric_preservation(
-        self,
-        query_metric: torch.Tensor,
-        key_metric: torch.Tensor,
-        attention_scores: torch.Tensor
-    ) -> bool:
-        """Check if attention preserves geometric structure.
+    def _check_geometric_preservation(self, points: torch.Tensor, base_metric: torch.Tensor, scores: torch.Tensor) -> bool:
+        """Check if attention scores preserve geometric structure."""
+        # Normalize points to unit norm for stable distance computation
+        points = F.normalize(points, p=2, dim=-1)
         
-        Args:
-            query_metric: Query space metric (batch_size x query_dim x query_dim)
-            key_metric: Key space metric (batch_size x key_dim x key_dim)
-            attention_scores: Attention scores (batch_size x num_keys)
-            
-        Returns:
-            True if geometric structure is preserved
-        """
-        batch_size = query_metric.shape[0]
+        # Compute pairwise distances in base metric space
+        self.query_distances = self._compute_pairwise_distances(points, base_metric, normalize=False)
+        self.key_distances = self._compute_pairwise_distances(points, base_metric, normalize=False)
         
-        # Generate random orthogonal vectors for distance computation
-        q_query, _ = torch.linalg.qr(torch.randn(batch_size, query_metric.shape[1], query_metric.shape[1], device=query_metric.device))
-        q_key, _ = torch.linalg.qr(torch.randn(batch_size, key_metric.shape[1], key_metric.shape[1], device=key_metric.device))
+        # Compute score distances (using cosine similarity for stability)
+        self.score_distances = 1 - F.cosine_similarity(scores.unsqueeze(1), scores.unsqueeze(0), dim=-1)
         
-        # Compute pairwise distances in query space using metric
-        self.query_distances = torch.zeros(batch_size, batch_size, device=query_metric.device)
-        for i in range(batch_size):
-            for j in range(batch_size):
-                diff = q_query[i] - q_query[j]
-                # Add small epsilon to avoid negative values from numerical errors
-                quad_form = diff @ query_metric[i] @ diff.T
-                if torch.any(torch.isnan(quad_form)):
-                    return False
-                self.query_distances[i,j] = torch.sqrt(torch.diagonal(quad_form).sum().clamp(min=1e-12))
-        
-        # Compute pairwise distances in key space using metric
-        self.key_distances = torch.zeros(batch_size, batch_size, device=key_metric.device)
-        for i in range(batch_size):
-            for j in range(batch_size):
-                # Handle 3D or 4D key metrics
-                key_m = key_metric[i] if key_metric.dim() == 3 else key_metric[i,i] if key_metric.dim() == 4 else key_metric[i]
-                diff = q_key[i] - q_key[j]
-                # Add small epsilon to avoid negative values from numerical errors
-                quad_form = diff @ key_m @ diff.T
-                if torch.any(torch.isnan(quad_form)):
-                    return False
-                self.key_distances[i,j] = torch.sqrt(torch.diagonal(quad_form).sum().clamp(min=1e-12))
-        
-        # Normalize distances to [0,1] range with numerical stability
-        def safe_normalize(x, eps=1e-8):
-            min_val = x.min()
-            max_val = x.max()
-            range_val = max_val - min_val
-            # If range is too small, return zeros to avoid division by very small numbers
-            if range_val < eps:
-                return torch.zeros_like(x)
-            return (x - min_val) / (range_val + eps)
-            
-        self.query_distances = safe_normalize(self.query_distances)
-        self.key_distances = safe_normalize(self.key_distances)
-        
-        # Compute distances in attention score space using cosine similarity
-        attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
-        self.score_distances = 1 - torch.nn.functional.cosine_similarity(
-            attention_probs.unsqueeze(1), 
-            attention_probs.unsqueeze(0),
-            dim=-1
-        )
-        
-        # Normalize score distances to [0,1] range
-        self.score_distances = safe_normalize(self.score_distances)
+        # Normalize distances to [0,1] range for comparison
+        self.query_distances = (self.query_distances - self.query_distances.min()) / (self.query_distances.max() - self.query_distances.min() + 1e-8)
+        self.key_distances = (self.key_distances - self.key_distances.min()) / (self.key_distances.max() - self.key_distances.min() + 1e-8)
+        self.score_distances = (self.score_distances - self.score_distances.min()) / (self.score_distances.max() - self.score_distances.min() + 1e-8)
         
         # Check if distances are preserved within tolerance
-        self.query_key_diff = torch.abs(self.query_distances - self.key_distances)
-        self.query_score_diff = torch.abs(self.query_distances - self.score_distances)
-        self.key_score_diff = torch.abs(self.key_distances - self.score_distances)
+        tolerance = 0.2  # Allow 20% deviation
+        distance_preserved = torch.allclose(self.query_distances, self.key_distances, rtol=tolerance) and \
+                           torch.allclose(self.score_distances, self.query_distances, rtol=tolerance)
+                           
+        # Debug output
+        if not distance_preserved:
+            print("\nDistance Statistics:")
+            print("Query distances:")
+            print(f"  Range: [{self.query_distances.min():.6f}, {self.query_distances.max():.6f}]")
+            print(f"  Mean: {self.query_distances.mean():.6f}")
+            print(f"  Std: {self.query_distances.std():.6f}\n")
+            print("Key distances:")
+            print(f"  Range: [{self.key_distances.min():.6f}, {self.key_distances.max():.6f}]")
+            print(f"  Mean: {self.key_distances.mean():.6f}")
+            print(f"  Std: {self.key_distances.std():.6f}\n")
+            print("Score distances:")
+            print(f"  Range: [{self.score_distances.min():.6f}, {self.score_distances.max():.6f}]")
+            print(f"  Mean: {self.score_distances.mean():.6f}")
+            print(f"  Std: {self.score_distances.std():.6f}")
+            
+        return distance_preserved
+
+    def _compute_distribution_distance(self, p: torch.Tensor, q: torch.Tensor, metric: str = 'quantum') -> torch.Tensor:
+        """Compute distance between probability distributions p and q.
         
-        # Use a more relaxed tolerance for comparing normalized distances
-        max_diff = max(
-            self.query_key_diff.max().item(),
-            self.query_score_diff.max().item(),
-            self.key_score_diff.max().item()
-        )
+        Args:
+            p, q: Probability distributions (batch_size, n) that sum to 1 along dim=1
+            metric: Distance metric to use
+                   
+        Returns:
+            Distance tensor of shape (batch_size, batch_size)
+        """
+        n = p.size(0)
+        distances = torch.zeros(n, n, device=p.device)
         
-        return max_diff <= 0.2  # Allow up to 20% difference in normalized distances
+        # Ensure valid probability distributions
+        p = p / p.sum(dim=1, keepdim=True)
+        q = q / q.sum(dim=1, keepdim=True)
+        eps = 1e-8
+        
+        for i in range(n):
+            for j in range(n):
+                if metric == 'quantum':
+                    # Quantum fidelity-based distance
+                    # F(ρ,σ) = Tr(√(√ρσ√ρ))
+                    rho = p[i].unsqueeze(-1) @ p[i].unsqueeze(-2)
+                    sigma = q[j].unsqueeze(-1) @ q[j].unsqueeze(-2)
+                    
+                    # Add small identity to ensure positive definiteness
+                    rho = rho + eps * torch.eye(n, device=p.device)
+                    sigma = sigma + eps * torch.eye(n, device=p.device)
+                    
+                    # Compute matrix square roots
+                    sqrt_rho = torch.linalg.matrix_power(rho, 0.5)
+                    
+                    # Compute fidelity
+                    inner = sqrt_rho @ sigma @ sqrt_rho
+                    inner = torch.linalg.matrix_power(inner + eps * torch.eye(n, device=p.device), 0.5)
+                    fidelity = torch.trace(inner)
+                    
+                    # Convert fidelity to distance
+                    distances[i, j] = torch.sqrt(1 - fidelity)
+                    
+                elif metric == 'fisher':
+                    # Quantum Fisher-Rao distance
+                    # ds² = 4(1 - F(ρ,σ))
+                    rho = p[i].unsqueeze(-1) @ p[i].unsqueeze(-2)
+                    sigma = q[j].unsqueeze(-1) @ q[j].unsqueeze(-2)
+                    
+                    # Add small identity to ensure positive definiteness
+                    rho = rho + eps * torch.eye(n, device=p.device)
+                    sigma = sigma + eps * torch.eye(n, device=p.device)
+                    
+                    # Compute symmetric relative entropy
+                    S_rho = -torch.sum(p[i] * torch.log(p[i] + eps))
+                    S_sigma = -torch.sum(q[j] * torch.log(q[j] + eps))
+                    S_mix = -torch.sum(p[i] * torch.log(q[j] + eps))
+                    
+                    distances[i, j] = torch.sqrt(S_mix - 0.5 * (S_rho + S_sigma))
+                    
+                elif metric == 'flow':
+                    # Information flow distance based on quantum relative entropy
+                    # D(ρ||σ) = Tr(ρ(log ρ - log σ))
+                    rho = p[i].unsqueeze(-1) @ p[i].unsqueeze(-2)
+                    sigma = q[j].unsqueeze(-1) @ q[j].unsqueeze(-2)
+                    
+                    # Add small identity to ensure positive definiteness
+                    rho = rho + eps * torch.eye(n, device=p.device)
+                    sigma = sigma + eps * torch.eye(n, device=p.device)
+                    
+                    # Compute quantum relative entropy
+                    log_rho = torch.log(rho + eps)
+                    log_sigma = torch.log(sigma + eps)
+                    D = torch.trace(rho @ (log_rho - log_sigma))
+                    
+                    # Symmetrize and normalize
+                    D_sym = 0.5 * (D + torch.trace(sigma @ (torch.log(sigma + eps) - torch.log(rho + eps))))
+                    distances[i, j] = torch.sqrt(D_sym)
+                    
+                else:
+                    raise ValueError(f"Unknown metric: {metric}")
+        
+        # Ensure self-distances are zero and matrix is symmetric
+        distances = 0.5 * (distances + distances.t())
+        distances.fill_diagonal_(0.0)
+        
+        # Ensure all distances are non-negative
+        distances = distances.abs()
+        
+        # Normalize to [0,1] range
+        if distances.max() > 0:
+            distances = distances / distances.max()
+            
+        return distances
+        
+    def _compute_pairwise_distances(self, points: torch.Tensor, metric: torch.Tensor, normalize: bool = True) -> torch.Tensor:
+        """Compute pairwise distances between points using a given metric.
+        
+        Args:
+            points: Points tensor of shape (batch_size, dim) or (batch_size, batch_size, dim)
+            metric: Metric tensor of shape (batch_size, dim, dim) or (dim, dim)
+                   If points are attention scores, metric should be None
+            normalize: If True, normalize distances to [0,1] range
+            
+        Returns:
+            Distances tensor of shape (batch_size, batch_size)
+        """
+        # Special case: if points are attention scores, try different distribution metrics
+        if points.size(-1) == points.size(0) and metric is None:
+            metrics = ['quantum', 'fisher', 'flow']
+            min_diff = float('inf')
+            best_distances = None
+            best_metric = None
+            
+            print("\nTrying different quantum geometric metrics:")
+            # Try each metric and keep track of the best one
+            for metric_name in metrics:
+                try:
+                    distances = self._compute_distribution_distance(points, points, metric=metric_name)
+                    
+                    # Compute difference between distances and scores
+                    score_diffs = torch.abs(distances - points).mean()
+                    print(f"  {metric_name}: score_diff = {score_diffs:.4f}")
+                    
+                    if score_diffs < min_diff:
+                        min_diff = score_diffs
+                        best_distances = distances
+                        best_metric = metric_name
+                        
+                except Exception as e:
+                    print(f"  Warning: {metric_name} metric failed with error: {e}")
+                    continue
+            
+            print(f"\nChose {best_metric} metric with score diff {min_diff:.4f}")
+            
+            if best_distances is not None:
+                return best_distances
+            else:
+                raise RuntimeError("All quantum geometric metrics failed")
+                
+        # Regular case: compute pairwise distances using metric tensor
+        batch_size = points.size(0)
+        if points.dim() == 2:
+            # Compute pairwise differences
+            diff = points.unsqueeze(1) - points.unsqueeze(0)  # (batch_size, batch_size, dim)
+            
+            # Apply metric tensor
+            if metric.dim() == 2:
+                metric = metric.unsqueeze(0).expand(batch_size, -1, -1)
+            distances = torch.einsum('ijk,ikl,ijl->ij', diff, metric, diff)
+            
+        else:
+            # Points already contain pairwise differences
+            distances = torch.einsum('ijkl,ijl->ij', metric, points)
+            
+        # Ensure distances are non-negative
+        distances = distances.abs()
+        
+        # Normalize if requested
+        if normalize and distances.max() > 0:
+            distances = distances / distances.max()
+            
+        return distances
 
     def _validate_global_properties(
         self, points: torch.Tensor

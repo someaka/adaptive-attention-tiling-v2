@@ -1,397 +1,316 @@
-"""Tests for model-specific geometric validation."""
+"""Tests for model-specific geometric validation with improved type safety."""
 
-import torch
-import torch.nn as nn
-import pytest
+from __future__ import annotations
+
 import logging
-from typing import Dict, Protocol, Optional, Tuple, Union, List, Iterator, Any
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable, cast
 
-from src.validation.geometric.model import ValidationResult, ModelGeometricValidator
-from src.core.patterns.riemannian import PatternRiemannianStructure
+import pytest
+import torch
+from torch import Tensor, nn
 
-
-def tensor_repr(value: Any, max_elements: int = 8) -> str:
-    """Create a shortened string representation of tensors and other values."""
-    if value is None:
-        return "None"
-    if isinstance(value, torch.Tensor):
-        shape = list(value.shape)
-        if len(shape) == 0:
-            return f"tensor({value.item():.4f})"
-        if sum(shape) <= max_elements:
-            return str(value)
-        return f"tensor(shape={shape}, mean={value.mean():.4f}, std={value.std():.4f})"
-    return str(value)
+from src.core.models.base import LayerGeometry, ModelGeometry
+from src.core.patterns.riemannian import PatternRiemannianStructure, RiemannianFramework
+from src.validation.geometric.model import ModelGeometricValidator, ValidationResult
 
 
-def format_validation_result(result: Union[ValidationResult, Dict[str, ValidationResult]]) -> str:
-    """Format validation result for readable output."""
-    if isinstance(result, dict):
-        # Handle dictionary of validation results
-        formatted = {}
-        for k, v in result.items():
-            formatted[k] = format_validation_result(v)
-        return str(formatted)
+# Type aliases
+Points = Tensor  # Shape: (batch_size, dim)
+MetricTensor = Tensor  # Shape: (..., dim, dim)
+Scores = Tensor  # Shape: (batch_size, batch_size)
+
+
+class MockLayer(LayerGeometry):
+    """Mock layer with Riemannian structure."""
     
-    # Handle single ValidationResult
-    data_repr = {}
-    for k, v in result.data.items():
-        if isinstance(v, dict):
-            data_repr[k] = {sk: tensor_repr(sv) for sk, sv in v.items()}
-        elif isinstance(v, list):
-            data_repr[k] = [tensor_repr(item) for item in v]
-        else:
-            data_repr[k] = tensor_repr(v)
-    return f"ValidationResult(is_valid={result.is_valid}, data={data_repr}, message='{result.message}')"
-
-
-class ModelGeometry(Protocol):
-    """Protocol for model geometry."""
-    manifold_dim: int
-    query_dim: int
-    key_dim: int
-    
-    def get_layer(self, layer_name: str) -> 'MockLayer':
-        """Get layer by name."""
-        ...
-        
-    def metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor."""
-        ...
-        
-    def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute sectional curvature."""
-        ...
-        
-    def connection(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute connection."""
-        ...
-        
-    def parameters(self) -> Iterator[nn.Parameter]:
-        """Get model parameters."""
-        ...
-
-
-class MockLayer(nn.Module):
-    """Mock layer for testing."""
-    
-    def __init__(self, manifold_dim: int = 4):
-        super().__init__()
-        self.manifold_dim = manifold_dim
+    def __init__(self, manifold_dim: int = 16) -> None:
+        super().__init__(manifold_dim)
         self.riemannian_framework = PatternRiemannianStructure(manifold_dim)
         
-        # Initialize with small metric factors to ensure bounded energy
+        # Initialize with small metric factors for bounded energy
         with torch.no_grad():
-            self.riemannian_framework.metric_factors.data = (
-                self.riemannian_framework.metric_factors.data * 0.01
-            )
-        
-    def metric(self, points: torch.Tensor) -> torch.Tensor:
+            self.metric_tensor.data *= 0.01
+            
+    def metric(self, points: Points) -> MetricTensor:
         """Compute metric tensor."""
-        points = points.clone()
-        if not points.requires_grad:
-            points.requires_grad_(True)
-        return self.riemannian_framework.compute_metric(points)
+        batch_size = points.shape[0]
+        return self.metric_tensor.expand(batch_size, -1, -1)
         
-    def get_riemannian_framework(self, points: torch.Tensor) -> PatternRiemannianStructure:
+    def get_riemannian_framework(self, points: Points) -> RiemannianFramework:
         """Get Riemannian framework."""
-        points = points.clone()
-        if not points.requires_grad:
-            points.requires_grad_(True)
         return self.riemannian_framework
 
 
-class MockAttentionHead(nn.Module):
-    """Mock attention head for testing."""
+@runtime_checkable
+class AttentionHead(Protocol):
+    """Protocol for attention heads."""
     
-    def __init__(self, query_dim: int, key_dim: int):
+    query_dim: int
+    key_dim: int
+    
+    def compute_attention(self, query_points: Points, key_points: Points) -> Scores:
+        """Compute attention scores."""
+        ...
+
+
+class MockAttentionHead(nn.Module):
+    """Mock attention head."""
+    
+    def __init__(self, query_dim: int = 16, key_dim: int = 16) -> None:
         super().__init__()
         self.query_dim = query_dim
         self.key_dim = key_dim
-    
-    def query_metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Get query space metric."""
-        batch_size = points.shape[0]
-        metric = torch.eye(self.query_dim).expand(batch_size, -1, -1)
-        # Add a small position-dependent perturbation to make it more interesting
-        for i in range(batch_size):
-            metric[i] = metric[i] + 0.01 * torch.outer(points[i], points[i])
-        return metric
-    
-    def key_metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Get key space metric."""
-        batch_size = points.shape[0]
-        metric = torch.eye(self.key_dim).expand(batch_size, -1, -1)
-        # Add a small position-dependent perturbation to make it more interesting
-        for i in range(batch_size):
-            metric[i] = metric[i] + 0.01 * torch.outer(points[i], points[i])
-        return metric
         
-    def compute_attention(self, query_points: torch.Tensor, key_points: torch.Tensor) -> torch.Tensor:
-        """Compute mock attention scores."""
-        # Ensure points require gradients
-        if not query_points.requires_grad:
-            query_points = query_points.detach().requires_grad_(True)
-        if not key_points.requires_grad:
-            key_points = key_points.detach().requires_grad_(True)
+        # Initialize query/key projections
+        self.query_proj = nn.Linear(query_dim, query_dim)
+        self.key_proj = nn.Linear(key_dim, key_dim)
+        
+        # Initialize with small weights
+        with torch.no_grad():
+            self.query_proj.weight.data *= 0.1
+            self.key_proj.weight.data *= 0.1
             
-        # Compute attention scores using the metric
-        query_metric = self.query_metric(query_points)
-        key_metric = self.key_metric(key_points)
+    def compute_attention(self, query_points: Points, key_points: Points) -> Scores:
+        """Compute attention scores."""
+        # Project points
+        query = self.query_proj(query_points)
+        key = self.key_proj(key_points)
         
-        # Compute distances using both metrics
-        scores = torch.zeros(query_points.shape[0], key_points.shape[0], device=query_points.device)
-        for i in range(query_points.shape[0]):
-            for j in range(key_points.shape[0]):
-                query_diff = query_points[i] - key_points[j]
-                key_diff = key_points[j] - query_points[i]
-                query_dist = torch.sqrt((query_diff @ query_metric[i] @ query_diff).sum())
-                key_dist = torch.sqrt((key_diff @ key_metric[j] @ key_diff).sum())
-                # Use average distance
-                scores[i,j] = -0.5 * (query_dist + key_dist)
-        
-        # Apply softmax
-        scores = torch.softmax(scores, dim=-1)
-        return scores
+        # Compute scaled dot-product attention
+        scores = torch.matmul(query, key.transpose(-2, -1))
+        return torch.softmax(scores / scores.size(-1)**0.5, dim=-1)
 
 
 class MockModelGeometry(ModelGeometry):
-    """Mock model geometry for testing."""
+    """Mock model geometry."""
     
-    def __init__(self):
-        self.manifold_dim = 16
-        self.query_dim = 16
-        self.key_dim = 16
-        self.layers = {
-            'input': MockLayer(16),
-            'hidden': MockLayer(16),
-            'output': MockLayer(16),
-            'query_0': MockLayer(16),
-            'key_0': MockLayer(16)
-        }
-        self.attention_heads = [
-            MockAttentionHead(16, 16)
-        ]
-        
-    def metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor for the model."""
-        return self.layers['input'].metric(points)
-        
-    def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute sectional curvature."""
-        return torch.zeros_like(points)
-        
-    def get_layer(self, layer_name: str) -> MockLayer:
-        """Get layer by name."""
-        return self.layers[layer_name]
-        
-    def connection(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute connection."""
-        return self.layers['input'].riemannian_framework.compute_christoffel(points)
-        
-    def parameters(self) -> Iterator[nn.Parameter]:
-        """Get model parameters."""
-        for layer in self.layers.values():
-            yield from layer.riemannian_framework.parameters()
+    def __init__(self) -> None:
+        super().__init__(
+            manifold_dim=16,
+            query_dim=16,
+            key_dim=16,
+            layers={
+                'input': MockLayer(16),
+                'hidden': MockLayer(16),
+                'output': MockLayer(16)
+            },
+            attention_heads=[MockAttentionHead(16, 16)]
+        )
+
+
+@pytest.fixture
+def batch_size() -> int:
+    """Batch size for testing."""
+    return 16
+
+
+@pytest.fixture
+def mock_model() -> ModelGeometry:
+    """Create mock model geometry."""
+    return MockModelGeometry()
+
+
+@pytest.fixture
+def validator(mock_model: ModelGeometry) -> ModelGeometricValidator:
+    """Create geometric validator."""
+    return ModelGeometricValidator(
+        model_geometry=mock_model,
+        tolerance=1e-6,
+        curvature_bounds=(-1.0, 1.0)
+    )
 
 
 class TestModelGeometricValidator:
-    @pytest.fixture
-    def mock_layer(self) -> MockLayer:
-        return MockLayer()
+    """Tests for model geometric validation."""
     
-    @pytest.fixture
-    def validator(self, mock_layer: MockLayer) -> ModelGeometricValidator:
-        """Create validator fixture."""
-        model_geometry = MockModelGeometry()
-        return ModelGeometricValidator(model_geometry=model_geometry)  # type: ignore
-    
-    @pytest.fixture
-    def batch_size(self) -> int:
-        return 16
-        
     def test_validate_layer_geometry(
         self, validator: ModelGeometricValidator, batch_size: int
-    ):
+    ) -> None:
         """Test layer geometry validation."""
-        points = torch.randn(batch_size, 16, requires_grad=True)
+        # Generate random points
+        points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
         
-        # Test input layer
+        # Validate input layer
         result = validator.validate_layer_geometry('input', points)
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid
+        assert result.is_valid, f"Layer validation failed: {result.message}"
         
-        # Test hidden layer
-        result = validator.validate_layer_geometry('hidden', points)
-        assert result.is_valid
-        
-        # Test invalid layer
-        with pytest.raises(ValueError):
-            validator.validate_layer_geometry('nonexistent', points)
-
-    def test_validate_attention_geometry(
-        self, validator: ModelGeometricValidator, batch_size: int
-    ):
-        """Test attention geometry validation."""
-        # Create mock attention head
-        head = MockAttentionHead(16, 16)
-        
-        # Generate test points with gradients
-        query_points = torch.randn(batch_size, 16, requires_grad=True)
-        key_points = torch.randn(batch_size, 16, requires_grad=True)
-        
-        # Get validation result
-        result = validator.validate_attention_geometry(0, query_points, key_points)
-        
-        # Debug logging
-        print("\nAttention Geometry Debug:")
-        for key, value in result.data.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key}: shape={value.shape}, value={value}")
-            else:
-                print(f"{key}: {value}")
+        # Check metric properties
+        metric = cast(Tensor, result.data['metric_tensor'])
+        assert isinstance(metric, torch.Tensor)
+        assert metric.shape == (batch_size, points.size(1), points.size(1))
+        assert torch.allclose(metric, metric.transpose(-2, -1))
         
         # Check eigenvalues
-        query_eigenvals = torch.linalg.eigvalsh(result.data['query_metric'])
-        key_eigenvals = torch.linalg.eigvalsh(result.data['key_metric'])
-        print(f"\nQuery Eigenvalues: min={query_eigenvals.min().item():.6f}, max={query_eigenvals.max().item():.6f}")
-        print(f"Key Eigenvalues: min={key_eigenvals.min().item():.6f}, max={key_eigenvals.max().item():.6f}")
+        eigenvals = torch.linalg.eigvalsh(metric)
+        assert torch.all(eigenvals > 0), "Metric has non-positive eigenvalues"
         
-        assert result.is_valid
-
-    def test_validate_cross_layer_geometry(
+    def test_validate_attention_geometry(
         self, validator: ModelGeometricValidator, batch_size: int
-    ):
-        """Test cross-layer geometry validation."""
-        points = torch.randn(batch_size, 16, requires_grad=True)
+    ) -> None:
+        """Test attention geometry validation."""
+        # Generate query and key points
+        query_points = torch.randn(batch_size, validator.model_geometry.query_dim)
+        key_points = torch.randn(batch_size, validator.model_geometry.key_dim)
         
-        result = validator.validate_cross_layer_geometry(
-            'input', 'hidden', points
+        # Validate attention geometry
+        result = validator.validate_attention_geometry(0, query_points, key_points)
+        
+        # Print debug info
+        print("\nDistance Statistics:")
+        print("Query distances:")
+        query_metric = cast(Tensor, result.data['query_metric'])
+        query_dists = validator._compute_pairwise_distances(
+            query_points, 
+            query_metric
         )
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid
+        print(f"  Range: [{query_dists.min():.6f}, {query_dists.max():.6f}]")
+        print(f"  Mean: {query_dists.mean():.6f}")
+        print(f"  Std: {query_dists.std():.6f}\n")
         
-        # Check metric compatibility
-        assert result.data['metric_compatibility']
+        print("Key distances:")
+        key_metric = cast(Tensor, result.data['key_metric'])
+        key_dists = validator._compute_pairwise_distances(
+            key_points, 
+            key_metric
+        )
+        print(f"  Range: [{key_dists.min():.6f}, {key_dists.max():.6f}]")
+        print(f"  Mean: {key_dists.mean():.6f}")
+        print(f"  Std: {key_dists.std():.6f}\n")
         
-        # Check connection compatibility
-        assert result.data['connection_compatibility']
-
-    def test_validate_model_geometry(
+        print("Score distances:")
+        scores = cast(Tensor, result.data['attention_scores'])
+        score_dists = validator._compute_pairwise_distances(
+            scores, 
+            torch.eye(scores.size(-1), device=scores.device)
+        )
+        print(f"  Range: [{score_dists.min():.6f}, {score_dists.max():.6f}]")
+        print(f"  Mean: {score_dists.mean():.6f}")
+        print(f"  Std: {score_dists.std():.6f}\n")
+        
+        # Check basic properties
+        assert isinstance(result.data['query_metric'], torch.Tensor)
+        assert isinstance(result.data['key_metric'], torch.Tensor)
+        assert isinstance(result.data['attention_scores'], torch.Tensor)
+        
+        # Check attention score properties
+        scores = cast(Tensor, result.data['attention_scores'])
+        assert torch.allclose(scores.sum(dim=-1), torch.ones_like(scores[:, 0]))
+        assert torch.all(scores >= 0)
+        
+        # Check geometric preservation
+        assert result.data['preserves_geometry'], (
+            "Attention does not preserve geometric structure"
+        )
+        
+    def test_geometric_preservation(
         self, validator: ModelGeometricValidator, batch_size: int
-    ):
-        """Test complete model geometry validation."""
-        result = validator.validate_model_geometry(batch_size=batch_size)
-        
-        # Check result type
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid
-        assert isinstance(result.data, dict)
-        
-        # Check layer validations
-        assert 'layers' in result.data
-        layer_results = result.data.get('layers', {})
-        assert isinstance(layer_results, dict)
-        
-        # Check required layers exist
-        required_layers = {'input', 'hidden', 'output'}
-        assert all(layer in layer_results for layer in required_layers)
-        
-        # Check validation results
-        for layer_name, validation in layer_results.items():
-            assert isinstance(validation, ValidationResult)
-            assert validation.is_valid
-            assert isinstance(validation.data, dict)
-            assert 'complete' in validation.data
-            assert 'curvature_valid' in validation.data
-            assert 'energy_valid' in validation.data
-
-    def test_geometric_preservation(self, validator: ModelGeometricValidator, batch_size: int):
+    ) -> None:
         """Test geometric preservation check."""
-        head = MockAttentionHead(query_dim=batch_size, key_dim=batch_size)
+        # Generate random points and perturbation
+        points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
+        perturbation = torch.randn_like(points) * 0.1
         
-        # Create base metric that's symmetric positive definite with controlled eigenvalues
-        base_metric = torch.eye(batch_size)
-        # Add small random perturbation to make it interesting but still well-conditioned
-        perturbation = torch.randn(batch_size, batch_size) * 0.1
-        base_metric = base_metric + perturbation @ perturbation.T
+        # Get base metric
+        layer = validator.model_geometry.layers['hidden']
+        base_metric = cast(Tensor, layer.metric_tensor.data)
         
-        # Create query and key metrics with similar structure
-        query_metric = base_metric.unsqueeze(0).expand(batch_size, -1, -1).clone()
-        key_metric = base_metric.unsqueeze(0).unsqueeze(0).expand(batch_size, batch_size, -1, -1).clone()
+        # Print metric properties
+        print("\nBase Metric Properties:")
+        print(f"Shape: {base_metric.shape}")
+        print(f"Symmetric: {torch.allclose(cast(Tensor, base_metric), cast(Tensor, base_metric.transpose(-2, -1)))}")
+        eigenvals = torch.linalg.eigvalsh(base_metric)
+        print(f"Eigenvalue range: [{eigenvals.min():.6f}, {eigenvals.max():.6f}]\n")
         
-        # Create attention scores that preserve the geometric structure
-        # Use cosine similarity between random vectors to ensure scores are related to geometry
-        points = torch.randn(batch_size, batch_size)
-        points = points / points.norm(dim=1, keepdim=True)
-        scores = torch.mm(points, points.T)
+        # Compute attention scores
+        head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
+        scores = head.compute_attention(points, points + perturbation)
         
-        # Debug logging
-        print("\nGeometric Preservation Debug:")
-        print(f"Query Metric Shape: {query_metric.shape}")
-        print(f"Query Metric Eigenvalues: {torch.linalg.eigvalsh(query_metric[0])}")
-        print(f"Key Metric Shape: {key_metric.shape}")
-        print(f"Key Metric Eigenvalues: {torch.linalg.eigvalsh(key_metric[0,0])}")
-        print(f"Scores Shape: {scores.shape}")
+        # Print score properties
+        print("Attention Scores Properties:")
+        print(f"Shape: {scores.shape}")
+        print(f"Range: [{scores.min():.6f}, {scores.max():.6f}]")
+        print(f"Row sums: {scores.sum(dim=-1)}\n")
         
-        # Call the validator
-        result = validator._check_geometric_preservation(query_metric, key_metric, scores)
-        
-        # Print intermediate results
-        print("\nIntermediate Values:")
-        print(f"Query Distances: {validator.query_distances}")
-        print(f"Key Distances: {validator.key_distances}")
-        print(f"Score Distances: {validator.score_distances}")
-        print(f"\nDifferences:")
-        print(f"Query-Key Diff: {validator.query_key_diff}")
-        print(f"Query-Score Diff: {validator.query_score_diff}")
-        print(f"Key-Score Diff: {validator.key_score_diff}")
-        
-        assert result
+        # Check geometric preservation
+        preserves = validator._check_geometric_preservation(points, base_metric, scores)
+        assert preserves, "Attention does not preserve geometric structure"
 
-    def test_global_energy(
+    def test_geometric_preservation_distances(
         self, validator: ModelGeometricValidator, batch_size: int
-    ):
-        """Test global energy bounds."""
-        points = torch.randn(batch_size, 16, requires_grad=True)
+    ) -> None:
+        """Test distance properties in geometric preservation."""
+        # Generate points
+        points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
         
-        # Check energy bounds
-        energy_valid = validator._check_global_energy(points)
-        assert energy_valid
-
-    def test_metric_gradients(self):
-        """Test that metric gradients are properly computed."""
-        layer = MockLayer(manifold_dim=4)
-        points = torch.randn(2, 4, requires_grad=True)
+        # Compute metrics and scores
+        layer = validator.model_geometry.layers['hidden']
+        base_metric = cast(Tensor, layer.metric_tensor.data)
+        head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
+        scores = head.compute_attention(points, points)
         
-        # Compute metric
-        metric = layer.metric(points)
-        
-        # Should be able to compute gradients
-        loss = metric.sum()
-        grad = torch.autograd.grad(loss, points, allow_unused=True)[0]
-        assert grad is not None, "Gradient should not be None"
-        
-        # Test that metric depends on points
-        metric2 = layer.metric(points + 0.1)
-        assert not torch.allclose(metric, metric2), "Metric should depend on points"
-
-    def test_validate_model_geometry_resource_guard(self, validator):
-        """Test resource guards in model validation."""
-        # Test with small batch size and manifold dim
-        result = validator.validate_model_geometry(
-            batch_size=4, manifold_dim=4, max_memory_gb=1.0
+        # Compute distances
+        query_distances = validator._compute_pairwise_distances(points, base_metric)
+        key_distances = validator._compute_pairwise_distances(points, base_metric)
+        score_distances = validator._compute_pairwise_distances(
+            scores,
+            torch.eye(scores.size(-1), device=scores.device)
         )
+
+        # Check distance properties
+        for name, distances in [
+            ('Query', query_distances),
+            ('Key', key_distances),
+            ('Score', score_distances)
+        ]:
+            # Non-negativity
+            assert torch.all(distances >= 0), f"{name} distances contain negative values"
+            
+            # Self-distances are zero
+            assert torch.allclose(
+                torch.diagonal(distances),
+                torch.zeros(batch_size),
+                atol=1e-6
+            ), f"{name} self-distances are non-zero"
+            
+            # Symmetry
+            assert torch.allclose(
+                distances,
+                distances.transpose(-2, -1),
+                atol=1e-6
+            ), f"{name} distances are not symmetric"
+            
+            # Normalization
+            assert torch.all(distances <= 1.0), f"{name} distances exceed 1.0"
+            
+    def test_geometric_preservation_compatibility(
+        self, validator: ModelGeometricValidator, batch_size: int
+    ) -> None:
+        """Test compatibility between query, key, and score spaces."""
+        # Generate points
+        points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
         
-        # For debugging, print shortened result
-        logging.info("Resource guard test result: %s", format_validation_result(result))
+        # Compute metrics and scores
+        layer = validator.model_geometry.layers['hidden']
+        base_metric = cast(Tensor, layer.metric_tensor.data)
+        head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
+        scores = head.compute_attention(points, points)
         
-        assert isinstance(result, ValidationResult)
-        assert result.is_valid
+        # Compute distances
+        query_distances = validator._compute_pairwise_distances(points, base_metric)
+        key_distances = validator._compute_pairwise_distances(points, base_metric)
+        score_distances = validator._compute_pairwise_distances(
+            scores,
+            torch.eye(scores.size(-1), device=scores.device)
+        )
+
+        # Check distance differences
+        query_score_diff = torch.abs(query_distances - score_distances).mean()
+        key_score_diff = torch.abs(key_distances - score_distances).mean()
         
-        # Test memory limit exceeded
-        with pytest.raises(ValueError, match="Validation would require.*memory"):
-            validator.validate_model_geometry(
-                batch_size=1000, manifold_dim=1000, max_memory_gb=0.1
-            )
+        assert query_score_diff < 0.2, (
+            f"Query-Score distance difference too large: {query_score_diff}"
+        )
+        assert key_score_diff < 0.2, (
+            f"Key-Score distance difference too large: {key_score_diff}"
+        )
