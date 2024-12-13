@@ -1,4 +1,4 @@
-"""Pattern stability validation implementation."""
+"""Pattern perturbation analysis implementation."""
 
 from typing import Optional, Dict, List, Tuple, Union
 import torch
@@ -9,8 +9,8 @@ from ...neural.attention.pattern.models import StabilityMetrics, StabilityInfo
 from ..base import BaseValidator
 
 
-class PatternStabilityValidator(BaseValidator):
-    """Validator for pattern stability properties."""
+class PerturbationAnalyzer(BaseValidator):
+    """Analyzer for pattern perturbation response."""
 
     def __init__(
         self,
@@ -19,13 +19,13 @@ class PatternStabilityValidator(BaseValidator):
         window_size: int = 100,
         num_modes: int = 8
     ):
-        """Initialize pattern stability validator.
+        """Initialize perturbation analyzer.
         
         Args:
             dynamics: Pattern dynamics system
-            threshold: Stability threshold
+            threshold: Recovery threshold
             window_size: Analysis window size
-            num_modes: Number of stability modes to analyze
+            num_modes: Number of modes to analyze
         """
         super().__init__()
         self.dynamics = dynamics
@@ -33,77 +33,65 @@ class PatternStabilityValidator(BaseValidator):
         self.window = window_size
         self.num_modes = num_modes
 
-    def validate(
+    def analyze_perturbation(
         self,
         state: torch.Tensor,
-        time_steps: int = 1000,
-        perturbation: Optional[torch.Tensor] = None
+        perturbation: torch.Tensor,
+        time_steps: int = 1000
     ) -> StabilityInfo:
-        """Validate stability of pattern dynamics.
+        """Analyze perturbation response.
         
         Args:
-            state: Initial state
+            state: Base state
+            perturbation: Perturbation to apply
             time_steps: Number of time steps
-            perturbation: Optional perturbation to apply
             
         Returns:
-            Stability validation results
+            Stability analysis results
         """
-        # Compute base trajectory
+        # Get base and perturbed trajectories
         base_traj = self.dynamics.evolve(state, time_steps)
+        perturbed_traj = self.dynamics.evolve(state + perturbation, time_steps)
         
-        # Apply perturbation if provided
-        if perturbation is not None:
-            perturbed_state = state + perturbation
-            perturbed_traj = self.dynamics.evolve(perturbed_state, time_steps)
-        else:
-            perturbed_traj = None
-            
-        # Analyze stability
+        # Compute stability metrics
         metrics = self._compute_stability_metrics(base_traj, perturbed_traj)
         
-        # Package results
-        info = StabilityInfo(
+        # Get recovery time
+        recovery_time = self._compute_recovery_time(base_traj, perturbed_traj)
+        
+        return StabilityInfo(
             metrics=metrics,
             is_stable=metrics.max_lyapunov < self.threshold,
-            recovery_time=self._compute_recovery_time(base_traj, perturbed_traj)
-            if perturbed_traj is not None else None
+            recovery_time=recovery_time
         )
-        
-        return info
 
     def _compute_stability_metrics(
         self,
         base_traj: torch.Tensor,
-        perturbed_traj: Optional[torch.Tensor] = None
+        perturbed_traj: torch.Tensor
     ) -> StabilityMetrics:
         """Compute stability metrics from trajectories.
         
         Args:
             base_traj: Base trajectory
-            perturbed_traj: Optional perturbed trajectory
+            perturbed_traj: Perturbed trajectory
             
         Returns:
             Stability metrics
         """
-        # Get Jacobian at final state
-        final_state = base_traj[-1]
-        J = self.dynamics.compute_jacobian(final_state)
+        # Compute error trajectory
+        error = torch.norm(perturbed_traj - base_traj, dim=(-2, -1))
         
-        # Compute eigenvalues
-        eigvals = torch.linalg.eigvals(J)
-        max_lyap = torch.max(eigvals.real).item()
+        # Get max Lyapunov exponent from error growth
+        growth_rates = torch.log(error[1:] / error[:-1])
+        max_lyap = torch.mean(growth_rates).item()
         
         # Compute stability margin
         margin = self.threshold - max_lyap
         
-        # Compute recovery metrics if perturbed trajectory available
-        if perturbed_traj is not None:
-            recovery_error = torch.norm(base_traj - perturbed_traj, dim=(-2, -1))
-            recovery_rate = torch.mean(recovery_error[1:] / recovery_error[:-1])
-        else:
-            recovery_rate = None
-            
+        # Get recovery rate
+        recovery_rate = torch.mean(error[1:] / error[:-1]).item()
+        
         return StabilityMetrics(
             max_lyapunov=max_lyap,
             stability_margin=margin,
@@ -118,17 +106,14 @@ class PatternStabilityValidator(BaseValidator):
         """Compute recovery time between trajectories.
         
         Args:
-            base_traj: Base trajectory 
+            base_traj: Base trajectory
             perturbed_traj: Perturbed trajectory
             
         Returns:
             Recovery time steps or None if no recovery
         """
-        if perturbed_traj is None:
-            return None
-            
         # Compute error over time
-        error = torch.norm(base_traj - perturbed_traj, dim=(-2, -1))
+        error = torch.norm(perturbed_traj - base_traj, dim=(-2, -1))
         
         # Find first time error drops below threshold
         recovered = torch.where(error < self.threshold)[0]
@@ -137,3 +122,29 @@ class PatternStabilityValidator(BaseValidator):
             return recovered[0].item()
         else:
             return None
+
+    def generate_perturbations(
+        self,
+        state: torch.Tensor,
+        num_perturbations: int = 10,
+        magnitude: float = 0.1
+    ) -> torch.Tensor:
+        """Generate random perturbations for analysis.
+        
+        Args:
+            state: Base state to perturb
+            num_perturbations: Number of perturbations to generate
+            magnitude: Perturbation magnitude
+            
+        Returns:
+            Tensor of perturbations
+        """
+        # Generate random perturbations
+        shape = (num_perturbations,) + state.shape
+        perturbations = torch.randn(shape, device=state.device)
+        
+        # Normalize and scale
+        norms = torch.norm(perturbations, dim=(-2, -1), keepdim=True)
+        perturbations = perturbations / norms * magnitude
+        
+        return perturbations

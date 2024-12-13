@@ -3,7 +3,7 @@ Unit tests for the validation framework.
 
 Tests cover:
 1. Geometric validation
-2. Quantum validation
+2. Quantum validation 
 3. Pattern validation
 4. Integration tests
 """
@@ -12,12 +12,26 @@ import pytest
 import torch
 
 from src.validation.framework import (
-    ModelGeometricValidator,
-    PatternValidator,
-    QuantumValidator,
     ValidationFramework,
-    ValidationResult,
+    ValidationResult
 )
+from src.validation.geometric.flow import (
+    GeometricFlowValidator,
+    FlowStabilityValidator,
+    EnergyValidator,
+    ConvergenceValidator
+)
+from src.validation.patterns.stability import (
+    PatternStabilityValidator,
+    LinearStabilityAnalyzer,
+    NonlinearStabilityAnalyzer,
+    LyapunovAnalyzer,
+    BifurcationValidator
+)
+from src.validation.quantum.validator import QuantumValidator
+from src.neural.attention.pattern.dynamics import PatternDynamics
+from src.neural.flow.geometric_flow import GeometricFlow
+from src.neural.flow.hamiltonian import HamiltonianSystem
 
 
 class TestValidationFramework:
@@ -33,20 +47,24 @@ class TestValidationFramework:
     def manifold_dim(self) -> int:
         return 8
 
-    @pytest.fixture
-    def state_dim(self) -> int:
-        return 8
+    @pytest.fixture 
+    def pattern_dynamics(self) -> PatternDynamics:
+        return PatternDynamics(grid_size=32, space_dim=2)
 
     @pytest.fixture
-    def pattern_dim(self) -> int:
-        return 8
+    def geometric_flow(self) -> GeometricFlow:
+        return GeometricFlow()
 
     @pytest.fixture
-    def framework(self, manifold_dim) -> ValidationFramework:
+    def hamiltonian(self) -> HamiltonianSystem:
+        return HamiltonianSystem()
+
+    @pytest.fixture
+    def framework(self, pattern_dynamics: PatternDynamics, geometric_flow: GeometricFlow) -> ValidationFramework:
         return ValidationFramework(
-            geometric_validator=ModelGeometricValidator(manifold_dim=manifold_dim),
+            geometric_validator=GeometricFlowValidator(),
             quantum_validator=QuantumValidator(),
-            pattern_validator=PatternValidator(),
+            pattern_validator=PatternStabilityValidator(pattern_dynamics)
         )
 
     @pytest.mark.level0
@@ -69,10 +87,10 @@ class TestValidationFramework:
 
     @pytest.mark.level0
     def test_quantum_validation(
-        self, framework: ValidationFramework, batch_size: int, state_dim: int
+        self, framework: ValidationFramework, batch_size: int, dim: int
     ):
         """Test quantum validation methods."""
-        state = torch.randn(batch_size, state_dim, dtype=torch.complex64)
+        state = torch.randn(batch_size, dim, dtype=torch.complex64)
         state = state / state.norm(dim=1, keepdim=True)
         
         result = framework.validate_quantum_state(state)
@@ -93,10 +111,10 @@ class TestValidationFramework:
 
     @pytest.mark.level0
     def test_pattern_validation(
-        self, framework: ValidationFramework, batch_size: int, pattern_dim: int
+        self, framework: ValidationFramework, batch_size: int, dim: int
     ):
         """Test pattern validation methods."""
-        pattern = torch.randn(batch_size, pattern_dim)
+        pattern = torch.randn(batch_size, dim)
         
         result = framework.validate_pattern_formation(pattern)
         assert isinstance(result, ValidationResult)

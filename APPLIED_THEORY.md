@@ -12,13 +12,13 @@ The geometric flow forms the backbone of our attention mechanism:
 
 ```python
 class GeometricFlow:
-    def __init__(self, manifold_dim, tolerance=1e-6):
+    def __init__(self, manifold_dim: int, tolerance: float = 1e-6):
         self.dim = manifold_dim
         self.tolerance = tolerance
         self.metric = self.initialize_metric()
         self.connection = self.compute_connection()
         
-    def evolve(self, state, time_steps):
+    def evolve(self, state: torch.Tensor, time_steps: int) -> torch.Tensor:
         """Evolve state through geometric flow.
         
         Implementation of:
@@ -42,10 +42,18 @@ class GeometricFlow:
                 current_state, ricci, potential, hessian)
             
             # Validate and normalize
+            current_state = self.normalize_flow(current_state, current_state)
             if not self.validate_state(current_state):
                 break
                 
         return current_state
+
+    def normalize_flow(self, flow: torch.Tensor, metric: torch.Tensor) -> torch.Tensor:
+        """Normalize flow using the metric tensor.
+        
+        Ensures proper geometric structure is maintained during evolution.
+        """
+        return self._normalize_flow_impl(flow, metric)
 ```
 
 ### 1.2 Pattern Detection

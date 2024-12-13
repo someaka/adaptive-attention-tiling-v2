@@ -18,13 +18,23 @@ import numpy as np
 import pytest
 import torch
 
+from src.neural.attention.pattern.models import (
+    StabilityMetrics,
+    StabilityInfo,
+    BifurcationPoint,
+    BifurcationDiagram
+)
+from src.neural.attention.pattern.dynamics import PatternDynamics
 from src.validation.patterns.stability import (
     LinearStabilityAnalyzer,
     LyapunovAnalyzer,
     NonlinearStabilityAnalyzer,
     PatternStabilityValidator,
+    BifurcationValidator
+)
+from src.validation.patterns.perturbation import (
     PerturbationAnalyzer,
-    StabilityMetrics,
+    PerturbationMetrics
 )
 
 
@@ -42,10 +52,16 @@ class TestPatternStability:
         return 100
 
     @pytest.fixture
-    def validator(self) -> PatternStabilityValidator:
-        return PatternStabilityValidator(
-            linear_threshold=0.1, nonlinear_threshold=0.2, lyapunov_threshold=0.01
+    def pattern_dynamics(self) -> PatternDynamics:
+        return PatternDynamics(
+            grid_size=32,
+            space_dim=2,
+            dt=0.01
         )
+
+    @pytest.fixture
+    def validator(self, pattern_dynamics: PatternDynamics) -> PatternStabilityValidator:
+        return PatternStabilityValidator(pattern_dynamics)
 
     def test_linear_stability(
         self, validator: PatternStabilityValidator, batch_size: int, spatial_dim: int

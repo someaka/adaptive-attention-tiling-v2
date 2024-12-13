@@ -49,6 +49,78 @@ class PatternDynamics:
         self.reaction = ReactionSystem(self.size)
         self.stability = StabilityAnalyzer(self)
 
+    def evolve(
+        self,
+        state: torch.Tensor,
+        time_steps: int = 100,
+        control: Optional[ControlSignal] = None
+    ) -> torch.Tensor:
+        """Evolve pattern dynamics forward in time.
+        
+        Args:
+            state: Initial state tensor
+            time_steps: Number of time steps
+            control: Optional control signal
+            
+        Returns:
+            Evolved state tensor
+        """
+        # Initialize trajectory storage
+        trajectory = [state]
+        
+        # Evolve system
+        current = state
+        for t in range(time_steps):
+            # Apply control if provided
+            if control is not None:
+                current = control.apply(current, t)
+                
+            # Evolve state
+            current = self.step(current)
+            trajectory.append(current)
+            
+        return torch.stack(trajectory)
+
+    def step(self, state: torch.Tensor) -> torch.Tensor:
+        """Single time step evolution.
+        
+        Args:
+            state: Current state tensor
+            
+        Returns:
+            Next state tensor
+        """
+        # Apply reaction
+        reaction = self.reaction(state)
+        
+        # Apply diffusion
+        diffusion = self.diffusion(state)
+        
+        # Combine updates
+        next_state = state + self.dt * (reaction + diffusion)
+        
+        return next_state
+
+    def compute_jacobian(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute Jacobian matrix at state.
+        
+        Args:
+            state: State tensor
+            
+        Returns:
+            Jacobian matrix
+        """
+        # Get reaction Jacobian
+        J_reaction = self.reaction.compute_jacobian(state)
+        
+        # Get diffusion Jacobian
+        J_diffusion = self.diffusion.compute_jacobian(state)
+        
+        # Combine Jacobians
+        J = J_reaction + J_diffusion
+        
+        return J
+
     def step(self, state: torch.Tensor) -> torch.Tensor:
         """Perform one step of pattern dynamics.
         
@@ -91,17 +163,6 @@ class PatternDynamics:
             current = self.step(current)
             
         return trajectory
-        
-    def compute_jacobian(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute Jacobian matrix of dynamics.
-        
-        Args:
-            state: Current state
-            
-        Returns:
-            Jacobian matrix
-        """
-        return self.compute_stability_matrix(state)
         
     def compute_stability_matrix(self, state: torch.Tensor) -> torch.Tensor:
         """Compute stability matrix for a given state.
