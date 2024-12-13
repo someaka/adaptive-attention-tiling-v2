@@ -27,8 +27,8 @@ from src.neural.flow.geometric_flow import (
     SingularityInfo as Singularity,
 )
 from src.validation.geometric.flow import (
-    FlowValidator,
-    FlowValidationResult,
+    TilingFlowValidator as FlowValidator,
+    TilingFlowValidationResult as FlowValidationResult,
 )
 
 # Mark test class for dependency management
@@ -67,14 +67,13 @@ class TestGeometricFlow:
         return flow.compute_metric(points)
 
     @pytest.fixture
-    def validator():
+    def validator(self, flow):
         """Create flow validator."""
         return FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-6
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         )
 
     @pytest.fixture

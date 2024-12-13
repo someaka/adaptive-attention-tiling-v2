@@ -1,455 +1,209 @@
 """Validation framework for model analysis."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any, Union, Type, cast, Callable
+from typing import Dict, List, Optional, Tuple, Any, Union, Type, cast, Callable, Generic, TypeVar, Protocol, runtime_checkable
+from numbers import Number as NumberType
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.types import Number
 
-from .patterns.stability import (
-    PatternValidator as LinearStabilityAnalyzer,
-    PatternValidator as NonlinearStabilityAnalyzer,
-)
+from .base import ValidationResult
+from .patterns.stability import PatternValidator as StabilityValidator
 from .patterns.decomposition import ModeDecomposer
 from ..core.patterns.formation import BifurcationAnalyzer
 from .geometric.metric import GeometricMetricValidator, CurvatureBounds
-from .geometric.flow import TilingFlowValidator as FlowValidator, TilingFlowValidationResult as EnergyMetrics
-from ..core.patterns.dynamics import PatternDynamics
-from ..core.patterns.riemannian import RiemannianFramework
+from .geometric.flow import TilingFlowValidator as FlowValidator, TilingFlowValidationResult
+from .geometric.model import GeometricValidationResult, ModelGeometricValidator
+from .quantum.state import QuantumStateValidator, QuantumStateValidationResult
+from ..neural.attention.pattern.dynamics import PatternDynamics as AttentionPatternDynamics
+from ..core.patterns.riemannian import RiemannianFramework, PatternRiemannianStructure
 from ..core.tiling.geometric_flow import GeometricFlow
+from ..core.quantum.types import QuantumState
+from .patterns.formation import PatternFormationValidator
 
-@dataclass
-class ValidationMetrics:
-    """Collection of validation metrics."""
-    curvature_bounds: 'CurvatureBounds'
-    energy_metrics: 'EnergyMetrics'
-    bifurcation_points: List[torch.Tensor]
-    stability_eigenvalues: torch.Tensor
+T = TypeVar('T')
+
+@runtime_checkable
+class ValidationProtocol(Protocol):
+    """Protocol for validation results."""
     
-    # Framework metrics
-    framework_accuracy: float
-    framework_consistency: float
-
-
-@dataclass
-class ModelGeometricValidator:
-    """High-level validator for geometric properties of models."""
+    is_valid: bool
+    message: str
+    data: Optional[Dict[str, Any]]
     
-    def __init__(
-        self,
-        manifold_dim: int,
-        curvature_tolerance: float = 1e-6,
-        energy_tolerance: float = 1e-6
-    ):
-        """Initialize model geometric validator.
+    def merge(self, other: 'ValidationProtocol') -> 'ValidationProtocol':
+        """Merge with another validation result."""
+        ...
         
-        Args:
-            manifold_dim: Dimension of the manifold
-            curvature_tolerance: Tolerance for curvature bounds
-            energy_tolerance: Tolerance for energy metrics
-        """
-        self.manifold_dim = manifold_dim
-        self.curvature_tolerance = curvature_tolerance
-        self.energy_tolerance = energy_tolerance
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary representation."""
+        ...
         
-        # Initialize specialized validators
-        self.metric_validator = GeometricMetricValidator(
-            manifold_dim=manifold_dim,
-            tolerance=curvature_tolerance
-        )
-        self.flow_validator = self._create_flow_validator()
-        
-    def _create_flow_validator(self) -> FlowValidator:
-        """Create flow validator instance."""
-        flow = GeometricFlow(
-            hidden_dim=32,  # Default hidden dimension
-            manifold_dim=2,
-            motive_rank=4,
-            num_charts=1,
-            integration_steps=10,
-            dt=0.1,
-            stability_threshold=1e-6
-        )
-        
-        return FlowValidator(
-            flow=flow,
-            stability_threshold=1e-6,
-            curvature_bounds=(-1.0, 1.0),
-            max_energy=1e3
-        )
-        
-    def validate_geometry(
-        self,
-        model: nn.Module,
-        data: torch.Tensor,
-        riemannian: RiemannianFramework
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Validate geometric properties of the model.
-        
-        Args:
-            model: Model to validate
-            data: Input data tensor
-            riemannian: Riemannian framework for geometric analysis
-            
-        Returns:
-            Tuple of metric and flow validation results
-        """
-        # Validate geometric metric properties
-        metric_results = self.metric_validator.validate(riemannian, data)
-        
-        # Get flow from model
-        flow_fn: Optional[Callable] = getattr(model, 'get_geometric_flow', None)
-        flow = flow_fn(data) if flow_fn is not None else None
-        
-        # Validate flow if available
-        flow_results = {}
-        if flow is not None:
-            validation_result = self.flow_validator.validate_flow(data, chart=0)
-            flow_results = {"is_valid": validation_result}
-            
-        return metric_results, flow_results
-        
-    def _check_normalization(
-        self,
-        model: nn.Module
-    ) -> bool:
-        """Check if model output is normalized."""
-        if not hasattr(model, 'in_features'):
-            return True
-        features = cast(Number, model.in_features)
-        sample_input = torch.randn(1, int(features))
-        output = model(sample_input)
-        norm_check = torch.allclose(output.norm(dim=1), torch.ones(output.shape[0]))
-        return bool(norm_check)
-        
-    def validate_metric(
-        self,
-        metric: torch.Tensor
-    ) -> bool:
-        """Validate metric properties."""
-        return bool(self.metric_validator.metric_validator.validate_metric(metric))
-        
-    def validate_positive_definite(
-        self,
-        metric: torch.Tensor
-    ) -> bool:
-        """Validate if metric is positive definite."""
-        validation_result = self.metric_validator.metric_validator.validate_metric(metric)
-        return bool(validation_result.positive_definite)
-
-    def validate_smoothness(
-        self,
-        metric: torch.Tensor
-    ) -> bool:
-        """Validate metric smoothness."""
-        # Use the metric validator's completeness check as a proxy for smoothness
-        return bool(self.metric_validator.metric_validator.check_completeness(metric, metric))
-
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ValidationProtocol':
+        """Create from dictionary representation."""
+        ...
 
 @dataclass
-class PatternValidator:
-    """Validator for pattern formation and dynamics."""
+class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
+    """Results from validation framework with proper typing."""
+    
+    geometric_result: Optional[GeometricValidationResult] = None
+    flow_result: Optional[TilingFlowValidationResult] = None
+    quantum_result: Optional[QuantumStateValidationResult] = None
+    pattern_result: Optional[ValidationResult] = None
     
     def __init__(
         self,
-        stability_tolerance: float = 1e-6,
-        bifurcation_tolerance: float = 1e-6,
-        mode_tolerance: float = 1e-6
+        is_valid: bool,
+        message: str,
+        data: Optional[Dict[str, Any]] = None,
+        geometric_result: Optional[GeometricValidationResult] = None,
+        flow_result: Optional[TilingFlowValidationResult] = None,
+        quantum_result: Optional[QuantumStateValidationResult] = None,
+        pattern_result: Optional[ValidationResult] = None,
+        curvature_bounds: Optional[Tuple[float, float]] = None
     ):
-        """Initialize pattern validator.
+        """Initialize framework validation result."""
+        super().__init__(is_valid, message, data)
+        self.geometric_result = geometric_result
+        self.flow_result = flow_result
+        self.quantum_result = quantum_result
+        self.pattern_result = pattern_result
+        self.curvature_bounds = curvature_bounds
         
-        Args:
-            stability_tolerance: Tolerance for stability analysis
-            bifurcation_tolerance: Tolerance for bifurcation analysis
-            mode_tolerance: Tolerance for mode analysis
-        """
-        self.stability_tolerance = stability_tolerance
-        self.bifurcation_tolerance = bifurcation_tolerance
-        self.mode_tolerance = mode_tolerance
-        
-    def validate_patterns(
-        self,
-        model: Optional[nn.Module],
-        pattern: torch.Tensor,
-        dynamics: Optional[torch.Tensor] = None
-    ) -> Dict[str, Any]:
-        """Validate pattern formation."""
-        # For test purposes, just check basic pattern properties
-        if model is None:
-            return {
-                "spatial_coherence": True,
-                "temporal_stability": True,
-                "symmetry": True,
-                "bifurcation_points": [torch.tensor([0.0])],
-                "stability_eigenvalues": torch.zeros(1)
-            }
+    def merge(self, other: ValidationResult) -> 'FrameworkValidationResult':
+        """Merge with another validation result."""
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
             
-        # Otherwise compute pattern metrics using model
-        return {
-            "spatial_coherence": self._check_spatial_coherence(pattern),
-            "temporal_stability": self._check_temporal_stability(pattern, dynamics),
-            "symmetry": self._check_pattern_symmetry(pattern),
-            "bifurcation_points": self._find_bifurcation_points(model, pattern, dynamics),
-            "stability_eigenvalues": self._compute_stability_eigenvalues(model, pattern)
-        }
+        # Merge base validation result
+        merged_data = {**(self.data or {}), **(other.data or {})}
         
-    def _check_spatial_coherence(
-        self,
-        pattern: torch.Tensor
-    ) -> bool:
-        """Check spatial coherence of pattern."""
-        # For test purposes, just check if pattern is finite
-        return bool(torch.all(torch.isfinite(pattern)).item())
+        # Handle specialized results based on type
+        geometric_result = self.geometric_result
+        flow_result = self.flow_result
+        quantum_result = self.quantum_result
+        pattern_result = self.pattern_result
         
-    def _check_temporal_stability(
-        self,
-        pattern: torch.Tensor,
-        dynamics: Optional[torch.Tensor] = None
-    ) -> bool:
-        """Check temporal stability of pattern."""
-        # For test purposes, just check if pattern is finite
-        return bool(torch.all(torch.isfinite(pattern)).item())
-        
-    def _check_pattern_symmetry(
-        self,
-        pattern: torch.Tensor
-    ) -> bool:
-        """Check symmetry of pattern."""
-        # For test purposes, just check if pattern is finite
-        return bool(torch.all(torch.isfinite(pattern)).item())
-        
-    def _find_bifurcation_points(
-        self,
-        model: nn.Module,
-        pattern: torch.Tensor,
-        dynamics: Optional[torch.Tensor] = None
-    ) -> List[torch.Tensor]:
-        """Find bifurcation points of pattern."""
-        # For test purposes, just return a single bifurcation point
-        return [torch.tensor([0.0])]
-        
-    def _compute_stability_eigenvalues(
-        self,
-        model: nn.Module,
-        pattern: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute stability eigenvalues of pattern."""
-        # For test purposes, just return a single eigenvalue
-        return torch.zeros(1)
-
-
-@dataclass
-class QuantumValidator:
-    """Validator for quantum properties."""
-    
-    def __init__(
-        self,
-        tolerance: float = 1e-6,
-        n_samples: int = 1000
-    ):
-        """Initialize validator.
-        
-        Args:
-            tolerance: Tolerance for quantum metrics
-            n_samples: Number of samples for quantum measurements
-        """
-        self.tolerance = tolerance
-        self.n_samples = n_samples
-        
-    def validate_quantum_properties(
-        self,
-        model: nn.Module,
-        data: torch.Tensor
-    ) -> Dict[str, Any]:
-        """Validate quantum properties.
-        
-        Args:
-            model: Model to validate
-            data: Input data tensor
-            
-        Returns:
-            Dictionary with validation results
-        """
-        # Compute quantum metrics
-        metrics = self._compute_quantum_metrics(model, data)
-        
-        # Analyze entanglement
-        entanglement = self._analyze_entanglement(model, data)
-        
-        # Analyze coherence
-        coherence = self._analyze_coherence(model, data)
-        
-        return {
-            "metrics": metrics,
-            "entanglement": entanglement,
-            "coherence": coherence
-        }
-        
-    def _compute_quantum_metrics(
-        self,
-        model: Optional[nn.Module],
-        data: torch.Tensor
-    ) -> Dict[str, Any]:
-        """Compute quantum validation metrics."""
-        # If no model provided, just check basic quantum properties
-        if model is None:
-            return {
-                "normalization": torch.allclose(data.norm(dim=1), torch.ones(data.shape[0])),
-                "unitarity": True,  # Assume unitary for test
-                "energy_conservation": True  # Assume conserved for test
-            }
-            
-        # Otherwise compute metrics using model
-        output = model(data)
-        return {
-            "normalization": torch.allclose(output.norm(dim=1), torch.ones(output.shape[0])),
-            "unitarity": self._check_unitarity(model),
-            "energy_conservation": self._check_energy_conservation(model, data, output)
-        }
-        
-    def _analyze_entanglement(
-        self,
-        model: Optional[nn.Module],
-        data: torch.Tensor
-    ) -> Dict[str, float]:
-        """Analyze quantum entanglement."""
-        # If no model, just return default metrics
-        if model is None:
-            return {
-                "entanglement_entropy": 0.0,
-                "mutual_information": 0.0,
-                "relative_entropy": 0.0
-            }
-            
-        # Get model output
-        output = model(data)
-        
-        # Compute entanglement entropy
-        entropy = -torch.sum(
-            output * torch.log(output + 1e-10),
-            dim=1
-        ).mean()
-        
-        # Compute mutual information
-        mutual_info = torch.zeros(1)  # Placeholder
-        
-        # Compute relative entropy
-        rel_entropy = torch.zeros(1)  # Placeholder
-        
-        return {
-            "entanglement_entropy": float(entropy),
-            "mutual_information": float(mutual_info.item()),
-            "relative_entropy": float(rel_entropy.item())
-        }
-
-    def _analyze_coherence(
-        self,
-        model: Optional[nn.Module],
-        data: torch.Tensor
-    ) -> Dict[str, float]:
-        """Analyze quantum coherence."""
-        # If no model, just return default metrics
-        if model is None:
-            return {
-                "coherence_length": 0.0,
-                "coherence_time": 0.0,
-                "decoherence_rate": 0.0
-            }
-            
-        # Get model output
-        output = model(data)
-        
-        # Compute coherence metrics
-        coherence_length = torch.zeros(1)  # Placeholder
-        coherence_time = torch.zeros(1)  # Placeholder
-        decoherence_rate = torch.zeros(1)  # Placeholder
-        
-        return {
-            "coherence_length": float(coherence_length.item()),
-            "coherence_time": float(coherence_time.item()),
-            "decoherence_rate": float(decoherence_rate.item())
-        }
-
-    def _check_unitarity(
-        self,
-        model: nn.Module
-    ) -> bool:
-        """Check if model is unitary."""
-        # For test purposes, just check if output norm is 1
-        if not hasattr(model, 'in_features'):
-            return True
-        features = cast(Number, model.in_features)
-        output = model(torch.randn(1, int(features)))
-        return bool(torch.allclose(output.norm(dim=1), torch.ones(output.shape[0])))
-        
-    def _check_energy_conservation(
-        self,
-        model: nn.Module,
-        data: torch.Tensor,
-        output: torch.Tensor
-    ) -> bool:
-        """Check if model conserves energy."""
-        # For test purposes, just check if output energy is close to input energy
-        input_energy = data.norm(dim=1).mean()
-        output_energy = output.norm(dim=1).mean()
-        return torch.allclose(input_energy, output_energy)
-        
-    def _partial_trace(
-        self,
-        state: torch.Tensor,
-        dims: List[int]
-    ) -> torch.Tensor:
-        """Compute partial trace of quantum state.
-        
-        Args:
-            state: Quantum state tensor
-            dims: Dimensions to trace out
-            
-        Returns:
-            Reduced density matrix
-        """
-        # Reshape state
-        shape = state.shape
-        n_dims = len(shape) // 2
-        
-        # Compute remaining dimensions
-        remain_dims = [i for i in range(n_dims) if i not in dims]
-        
-        # Trace out specified dimensions
-        reduced = torch.einsum(
-            'ii' + ''.join(chr(ord('a') + i) for i in remain_dims),
-            state
+        if isinstance(other, FrameworkValidationResult):
+            if other.geometric_result:
+                geometric_result = (
+                    geometric_result.merge(other.geometric_result)
+                    if geometric_result else other.geometric_result
+                )
+            if other.flow_result:
+                if isinstance(other.flow_result, dict):
+                    # Handle dictionary of flow results by taking the first result
+                    first_result = next(iter(other.flow_result.values()))
+                    flow_result = (
+                        flow_result.merge(first_result)
+                        if flow_result else first_result
+                    )
+                else:
+                    # Handle single flow result
+                    flow_result = (
+                        flow_result.merge(other.flow_result)
+                        if flow_result else other.flow_result
+                    )
+            if other.quantum_result:
+                quantum_result = (
+                    quantum_result.merge(other.quantum_result)
+                    if quantum_result else other.quantum_result
+                )
+            if other.pattern_result:
+                pattern_result = (
+                    pattern_result.merge(other.pattern_result)
+                    if pattern_result else other.pattern_result
+                )
+                
+        return FrameworkValidationResult(
+            is_valid=bool(self.is_valid and other.is_valid),
+            message=f"{self.message}; {other.message}",
+            data=merged_data,
+            geometric_result=geometric_result,
+            flow_result=flow_result,
+            quantum_result=quantum_result,
+            pattern_result=pattern_result,
+            curvature_bounds=self.curvature_bounds
         )
         
-        return reduced
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary with proper tensor handling."""
+        result = {
+            "is_valid": bool(self.is_valid),
+            "message": self.message,
+            "data": self.data
+        }
         
-    def _compute_entropy(
-        self,
-        state: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute von Neumann entropy.
-        
-        Args:
-            state: Quantum state tensor
+        # Add specialized results if available
+        if self.geometric_result:
+            result["geometric"] = self.geometric_result.to_dict()
+        if self.flow_result:
+            result["flow"] = self.flow_result.to_dict()
+        if self.quantum_result:
+            result["quantum"] = self.quantum_result.to_dict()
+        if self.pattern_result:
+            result["pattern"] = self.pattern_result.to_dict()
             
-        Returns:
-            von Neumann entropy
-        """
-        # Compute eigenvalues
-        eigenvalues = torch.linalg.eigvalsh(state)
+        return result
         
-        # Compute entropy
-        entropy = -torch.sum(
-            eigenvalues * torch.log(eigenvalues + 1e-10)
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'FrameworkValidationResult':
+        """Create from dictionary."""
+        if not isinstance(data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        required_fields = {"is_valid", "message"}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
+        # Create specialized results if available
+        geometric_result = (
+            GeometricValidationResult.from_dict(data["geometric"])
+            if "geometric" in data else None
+        )
+        flow_result = (
+            TilingFlowValidationResult.from_dict(data["flow"])
+            if "flow" in data else None
+        )
+        quantum_result = (
+            QuantumStateValidationResult.from_dict(data["quantum"])
+            if "quantum" in data else None
+        )
+        pattern_result = None  # TODO: Add pattern result deserialization
+        
+        return cls(
+            is_valid=bool(data["is_valid"]),
+            message=data["message"],
+            data=data.get("data", {}),
+            geometric_result=geometric_result,
+            flow_result=flow_result,
+            quantum_result=quantum_result,
+            pattern_result=pattern_result,
+            curvature_bounds=data.get("curvature_bounds")
         )
         
-        return entropy
-
+    def __str__(self) -> str:
+        """String representation with component summaries."""
+        components = []
+        
+        if self.geometric_result:
+            components.append(f"Geometric: {self.geometric_result}")
+        if self.flow_result:
+            components.append(f"Flow: {self.flow_result}")
+        if self.quantum_result:
+            components.append(f"Quantum: {self.quantum_result}")
+        if self.pattern_result:
+            components.append(f"Pattern: {self.pattern_result}")
+            
+        component_info = f" [{', '.join(components)}]" if components else ""
+        return f"FrameworkValidationResult(valid={self.is_valid}, message='{self.message}'{component_info})"
 
 @dataclass
-class ValidationResult:
+class ConcreteValidationResult(ValidationResult[Dict[str, Any]]):
     """Results from validation framework."""
     
     curvature_bounds: Optional[Tuple[float, float]] = None
@@ -460,6 +214,102 @@ class ValidationResult:
     framework_consistency: float = 0.0
     metrics: Dict[str, Any] = field(default_factory=dict)
     component_scores: Dict[str, float] = field(default_factory=dict)
+
+    def merge(self, other: ValidationResult) -> 'ConcreteValidationResult':
+        """Merge with another validation result."""
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+            
+        # Merge base validation result
+        merged_data = {**(self.data or {}), **(other.data or {})}
+        
+        # Merge metrics dictionaries carefully
+        merged_metrics = {**self.metrics}
+        if isinstance(other, ConcreteValidationResult):
+            other_metrics = other.metrics
+            other_scores = other.component_scores
+            
+            for key, value in other_metrics.items():
+                if key in merged_metrics and isinstance(value, dict):
+                    merged_metrics[key].update(value)
+                else:
+                    merged_metrics[key] = value
+                    
+            merged_scores = {**self.component_scores}
+            for key, value in other_scores.items():
+                if key in merged_scores:
+                    merged_scores[key] = (merged_scores[key] + value) / 2
+                else:
+                    merged_scores[key] = value
+                    
+            return ConcreteValidationResult(
+                is_valid=bool(self.is_valid and other.is_valid),
+                message=f"{self.message}; {other.message}",
+                data=merged_data,
+                curvature_bounds=self.curvature_bounds,
+                energy_metrics=self.energy_metrics,
+                bifurcation_points=self.bifurcation_points,
+                stability_eigenvalues=self.stability_eigenvalues,
+                framework_accuracy=(self.framework_accuracy + other.framework_accuracy) / 2,
+                framework_consistency=(self.framework_consistency + other.framework_consistency) / 2,
+                metrics=merged_metrics,
+                component_scores=merged_scores
+            )
+        else:
+            return ConcreteValidationResult(
+                is_valid=bool(self.is_valid and other.is_valid),
+                message=f"{self.message}; {other.message}",
+                data=merged_data,
+                curvature_bounds=self.curvature_bounds,
+                energy_metrics=self.energy_metrics,
+                bifurcation_points=self.bifurcation_points,
+                stability_eigenvalues=self.stability_eigenvalues,
+                framework_accuracy=self.framework_accuracy,
+                framework_consistency=self.framework_consistency,
+                metrics=merged_metrics,
+                component_scores=self.component_scores
+            )
+            
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary with proper tensor handling."""
+        result = {
+            "is_valid": bool(self.is_valid),
+            "message": self.message,
+            "data": self.data,
+            "curvature_bounds": self.curvature_bounds,
+            "energy_metrics": self.energy_metrics,
+            "bifurcation_points": [p.tolist() for p in (self.bifurcation_points or [])],
+            "stability_eigenvalues": self.stability_eigenvalues.tolist() if self.stability_eigenvalues is not None else None,
+            "framework_accuracy": float(self.framework_accuracy),
+            "framework_consistency": float(self.framework_consistency),
+            "metrics": self.metrics,
+            "component_scores": self.component_scores
+        }
+        return result
+        
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ConcreteValidationResult':
+        """Create from dictionary."""
+        if not isinstance(data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        required_fields = {"is_valid", "message"}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
+        return cls(
+            is_valid=bool(data["is_valid"]),
+            message=data["message"],
+            data=data.get("data", {}),
+            curvature_bounds=data.get("curvature_bounds"),
+            energy_metrics=data.get("energy_metrics", {}),
+            bifurcation_points=[torch.tensor(p) for p in data.get("bifurcation_points", [])] if data.get("bifurcation_points") else None,
+            stability_eigenvalues=torch.tensor(data["stability_eigenvalues"]) if data.get("stability_eigenvalues") is not None else None,
+            framework_accuracy=float(data.get("framework_accuracy", 0.0)),
+            framework_consistency=float(data.get("framework_consistency", 0.0)),
+            metrics=data.get("metrics", {}),
+            component_scores=data.get("component_scores", {})
+        )
 
     def __post_init__(self):
         """Validate initialization."""
@@ -485,45 +335,12 @@ class ValidationResult:
             }
 
     @property
-    def is_valid(self) -> bool:
-        """Check if validation result is valid."""
-        return (
-            self.framework_accuracy >= 0.0 
-            and self.framework_accuracy <= 1.0
-            and self.framework_consistency >= 0.0
-            and self.framework_consistency <= 1.0
-        )
-        
-    @property
     def overall_score(self) -> float:
         """Get overall validation score."""
         return (self.framework_accuracy + self.framework_consistency) / 2
-        
-    def to_dict(self) -> Dict[str, Dict[str, Any]]:
-        """Convert results to dictionary.
-        
-        Returns:
-            Dictionary representation
-        """
-        return {
-            "geometric_metrics": self.energy_metrics or {},
-            "pattern_metrics": {
-                "bifurcation_points": self.bifurcation_points or [],
-                "stability_eigenvalues": self.stability_eigenvalues or torch.zeros(1)
-            },
-            "quantum_metrics": {},
-            "framework_metrics": {
-                "framework_accuracy": float(self.framework_accuracy),
-                "framework_consistency": float(self.framework_consistency)
-            }
-        }
 
     def get_summary(self) -> str:
-        """Get summary of validation results.
-        
-        Returns:
-            Summary string
-        """
+        """Get summary of validation results."""
         summary = []
         
         # Geometric metrics
@@ -538,92 +355,12 @@ class ValidationResult:
             summary.append(f"  bifurcation_points: {self.bifurcation_points}")
             summary.append(f"  stability_eigenvalues: {self.stability_eigenvalues}")
             
-        # Quantum metrics
-        summary.append("\nQuantum Validation:")
-        summary.append("  Not implemented")
-            
         # Framework metrics
         summary.append("\nFramework Validation:")
         summary.append(f"  framework_accuracy: {self.framework_accuracy:.3f}")
         summary.append(f"  framework_consistency: {self.framework_consistency:.3f}")
             
         return "\n".join(summary)
-        
-    def __lt__(self, other: 'ValidationResult') -> bool:
-        return self.overall_score < other.overall_score
-        
-    def __le__(self, other: 'ValidationResult') -> bool:
-        return self.overall_score <= other.overall_score
-        
-    def __gt__(self, other: 'ValidationResult') -> bool:
-        return self.overall_score > other.overall_score
-        
-    def __ge__(self, other: 'ValidationResult') -> bool:
-        return self.overall_score >= other.overall_score
-        
-    @classmethod
-    def aggregate(cls, results: List['ValidationResult']) -> 'ValidationResult':
-        """Aggregate multiple validation results."""
-        overall_accuracy = sum(r.framework_accuracy for r in results) / len(results)
-        overall_consistency = sum(r.framework_consistency for r in results) / len(results)
-        
-        return cls(
-            framework_accuracy=overall_accuracy,
-            framework_consistency=overall_consistency
-        )
-
-    def save(self, path: str):
-        """Save validation results to file.
-        
-        Args:
-            path: Path to save file
-        """
-        import json
-        
-        # Convert to dictionary
-        data = self.to_dict()
-        
-        # Save to JSON file
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-            
-    @classmethod
-    def load(cls, path: str) -> "ValidationResult":
-        """Load validation results from file.
-        
-        Args:
-            path: Path to load file
-            
-        Returns:
-            ValidationResult instance
-        """
-        import json
-        
-        # Load from JSON file
-        with open(path, 'r') as f:
-            data = json.load(f)
-            
-        # Create instance
-        return cls.from_dict(data)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Dict[str, Any]]) -> "ValidationResult":
-        """Create results from dictionary.
-        
-        Args:
-            data: Dictionary representation
-            
-        Returns:
-            ValidationResult instance
-        """
-        return cls(
-            curvature_bounds=None,
-            energy_metrics=data["geometric_metrics"],
-            bifurcation_points=data["pattern_metrics"]["bifurcation_points"],
-            stability_eigenvalues=data["pattern_metrics"]["stability_eigenvalues"],
-            framework_accuracy=float(data["framework_metrics"]["framework_accuracy"]),
-            framework_consistency=float(data["framework_metrics"]["framework_consistency"])
-        )
 
     def validate_metric(self, metric: torch.Tensor) -> bool:
         """Validate metric properties."""
@@ -673,135 +410,255 @@ class ValidationFramework:
     def __init__(
         self,
         geometric_validator: ModelGeometricValidator,
-        quantum_validator: QuantumValidator,
-        pattern_validator: PatternValidator,
+        quantum_validator: QuantumStateValidator,
+        pattern_validator: StabilityValidator,
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     ):
-        """Initialize validation framework.
-        
-        Args:
-            geometric_validator: Validator for geometric properties
-            quantum_validator: Validator for quantum properties
-            pattern_validator: Validator for pattern properties
-            device: Computation device
-        """
+        """Initialize validation framework."""
         self.geometric_validator = geometric_validator
         self.quantum_validator = quantum_validator
         self.pattern_validator = pattern_validator
         self.device = device
-
-    def get_test_metric(self, batch_size: Optional[int] = None) -> torch.Tensor:
-        """Get test metric for validation."""
-        if batch_size is None:
-            batch_size = 16
-        dim = self.geometric_validator.manifold_dim
-        return torch.eye(dim).unsqueeze(0).repeat(batch_size, 1, 1)
-
-    def get_test_connection(self, batch_size: Optional[int] = None) -> torch.Tensor:
-        """Get test connection for validation."""
-        if batch_size is None:
-            batch_size = 16
-        dim = self.geometric_validator.manifold_dim
-        return torch.zeros(batch_size, dim, dim, dim)
-
-    def get_test_curvature(self, batch_size: Optional[int] = None) -> torch.Tensor:
-        """Get test curvature for validation."""
-        if batch_size is None:
-            batch_size = 16
-        dim = self.geometric_validator.manifold_dim
-        return torch.zeros(batch_size, dim, dim, dim, dim)
-
-    def validate_metric(self, metric: torch.Tensor) -> bool:
-        """Validate metric properties."""
-        return bool(self.geometric_validator.validate_metric(metric))
-
-    def validate_positive_definite(self, metric: torch.Tensor) -> bool:
-        """Validate if metric is positive definite."""
-        return bool(self.geometric_validator.validate_positive_definite(metric))
-
-    def validate_smoothness(self, metric: torch.Tensor) -> bool:
-        """Validate if metric is smooth."""
-        return bool(self.geometric_validator.validate_smoothness(metric))
-
-    def validate_compatibility(self, metric: torch.Tensor, connection: torch.Tensor) -> bool:
-        """Validate metric compatibility with connection."""
-        # For test purposes, just check shapes match
-        return (metric.shape[0] == connection.shape[0] and 
-                metric.shape[1] == connection.shape[1])
-
-    def validate_curvature_symmetries(self, curvature: torch.Tensor) -> bool:
-        """Validate curvature tensor symmetries."""
-        # Check basic symmetries of Riemann curvature tensor
-        # R_ijkl = -R_jikl = -R_ijlk = R_klij
-        result = torch.allclose(curvature, -curvature.transpose(1, 2)) and \
-                torch.allclose(curvature, -curvature.transpose(2, 3))
-        return bool(result)
-
-    def validate_bianchi_identities(self, curvature: torch.Tensor) -> bool:
-        """Validate Bianchi identities."""
-        # Compute cyclic sum
-        cyclic_sum = torch.zeros_like(curvature)
-        for i in range(curvature.ndim - 1):
-            cyclic_sum = cyclic_sum + torch.roll(curvature, shifts=1, dims=i)
-            
-        # Check if sum vanishes
-        result = torch.allclose(cyclic_sum, torch.zeros_like(cyclic_sum), atol=1e-5)
-        return bool(result)
-
-    def has_sectional_bounds(self) -> bool:
-        """Check if sectional curvature bounds are available."""
-        return True
-
-    def get_sectional_bounds(self) -> Tuple[float, float]:
-        """Get bounds on sectional curvature."""
-        return -1.0, 1.0
-
-    def validate_sectional_bounds(self, curvature: torch.Tensor) -> bool:
-        """Validate sectional curvature bounds."""
-        # For test purposes, just check if values are within bounds
-        lower, upper = self.get_sectional_bounds()
-        return bool(torch.all((curvature >= lower) & (curvature <= upper)))
-
-    def validate_quantum_state(self, state: torch.Tensor) -> Dict[str, Any]:
-        """Validate quantum state properties."""
-        # Create a dummy model for validation
-        model = nn.Sequential()  # Empty model as placeholder
-        result = self.quantum_validator.validate_quantum_properties(model, state)
-        return result
-
-    def validate_pattern_formation(self, pattern: torch.Tensor) -> Dict[str, Any]:
-        """Validate pattern formation."""
-        # Create a dummy model for validation
-        model = nn.Sequential()  # Empty model as placeholder
-        result = self.pattern_validator.validate_patterns(model, pattern)
-        return result
-
-    def validate_framework(self, data: torch.Tensor) -> ValidationResult:
-        """Validate entire framework."""
-        # Run geometric validation
-        metric_valid = self.validate_metric(data)
         
+    def validate_all(
+        self,
+        model: Optional[nn.Module],
+        data: torch.Tensor,
+        metric: Optional[torch.Tensor] = None,
+        riemannian: Optional[RiemannianFramework] = None,
+    ) -> FrameworkValidationResult:
+        """Run complete validation on model and data."""
+        # Initialize messages list
+        messages = []
+        
+        # Run geometric validation
+        geometric_result = None
+        if metric is not None or riemannian is not None:
+            if riemannian is None and metric is not None:
+                # Create basic Riemannian framework from metric
+                riemannian = PatternRiemannianStructure(manifold_dim=metric.shape[-1])
+                riemannian.metric_factors = nn.Parameter(metric)
+            geometric_result = self.validate_geometry(model, data, riemannian)
+            messages.append(geometric_result.message)
+            
         # Run quantum validation
-        quantum_metrics = self.validate_quantum_state(data)
+        quantum_result = self.validate_quantum_state(data)
+        messages.append(quantum_result.message)
         
         # Run pattern validation
-        pattern_metrics = self.validate_pattern_formation(data)
+        pattern_result = self.validate_pattern_formation(data)
+        messages.append(pattern_result.message)
         
-        # Create validation result
-        result = ValidationResult(
-            curvature_bounds=None,
-            energy_metrics={"total": 0.5},
-            bifurcation_points=pattern_metrics.get("bifurcation_points", []),
-            stability_eigenvalues=pattern_metrics.get("stability_eigenvalues", torch.tensor([])),
-            framework_accuracy=0.95 if metric_valid else 0.0,
-            framework_consistency=0.90
+        # Determine overall validity
+        is_valid = all([
+            geometric_result.is_valid if geometric_result else True,
+            quantum_result.is_valid,
+            pattern_result.is_valid
+        ])
+        
+        # Create framework validation result
+        return FrameworkValidationResult(
+            is_valid=is_valid,
+            message="; ".join(messages),
+            geometric_result=geometric_result,
+            quantum_result=quantum_result,
+            pattern_result=pattern_result
         )
+
+    def safe_int_cast(self, value: Union[int, float, torch.Tensor, nn.Module]) -> int:
+        """Safely cast a value to int, handling various input types."""
+        if isinstance(value, (int, float)):
+            return int(value)
+        elif isinstance(value, torch.Tensor):
+            return int(value.item())
+        elif isinstance(value, nn.Module):
+            if hasattr(value, 'out_features'):
+                out_feat = value.out_features
+                if isinstance(out_feat, (int, float)):
+                    return int(out_feat)
+                elif isinstance(out_feat, torch.Tensor):
+                    return int(out_feat.item())
+        raise ValueError(f"Cannot safely cast {type(value)} to int")
+
+    def validate_geometry(
+        self,
+        model: Optional[nn.Module],
+        data: torch.Tensor,
+        riemannian: Optional[RiemannianFramework] = None
+    ) -> GeometricValidationResult:
+        """Validate geometric properties."""
+        # Handle case where no Riemannian structure is provided
+        if riemannian is None:
+            return GeometricValidationResult(
+                is_valid=True,
+                message="No Riemannian structure provided for validation",
+                data={}
+            )
+
+        # Get metric validation
+        metric = riemannian.compute_metric(data)
+        metric_result = self.geometric_validator.validate_layer_geometry("default", data)
         
-        # Add component metrics
-        result.metrics = {
-            "geometric": {"positive_definite": metric_valid},
-            "quantum": quantum_metrics.get("metrics", {}).get("quantum", {}),
-            "pattern": pattern_metrics.get("metrics", {}).get("pattern", {})
-        }
+        # Get flow validation if model has geometric flow
+        flow_result = None
+        if model is not None and hasattr(model, 'geometric_flow'):
+            geometric_flow = model.geometric_flow  # Access as property
+            if isinstance(geometric_flow, (nn.Module, torch.Tensor)):
+                # Convert to GeometricFlow if needed
+                if not isinstance(geometric_flow, GeometricFlow):
+                    try:
+                        if isinstance(geometric_flow, torch.Tensor):
+                            # Create GeometricFlow from tensor
+                            hidden_dim = self.safe_int_cast(geometric_flow.shape[-1])
+                            manifold_dim = self.safe_int_cast(data.shape[-1])
+                        else:
+                            # Create GeometricFlow from module
+                            if hasattr(geometric_flow, 'out_features'):
+                                hidden_dim = self.safe_int_cast(geometric_flow.out_features)
+                            else:
+                                hidden_dim = self.safe_int_cast(data.shape[-1])
+                            manifold_dim = self.safe_int_cast(data.shape[-1])
+                            
+                        geometric_flow = GeometricFlow(
+                            hidden_dim=hidden_dim,
+                            manifold_dim=manifold_dim
+                        )
+                    except ValueError as e:
+                        raise TypeError(f"Failed to create GeometricFlow: {str(e)}")
+            
+            # Ensure geometric_flow is of correct type
+            if not isinstance(geometric_flow, GeometricFlow):
+                raise TypeError(f"Expected GeometricFlow, got {type(geometric_flow)}")
+            
+            flow_validator = FlowValidator(
+                flow=geometric_flow,
+                stability_threshold=1e-6,
+                curvature_bounds=(-1.0, 1.0),
+                max_energy=1e3
+            )
+            flow_result = flow_validator.validate_flow(data)
         
+        # Create combined geometric result
+        result = metric_result
+        if flow_result is not None:
+            # Handle both single result and dictionary of results
+            if isinstance(flow_result, dict):
+                # Take the first result from the dictionary
+                first_result = next(iter(flow_result.values()))
+                result = cast(GeometricValidationResult, result.merge(first_result))
+            else:
+                result = cast(GeometricValidationResult, result.merge(flow_result))
+            
         return result
+
+    def validate_quantum_state(
+        self,
+        state: Union[torch.Tensor, QuantumState],
+        prepared: Optional[Union[torch.Tensor, QuantumState]] = None,
+        measurements: Optional[List[Union[torch.Tensor, QuantumState]]] = None,
+        bases: Optional[List[str]] = None
+    ) -> QuantumStateValidationResult:
+        """Validate quantum state properties."""
+        # Convert tensor to QuantumState
+        if isinstance(state, torch.Tensor):
+            # Create basis labels based on dimension
+            basis_labels = [f"|{i}⟩" for i in range(state.shape[-1])]
+            # Convert to complex if not already
+            if not torch.is_complex(state):
+                state = state.to(torch.complex64)
+            # Create QuantumState instance
+            state = QuantumState(
+                amplitudes=state,
+                basis_labels=basis_labels,
+                phase=torch.zeros_like(state, dtype=torch.complex64)
+            )
+            
+        # Convert prepared state if provided
+        if prepared is not None and isinstance(prepared, torch.Tensor):
+            prepared = QuantumState(
+                amplitudes=prepared.to(torch.complex64) if not torch.is_complex(prepared) else prepared,
+                basis_labels=state.basis_labels,
+                phase=torch.zeros_like(prepared, dtype=torch.complex64)
+            )
+            
+        # Convert measurements if provided and create basis tensors
+        measurements_tensor = None
+        basis_tensors = []
+        
+        if measurements is not None:
+            # Convert each measurement to QuantumState if needed
+            quantum_measurements = [
+                QuantumState(
+                    amplitudes=m.to(torch.complex64) if not torch.is_complex(m) else m,
+                    basis_labels=state.basis_labels,
+                    phase=torch.zeros_like(m, dtype=torch.complex64)
+                ) if isinstance(m, torch.Tensor) else m
+                for m in measurements
+            ]
+            # Stack measurements into a single tensor
+            measurements_tensor = torch.stack([m.amplitudes for m in quantum_measurements])
+            
+        if prepared is None or measurements_tensor is None or bases is None:
+            # Use default values if not provided
+            prepared = state  # Use input state as prepared state
+            measurements_tensor = state.amplitudes.unsqueeze(0)  # Use input state as measurement
+            bases = ["computational"]  # Use computational basis
+            
+        # Create measurement bases tensors
+        for basis in bases:
+            if basis == "computational":
+                # Create computational basis projector
+                dim = state.amplitudes.shape[-1]
+                basis_tensor = torch.eye(dim, dtype=torch.complex64)
+            else:
+                # Use computational basis as default
+                basis_tensor = torch.eye(state.amplitudes.shape[-1], dtype=torch.complex64)
+            basis_tensors.append(basis_tensor)
+            
+        return self.quantum_validator.validate(
+            target=state,
+            prepared=prepared,
+            measurements=measurements_tensor,
+            bases=basis_tensors
+        )
+
+    def validate_pattern_formation(
+        self,
+        pattern: torch.Tensor,
+        dynamics: Optional[AttentionPatternDynamics] = None,
+        time_steps: int = 1000
+    ) -> ValidationResult:
+        """Validate pattern formation."""
+        pattern_validator = PatternFormationValidator(
+            tolerance=1e-6,
+            coherence_threshold=0.8,
+            symmetry_threshold=0.9,
+            defect_threshold=0.1,
+            frequency_threshold=0.1,
+            phase_threshold=0.1,
+        )
+        return pattern_validator.validate(
+            dynamics=dynamics,
+            initial=pattern,
+            time_steps=time_steps
+        )
+
+    def save_results(self, results: FrameworkValidationResult, path: str):
+        """Save validation results to file."""
+        # Convert to dictionary
+        data = results.to_dict()
+        
+        # Save to JSON file
+        import json
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+            
+    def load_results(self, path: str) -> FrameworkValidationResult:
+        """Load validation results from file."""
+        # Load from JSON file
+        import json
+        with open(path, 'r') as f:
+            data = json.load(f)
+            
+        # Create validation result
+        return FrameworkValidationResult.from_dict(data)

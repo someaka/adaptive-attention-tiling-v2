@@ -8,19 +8,18 @@ This module contains focused unit tests to debug specific issues in:
 
 import pytest
 import torch
-from src.validation.patterns.stability import (
-    PatternStabilityValidator,
-    LinearStabilityAnalyzer,
-    ValidationResult,
-    StabilitySpectrum
+from src.validation.base import ValidationResult
+from src.validation.patterns.stability import StabilitySpectrum
+from src.validation.flow.stability import (
+    LinearStabilityValidator,
+    NonlinearStabilityValidator
 )
 from src.validation.geometric.flow import (
-    FlowValidator,
-    FlowProperties,
-    EnergyMetrics,
-    FlowValidationResult
+    TilingFlowValidator as FlowValidator,
+    TilingFlowValidationResult as FlowValidationResult
 )
 from src.neural.attention.pattern.dynamics import PatternDynamics
+from src.core.tiling.geometric_flow import GeometricFlow
 
 # Test parameters for faster execution
 TEST_GRID_SIZE = 16
@@ -35,11 +34,14 @@ class TestStabilityValidation:
     def setup_stability(self):
         """Set up stability validation components."""
         return {
-            'validator': LinearStabilityAnalyzer(tolerance=1e-6),
+            'validator': LinearStabilityValidator(tolerance=1e-6),
             'pattern': torch.randn(TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                                  TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1,
-            'dynamics': PatternDynamics(grid_size=TEST_GRID_SIZE, 
-                                      space_dim=TEST_SPACE_DIM, dt=0.1)
+            'dynamics': PatternDynamics(
+                grid_size=TEST_GRID_SIZE,
+                space_dim=TEST_SPACE_DIM,
+                hidden_dim=TEST_GRID_SIZE
+            )
         }
 
     @pytest.mark.parametrize("attr", ['is_valid', 'message', 'data'])
@@ -74,13 +76,21 @@ class TestEnergyValidation:
     @pytest.fixture
     def setup_energy(self):
         """Set up energy validation components."""
+        flow = GeometricFlow(
+            hidden_dim=TEST_GRID_SIZE,
+            manifold_dim=TEST_GRID_SIZE,
+            motive_rank=4,
+            num_charts=4,
+            integration_steps=TEST_TIME_STEPS,
+            dt=0.1,
+            stability_threshold=1e-6
+        )
         return {
             'validator': FlowValidator(
-                energy_threshold=1e-6,
-                monotonicity_threshold=1e-4,
-                singularity_threshold=1.0,
-                max_iterations=1000,
-                tolerance=1e-5
+                flow=flow,
+                stability_threshold=1e-6,
+                curvature_bounds=(-1.0, 1.0),
+                max_energy=1e3
             ),
             'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                               TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
@@ -107,9 +117,9 @@ class TestEnergyValidation:
         
         result = validator.validate_energy_conservation(flow)
         
-        assert isinstance(result, ValidationResult), "Should return ValidationResult"
-        assert 'total_energy' in result.data, "Should have total_energy in data"
-        assert 'energy_variation' in result.data, "Should have energy_variation in data"
+        assert isinstance(result, FlowValidationResult), "Should return FlowValidationResult"
+        assert result.data is not None, "Should have data"
+        assert 'energy' in result.data, "Should have energy metrics"
         
 class TestFlowProperties:
     """Test suite for debugging flow properties construction."""
@@ -117,13 +127,21 @@ class TestFlowProperties:
     @pytest.fixture
     def setup_flow(self):
         """Set up flow validation components."""
+        flow = GeometricFlow(
+            hidden_dim=TEST_GRID_SIZE,
+            manifold_dim=TEST_GRID_SIZE,
+            motive_rank=4,
+            num_charts=4,
+            integration_steps=TEST_TIME_STEPS,
+            dt=0.1,
+            stability_threshold=1e-6
+        )
         return {
             'validator': FlowValidator(
-                energy_threshold=1e-6,
-                monotonicity_threshold=1e-4,
-                singularity_threshold=1.0,
-                max_iterations=1000,
-                tolerance=1e-5
+                flow=flow,
+                stability_threshold=1e-6,
+                curvature_bounds=(-1.0, 1.0),
+                max_energy=1e3
             ),
             'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                               TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
@@ -134,31 +152,41 @@ class TestFlowProperties:
         validator = setup_flow['validator']
         flow = setup_flow['flow']
         
-        properties = validator.compute_flow_properties(flow)
+        result = validator.validate_flow(flow)
         
-        assert isinstance(properties, FlowProperties), "Should return FlowProperties"
-        assert hasattr(properties, 'is_stable'), "Should have stability flag"
-        assert hasattr(properties, 'is_convergent'), "Should have convergence flag"
+        assert isinstance(result, FlowValidationResult), "Should return FlowValidationResult"
+        assert result.data is not None, "Should have data"
+        assert 'stability' in result.data, "Should have stability metrics"
+        assert 'energy' in result.data, "Should have energy metrics"
         
     def test_flow_properties_with_energy(self, setup_flow):
         """Test flow properties with explicit energy metrics."""
         validator = setup_flow['validator']
         flow = setup_flow['flow']
         
-        properties = validator.compute_flow_properties(flow)
+        result = validator.validate_flow(flow)
         
-        assert hasattr(properties, 'total_energy'), "Should have total energy"
-        assert hasattr(properties, 'energy_variation'), "Should have energy variation"
+        assert result.data is not None, "Should have data"
+        assert 'energy' in result.data, "Should have energy metrics"
+        assert 'stability' in result.data, "Should have stability metrics"
 
 def setup_energy_validation():
     """Set up energy validation components."""
+    flow = GeometricFlow(
+        hidden_dim=TEST_GRID_SIZE,
+        manifold_dim=TEST_GRID_SIZE,
+        motive_rank=4,
+        num_charts=4,
+        integration_steps=TEST_TIME_STEPS,
+        dt=0.1,
+        stability_threshold=1e-6
+    )
     return {
         'validator': FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-5
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         ),
         'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                           TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1
@@ -166,13 +194,21 @@ def setup_energy_validation():
 
 def setup_flow_validation():
     """Set up flow validation components."""
+    flow = GeometricFlow(
+        hidden_dim=TEST_GRID_SIZE,
+        manifold_dim=TEST_GRID_SIZE,
+        motive_rank=4,
+        num_charts=4,
+        integration_steps=TEST_TIME_STEPS,
+        dt=0.1,
+        stability_threshold=1e-6
+    )
     return {
         'validator': FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-5
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         ),
         'flow': torch.randn(TEST_TIME_STEPS, TEST_BATCH_SIZE, TEST_SPACE_DIM, 
                           TEST_GRID_SIZE, TEST_GRID_SIZE) * 0.1

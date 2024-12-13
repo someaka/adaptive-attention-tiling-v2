@@ -13,9 +13,13 @@ import logging
 import numpy as np
 import math
 from src.validation.patterns.formation import SpatialValidator
-from src.validation.patterns.stability import PatternStabilityValidator
-from src.validation.geometric.flow import FlowValidator, FlowValidationResult
+from src.validation.patterns.stability import PatternValidator as PatternStabilityValidator
+from src.validation.geometric.flow import (
+    TilingFlowValidator as FlowValidator,
+    TilingFlowValidationResult as FlowValidationResult
+)
 from src.neural.attention.pattern.dynamics import PatternDynamics
+from src.core.tiling.geometric_flow import GeometricFlow
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -418,20 +422,42 @@ def setup_test_parameters():
 @pytest.fixture
 def pattern_validator(setup_test_parameters):
     """Create pattern stability validator."""
+    dynamics = PatternDynamics(
+        grid_size=setup_test_parameters['grid_size'],
+        space_dim=setup_test_parameters['space_dim'],
+        dt=setup_test_parameters['dt']
+    )
+    flow = GeometricFlow(
+        hidden_dim=setup_test_parameters['grid_size'],
+        manifold_dim=setup_test_parameters['grid_size'],
+        motive_rank=4,
+        num_charts=1,
+        integration_steps=setup_test_parameters['time_steps'],
+        dt=setup_test_parameters['dt'],
+        stability_threshold=setup_test_parameters['tolerance']
+    )
     return PatternStabilityValidator(
-        tolerance=setup_test_parameters['tolerance'],
-        max_time=setup_test_parameters['time_steps']
+        dynamics=dynamics,
+        flow=flow
     )
 
 @pytest.fixture
 def flow_validator(setup_test_parameters):
     """Create flow validator."""
+    flow = GeometricFlow(
+        hidden_dim=setup_test_parameters['grid_size'],
+        manifold_dim=setup_test_parameters['grid_size'],
+        motive_rank=4,
+        num_charts=1,
+        integration_steps=setup_test_parameters['time_steps'],
+        dt=setup_test_parameters['dt'],
+        stability_threshold=setup_test_parameters['tolerance']
+    )
     return FlowValidator(
-        energy_threshold=1e-6,
-        monotonicity_threshold=1e-4,
-        singularity_threshold=1.0,
-        max_iterations=1000,
-        tolerance=setup_test_parameters['tolerance']
+        flow=flow,
+        stability_threshold=setup_test_parameters['tolerance'],
+        curvature_bounds=(-1.0, 1.0),
+        max_energy=1e3
     )
 
 def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_validator):

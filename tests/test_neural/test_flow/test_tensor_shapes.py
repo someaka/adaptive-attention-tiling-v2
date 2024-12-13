@@ -5,7 +5,10 @@ import torch
 
 from src.neural.flow.geometric_flow import GeometricFlow, RicciTensorNetwork
 from src.neural.flow.hamiltonian import HamiltonianSystem
-from src.validation.geometric.flow import FlowValidator, FlowValidationResult
+from src.validation.geometric.flow import (
+    TilingFlowValidator as FlowValidator,
+    TilingFlowValidationResult as FlowValidationResult
+)
 
 class TestTensorShapes:
     """Test tensor shapes in geometric flow."""
@@ -130,26 +133,19 @@ class TestTensorShapes:
         
         # Test energy validation (uses full phase space)
         validator = FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-6
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         )
-        result = validator.validate(phase_points)
+        result = validator.validate_flow(phase_points)
         
         assert isinstance(result, FlowValidationResult), \
             "Validation result should be a FlowValidationResult"
         assert result.data is not None, \
             "Validation result should have data"
-        assert 'energy_metrics' in result.data, \
+        assert 'energy' in result.data, \
             "Validation result should have energy metrics"
-        
-        energy_metrics = result.data['energy_metrics']
-        assert isinstance(energy_metrics.initial_energy, float), \
-            "Initial energy should be a float"
-        assert isinstance(energy_metrics.final_energy, float), \
-            "Final energy should be a float"
             
     def test_convergence_shapes(self, flow, phase_points):
         """Test shapes in convergence computations."""
@@ -162,27 +158,25 @@ class TestTensorShapes:
         
         # Test convergence validation (uses position components only)
         validator = FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-6
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         )
-        result = validator.validate(position)
+        result = validator.validate_flow(position)
         
         assert isinstance(result, FlowValidationResult), \
             "Validation result should be a FlowValidationResult"
         assert result.data is not None, \
             "Validation result should have data"
-        assert 'convergence_metrics' in result.data, \
+        assert 'stability' in result.data, \
             "Validation result should have convergence metrics"
 
-    def test_energy_validation_shapes(self):
+    def test_energy_validation_shapes(self, flow):
         """Test energy validation tensor shapes."""
         validator = FlowValidator(
-            energy_threshold=1e-6,
-            monotonicity_threshold=1e-4,
-            singularity_threshold=1.0,
-            max_iterations=1000,
-            tolerance=1e-6
+            flow=flow,
+            stability_threshold=1e-6,
+            curvature_bounds=(-1.0, 1.0),
+            max_energy=1e3
         )

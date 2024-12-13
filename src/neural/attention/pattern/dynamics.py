@@ -49,7 +49,7 @@ class PatternDynamics:
         self.reaction = ReactionSystem(self.size)
         self.stability = StabilityAnalyzer(self)
 
-    def step(self, state: torch.Tensor) -> torch.Tensor:
+    def compute_next_state(self, state: torch.Tensor) -> torch.Tensor:
         """Perform one step of pattern dynamics.
         
         Args:
@@ -59,8 +59,8 @@ class PatternDynamics:
             torch.Tensor: Next state
         """
         # Apply reaction and diffusion
-        reaction = self.reaction.compute_reaction(state)
-        diffusion = self.diffusion.compute_diffusion(state)
+        reaction = self.reaction.reaction_term(state)
+        diffusion = self.diffusion.apply_diffusion(state, diffusion_coefficient=0.1, dt=self.dt)
         
         # Combine using timestep
         next_state = state + self.dt * (reaction + diffusion)
@@ -71,6 +71,7 @@ class PatternDynamics:
         self,
         pattern: torch.Tensor,
         diffusion_coefficient: float = 0.1,
+        reaction_term: Optional[Callable] = None,
         steps: int = 100
     ) -> List[torch.Tensor]:
         """Evolve pattern forward in time.
@@ -78,6 +79,7 @@ class PatternDynamics:
         Args:
             pattern: Initial pattern
             diffusion_coefficient: Diffusion coefficient
+            reaction_term: Optional custom reaction term function
             steps: Number of timesteps
             
         Returns:
@@ -88,7 +90,13 @@ class PatternDynamics:
         
         for _ in range(steps):
             trajectory.append(current)
-            current = self.step(current)
+            # Apply reaction and diffusion with optional custom reaction term
+            if reaction_term is not None:
+                reaction = reaction_term(current)
+            else:
+                reaction = self.reaction.reaction_term(current)
+            diffusion = self.diffusion.apply_diffusion(current, diffusion_coefficient=diffusion_coefficient, dt=self.dt)
+            current = current + self.dt * (reaction + diffusion)
             
         return trajectory
         
@@ -101,52 +109,56 @@ class PatternDynamics:
         Returns:
             Jacobian matrix
         """
-        return self.compute_stability_matrix(state)
+        return self.compute_stability_matrix(state, epsilon=1e-6, chunk_size=10)
         
-    def compute_stability_matrix(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute stability matrix for a given state.
-        
-        This computes the Jacobian of the dynamics with respect to the state.
+    def compute_stability_matrix(
+        self,
+        state: torch.Tensor,
+        epsilon: float = 1e-6,
+        chunk_size: int = 500
+    ) -> torch.Tensor:
+        """Compute stability matrix for current state.
         
         Args:
-            state (torch.Tensor): State to compute stability for
+            state: Current state tensor
+            epsilon: Small perturbation for numerical derivatives
+            chunk_size: Size of chunks to process at once
             
         Returns:
-            torch.Tensor: Stability matrix (Jacobian)
+            Stability matrix
         """
         # Get state shape and ensure proper dimensions
         if len(state.shape) == 4:  # [batch, channels, height, width]
             batch_size = state.shape[0]
             n = state.shape[1] * state.shape[2] * state.shape[3]
-            state = state.reshape(batch_size, n)
+            state = state.view(batch_size, n)
         else:  # [channels, height, width]
             batch_size = 1
             n = state.numel()
-            state = state.reshape(1, n)
+            state = state.view(1, n)
         
         # Initialize Jacobian efficiently
         J = torch.zeros((n, n), dtype=state.dtype, device=state.device)
         
         # Use vectorized operations for efficiency
-        eps = 1e-6
-        for i in range(0, n, 10):  # Process in chunks of 10 for memory efficiency
-            end_idx = min(i + 10, n)
-            chunk_size = end_idx - i
+        for i in range(0, n, chunk_size):  # Process in chunks for memory efficiency
+            end_idx = min(i + chunk_size, n)
+            curr_chunk_size = end_idx - i
             
             # Create perturbations for this chunk
-            perturb = torch.zeros((chunk_size, n), dtype=state.dtype, device=state.device)
-            perturb[range(chunk_size), range(i, end_idx)] = eps
+            perturb = torch.zeros((curr_chunk_size, n), dtype=state.dtype, device=state.device)
+            perturb[range(curr_chunk_size), range(i, end_idx)] = epsilon
             
             # Forward differences (vectorized)
-            states_plus = (state + perturb).reshape(-1, self.dim, self.size, self.size)
-            forward = self.step(states_plus).reshape(chunk_size, n)
+            states_plus = (state + perturb).view(-1, self.dim, self.size, self.size)
+            forward = self.compute_next_state(states_plus).view(curr_chunk_size, n)
             
             # Backward differences (vectorized)
-            states_minus = (state - perturb).reshape(-1, self.dim, self.size, self.size)
-            backward = self.step(states_minus).reshape(chunk_size, n)
+            states_minus = (state - perturb).view(-1, self.dim, self.size, self.size)
+            backward = self.compute_next_state(states_minus).view(curr_chunk_size, n)
             
             # Central differences
-            J[i:end_idx] = (forward - backward) / (2 * eps)
+            J[i:end_idx] = (forward - backward) / (2 * epsilon)
         
         return J
 
@@ -191,27 +203,33 @@ class PatternDynamics:
         """
         # Ensure proper dimensions
         if len(state.shape) == 4:  # [batch, channels, height, width]
-            state = state.reshape(state.shape[0], -1)
+            state = state.view(state.shape[0], -1)
         else:  # [channels, height, width]
-            state = state.reshape(1, -1)
+            state = state.view(1, -1)
         
         # Compute kinetic energy efficiently
         kinetic = 0.5 * torch.sum(state * state, dim=1)
         
         # Compute field terms
-        reaction = self.reaction.compute_reaction(state.reshape(-1, self.dim, self.size, self.size))
-        diffusion = self.diffusion.compute_diffusion(state.reshape(-1, self.dim, self.size, self.size))
+        reaction = self.reaction.reaction_term(state.view(-1, self.dim, self.size, self.size))
+        diffusion = self.diffusion.apply_diffusion(
+            state.view(-1, self.dim, self.size, self.size),
+            diffusion_coefficient=0.1,
+            dt=self.dt
+        )
         
         # Reshape fields
-        reaction = reaction.reshape(state.shape)
-        diffusion = diffusion.reshape(state.shape)
+        reaction = reaction.view(state.shape)
+        diffusion = diffusion.view(state.shape)
         
         # Compute potential energy efficiently
         potential = -0.5 * torch.sum(state * (reaction + diffusion), dim=1)
         
         # Return total energy (averaged over batch if needed)
         total_energy = kinetic + potential
-        return total_energy.mean() if len(total_energy) > 1 else total_energy[0]
+        if total_energy.shape[0] > 1:
+            return total_energy.mean()
+        return total_energy[0]
 
     def is_stable(self, state: torch.Tensor, threshold: float = 0.1) -> bool:
         """Check if a state is stable.
@@ -229,7 +247,7 @@ class PatternDynamics:
         # Check if all real parts are negative
         max_real = torch.max(eigenvalues.real)
         
-        return max_real < threshold
+        return bool(max_real < threshold)
 
     def apply_diffusion(
         self,
@@ -370,67 +388,7 @@ class PatternDynamics:
             
         # Pattern formed if changes are small and consistent
         mean_change = sum(changes) / len(changes)
-        return mean_change < 1e-3
-
-    def compute_stability_matrix(
-        self,
-        state: torch.Tensor,
-        epsilon: float = 1e-6,
-        chunk_size: int = 500
-    ) -> torch.Tensor:
-        """Compute stability matrix for current state.
-        
-        Args:
-            state: Current state tensor
-            epsilon: Small perturbation for numerical derivatives
-            chunk_size: Size of chunks to process at once
-            
-        Returns:
-            Stability matrix
-        """
-        # Ensure state is on CPU for stability
-        state = state.cpu()
-        
-        # Get flattened state size
-        state_size = state.numel()
-        
-        # Initialize stability matrix
-        stability_matrix = torch.zeros((state_size, state_size), dtype=state.dtype)
-        
-        # Compute base reaction-diffusion once
-        f_minus = self.reaction_diffusion(state).reshape(-1)
-        
-        # Process in chunks to manage memory
-        for chunk_start in range(0, state_size, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, state_size)
-            chunk_size_actual = chunk_end - chunk_start
-            
-            # Create perturbed states for this chunk efficiently
-            perturbed_states = state.repeat(chunk_size_actual, 1, 1, 1)
-            indices = torch.arange(chunk_start, chunk_end)
-            flat_perturbations = torch.zeros(chunk_size_actual, state_size, dtype=state.dtype)
-            flat_perturbations[torch.arange(chunk_size_actual), indices] = epsilon
-            perturbations = flat_perturbations.view(-1, *state.shape[1:])
-            perturbed_states = perturbed_states + perturbations
-            
-            # Compute derivatives in batch
-            with torch.no_grad():
-                f_plus = torch.stack([
-                    self.reaction_diffusion(p_state) 
-                    for p_state in perturbed_states
-                ]).reshape(chunk_size_actual, -1)
-                
-                # Numerical derivatives for this chunk
-                derivatives = (f_plus - f_minus) / epsilon
-                
-                # Store in stability matrix
-                stability_matrix[:, chunk_start:chunk_end] = derivatives.T
-                
-                # Check for numerical instability
-                if torch.isnan(derivatives).any():
-                    raise RuntimeError("Numerical instability in stability matrix computation")
-        
-        return stability_matrix
+        return bool(mean_change < 1e-3)
 
     def compute_lyapunov_spectrum(
         self,
@@ -448,8 +406,8 @@ class PatternDynamics:
         Returns:
             Lyapunov exponents tensor
         """
-        # Delegate to stability analyzer
-        return self.stability.compute_lyapunov_spectrum(state)
+        # Delegate to stability analyzer with the provided parameters
+        return self.stability.compute_lyapunov_spectrum(state, steps=steps)
 
     def test_structural_stability(
         self,
@@ -470,8 +428,13 @@ class PatternDynamics:
             Structural stability measure
         """
         # Evolve original and perturbed systems
-        original_evolution = self.evolve_pattern(state, 0.1, steps=steps)
-        perturbed_evolution = self.evolve_pattern(state, 0.1, perturbed_reaction, steps=steps)
+        original_evolution = self.evolve_pattern(state, diffusion_coefficient=0.1, steps=steps)
+        perturbed_evolution = self.evolve_pattern(
+            state,
+            diffusion_coefficient=0.1,
+            reaction_term=perturbed_reaction,
+            steps=steps
+        )
         
         # Compute difference in trajectories
         differences = []
@@ -522,7 +485,7 @@ class PatternDynamics:
             # Simulate dynamics with smaller time step near zero
             state = pattern.clone()
             converged = False
-            dt = min(0.1, abs(param) + 0.01)  # Smaller dt near bifurcation
+            dt = 0.1 if isinstance(param, float) else min(0.1, float(torch.abs(param).item()) + 0.01)  # Smaller dt near bifurcation
             
             for _ in range(max_iter):
                 next_state = self.reaction_diffusion(state, reaction, dt=dt)
@@ -729,8 +692,22 @@ class PatternDynamics:
         fixed_point: Union[ReactionDiffusionState, torch.Tensor],
         perturbation: torch.Tensor,
     ) -> StabilityMetrics:
-        """Analyze stability around fixed point."""
-        return self.stability.analyze_stability(fixed_point, perturbation)
+        """Analyze stability around fixed point.
+        
+        Args:
+            fixed_point: Fixed point state (either ReactionDiffusionState or Tensor)
+            perturbation: Perturbation tensor
+            
+        Returns:
+            StabilityMetrics: Stability analysis results
+        """
+        # Convert ReactionDiffusionState to tensor if needed
+        if isinstance(fixed_point, ReactionDiffusionState):
+            state_tensor = torch.cat([fixed_point.activator, fixed_point.inhibitor], dim=1)
+        else:
+            state_tensor = fixed_point
+            
+        return self.stability.analyze_stability(state_tensor, perturbation)
     
     def find_reaction_fixed_points(
         self,
@@ -814,3 +791,65 @@ class PatternDynamics:
         control = control + 0.1 * error
         
         return ControlSignal(control)
+
+    def compute_linearization(self, pattern: torch.Tensor) -> torch.Tensor:
+        """Compute linearized dynamics matrix.
+        
+        Args:
+            pattern: Input pattern tensor
+            
+        Returns:
+            Linearized dynamics matrix
+        """
+        # Get current state
+        state = pattern.detach().requires_grad_(True)
+        
+        # Compute dynamics
+        dynamics = self.compute_next_state(state)
+        
+        # Compute Jacobian matrix
+        jacobian = torch.autograd.functional.jacobian(self.compute_next_state, state)
+        
+        # Convert to tensor and reshape to matrix form
+        if isinstance(jacobian, tuple):
+            jacobian = torch.stack(list(jacobian))
+        batch_size = pattern.size(0)
+        state_size = pattern.numel() // batch_size
+        return jacobian.view(batch_size, state_size, state_size)
+
+    def apply_symmetry(self, pattern: torch.Tensor, symmetry: torch.Tensor) -> torch.Tensor:
+        """Apply symmetry transformation to pattern.
+        
+        Args:
+            pattern: Input pattern tensor
+            symmetry: Symmetry transformation matrix
+            
+        Returns:
+            Transformed pattern
+        """
+        # Reshape pattern for matrix multiplication
+        batch_size = pattern.size(0)
+        state_size = pattern.numel() // batch_size
+        pattern_flat = pattern.reshape(batch_size, state_size)
+        
+        # Apply symmetry transformation
+        transformed = torch.matmul(pattern_flat, symmetry)
+        
+        # Reshape back to original shape
+        return transformed.reshape_as(pattern)
+
+    def apply_scale_transform(self, pattern: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Apply scale transformation to pattern.
+        
+        Args:
+            pattern: Input pattern tensor
+            scale: Scale transformation tensor
+            
+        Returns:
+            Transformed pattern
+        """
+        # Apply scaling
+        transformed = pattern * scale.unsqueeze(-1).unsqueeze(-1)
+        
+        # Normalize to preserve total intensity
+        return transformed / transformed.sum(dim=(-2, -1), keepdim=True).clamp(min=1e-6)

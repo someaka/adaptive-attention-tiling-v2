@@ -17,10 +17,11 @@ import numpy as np
 import pytest
 import torch
 from src.validation.geometric.flow import TilingFlowValidator as FlowValidator
-from src.validation.framework import PatternValidator
+from src.validation.patterns.stability import PatternValidator
 from src.validation.quantum.state import QuantumStateValidator
 from src.validation.framework import ValidationFramework
 from src.core.tiling.geometric_flow import GeometricFlow
+from src.neural.attention.pattern.dynamics import PatternDynamics
 
 # Configure logging
 root_logger = logging.getLogger()
@@ -483,10 +484,17 @@ def seq_length():
     return 16
 
 
-@pytest.fixture
-def pattern_dynamics(pattern_system):
+@pytest.fixture(scope="session")
+def pattern_dynamics(hidden_dim):
     """Create pattern dynamics system for testing."""
-    return pattern_system
+    return PatternDynamics(
+        grid_size=32,  # Match test_params grid_size
+        space_dim=2,
+        boundary='periodic',
+        dt=0.01,
+        num_modes=8,
+        hidden_dim=hidden_dim
+    )
 
 
 # Validation fixtures
@@ -533,9 +541,12 @@ def geometric_flow_validator(flow_validator):
 
 # Pattern validation fixtures
 @pytest.fixture(scope="session")
-def pattern_validator():
+def pattern_validator(pattern_dynamics, flow_validator):
     """Get pattern validator for testing."""
-    return PatternValidator()
+    return PatternValidator(
+        dynamics=pattern_dynamics,
+        flow=flow_validator.flow
+    )
 
 # Quantum validation fixtures
 @pytest.fixture(scope="session")

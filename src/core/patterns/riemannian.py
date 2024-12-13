@@ -6,12 +6,10 @@ including metric tensors, connections, and curvature computations.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Protocol, Tuple, Union
+from typing import Optional, Protocol, Tuple, runtime_checkable
 import torch
 from torch import Tensor
 import torch.nn as nn
-
-T = Union[Tensor]
 
 @dataclass
 class ChristoffelSymbols:
@@ -27,6 +25,7 @@ class CurvatureTensor:
     scalar: Tensor
     dimension: int
 
+@runtime_checkable
 class RiemannianFramework(Protocol):
     """Protocol for Riemannian geometric structure."""
     
@@ -52,14 +51,6 @@ class RiemannianFramework(Protocol):
 
     def covariant_derivative(self, vector_field: Tensor, direction: Tensor) -> Tensor:
         """Computes covariant derivative of a vector field."""
-        ...
-
-    def geodesic_flow(self, initial_point: Tensor, initial_velocity: Tensor) -> Tensor:
-        """Computes geodesic flow from initial conditions."""
-        ...
-
-    def curvature_tensor(self, point: Tensor) -> CurvatureTensor:
-        """Computes various curvature tensors at a point."""
         ...
 
 class PatternRiemannianStructure(nn.Module):
@@ -106,14 +97,7 @@ class PatternRiemannianStructure(nn.Module):
         )
 
     def compute_metric(self, points: Tensor) -> Tensor:
-        """Compute the metric tensor at the given points.
-
-        Args:
-            points: Points to compute metric at, shape (batch_size, manifold_dim)
-
-        Returns:
-            Metric tensor at points, shape (batch_size, manifold_dim, manifold_dim)
-        """
+        """Compute the metric tensor at the given points."""
         batch_size = points.shape[0]
         manifold_dim = points.shape[1]
         
@@ -158,14 +142,7 @@ class PatternRiemannianStructure(nn.Module):
         return factors
 
     def compute_christoffel(self, points: Tensor) -> Tensor:
-        """Compute Christoffel symbols of the second kind.
-        
-        Args:
-            points: Points to compute at, shape (batch_size, manifold_dim)
-            
-        Returns:
-            Christoffel symbols, shape (batch_size, manifold_dim, manifold_dim, manifold_dim)
-        """
+        """Compute Christoffel symbols of the second kind."""
         points = points.clone()
         if not points.requires_grad:
             points.requires_grad_(True)
@@ -200,12 +177,54 @@ class PatternRiemannianStructure(nn.Module):
                         metric_inv[:, i, :] * metric_deriv[:, j, :],
                         dim=1
                     )
-        
+                    
         return christoffel
 
-    def christoffel_symbols(
-        self, chart: Tensor
-    ) -> ChristoffelSymbols:
+    def compute_riemann(self, points: Tensor) -> Tensor:
+        """Compute the Riemann curvature tensor."""
+        batch_size = points.shape[0]
+        dim = points.shape[1]
+        device = points.device
+        
+        # Initialize tensors
+        christoffel = self.compute_christoffel(points)  # Shape: (batch_size, dim, dim, dim)
+        christoffel_grad = torch.zeros((batch_size, dim, dim, dim, dim), device=device)
+        
+        # Compute gradients for each component
+        for l in range(dim):
+            grad_l = torch.autograd.grad(
+                christoffel[..., l].sum(),
+                points,
+                create_graph=True,
+                retain_graph=True
+            )[0]  # Shape: (batch_size, dim)
+            
+            # Expand grad_l to match the desired shape
+            grad_l = grad_l.unsqueeze(1).unsqueeze(2).expand(-1, dim, dim, -1)
+            christoffel_grad[..., l, :] = grad_l
+            
+        # Compute Riemann tensor components
+        riemann = (
+            christoffel_grad.transpose(-2, -1) - 
+            christoffel_grad.transpose(-3, -1).transpose(-2, -1)
+        )
+        
+        # Add Christoffel terms
+        for m in range(dim):
+            for n in range(dim):
+                riemann[..., m, n] += torch.einsum(
+                    'bijk,bikl->bijl',
+                    christoffel[..., m].unsqueeze(1),
+                    christoffel[..., n].unsqueeze(1)
+                ) - torch.einsum(
+                    'bijk,bikl->bijl',
+                    christoffel[..., n].unsqueeze(1),
+                    christoffel[..., m].unsqueeze(1)
+                )
+                
+        return riemann
+
+    def christoffel_symbols(self, chart: Tensor) -> ChristoffelSymbols:
         """Computes Christoffel symbols in a chart."""
         # Get metric and its derivatives
         metric = self.metric_tensor(chart)
@@ -237,9 +256,7 @@ class PatternRiemannianStructure(nn.Module):
             second_kind=gamma_second,
         )
 
-    def covariant_derivative(
-        self, vector_field: Tensor, direction: Tensor
-    ) -> Tensor:
+    def covariant_derivative(self, vector_field: Tensor, direction: Tensor) -> Tensor:
         """Computes covariant derivative of a vector field."""
         # Get Christoffel symbols
         christoffel = self.christoffel_symbols(direction)
@@ -291,57 +308,6 @@ class PatternRiemannianStructure(nn.Module):
             trajectory.append(new_point)
 
         return torch.stack(trajectory, dim=0)
-
-    def compute_riemann(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute the Riemann curvature tensor.
-        
-        Args:
-            points: Input points tensor of shape (batch_size, dim)
-            
-        Returns:
-            Riemann curvature tensor of shape (batch_size, dim, dim, dim, dim)
-        """
-        batch_size = points.shape[0]
-        dim = points.shape[1]
-        device = points.device
-        
-        # Initialize tensors
-        christoffel = self.compute_christoffel(points)  # Shape: (batch_size, dim, dim, dim)
-        christoffel_grad = torch.zeros((batch_size, dim, dim, dim, dim), device=device)
-        
-        # Compute gradients for each component
-        for l in range(dim):
-            grad_l = torch.autograd.grad(
-                christoffel[..., l].sum(),
-                points,
-                create_graph=True,
-                retain_graph=True
-            )[0]  # Shape: (batch_size, dim)
-            
-            # Expand grad_l to match the desired shape
-            grad_l = grad_l.unsqueeze(1).unsqueeze(2).expand(-1, dim, dim, -1)
-            christoffel_grad[..., l, :] = grad_l
-            
-        # Compute Riemann tensor components
-        riemann = (
-            christoffel_grad.transpose(-2, -1) - 
-            christoffel_grad.transpose(-3, -1).transpose(-2, -1)
-        )
-        
-        # Add Christoffel terms
-        for m in range(dim):
-            for n in range(dim):
-                riemann[..., m, n] += torch.einsum(
-                    'bijk,bikl->bijl',
-                    christoffel[..., m].unsqueeze(1),
-                    christoffel[..., n].unsqueeze(1)
-                ) - torch.einsum(
-                    'bijk,bikl->bijl',
-                    christoffel[..., n].unsqueeze(1),
-                    christoffel[..., m].unsqueeze(1)
-                )
-                
-        return riemann
 
     def curvature_tensor(self, point: Tensor) -> CurvatureTensor:
         """Computes curvature tensors at a point."""
