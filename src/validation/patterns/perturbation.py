@@ -1,150 +1,211 @@
-"""Pattern perturbation analysis implementation."""
+"""Pattern perturbation analysis implementation.
 
-from typing import Optional, Dict, List, Tuple, Union
+This module provides tools for analyzing pattern response to perturbations:
+- Linear response analysis
+- Nonlinear effects
+- Stability under perturbations
+- Recovery time estimation
+"""
+
+from typing import Dict, Optional, Tuple
 import torch
 import numpy as np
+from dataclasses import dataclass
 
-from ...neural.attention.pattern.dynamics import PatternDynamics
-from ...neural.attention.pattern.models import StabilityMetrics, StabilityInfo
-from ..base import BaseValidator
+from src.neural.attention.pattern.dynamics import PatternDynamics
+
+@dataclass
+class PerturbationMetrics:
+    """Metrics for perturbation analysis."""
+    
+    linear_response: torch.Tensor
+    """Linear response to perturbation."""
+    
+    recovery_time: float
+    """Time to recover from perturbation."""
+    
+    stability_margin: float
+    """Margin of stability."""
+    
+    max_amplitude: float
+    """Maximum perturbation amplitude."""
 
 
-class PerturbationAnalyzer(BaseValidator):
-    """Analyzer for pattern perturbation response."""
-
-    def __init__(
+class PerturbationAnalyzer:
+    """Analysis of pattern response to perturbations."""
+    
+    def __init__(self, tolerance: float = 1e-6, max_time: int = 1000):
+        """Initialize analyzer.
+        
+        Args:
+            tolerance: Numerical tolerance
+            max_time: Maximum simulation time
+        """
+        self.tolerance = tolerance
+        self.max_time = max_time
+        
+    def analyze_perturbation(
         self,
         dynamics: PatternDynamics,
-        threshold: float = 0.1,
-        window_size: int = 100,
-        num_modes: int = 8
-    ):
-        """Initialize perturbation analyzer.
+        pattern: torch.Tensor,
+        perturbation: Optional[torch.Tensor] = None,
+    ) -> PerturbationMetrics:
+        """Analyze pattern response to perturbation.
         
         Args:
             dynamics: Pattern dynamics system
-            threshold: Recovery threshold
-            window_size: Analysis window size
-            num_modes: Number of modes to analyze
-        """
-        super().__init__()
-        self.dynamics = dynamics
-        self.threshold = threshold
-        self.window = window_size
-        self.num_modes = num_modes
-
-    def analyze_perturbation(
-        self,
-        state: torch.Tensor,
-        perturbation: torch.Tensor,
-        time_steps: int = 1000
-    ) -> StabilityInfo:
-        """Analyze perturbation response.
-        
-        Args:
-            state: Base state
-            perturbation: Perturbation to apply
-            time_steps: Number of time steps
+            pattern: Base pattern to perturb
+            perturbation: Optional specific perturbation to analyze
             
         Returns:
-            Stability analysis results
+            Perturbation analysis metrics
         """
-        # Get base and perturbed trajectories
-        base_traj = self.dynamics.evolve(state, time_steps)
-        perturbed_traj = self.dynamics.evolve(state + perturbation, time_steps)
-        
-        # Compute stability metrics
-        metrics = self._compute_stability_metrics(base_traj, perturbed_traj)
-        
-        # Get recovery time
-        recovery_time = self._compute_recovery_time(base_traj, perturbed_traj)
-        
-        return StabilityInfo(
-            metrics=metrics,
-            is_stable=metrics.max_lyapunov < self.threshold,
-            recovery_time=recovery_time
-        )
-
-    def _compute_stability_metrics(
-        self,
-        base_traj: torch.Tensor,
-        perturbed_traj: torch.Tensor
-    ) -> StabilityMetrics:
-        """Compute stability metrics from trajectories.
-        
-        Args:
-            base_traj: Base trajectory
-            perturbed_traj: Perturbed trajectory
+        if perturbation is None:
+            perturbation = self._generate_perturbation(pattern)
             
-        Returns:
-            Stability metrics
-        """
-        # Compute error trajectory
-        error = torch.norm(perturbed_traj - base_traj, dim=(-2, -1))
-        
-        # Get max Lyapunov exponent from error growth
-        growth_rates = torch.log(error[1:] / error[:-1])
-        max_lyap = torch.mean(growth_rates).item()
-        
+        # Compute linear response
+        linear_response = self._compute_linear_response(
+            dynamics, pattern, perturbation)
+            
+        # Estimate recovery time
+        recovery_time = self._estimate_recovery_time(
+            dynamics, pattern, perturbation)
+            
         # Compute stability margin
-        margin = self.threshold - max_lyap
-        
-        # Get recovery rate
-        recovery_rate = torch.mean(error[1:] / error[:-1]).item()
-        
-        return StabilityMetrics(
-            max_lyapunov=max_lyap,
-            stability_margin=margin,
-            recovery_rate=recovery_rate
+        stability_margin = self._compute_stability_margin(
+            dynamics, pattern, perturbation)
+            
+        # Find maximum stable amplitude
+        max_amplitude = self._find_max_amplitude(
+            dynamics, pattern)
+            
+        return PerturbationMetrics(
+            linear_response=linear_response,
+            recovery_time=recovery_time,
+            stability_margin=stability_margin,
+            max_amplitude=max_amplitude
         )
-
-    def _compute_recovery_time(
+        
+    def _generate_perturbation(
         self,
-        base_traj: torch.Tensor,
-        perturbed_traj: torch.Tensor
-    ) -> Optional[int]:
-        """Compute recovery time between trajectories.
-        
-        Args:
-            base_traj: Base trajectory
-            perturbed_traj: Perturbed trajectory
-            
-        Returns:
-            Recovery time steps or None if no recovery
-        """
-        # Compute error over time
-        error = torch.norm(perturbed_traj - base_traj, dim=(-2, -1))
-        
-        # Find first time error drops below threshold
-        recovered = torch.where(error < self.threshold)[0]
-        
-        if len(recovered) > 0:
-            return recovered[0].item()
-        else:
-            return None
-
-    def generate_perturbations(
-        self,
-        state: torch.Tensor,
-        num_perturbations: int = 10,
-        magnitude: float = 0.1
+        pattern: torch.Tensor,
+        amplitude: float = 0.1
     ) -> torch.Tensor:
-        """Generate random perturbations for analysis.
+        """Generate random perturbation of pattern.
         
         Args:
-            state: Base state to perturb
-            num_perturbations: Number of perturbations to generate
-            magnitude: Perturbation magnitude
+            pattern: Pattern to perturb
+            amplitude: Perturbation amplitude
             
         Returns:
-            Tensor of perturbations
+            Perturbation tensor
         """
-        # Generate random perturbations
-        shape = (num_perturbations,) + state.shape
-        perturbations = torch.randn(shape, device=state.device)
+        return torch.randn_like(pattern) * amplitude
         
-        # Normalize and scale
-        norms = torch.norm(perturbations, dim=(-2, -1), keepdim=True)
-        perturbations = perturbations / norms * magnitude
+    def _compute_linear_response(
+        self,
+        dynamics: PatternDynamics,
+        pattern: torch.Tensor,
+        perturbation: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute linearized response to perturbation.
         
-        return perturbations
+        Args:
+            dynamics: Pattern dynamics
+            pattern: Base pattern
+            perturbation: Perturbation to analyze
+            
+        Returns:
+            Linear response tensor
+        """
+        # Get Jacobian
+        jacobian = dynamics.compute_jacobian(pattern)
+        
+        # Compute linear response
+        response = torch.matmul(jacobian, perturbation.flatten())
+        return response.reshape(pattern.shape)
+        
+    def _estimate_recovery_time(
+        self,
+        dynamics: PatternDynamics,
+        pattern: torch.Tensor,
+        perturbation: torch.Tensor
+    ) -> float:
+        """Estimate time to recover from perturbation.
+        
+        Args:
+            dynamics: Pattern dynamics
+            pattern: Base pattern
+            perturbation: Perturbation to analyze
+            
+        Returns:
+            Recovery time estimate
+        """
+        perturbed = pattern + perturbation
+        
+        # Simulate until recovery
+        current = perturbed
+        for t in range(self.max_time):
+            current = dynamics.evolve(current, 1)
+            
+            # Check if recovered
+            if torch.norm(current - pattern) < self.tolerance:
+                return float(t)
+                
+        return float(self.max_time)
+        
+    def _compute_stability_margin(
+        self,
+        dynamics: PatternDynamics,
+        pattern: torch.Tensor,
+        perturbation: torch.Tensor
+    ) -> float:
+        """Compute stability margin for perturbation.
+        
+        Args:
+            dynamics: Pattern dynamics
+            pattern: Base pattern
+            perturbation: Perturbation to analyze
+            
+        Returns:
+            Stability margin
+        """
+        # Get eigenvalues of Jacobian
+        jacobian = dynamics.compute_jacobian(pattern)
+        eigenvalues = torch.linalg.eigvals(jacobian)
+        
+        # Stability margin is negative of largest real part
+        return float(-torch.max(eigenvalues.real))
+        
+    def _find_max_amplitude(
+        self,
+        dynamics: PatternDynamics,
+        pattern: torch.Tensor,
+    ) -> float:
+        """Find maximum stable perturbation amplitude.
+        
+        Args:
+            dynamics: Pattern dynamics
+            pattern: Base pattern
+            
+        Returns:
+            Maximum stable amplitude
+        """
+        # Binary search for maximum amplitude
+        low = 0.0
+        high = 1.0
+        
+        for _ in range(20):  # 20 iterations for precision
+            mid = (low + high) / 2
+            perturbation = self._generate_perturbation(pattern, mid)
+            
+            # Check if stable
+            perturbed = pattern + perturbation
+            final = dynamics.evolve(perturbed, self.max_time)
+            
+            if torch.norm(final - pattern) < self.tolerance:
+                low = mid  # Stable, try larger
+            else:
+                high = mid  # Unstable, try smaller
+                
+        return low  # Return largest stable amplitude

@@ -3,7 +3,7 @@ Unit tests for metric validation.
 
 Tests cover:
 1. Positive definite properties
-2. Compatibility conditions  
+2. Compatibility conditions
 3. Smoothness properties
 4. Curvature bounds
 """
@@ -15,14 +15,12 @@ import pytest
 import torch
 
 from src.validation.geometric.metric import (
-    MetricValidator,
     CurvatureBounds,
     MetricProperties,
-    SmoothnessMetrics
+    MetricValidator,
+    SmoothnessMetrics,
 )
 from src.validation.framework import ValidationResult
-from src.neural.flow.geometric_flow import GeometricFlow
-from src.neural.flow.hamiltonian import HamiltonianSystem
 
 
 class TestMetricValidation:
@@ -35,20 +33,11 @@ class TestMetricValidation:
         return 8
 
     @pytest.fixture
-    def geometric_flow(self) -> GeometricFlow:
-        return GeometricFlow()
-
-    @pytest.fixture
-    def hamiltonian(self) -> HamiltonianSystem:
-        return HamiltonianSystem()
-
-    @pytest.fixture
-    def validator(self, geometric_flow: GeometricFlow) -> MetricValidator:
+    def validator(self) -> MetricValidator:
         return MetricValidator(
-            flow=geometric_flow,
             positive_definite_threshold=1e-6,
             smoothness_threshold=0.1,
-            curvature_bound=1.0
+            curvature_bound=1.0,
         )
 
     def test_positive_definite(
