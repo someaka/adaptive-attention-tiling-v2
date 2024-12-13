@@ -142,8 +142,9 @@ class PatternRiemannianStructure(nn.Module):
         manifold_dim = points.shape[1]
         
         # Ensure points requires grad for computing factors
+        points = points.clone()
         if not points.requires_grad:
-            points = points.detach().requires_grad_(True)
+            points.requires_grad_(True)
         
         # Compute position-dependent factors
         factors = torch.zeros(batch_size, manifold_dim, manifold_dim, device=points.device)
@@ -165,8 +166,9 @@ class PatternRiemannianStructure(nn.Module):
         Returns:
             Christoffel symbols, shape (batch_size, manifold_dim, manifold_dim, manifold_dim)
         """
+        points = points.clone()
         if not points.requires_grad:
-            points = points.detach().requires_grad_(True)
+            points.requires_grad_(True)
             
         batch_size = points.shape[0]
         manifold_dim = points.shape[1]
