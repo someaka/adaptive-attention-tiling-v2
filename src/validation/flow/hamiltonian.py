@@ -8,21 +8,154 @@ This module validates Hamiltonian flow properties:
 """
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, List, Optional, Any, Union, Tuple
 
 import numpy as np
 import torch
+from torch import Tensor
 
+from ..base import ValidationResult
 from ...core.patterns.symplectic import SymplecticStructure
 from ...neural.flow.hamiltonian import HamiltonianSystem
 
 
-@dataclass
-class ValidationResult:
-    """Result of validation."""
+def convert_tensor_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert tensor data to serializable format."""
+    result = {}
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor):
+            result[key] = value.detach().cpu().tolist()
+        elif isinstance(value, dict):
+            result[key] = convert_tensor_data(value)
+        elif isinstance(value, (list, tuple)):
+            result[key] = [
+                v.detach().cpu().tolist() if isinstance(v, torch.Tensor) else v
+                for v in value
+            ]
+        else:
+            result[key] = value
+    return result
 
-    is_valid: bool
-    message: str
+
+@dataclass
+class HamiltonianFlowValidationResult(ValidationResult[Dict[str, Any]]):
+    """Validation results for Hamiltonian flow.
+    
+    This class handles validation of:
+    - Energy conservation
+    - Symplectic structure preservation
+    - Phase space volume preservation
+    - Poincaré recurrence
+    """
+    
+    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+        """Initialize Hamiltonian flow validation result.
+        
+        Args:
+            is_valid: Whether validation passed
+            message: Description of validation result
+            data: Optional validation data containing flow metrics and tensors
+        """
+        super().__init__(is_valid, message, data)
+    
+    def merge(self, other: ValidationResult) -> 'HamiltonianFlowValidationResult':
+        """Merge with another validation result.
+        
+        Args:
+            other: Another validation result to merge with
+            
+        Returns:
+            New HamiltonianFlowValidationResult combining both results
+            
+        Raises:
+            TypeError: If other is not a ValidationResult
+        """
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+            
+        # Merge metrics dictionaries carefully
+        merged_data = {**(self.data or {})}
+        other_data = other.data or {}
+        
+        # Special handling for flow metrics
+        for key, value in other_data.items():
+            if key in merged_data and isinstance(value, dict):
+                if isinstance(merged_data[key], dict):
+                    merged_data[key].update(value)
+                else:
+                    merged_data[key] = value
+            else:
+                merged_data[key] = value
+        
+        return HamiltonianFlowValidationResult(
+            is_valid=bool(self.is_valid and other.is_valid),
+            message=f"{self.message}; {other.message}",
+            data=merged_data
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary with proper tensor handling."""
+        return {
+            "is_valid": bool(self.is_valid),
+            "message": self.message,
+            "data": convert_tensor_data(self.data or {})
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'HamiltonianFlowValidationResult':
+        """Create from dictionary.
+        
+        Args:
+            data: Dictionary containing validation data
+            
+        Returns:
+            New HamiltonianFlowValidationResult instance
+            
+        Raises:
+            ValueError: If required fields are missing
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        required_fields = {"is_valid", "message"}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
+        return cls(
+            is_valid=bool(data["is_valid"]),
+            message=data["message"],
+            data=data.get("data", {})
+        )
+
+    def __str__(self) -> str:
+        """String representation with tensor summary."""
+        tensor_summaries = []
+        if self.data:
+            for key, value in self.data.items():
+                if isinstance(value, torch.Tensor):
+                    tensor_summaries.append(f"{key}: {self._tensor_repr(value)}")
+                elif isinstance(value, dict):
+                    nested_tensors = [
+                        f"{k}: {self._tensor_repr(v)}" 
+                        for k, v in value.items() 
+                        if isinstance(v, torch.Tensor)
+                    ]
+                    if nested_tensors:
+                        tensor_summaries.append(f"{key}: {{{', '.join(nested_tensors)}}}")
+        
+        tensor_info = f" [{', '.join(tensor_summaries)}]" if tensor_summaries else ""
+        return f"HamiltonianFlowValidationResult(valid={self.is_valid}, message='{self.message}'{tensor_info})"
+
+    def _tensor_repr(self, tensor: Optional[Tensor], max_elements: int = 8) -> str:
+        """Create a shortened string representation of tensors."""
+        if tensor is None:
+            return "None"
+        shape = list(tensor.shape)
+        if len(shape) == 0:
+            return f"tensor({tensor.item():.4f})"
+        if sum(shape) <= max_elements:
+            return str(tensor)
+        return f"tensor(shape={shape}, mean={tensor.mean():.4f}, std={tensor.std():.4f})"
 
 
 @dataclass
@@ -52,7 +185,7 @@ class PhaseSpaceValidation:
     ergodic: bool  # Ergodicity property
     mixing_rate: float  # Mixing time scale
     entropy: float  # KS entropy
-    lyapunov: torch.Tensor  # Lyapunov spectrum
+    lyapunov: Tensor  # Lyapunov spectrum
 
 
 class HamiltonianFlowValidator:
@@ -63,7 +196,9 @@ class HamiltonianFlowValidator:
         self.max_energy_drift = 0.01  # Maximum allowed energy drift
         self.max_symplectic_error = 0.01  # Maximum symplectic form error
 
-    def validate_energy_conservation(self, flow: HamiltonianSystem, states: torch.Tensor, time_steps: int = 100) -> ValidationResult:
+    def validate_energy_conservation(
+        self, flow: HamiltonianSystem, states: Tensor, time_steps: int = 100
+    ) -> HamiltonianFlowValidationResult:
         """Validate energy conservation along flow."""
         is_valid = True
         messages = []
@@ -96,12 +231,22 @@ class HamiltonianFlowValidator:
             is_valid = False
             messages.append(f"Energy fluctuations too large: {energy_std:.2e}")
 
-        return ValidationResult(
+        return HamiltonianFlowValidationResult(
             is_valid=is_valid,
-            message="; ".join(messages) if messages else "Energy conserved"
+            message="; ".join(messages) if messages else "Energy conserved",
+            data={
+                "energy": {
+                    "initial": initial_energy,
+                    "history": energies,
+                    "drift": max_drift,
+                    "std": energy_std
+                }
+            }
         )
 
-    def validate_symplectic_form(self, flow: HamiltonianSystem, states: torch.Tensor) -> ValidationResult:
+    def validate_symplectic_form(
+        self, flow: HamiltonianSystem, states: Tensor
+    ) -> HamiltonianFlowValidationResult:
         """Validate preservation of symplectic form."""
         is_valid = True
         messages = []
@@ -110,28 +255,40 @@ class HamiltonianFlowValidator:
         dim = states.shape[1] // 2
 
         # Construct symplectic form
-        omega = torch.zeros(2*dim, 2*dim, device=states.device)
-        omega[:dim, dim:] = torch.eye(dim, device=states.device)
-        omega[dim:, :dim] = -torch.eye(dim, device=states.device)
+        structure = SymplecticStructure(dim=2*dim)
+        form = structure.compute_form(states)
 
         # Compute flow Jacobian
         with torch.enable_grad():
             states.requires_grad_(True)
             evolved = flow.evolve(states)
-            jac = torch.autograd.functional.jacobian(flow.evolve, states)
+            jac_tuple = torch.autograd.functional.jacobian(flow.evolve, states)
+            # Convert tuple to tensor if necessary
+            jac = jac_tuple[0] if isinstance(jac_tuple, tuple) else jac_tuple
 
         # Check symplectic condition
-        symplectic_error = torch.norm(jac @ omega @ jac.transpose(-1, -2) - omega)
+        symplectic_error = torch.norm(
+            torch.matmul(torch.matmul(jac, form.matrix), jac.transpose(-1, -2)) - form.matrix
+        )
         if symplectic_error > self.max_symplectic_error:
             is_valid = False
             messages.append(f"Symplectic form not preserved: {symplectic_error:.2e}")
 
-        return ValidationResult(
+        return HamiltonianFlowValidationResult(
             is_valid=is_valid, 
-            message="; ".join(messages) if messages else "Symplectic form preserved"
+            message="; ".join(messages) if messages else "Symplectic form preserved",
+            data={
+                "symplectic": {
+                    "error": symplectic_error,
+                    "jacobian": jac,
+                    "form": form.matrix
+                }
+            }
         )
 
-    def validate_flow(self, flow: HamiltonianSystem, states: torch.Tensor, time_steps: int = 100) -> ValidationResult:
+    def validate_flow(
+        self, flow: HamiltonianSystem, states: Tensor, time_steps: int = 100
+    ) -> HamiltonianFlowValidationResult:
         """Perform complete Hamiltonian flow validation."""
         # Check energy conservation
         energy_valid = self.validate_energy_conservation(flow, states, time_steps)
@@ -143,7 +300,8 @@ class HamiltonianFlowValidator:
         if not symplectic_valid.is_valid:
             return symplectic_valid
 
-        return ValidationResult(True, "Hamiltonian flow valid")
+        # Merge results
+        return energy_valid.merge(symplectic_valid)
 
 
 class HamiltonianValidator:
@@ -154,8 +312,8 @@ class HamiltonianValidator:
         self.recurrence_threshold = recurrence_threshold
 
     def validate_hamiltonian(
-        self, system: HamiltonianSystem, state: torch.Tensor, time_steps: int = 1000
-    ) -> HamiltonianValidation:
+        self, system: HamiltonianSystem, state: Tensor, time_steps: int = 1000
+    ) -> HamiltonianFlowValidationResult:
         """Validate Hamiltonian conservation."""
         # Track energy evolution
         initial_energy = system.compute_energy(state)
@@ -173,23 +331,34 @@ class HamiltonianValidator:
         relative_error = torch.abs((energies - initial_energy) / initial_energy).mean()
 
         # Compute Poisson bracket with Hamiltonian
-        poisson = system.compute_poisson_bracket(
-            lambda x: system.compute_energy(x),
-            lambda x: system.compute_energy(x),
+        structure = SymplecticStructure(dim=state.shape[-1])
+        poisson = structure.poisson_bracket(
+            initial_energy,
+            system.compute_energy(current),
             current,
         )
 
         # Estimate recurrence time
         recurrence = self._estimate_recurrence(energies, self.recurrence_threshold)
 
-        return HamiltonianValidation(
-            conserved=relative_error < self.tolerance,
-            relative_error=relative_error.item(),
-            poisson_bracket=poisson.item(),
-            recurrence_time=recurrence,
+        is_valid = bool(relative_error < self.tolerance)
+        message = "Hamiltonian conserved" if is_valid else f"Hamiltonian not conserved: relative error {relative_error:.2e}"
+
+        return HamiltonianFlowValidationResult(
+            is_valid=is_valid,
+            message=message,
+            data={
+                "hamiltonian": {
+                    "conserved": is_valid,
+                    "relative_error": float(relative_error.item()),
+                    "poisson_bracket": float(poisson.item()),
+                    "recurrence_time": recurrence,
+                    "energy_history": energies
+                }
+            }
         )
 
-    def _estimate_recurrence(self, energies: torch.Tensor, threshold: float) -> float:
+    def _estimate_recurrence(self, energies: Tensor, threshold: float) -> float:
         """Estimate Poincaré recurrence time."""
         initial = energies[0]
         diffs = torch.abs(energies - initial)
@@ -210,9 +379,9 @@ class SymplecticValidator:
         self,
         system: HamiltonianSystem,
         structure: SymplecticStructure,
-        state: torch.Tensor,
+        state: Tensor,
         time_steps: int = 100,
-    ) -> SymplecticValidation:
+    ) -> HamiltonianFlowValidationResult:
         """Validate symplectic preservation."""
         # Initial volume and form
         initial_volume = structure.compute_volume(state)
@@ -229,21 +398,32 @@ class SymplecticValidator:
             forms.append(structure.compute_form(current))
 
         volumes = torch.stack(volumes)
-        forms = torch.stack(forms)
+        forms = torch.stack([f.matrix for f in forms])
 
         # Compute errors
         volume_error = torch.abs((volumes - initial_volume) / initial_volume).mean()
-
-        form_error = torch.norm(forms - initial_form) / torch.norm(initial_form)
-
-        # Compute drift
+        form_error = torch.norm(forms - initial_form.matrix) / torch.norm(initial_form.matrix)
         structure_drift = torch.mean(torch.abs(forms[1:] - forms[:-1])) / time_steps
 
-        return SymplecticValidation(
-            preserved=volume_error < self.tolerance,
-            volume_error=volume_error.item(),
-            form_error=form_error.item(),
-            structure_drift=structure_drift.item(),
+        is_valid = bool(volume_error < self.tolerance)
+        message = (
+            "Symplectic structure preserved" if is_valid 
+            else f"Symplectic structure not preserved: volume error {volume_error:.2e}"
+        )
+
+        return HamiltonianFlowValidationResult(
+            is_valid=is_valid,
+            message=message,
+            data={
+                "symplectic": {
+                    "preserved": is_valid,
+                    "volume_error": float(volume_error.item()),
+                    "form_error": float(form_error.item()),
+                    "structure_drift": float(structure_drift.item()),
+                    "volume_history": volumes,
+                    "form_history": forms
+                }
+            }
         )
 
 
@@ -255,8 +435,8 @@ class PhaseSpaceValidator:
         self.mixing_threshold = mixing_threshold
 
     def validate_phase_space(
-        self, system: HamiltonianSystem, state: torch.Tensor, time_steps: int = 1000
-    ) -> PhaseSpaceValidation:
+        self, system: HamiltonianSystem, state: Tensor, time_steps: int = 1000
+    ) -> HamiltonianFlowValidationResult:
         """Validate phase space properties."""
         # Track trajectory
         trajectory = [state.clone()]
@@ -280,11 +460,27 @@ class PhaseSpaceValidator:
         # Compute Lyapunov spectrum
         lyapunov = self._compute_lyapunov(system, state, time_steps)
 
-        return PhaseSpaceValidation(
-            ergodic=ergodic, mixing_rate=mixing, entropy=entropy, lyapunov=lyapunov
+        is_valid = bool(ergodic)
+        message = (
+            "Phase space properties valid" if is_valid
+            else "Phase space properties invalid: non-ergodic behavior detected"
         )
 
-    def _check_ergodicity(self, trajectory: torch.Tensor) -> bool:
+        return HamiltonianFlowValidationResult(
+            is_valid=is_valid,
+            message=message,
+            data={
+                "phase_space": {
+                    "ergodic": ergodic,
+                    "mixing_rate": mixing,
+                    "entropy": entropy,
+                    "lyapunov": lyapunov,
+                    "trajectory": trajectory
+                }
+            }
+        )
+
+    def _check_ergodicity(self, trajectory: Tensor) -> bool:
         """Check if trajectory appears ergodic."""
         # Compute phase space density
         density = torch.histogramdd(
@@ -295,9 +491,9 @@ class PhaseSpaceValidator:
         density = density / density.sum()
         uniform = 1.0 / (self.bins ** trajectory.shape[-1])
 
-        return torch.abs(density - uniform).mean() < self.mixing_threshold
+        return bool(torch.abs(density - uniform).mean() < self.mixing_threshold)
 
-    def _compute_mixing(self, trajectory: torch.Tensor) -> float:
+    def _compute_mixing(self, trajectory: Tensor) -> float:
         """Compute mixing rate from autocorrelation."""
         # Compute autocorrelation
         mean = torch.mean(trajectory, dim=0)
@@ -320,7 +516,7 @@ class PhaseSpaceValidator:
 
         return float("inf")
 
-    def _compute_entropy(self, trajectory: torch.Tensor) -> float:
+    def _compute_entropy(self, trajectory: Tensor) -> float:
         """Compute Kolmogorov-Sinai entropy estimate."""
         # Use correlation sum method
         r = 0.1  # Scale parameter
@@ -339,8 +535,8 @@ class PhaseSpaceValidator:
         return max(0.0, -entropy)
 
     def _compute_lyapunov(
-        self, system: HamiltonianSystem, state: torch.Tensor, time_steps: int
-    ) -> torch.Tensor:
+        self, system: HamiltonianSystem, state: Tensor, time_steps: int
+    ) -> Tensor:
         """Compute Lyapunov spectrum."""
         dim = state.shape[-1]
         perturbations = torch.eye(dim, device=state.device)
@@ -350,7 +546,12 @@ class PhaseSpaceValidator:
         for _ in range(time_steps):
             # Evolve state and perturbations
             current = system.evolve(current)
-            jacobian = system.compute_jacobian(current)
+            with torch.enable_grad():
+                current.requires_grad_(True)
+                evolved = system.evolve(current)
+                jac_tuple = torch.autograd.functional.jacobian(system.evolve, current)
+                # Convert tuple to tensor if necessary
+                jacobian = jac_tuple[0] if isinstance(jac_tuple, tuple) else jac_tuple
             perturbations = torch.matmul(jacobian, perturbations)
 
             # Orthogonalize
@@ -383,9 +584,9 @@ class FlowValidator:
         self,
         system: HamiltonianSystem,
         structure: SymplecticStructure,
-        state: torch.Tensor,
+        state: Tensor,
         time_steps: int = 1000,
-    ) -> Tuple[HamiltonianValidation, SymplecticValidation, PhaseSpaceValidation]:
+    ) -> HamiltonianFlowValidationResult:
         """Perform complete flow validation."""
         # Validate Hamiltonian properties
         hamiltonian = self.hamiltonian_validator.validate_hamiltonian(
@@ -402,4 +603,8 @@ class FlowValidator:
             system, state, time_steps
         )
 
-        return hamiltonian, symplectic, phase_space
+        # Merge all results
+        result = hamiltonian.merge(symplectic)
+        result = result.merge(phase_space)
+
+        return result

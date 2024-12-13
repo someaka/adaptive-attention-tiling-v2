@@ -13,16 +13,151 @@ from typing import List, Tuple, Dict, Optional, Any
 import torch
 import numpy as np
 
+from ..base import ValidationResult
 from ...core.quantum.types import QuantumState
 
 
 @dataclass
-class ValidationResult:
-    """Result of a validation operation."""
+class QuantumStateValidationResult(ValidationResult[Dict[str, Any]]):
+    """Validation results for quantum states.
+    
+    This class handles validation of:
+    - State preparation fidelity
+    - Density matrix properties
+    - Purity and mixedness
+    - State tomography
+    """
+    
+    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+        """Initialize quantum state validation result.
+        
+        Args:
+            is_valid: Whether validation passed
+            message: Description of validation result
+            data: Optional validation data containing quantum metrics and tensors
+        """
+        super().__init__(is_valid, message, data)
+    
+    def merge(self, other: ValidationResult) -> 'QuantumStateValidationResult':
+        """Merge with another validation result.
+        
+        Args:
+            other: Another validation result to merge with
+            
+        Returns:
+            New QuantumStateValidationResult combining both results
+            
+        Raises:
+            TypeError: If other is not a ValidationResult
+        """
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+            
+        # Merge metrics dictionaries carefully
+        merged_data = {**(self.data or {})}
+        other_data = other.data or {}
+        
+        # Special handling for quantum metrics
+        for key, value in other_data.items():
+            if key in merged_data and isinstance(value, dict):
+                if isinstance(merged_data[key], dict):
+                    merged_data[key].update(value)
+                else:
+                    merged_data[key] = value
+            else:
+                merged_data[key] = value
+        
+        return QuantumStateValidationResult(
+            is_valid=bool(self.is_valid and other.is_valid),
+            message=f"{self.message}; {other.message}",
+            data=merged_data
+        )
 
-    is_valid: bool  # Whether validation passed
-    details: Dict[str, Any]  # Detailed validation results
-    error_msg: Optional[str] = None  # Error message if validation failed
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary with proper tensor handling."""
+        return {
+            "is_valid": bool(self.is_valid),
+            "message": self.message,
+            "data": self._convert_tensor_data(self.data or {})
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'QuantumStateValidationResult':
+        """Create from dictionary.
+        
+        Args:
+            data: Dictionary containing validation data
+            
+        Returns:
+            New QuantumStateValidationResult instance
+            
+        Raises:
+            ValueError: If required fields are missing
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        required_fields = {"is_valid", "message"}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
+        return cls(
+            is_valid=bool(data["is_valid"]),
+            message=data["message"],
+            data=data.get("data", {})
+        )
+
+    def _convert_tensor_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert tensor data to serializable format."""
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, torch.Tensor):
+                # Handle complex tensors
+                if value.is_complex():
+                    result[key] = {
+                        "real": value.real.detach().cpu().tolist(),
+                        "imag": value.imag.detach().cpu().tolist()
+                    }
+                else:
+                    result[key] = value.detach().cpu().tolist()
+            elif isinstance(value, complex):
+                result[key] = {"real": value.real, "imag": value.imag}
+            elif isinstance(value, dict):
+                result[key] = self._convert_tensor_data(value)
+            elif isinstance(value, (list, tuple)):
+                result[key] = [
+                    self._convert_tensor_data({"item": v})["item"]
+                    if isinstance(v, (dict, torch.Tensor))
+                    else v
+                    for v in value
+                ]
+            else:
+                result[key] = value
+        return result
+
+    def __str__(self) -> str:
+        """String representation with quantum state summary."""
+        metric_summaries = []
+        if self.data:
+            for key, value in self.data.items():
+                if isinstance(value, torch.Tensor):
+                    metric_summaries.append(f"{key}: {self._tensor_repr(value)}")
+                elif isinstance(value, dict):
+                    nested_metrics = [
+                        f"{k}: {self._tensor_repr(v) if isinstance(v, torch.Tensor) else v}" 
+                        for k, v in value.items()
+                    ]
+                    if nested_metrics:
+                        metric_summaries.append(f"{key}: {{{', '.join(nested_metrics)}}}")
+        
+        metric_info = f" [{', '.join(metric_summaries)}]" if metric_summaries else ""
+        return f"QuantumStateValidationResult(valid={self.is_valid}, message='{self.message}'{metric_info})"
+
+    def _tensor_repr(self, tensor: torch.Tensor) -> str:
+        """Create a shortened string representation of quantum tensors."""
+        if tensor.is_complex():
+            return f"complex_tensor(shape={list(tensor.shape)}, mean={tensor.abs().mean():.4f})"
+        return f"tensor(shape={list(tensor.shape)}, mean={tensor.mean():.4f}, std={tensor.std():.4f})"
 
 
 @dataclass
@@ -98,7 +233,7 @@ class StatePreparationValidator:
 
     def validate_preparation(
         self, target: QuantumState, prepared: QuantumState
-    ) -> StatePreparationValidation:
+    ) -> QuantumStateValidationResult:
         """Validate state preparation quality."""
         # Compute fidelity
         fidelity = self._compute_fidelity(target, prepared)
@@ -112,18 +247,44 @@ class StatePreparationValidator:
         # Compute concurrence (entanglement)
         concurrence = self._compute_concurrence(prepared)
 
-        return StatePreparationValidation(
-            fidelity=fidelity.item(),
-            trace_distance=trace_dist.item(),
-            purity=purity.item(),
-            concurrence=concurrence.item(),
+        # Check if preparation is valid
+        is_valid = bool(
+            fidelity > (1 - self.tolerance) and
+            trace_dist < self.tolerance and
+            abs(purity - 1.0) < self.tolerance
+        )
+
+        # Create validation message
+        if is_valid:
+            message = "State preparation successful"
+        else:
+            issues = []
+            if fidelity <= (1 - self.tolerance):
+                issues.append(f"Low fidelity: {fidelity:.4f}")
+            if trace_dist >= self.tolerance:
+                issues.append(f"High trace distance: {trace_dist:.4f}")
+            if abs(purity - 1.0) >= self.tolerance:
+                issues.append(f"Non-unit purity: {purity:.4f}")
+            message = "State preparation issues: " + "; ".join(issues)
+
+        return QuantumStateValidationResult(
+            is_valid=is_valid,
+            message=message,
+            data={
+                "preparation": {
+                    "fidelity": float(fidelity.item()),
+                    "trace_distance": float(trace_dist.item()),
+                    "purity": float(purity.item()),
+                    "concurrence": float(concurrence.item())
+                }
+            }
         )
 
     def _compute_fidelity(
         self, target: QuantumState, prepared: QuantumState
     ) -> torch.Tensor:
         """Compute quantum state fidelity."""
-        if target.is_pure() and prepared.is_pure():
+        if target.is_pure(self.tolerance) and prepared.is_pure(self.tolerance):
             # Pure state fidelity
             overlap = torch.abs(
                 torch.vdot(target.state_vector(), prepared.state_vector())
@@ -134,21 +295,30 @@ class StatePreparationValidator:
         rho1 = target.density_matrix()
         rho2 = prepared.density_matrix()
 
-        # Compute sqrt(rho1)
-        sqrt_rho1 = torch.matrix_power(rho1, 1 / 2)
+        # Compute sqrt(rho1) using eigendecomposition
+        eigvals, eigvecs = torch.linalg.eigh(rho1)
+        sqrt_eigvals = torch.sqrt(torch.abs(eigvals))  # Take sqrt of eigenvalues
+        sqrt_rho1 = torch.matmul(
+            eigvecs,
+            torch.matmul(torch.diag(sqrt_eigvals), eigvecs.conj().T)
+        )
 
         # Compute F = Tr[sqrt(sqrt(rho1) rho2 sqrt(rho1))]
         inner = torch.matmul(sqrt_rho1, torch.matmul(rho2, sqrt_rho1))
-        return torch.trace(torch.matrix_power(inner, 1 / 2))
+        
+        # Compute eigenvalues and take sqrt
+        eigvals = torch.linalg.eigvals(inner)
+        return torch.sum(torch.sqrt(torch.abs(eigvals))).real
 
     def _compute_trace_distance(
         self, target: QuantumState, prepared: QuantumState
     ) -> torch.Tensor:
         """Compute trace distance between states."""
         diff = target.density_matrix() - prepared.density_matrix()
-        return 0.5 * torch.trace(
-            torch.matrix_power(torch.matmul(diff.conj().T, diff), 1 / 2)
-        )
+        # Compute eigenvalues of diff^†diff
+        hermitian_product = torch.matmul(diff.conj().T, diff)
+        eigvals = torch.linalg.eigvalsh(hermitian_product)
+        return 0.5 * torch.sum(torch.sqrt(torch.abs(eigvals)))
 
     def _compute_purity(self, state: QuantumState) -> torch.Tensor:
         """Compute state purity."""
@@ -157,7 +327,8 @@ class StatePreparationValidator:
 
     def _compute_concurrence(self, state: QuantumState) -> torch.Tensor:
         """Compute concurrence for 2-qubit states."""
-        if state.hilbert_space.dimension != 4:
+        # Check if we have a 2-qubit state (4-dimensional Hilbert space)
+        if state.hilbert_space != 4:
             return torch.tensor(0.0)
 
         rho = state.density_matrix()
@@ -187,7 +358,7 @@ class DensityMatrixValidator:
     def __init__(self, tolerance: float = 1e-6):
         self.tolerance = tolerance
 
-    def validate_density_matrix(self, state: QuantumState) -> DensityMatrixValidation:
+    def validate_density_matrix(self, state: QuantumState) -> QuantumStateValidationResult:
         """Validate density matrix properties."""
         rho = state.density_matrix()
 
@@ -195,8 +366,9 @@ class DensityMatrixValidator:
         hermitian = torch.allclose(rho, rho.conj().T, atol=self.tolerance)
 
         # Check trace normalization
+        trace = torch.trace(rho)
         trace_one = torch.allclose(
-            torch.trace(rho),
+            trace,
             torch.tensor(1.0, dtype=torch.complex64),
             atol=self.tolerance,
         )
@@ -207,11 +379,35 @@ class DensityMatrixValidator:
         # Check positivity
         positive = torch.all(eigenvalues > -self.tolerance)
 
-        return DensityMatrixValidation(
-            hermitian=hermitian,
-            positive=positive,
-            trace_one=trace_one,
-            eigenvalues=eigenvalues,
+        # Determine validity and create message
+        is_valid = bool(hermitian and positive and trace_one)
+        
+        if is_valid:
+            message = "Density matrix is valid"
+        else:
+            issues = []
+            if not hermitian:
+                issues.append("Not Hermitian")
+            if not positive:
+                issues.append("Not positive semidefinite")
+            if not trace_one:
+                issues.append(f"Trace not 1: {trace:.4f}")
+            message = "Density matrix issues: " + "; ".join(issues)
+
+        return QuantumStateValidationResult(
+            is_valid=is_valid,
+            message=message,
+            data={
+                "density_matrix": {
+                    "hermitian": bool(hermitian),
+                    "positive": bool(positive),
+                    "trace_one": bool(trace_one),
+                    "trace": complex(trace.item()),
+                    "eigenvalues": eigenvalues.tolist(),
+                    "min_eigenvalue": float(torch.min(eigenvalues).item()),
+                    "max_eigenvalue": float(torch.max(eigenvalues).item())
+                }
+            }
         )
 
 
@@ -227,7 +423,7 @@ class TomographyValidator:
         true_state: QuantumState,
         measurements: torch.Tensor,
         bases: List[torch.Tensor],
-    ) -> TomographyValidation:
+    ) -> QuantumStateValidationResult:
         """Validate state tomography results."""
         # Perform state reconstruction
         reconstructed, error = self._reconstruct_state(measurements, bases)
@@ -238,78 +434,138 @@ class TomographyValidator:
         # Compute confidence
         confidence = self._compute_confidence(measurements, reconstructed, bases)
 
-        return TomographyValidation(
-            reconstruction_error=error.item(),
-            completeness=completeness.item(),
-            confidence=confidence.item(),
-            estimated_state=reconstructed,
+        # Compute fidelity with true state
+        fidelity = self._compute_fidelity(true_state, reconstructed)
+
+        # Determine validity
+        is_valid = bool(
+            error < (1 - self.confidence_level) and
+            completeness > self.confidence_level and
+            confidence > self.confidence_level and
+            fidelity > self.confidence_level
+        )
+
+        # Create validation message
+        if is_valid:
+            message = "State tomography successful"
+        else:
+            issues = []
+            if error >= (1 - self.confidence_level):
+                issues.append(f"High reconstruction error: {error:.4f}")
+            if completeness <= self.confidence_level:
+                issues.append(f"Incomplete measurement set: {completeness:.4f}")
+            if confidence <= self.confidence_level:
+                issues.append(f"Low statistical confidence: {confidence:.4f}")
+            if fidelity <= self.confidence_level:
+                issues.append(f"Low reconstruction fidelity: {fidelity:.4f}")
+            message = "State tomography issues: " + "; ".join(issues)
+
+        return QuantumStateValidationResult(
+            is_valid=is_valid,
+            message=message,
+            data={
+                "tomography": {
+                    "reconstruction_error": float(error.item()),
+                    "completeness": float(completeness.item()),
+                    "confidence": float(confidence.item()),
+                    "fidelity": float(fidelity.item()),
+                    "reconstructed_state": reconstructed.tolist(),
+                    "measurement_bases": [basis.tolist() for basis in bases],
+                    "measurements": measurements.tolist()
+                }
+            }
         )
 
     def _reconstruct_state(
         self, measurements: torch.Tensor, bases: List[torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Perform maximum likelihood tomography."""
+        """Perform quantum state reconstruction."""
+        # Initialize estimated state
         dim = bases[0].shape[0]
         rho = torch.eye(dim, dtype=torch.complex64) / dim
 
-        # Iterative maximum likelihood
+        # Maximum likelihood estimation
+        error = torch.tensor(float('inf'))
         for _ in range(self.max_iterations):
             # Compute expected measurements
-            expected = torch.stack(
-                [torch.trace(torch.matmul(rho, basis)) for basis in bases]
+            expected = torch.stack([
+                torch.trace(torch.matmul(rho, basis))
+                for basis in bases
+            ])
+
+            # Compute error
+            new_error = torch.norm(expected - measurements)
+            if torch.abs(error - new_error) < 1e-6:
+                break
+            error = new_error
+
+            # Update state estimate
+            gradient = sum(
+                (measurements[i] - expected[i].real) * bases[i]
+                for i in range(len(bases))
             )
-
-            # Compute gradient
-            gradient = torch.zeros_like(rho)
-            for i, basis in enumerate(bases):
-                gradient += (measurements[i] - expected[i]) * basis
-
-            # Update state
-            rho = torch.matmul(
-                torch.matrix_exp(0.1 * gradient),
-                torch.matmul(rho, torch.matrix_exp(0.1 * gradient.conj().T)),
-            )
-
-            # Normalize
-            rho = rho / torch.trace(rho)
-
-        # Compute reconstruction error
-        error = torch.norm(measurements - expected)
+            rho = rho + 0.01 * gradient
+            rho = 0.5 * (rho + rho.conj().T)  # Ensure Hermiticity
+            rho = rho / torch.trace(rho)  # Normalize
 
         return rho, error
 
     def _compute_completeness(self, bases: List[torch.Tensor]) -> torch.Tensor:
-        """Compute measurement completeness."""
-        dim = bases[0].shape[0]
-        required = dim**2 - 1  # Number of parameters needed
-
-        # Check linear independence
-        basis_vectors = torch.stack([basis.reshape(-1) for basis in bases])
-
-        rank = torch.linalg.matrix_rank(basis_vectors)
-        return rank.float() / required
+        """Compute measurement completeness using singular values."""
+        # Stack bases into matrix
+        basis_matrix = torch.stack([basis.flatten() for basis in bases])
+        
+        # Compute singular values
+        singular_values = torch.linalg.svdvals(basis_matrix)
+        
+        # Compute completeness measure (ratio of smallest to largest singular value)
+        return torch.min(singular_values) / torch.max(singular_values)
 
     def _compute_confidence(
-        self,
-        measurements: torch.Tensor,
-        reconstructed: torch.Tensor,
-        bases: List[torch.Tensor],
+        self, measurements: torch.Tensor, state: torch.Tensor, bases: List[torch.Tensor]
     ) -> torch.Tensor:
-        """Compute statistical confidence level."""
+        """Compute statistical confidence in reconstruction."""
+        # Compute expected measurements
+        expected = torch.stack([
+            torch.trace(torch.matmul(state, basis))
+            for basis in bases
+        ])
+
         # Compute chi-squared statistic
-        expected = torch.stack(
-            [torch.trace(torch.matmul(reconstructed, basis)) for basis in bases]
-        )
+        chi_squared = torch.sum((measurements - expected.real)**2 / measurements)
+        
+        # Convert to confidence level
+        from scipy.stats import chi2
+        dof = len(measurements) - state.shape[0]**2 + 1  # Degrees of freedom
+        return torch.tensor(1 - chi2.cdf(chi_squared.item(), dof))
 
-        chi_squared = torch.sum((measurements - expected) ** 2 / expected)
+    def _compute_fidelity(
+        self, true_state: QuantumState, reconstructed: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute fidelity between true and reconstructed states."""
+        if true_state.is_pure():
+            # Pure state fidelity
+            psi = true_state.state_vector()
+            return torch.abs(torch.vdot(psi, torch.matmul(reconstructed, psi)))
+        else:
+            # Mixed state fidelity
+            rho1 = true_state.density_matrix()
+            rho2 = reconstructed
 
-        # Compute degrees of freedom
-        dof = len(measurements) - (reconstructed.shape[0] ** 2 - 1)
+            # Compute sqrt(rho1) using eigendecomposition
+            eigvals1, eigvecs1 = torch.linalg.eigh(rho1)
+            sqrt_eigvals1 = torch.sqrt(torch.abs(eigvals1))
+            sqrt_rho1 = torch.matmul(
+                eigvecs1,
+                torch.matmul(torch.diag(sqrt_eigvals1), eigvecs1.conj().T)
+            )
 
-        # Convert to p-value (approximate)
-        p_value = torch.exp(-0.5 * (chi_squared - dof))
-
-        return torch.minimum(p_value, torch.tensor(1.0))
+            # Compute F = Tr[sqrt(sqrt(rho1) rho2 sqrt(rho1))]
+            inner = torch.matmul(sqrt_rho1, torch.matmul(rho2, sqrt_rho1))
+            
+            # Compute eigenvalues and take sqrt
+            eigvals = torch.linalg.eigvals(inner)
+            return torch.sum(torch.sqrt(torch.abs(eigvals))).real
 
 
 class StateValidator:
@@ -350,7 +606,7 @@ class StateValidator:
         is_pure = abs(purity - 1.0) < self.tolerance
         
         # Get rank (number of non-zero eigenvalues)
-        rank = torch.sum(eigenvalues.abs() > self.tolerance).item()
+        rank = int(torch.sum(eigenvalues.abs() > self.tolerance).item())
         
         return StateProperties(
             is_normalized=is_normalized,
@@ -405,9 +661,9 @@ class StateValidator:
         dim = 2 ** num_qubits
         p = torch.zeros((dim, dim), dtype=torch.complex64)
         for i in range(dim-1):
-            p[i,i+1] = 1j
-            p[i+1,i] = -1j
-        return p / np.sqrt(2)
+            p[i,i+1] = torch.tensor(1j, dtype=torch.complex64)
+            p[i+1,i] = torch.tensor(-1j, dtype=torch.complex64)
+        return p / torch.sqrt(torch.tensor(2.0))
 
     def _hamiltonian(self, num_qubits: int) -> torch.Tensor:
         """Construct system Hamiltonian."""
@@ -449,10 +705,18 @@ class QuantumStateValidator:
         prepared: QuantumState,
         measurements: torch.Tensor,
         bases: List[torch.Tensor],
-    ) -> Tuple[
-        StatePreparationValidation, DensityMatrixValidation, TomographyValidation
-    ]:
-        """Perform complete quantum state validation."""
+    ) -> QuantumStateValidationResult:
+        """Perform complete quantum state validation.
+        
+        Args:
+            target: Target quantum state
+            prepared: Prepared quantum state to validate
+            measurements: Measurement results
+            bases: Measurement bases
+            
+        Returns:
+            Combined validation result from all validators
+        """
         # Validate state preparation
         preparation = self.preparation_validator.validate_preparation(target, prepared)
 
@@ -464,4 +728,7 @@ class QuantumStateValidator:
             target, measurements, bases
         )
 
-        return preparation, density, tomography
+        # Merge all results
+        result = preparation.merge(density)
+        result = result.merge(tomography)
+        return result

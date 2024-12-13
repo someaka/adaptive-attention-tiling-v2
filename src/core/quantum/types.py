@@ -122,3 +122,44 @@ class QuantumState:
             basis_labels=self.basis_labels,
             phase=self.phase.to(device)
         )
+
+    @property
+    def hilbert_space(self) -> int:
+        """Get the dimension of the Hilbert space."""
+        return self.amplitudes.shape[-1]
+
+    @property
+    def num_qubits(self) -> int:
+        """Get the number of qubits in the state."""
+        return int(torch.log2(torch.tensor(self.hilbert_space)).item())
+
+    def is_pure(self, tolerance: float = 1e-6) -> bool:
+        """Check if the state is pure by computing the purity of its density matrix.
+        
+        A pure state has Tr(ρ²) = 1, while mixed states have Tr(ρ²) < 1.
+        
+        Args:
+            tolerance: Numerical tolerance for comparison with 1.0
+            
+        Returns:
+            bool: True if the state is pure, False otherwise
+        """
+        rho = self.density_matrix()
+        purity = torch.trace(torch.matmul(rho, rho)).real
+        return bool(abs(purity - 1.0) < tolerance)
+
+    def state_vector(self) -> torch.Tensor:
+        """Get the state vector representation.
+        
+        For pure states, this is just the amplitudes.
+        For mixed states, this raises an error.
+        
+        Returns:
+            torch.Tensor: The state vector
+            
+        Raises:
+            ValueError: If the state is not pure
+        """
+        if not self.is_pure():
+            raise ValueError("Cannot get state vector for mixed state")
+        return self.amplitudes
