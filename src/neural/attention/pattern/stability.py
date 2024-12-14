@@ -49,7 +49,7 @@ class StabilityAnalyzer:
         if torch.isnan(stability) or torch.isinf(stability):
             return False
             
-        return stability < threshold
+        return bool(stability < threshold)
 
     def compute_stability(
         self,
@@ -96,7 +96,7 @@ class StabilityAnalyzer:
         """
         # Get pattern shape
         batch_size = state.shape[0]
-        n = torch.prod(torch.tensor(state.shape[1:]))
+        n = int(torch.prod(torch.tensor(state.shape[1:])).item())
         
         # Reshape pattern for Jacobian computation
         state_flat = state.reshape(batch_size, -1)
@@ -202,25 +202,25 @@ class StabilityAnalyzer:
         # Compute linear stability using eigenvalue analysis
         stability_matrix = self.pattern_system.compute_stability_matrix(state)
         eigenvals = torch.linalg.eigvals(stability_matrix)
-        linear_stability = torch.max(eigenvals.real).item()
+        linear_stability = torch.max(eigenvals.real)  # Keep as tensor
         
         # Compute nonlinear stability using perturbation
         perturbed_state = state + perturbation
         nonlinear_stability = self.compute_stability(perturbed_state)
         
-        # Return metrics
+        # Return metrics with proper types
         return StabilityMetrics(
             linear_stability=linear_stability,
             nonlinear_stability=nonlinear_stability,
             lyapunov_spectrum=eigenvals,
-            structural_stability=float(nonlinear_stability / linear_stability)
+            structural_stability=float((nonlinear_stability / linear_stability).item())  # Convert to float
         )
 
     def compute_lyapunov_spectrum(
         self,
         state: torch.Tensor,
         steps: int = 100,
-        dt: float = None
+        dt: Optional[float] = None
     ) -> torch.Tensor:
         """Compute Lyapunov spectrum for a state.
         
@@ -244,7 +244,10 @@ class StabilityAnalyzer:
         lyap = torch.zeros(n, dtype=torch.float64, device=state.device)
         
         # Time integration
-        dt = dt or self.pattern_system.dt
+        dt = dt if dt is not None else self.pattern_system.dt  # Use system dt if not provided
+        if dt is None:
+            dt = 0.01  # Default value if no dt is available
+            
         for _ in range(steps):
             # Evolve perturbations
             for i in range(n):

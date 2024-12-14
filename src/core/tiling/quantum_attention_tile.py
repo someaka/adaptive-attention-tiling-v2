@@ -154,19 +154,19 @@ class QuantumMotivicTile(nn.Module):
             Dictionary containing memory usage metrics
         """
         # Compute current memory usage based on quantum metrics
-        current_memory = (
+        current_memory = float(
             self.size * self.hidden_dim * 4  # Base memory for attention
             + self.cohomology_dim * self.motive_rank * 4  # Quantum structure
             + sum(p.numel() * 4 for p in self.parameters())  # Parameters
         )
         
         # Scale by quantum entropy to account for information density
-        current_memory *= (1.0 + self._metrics["quantum_entropy"] / 5.0)
+        current_memory *= (1.0 + float(self._metrics["quantum_entropy"]) / 5.0)
         
         # Get peak memory from metrics history
         peak_memory = current_memory
         if self._metrics_log:
-            peak_memory = max(current_memory, max(m.get("memory_usage", 0.0) for m in self._metrics_log))
+            peak_memory = max(current_memory, max(float(m.get("memory_usage", 0.0)) for m in self._metrics_log))
             
         return {
             "current_memory": float(current_memory),
@@ -279,19 +279,19 @@ class QuantumMotivicTile(nn.Module):
             # Compute quantum entropy (bounded between 0.1 and 5.0)
             probs = torch.softmax(field, dim=-1)
             entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
-            entropy = entropy.mean().item()
+            entropy = float(entropy.mean().item())
             self._metrics["quantum_entropy"] = max(0.1, min(5.0, entropy))
 
             # Compute L-function value (normalized)
-            l_value = torch.norm(field, p=2).item() / (field.size(-1) ** 0.5)
+            l_value = float(torch.norm(field, p=2).item()) / (field.size(-1) ** 0.5)
             self._metrics["l_function_value"] = max(0.01, l_value)
 
             # Compute adelic norm (bounded)
-            adelic = torch.norm(field, p=float("inf")).item()
+            adelic = float(torch.norm(field, p=float("inf")).item())
             self._metrics["adelic_norm"] = max(0.1, min(1.0, adelic))
 
             # Update motive height (bounded between 0 and 10.0)
-            height = self._metrics["motive_height"]
+            height = float(self._metrics["motive_height"])
             height = height * 0.9 + 0.1 * l_value  # Smooth update
             self._metrics["motive_height"] = max(0.0, min(10.0, height))
 
@@ -301,12 +301,19 @@ class QuantumMotivicTile(nn.Module):
         Returns:
             Dictionary containing visualization data
         """
+        # Handle cohomology class - ensure it's a tensor before calling tensor methods
+        cohomology = self._metrics["cohomology_class"]
+        if isinstance(cohomology, torch.Tensor):
+            cohomology = cohomology.detach().cpu().numpy()
+        else:
+            cohomology = np.array([float(cohomology)])
+            
         return {
-            "cohomology_class": self._metrics["cohomology_class"].cpu().numpy(),
-            "motive_height": self._metrics["motive_height"],
-            "quantum_entropy": self._metrics["quantum_entropy"],
-            "l_function_value": self._metrics["l_function_value"],
-            "adelic_norm": self._metrics["adelic_norm"],
+            "cohomology_class": cohomology,
+            "motive_height": float(self._metrics["motive_height"]),
+            "quantum_entropy": float(self._metrics["quantum_entropy"]),
+            "l_function_value": float(self._metrics["l_function_value"]),
+            "adelic_norm": float(self._metrics["adelic_norm"]),
         }
 
     def optimize_resources(self, profile: LoadProfile) -> None:
@@ -315,14 +322,14 @@ class QuantumMotivicTile(nn.Module):
         Args:
             profile: Load profile for optimization
         """
-        # Get current height
-        height = self._metrics["motive_height"]
+        # Get current height as float
+        height = float(self._metrics["motive_height"])
 
         # Optimize based on height theory
         if height > profile.compute:
             # Reduce resolution based on height
-            new_resolution = self.resolution * (profile.compute / height)
-            self.resolution = max(CONFIG.MIN_RESOLUTION, new_resolution)
+            new_resolution = float(self.resolution * (profile.compute / height))
+            self.resolution = max(float(CONFIG.MIN_RESOLUTION), new_resolution)
 
     def _compute_information_density(self) -> float:
         """Compute information density using quantum structure."""
@@ -347,21 +354,21 @@ class QuantumMotivicTile(nn.Module):
         Returns:
             Dictionary containing all metrics
         """
-        density = self._compute_information_density()
-        flow = self._metrics["l_function_value"]
+        density = float(self._compute_information_density())
+        flow = float(self._metrics["l_function_value"])
         
         # Compute IFQ
-        pattern_stability = 1.0 - (self._metrics["quantum_entropy"] / 5.0)  # Normalize to [0,1]
-        cross_tile_flow = flow
-        edge_utilization = self._metrics["adelic_norm"]
-        info_density = density
+        pattern_stability = float(1.0 - (self._metrics["quantum_entropy"] / 5.0))  # Normalize to [0,1]
+        cross_tile_flow = float(flow)
+        edge_utilization = float(self._metrics["adelic_norm"])
+        info_density = float(density)
         
         ifq = self.compute_ifq(pattern_stability, cross_tile_flow, edge_utilization, info_density)
         
         # Compute CER
-        info_transferred = flow * density
-        compute_cost = self._metrics["motive_height"]
-        memory_usage = self._metrics["quantum_entropy"]
+        info_transferred = float(flow * density)
+        compute_cost = float(self._metrics["motive_height"])
+        memory_usage = float(self._metrics["quantum_entropy"])
         cer = self.compute_cer(info_transferred, compute_cost, memory_usage, self.resolution)
         
         # Compute AE
@@ -371,22 +378,22 @@ class QuantumMotivicTile(nn.Module):
             self._resolution_history = []
             
         self._metrics_log.append({
-            "ifq": ifq,
-            "cer": cer,
-            "flow": flow,
-            "density": density
+            "ifq": float(ifq),
+            "cer": float(cer),
+            "flow": float(flow),
+            "density": float(density)
         })
-        self._resolution_history.append(self.resolution)
+        self._resolution_history.append(float(self.resolution))
         
         ae = self.compute_ae(self._resolution_history, [0.0])  # No load variance yet
         
         return {
-            "ifq": ifq,
-            "cer": cer,
-            "ae": ae,
-            "flow": flow,
-            "density": density,
-            "resolution_history": self._resolution_history,
+            "ifq": float(ifq),
+            "cer": float(cer),
+            "ae": float(ae),
+            "flow": float(flow),
+            "density": float(density),
+            "resolution_history": [float(x) for x in self._resolution_history],
             "load_distribution": [0.0],  # Placeholder
         }
 

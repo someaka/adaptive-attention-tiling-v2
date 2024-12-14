@@ -62,7 +62,7 @@ class DiffusionSystem(nn.Module):
     def forward(
         self,
         state: torch.Tensor,
-        diffusion_coefficient: Union[float, torch.Tensor, callable],
+        diffusion_coefficient: Union[float, torch.Tensor],
         dt: float
     ) -> torch.Tensor:
         """Forward pass applies diffusion step.
@@ -78,6 +78,9 @@ class DiffusionSystem(nn.Module):
         Returns:
             Diffused state tensor
         """
+        # Convert tensor coefficient to float if needed
+        if isinstance(diffusion_coefficient, torch.Tensor):
+            diffusion_coefficient = float(diffusion_coefficient.item())
         return self.apply_diffusion(state, diffusion_coefficient, dt)
     
     def apply_diffusion(
@@ -90,12 +93,16 @@ class DiffusionSystem(nn.Module):
         
         Args:
             state: State tensor [batch, channels, height, width]
-            diffusion_coefficient: Diffusion coefficient
+            diffusion_coefficient: Diffusion coefficient (must be float)
             dt: Time step
             
         Returns:
             torch.Tensor: Diffused state
         """
+        # Ensure diffusion coefficient is float
+        if isinstance(diffusion_coefficient, torch.Tensor):
+            diffusion_coefficient = float(diffusion_coefficient.item())
+            
         # Ensure state has batch and channel dimensions
         if len(state.shape) == 2:  # [height, width]
             state = state.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
@@ -184,3 +191,5 @@ class DiffusionSystem(nn.Module):
                 return True
             
             prev_state = curr_state
+            
+        return False  # Not converged within max_iter

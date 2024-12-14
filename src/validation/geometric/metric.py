@@ -142,8 +142,8 @@ class SmoothnessMetrics:
         metric: Tensor,
         coords: Tensor,
         order: int = 2
-    ) -> Dict[str, bool]:
-        """Validate smoothness properties of metric.
+    ) -> Dict[str, Union[bool, float]]:
+        """Validate smoothness of metric tensor.
         
         Args:
             metric: Metric tensor
@@ -151,7 +151,7 @@ class SmoothnessMetrics:
             order: Order of smoothness to check
             
         Returns:
-            Dictionary with validation results
+            Dictionary with validation results containing both boolean and float values
         """
         results = {
             "is_continuous": self.check_continuity(metric, coords),

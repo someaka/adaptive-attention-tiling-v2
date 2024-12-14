@@ -81,7 +81,7 @@ class PatternDynamics:
         Args:
             pattern: Initial pattern
             diffusion_coefficient: Diffusion coefficient
-            reaction_term: Optional custom reaction term function
+            reaction_term: Optional custom reaction term
             steps: Number of timesteps
             
         Returns:
@@ -304,7 +304,29 @@ class PatternDynamics:
         state = state.to(torch.float64)
         
         # Apply reaction with numerical stability
-        reacted = self.reaction.apply_reaction(state, reaction_term)
+        if reaction_term is None:
+            reaction_term = self.reaction.reaction_term
+            
+        # Compute reaction term
+        with torch.no_grad():
+            try:
+                # Try calling with just state
+                reaction = reaction_term(state)
+            except TypeError:
+                # If that fails, check for param attribute
+                param = getattr(reaction_term, 'param', None)
+                if param is not None:
+                    # Create a partial function with the param
+                    from functools import partial
+                    wrapped_term = partial(reaction_term, param=param)
+                    reaction = wrapped_term(state)
+                else:
+                    raise ValueError("Reaction term must take either state or have param attribute")
+                    
+            reaction = torch.clamp(reaction, min=-10.0, max=10.0)
+        
+        # Add reaction to state
+        reacted = state + reaction
         
         # Ensure non-negative values (if applicable)
         if torch.all(state >= 0):
@@ -556,18 +578,162 @@ class PatternDynamics:
     def compute_normal_form(
         self,
         bifurcation_point: dict
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor:
         """Compute normal form at bifurcation point.
         
+        This method computes the normal form coefficients for the bifurcation
+        using center manifold reduction. The process involves:
+        1. Computing the center eigenspace
+        2. Projecting dynamics onto center manifold
+        3. Computing nonlinear terms up to cubic order
+        
         Args:
-            bifurcation_point: Bifurcation point information
+            bifurcation_point: Dictionary containing:
+                - state: State at bifurcation point
+                - parameter: Critical parameter value
+                - type: Type of bifurcation ("hopf", "pitchfork", "saddle-node")
             
         Returns:
-            Normal form coefficients or None
+            torch.Tensor: Normal form coefficients
         """
-        # TODO: Implement normal form computation
-        # This requires center manifold reduction and would be quite complex
-        return None
+        # Extract bifurcation information
+        state = bifurcation_point["state"]
+        param = bifurcation_point["parameter"]
+        bif_type = bifurcation_point["type"]
+        
+        # Compute Jacobian at bifurcation point
+        J = self.compute_jacobian(state)
+        
+        # Get eigendecomposition
+        eigenvals, eigenvecs = torch.linalg.eig(J)
+        
+        # Find center eigenspace (eigenvalues close to imaginary axis)
+        center_mask = torch.abs(eigenvals.real) < 1e-6
+        center_eigenvals = eigenvals[center_mask]
+        center_eigenvecs = eigenvecs[:, center_mask]
+        
+        # Project state onto center eigenspace
+        center_coords = torch.matmul(center_eigenvecs.T.conj(), state.reshape(-1))
+        
+        # Compute nonlinear terms based on bifurcation type
+        if bif_type == "hopf":
+            # For Hopf, compute first Lyapunov coefficient
+            omega = center_eigenvals[0].imag  # Frequency at bifurcation
+            
+            # Compute cubic terms in normal form
+            cubic_term = self._compute_hopf_coefficient(state, center_eigenvecs, omega)
+            
+            # Return [frequency, cubic coefficient]
+            return torch.stack([omega, cubic_term])
+            
+        elif bif_type == "pitchfork":
+            # For pitchfork, compute cubic coefficient
+            cubic_term = self._compute_pitchfork_coefficient(state, center_eigenvecs)
+            
+            # Return [0, cubic coefficient]
+            return torch.stack([torch.zeros(1, device=state.device), cubic_term])
+            
+        else:  # saddle-node
+            # For saddle-node, compute quadratic coefficient
+            quad_term = self._compute_saddle_node_coefficient(state, center_eigenvecs)
+            
+            # Return [quadratic coefficient, 0]
+            return torch.stack([quad_term, torch.zeros(1, device=state.device)])
+            
+    def _compute_hopf_coefficient(
+        self,
+        state: torch.Tensor,
+        eigenvecs: torch.Tensor,
+        omega: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute first Lyapunov coefficient for Hopf bifurcation."""
+        # Get critical eigenvector
+        q = eigenvecs[:, 0]  # Complex eigenvector
+        
+        # Compute adjoint eigenvector
+        p = torch.linalg.solve(self.compute_jacobian(state).T, q)
+        p = p / torch.dot(p, q)
+        
+        # Compute second and third order derivatives
+        eps = 1e-6
+        state_flat = state.reshape(-1)
+        n = len(state_flat)
+        
+        # Second derivatives (using finite differences)
+        H = torch.zeros((n, n, n), dtype=torch.complex64, device=state.device)
+        for i in range(n):
+            for j in range(n):
+                ei = torch.zeros(n, device=state.device)
+                ej = torch.zeros(n, device=state.device)
+                ei[i] = eps
+                ej[j] = eps
+                
+                f_ij = self.compute_next_state((state_flat + ei + ej).reshape_as(state))
+                f_i = self.compute_next_state((state_flat + ei).reshape_as(state))
+                f_j = self.compute_next_state((state_flat + ej).reshape_as(state))
+                f_0 = self.compute_next_state(state)
+                
+                H[:, i, j] = (f_ij - f_i - f_j + f_0).reshape(-1) / (eps * eps)
+        
+        # Compute g21 term (coefficient of z|z|^2 term)
+        g21 = torch.zeros(1, dtype=torch.complex64, device=state.device)
+        for i in range(n):
+            for j in range(n):
+                for k in range(n):
+                    g21 += p[i] * H[i, j, k] * q[j] * q[k].conj()
+                    
+        # First Lyapunov coefficient
+        l1 = (1 / (2 * omega)) * g21.real
+        
+        return l1
+        
+    def _compute_pitchfork_coefficient(
+        self,
+        state: torch.Tensor,
+        eigenvecs: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute cubic coefficient for pitchfork bifurcation."""
+        # Get critical eigenvector
+        v = eigenvecs[:, 0].real
+        
+        # Compute cubic term using finite differences
+        eps = 1e-6
+        state_flat = state.reshape(-1)
+        
+        # Evaluate field in positive and negative directions
+        f_pos = self.compute_next_state((state_flat + eps * v).reshape_as(state))
+        f_neg = self.compute_next_state((state_flat - eps * v).reshape_as(state))
+        f_0 = self.compute_next_state(state)
+        
+        # Approximate cubic coefficient
+        cubic = (f_pos + f_neg - 2 * f_0).reshape(-1) / (eps * eps)
+        coef = torch.dot(v, cubic) / (6 * torch.norm(v)**4)
+        
+        return coef
+        
+    def _compute_saddle_node_coefficient(
+        self,
+        state: torch.Tensor,
+        eigenvecs: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute quadratic coefficient for saddle-node bifurcation."""
+        # Get critical eigenvector
+        v = eigenvecs[:, 0].real
+        
+        # Compute quadratic term using finite differences
+        eps = 1e-6
+        state_flat = state.reshape(-1)
+        
+        # Evaluate field in critical direction
+        f_pos = self.compute_next_state((state_flat + eps * v).reshape_as(state))
+        f_neg = self.compute_next_state((state_flat - eps * v).reshape_as(state))
+        f_0 = self.compute_next_state(state)
+        
+        # Approximate quadratic coefficient
+        quad = (f_pos - 2 * f_0 + f_neg).reshape(-1) / (eps * eps)
+        coef = torch.dot(v, quad) / (2 * torch.norm(v)**3)
+        
+        return coef
 
     def _classify_bifurcation(
         self,
@@ -639,7 +805,7 @@ class PatternDynamics:
         
         # Apply reaction if provided
         if reaction_term is not None:
-            next_state = self.apply_reaction(next_state, reaction_term)
+            next_state = self.apply_reaction(next_state, reaction_term, self.dt)
             
         return next_state
 

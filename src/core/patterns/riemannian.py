@@ -53,6 +53,18 @@ class RiemannianFramework(Protocol):
         """Computes covariant derivative of a vector field."""
         ...
 
+    def exp_map(self, point: Tensor, vector: Tensor) -> Tensor:
+        """Compute the exponential map at a point in the direction of a vector.
+        
+        Args:
+            point: Point on the manifold
+            vector: Tangent vector at the point
+            
+        Returns:
+            Point on the manifold reached by following the geodesic
+        """
+        ...
+
 class PatternRiemannianStructure(nn.Module):
     """Concrete implementation of Riemannian structure for pattern spaces."""
 
@@ -368,3 +380,33 @@ class PatternRiemannianStructure(nn.Module):
         denominator = g11 * g22 - g12 * g12
 
         return numerator / (denominator + 1e-8)  # Add small epsilon for stability
+
+    def exp_map(self, point: Tensor, vector: Tensor) -> Tensor:
+        """Compute the exponential map using parallel transport.
+        
+        This implements a first-order approximation of the exponential map
+        by parallel transporting the vector along a geodesic.
+        
+        Args:
+            point: Point on the manifold
+            vector: Tangent vector at the point
+            
+        Returns:
+            Point on the manifold reached by following the geodesic
+        """
+        # Get Christoffel symbols at the point
+        christoffel = self.christoffel_symbols(point)
+        
+        # First-order approximation of geodesic
+        # x^i(t) = x^i(0) + v^i(0)t - 0.5 Γ^i_jk v^j v^k t^2 + O(t^3)
+        connection_term = 0.5 * torch.einsum(
+            "...ijk,...j,...k->...i",
+            christoffel.second_kind,
+            vector,
+            vector
+        )
+        
+        # Update point position
+        new_point = point + vector - connection_term
+        
+        return new_point

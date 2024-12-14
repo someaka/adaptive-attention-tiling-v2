@@ -1,8 +1,14 @@
 """Implementation of reaction dynamics."""
 
-from typing import Optional, Callable
+from typing import Optional, Callable, Protocol
 import torch
 from torch import nn
+from functools import partial
+
+
+class ReactionTerm(Protocol):
+    """Protocol for reaction terms."""
+    def __call__(self, state: torch.Tensor) -> torch.Tensor: ...
 
 
 class ReactionSystem:
@@ -64,6 +70,29 @@ class ReactionSystem:
         
         # Combine terms
         return torch.cat([activator_term, inhibitor_term], dim=1)
+
+    def _wrap_reaction_term(self, reaction_term: Callable, state: torch.Tensor) -> torch.Tensor:
+        """Wrap reaction term to handle parameterized functions.
+        
+        Args:
+            reaction_term: Reaction term function
+            state: Input state tensor
+            
+        Returns:
+            Reaction term output
+        """
+        try:
+            # Try calling with just state
+            return reaction_term(state)
+        except TypeError:
+            # If that fails, check for param attribute
+            param = getattr(reaction_term, 'param', None)
+            if param is not None:
+                # Create a partial function with the param
+                wrapped_term = partial(reaction_term, param=param)
+                return wrapped_term(state)
+            else:
+                raise ValueError("Reaction term must take either state or have param attribute")
     
     def apply_reaction(
         self,
@@ -88,18 +117,7 @@ class ReactionSystem:
         
         # Compute reaction term with gradient clipping
         with torch.no_grad():
-            try:
-                # Try calling with just state (for default reaction term)
-                reaction = reaction_term(state)
-            except TypeError:
-                # If that fails, assume it's a parameterized reaction term
-                # that takes both state and parameter
-                param = getattr(reaction_term, 'param', None)
-                if param is not None:
-                    reaction = reaction_term(state, param)
-                else:
-                    raise ValueError("Reaction term must take either state or (state, param)")
-                    
+            reaction = self._wrap_reaction_term(reaction_term, state)
             reaction = torch.clamp(reaction, min=-10.0, max=10.0)
         
         # Add reaction to state
@@ -112,16 +130,21 @@ class ReactionSystem:
     
     def find_reaction_fixed_points(
         self,
-        state: torch.Tensor
+        state: torch.Tensor,
+        reaction_term: Optional[Callable] = None
     ) -> torch.Tensor:
         """Find fixed points of the reaction term.
         
         Args:
             state: Input tensor [batch, channels, height, width]
+            reaction_term: Optional custom reaction term function
             
         Returns:
             Fixed point tensor [batch, channels, height, width]
         """
+        if reaction_term is None:
+            reaction_term = self.reaction_term
+
         # Convert to double
         state = state.to(torch.float64)
         
@@ -133,8 +156,8 @@ class ReactionSystem:
         tol = 1e-6
         
         for _ in range(max_iter):
-            # Compute reaction term
-            reaction = self.reaction_term(fixed_point)
+            # Compute reaction term with proper parameter handling
+            reaction = self._wrap_reaction_term(reaction_term, fixed_point)
             
             # Update fixed point estimate
             new_fixed_point = fixed_point + reaction

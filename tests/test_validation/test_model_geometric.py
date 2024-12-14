@@ -50,7 +50,15 @@ class AttentionHead(Protocol):
     key_dim: int
     
     def compute_attention(self, query_points: Points, key_points: Points) -> Scores:
-        """Compute attention scores."""
+        """Compute attention scores.
+        
+        Args:
+            query_points: Query points tensor
+            key_points: Key points tensor
+            
+        Returns:
+            Attention scores tensor
+        """
         ...
 
 

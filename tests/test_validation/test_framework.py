@@ -8,10 +8,12 @@ Tests cover:
 4. Integration tests
 """
 
+from __future__ import annotations
+
 import pytest
 import torch
 from torch import Tensor
-from typing import List, Union, Sequence
+from typing import Dict, List, Optional, Sequence, Union, cast
 
 from src.validation.framework import ValidationFramework, ConcreteValidationResult, FrameworkValidationResult
 from src.validation.geometric.model import ModelGeometricValidator
@@ -35,6 +37,7 @@ class TestValidationFramework:
 
     @pytest.fixture
     def dim(self) -> int:
+        """Dimension for testing."""
         return 8
 
     @pytest.fixture
@@ -44,10 +47,12 @@ class TestValidationFramework:
 
     @pytest.fixture
     def state_dim(self) -> int:
+        """State dimension for testing."""
         return 8
 
     @pytest.fixture
     def pattern_dim(self) -> int:
+        """Pattern dimension for testing."""
         return 8
 
     @pytest.fixture
@@ -108,18 +113,11 @@ class TestValidationFramework:
     @pytest.fixture
     def pattern_validator(self, model_geometry: ModelGeometry) -> StabilityValidator:
         """Create pattern validator."""
-        dynamics = AttentionPatternDynamics(
-            grid_size=model_geometry.manifold_dim,
-            space_dim=2,  # Default activator-inhibitor system
-            hidden_dim=model_geometry.manifold_dim
-        )
-        flow = GeometricFlow(
-            hidden_dim=model_geometry.manifold_dim,
-            manifold_dim=model_geometry.manifold_dim
-        )
         return StabilityValidator(
-            dynamics=dynamics,
-            flow=flow
+            tolerance=1e-6,
+            stability_threshold=0.0,
+            basin_samples=100,
+            parameter_range=0.1
         )
 
     @pytest.fixture
@@ -143,7 +141,7 @@ class TestValidationFramework:
         riemannian_framework: RiemannianFramework,
         batch_size: int,
         manifold_dim: int
-    ):
+    ) -> None:
         """Test geometric validation."""
         # Create test data
         points = torch.randn(batch_size, manifold_dim)
@@ -164,7 +162,7 @@ class TestValidationFramework:
 
         # Check metric properties
         assert "metric_tensor" in result.data["geometric"]
-        metric_tensor = result.data["geometric"]["metric_tensor"]
+        metric_tensor = cast(Tensor, result.data["geometric"]["metric_tensor"])
         assert metric_tensor.shape == (batch_size, manifold_dim, manifold_dim)
         assert torch.allclose(metric_tensor, metric_tensor.transpose(-1, -2))
 
@@ -180,7 +178,7 @@ class TestValidationFramework:
         riemannian_framework: RiemannianFramework,
         batch_size: int,
         manifold_dim: int
-    ):
+    ) -> None:
         """Test quantum validation."""
         # Create test quantum state
         state = torch.randn(batch_size, manifold_dim, dtype=torch.complex64)

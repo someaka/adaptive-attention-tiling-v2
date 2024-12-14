@@ -13,6 +13,11 @@ import logging
 import numpy as np
 import math
 from src.validation.patterns.formation import SpatialValidator
+from src.validation.flow.stability import (
+    LinearStabilityValidator,
+    NonlinearStabilityValidator,
+    LinearStabilityValidation
+)
 from src.validation.patterns.stability import (
     PatternStabilityValidator,
     PatternFlow,
@@ -47,7 +52,11 @@ def create_test_pattern(size: int, wavelength: float) -> torch.Tensor:
     pattern = pattern.repeat(1, 1, size, 1)
     return pattern
 
-def create_complex_pattern(size: int, wavelengths: list, amplitudes: Optional[list] = None) -> torch.Tensor:
+def create_complex_pattern(
+    size: int,
+    wavelengths: list[float],
+    amplitudes: Optional[list[float]] = None
+) -> torch.Tensor:
     """Create a pattern with multiple wavelengths.
     
     Args:
@@ -75,7 +84,7 @@ def create_complex_pattern(size: int, wavelengths: list, amplitudes: Optional[li
 # Basic Pattern Tests
 # =====================================
 
-def test_pattern_creation():
+def test_pattern_creation() -> None:
     """Test that pattern creation works as expected."""
     size = 32
     wavelength = 8.0
@@ -90,7 +99,7 @@ def test_pattern_creation():
     peak_distances = torch.diff(peaks.float())
     assert torch.allclose(peak_distances, torch.tensor(wavelength), atol=0.1)
 
-def test_complex_pattern():
+def test_complex_pattern() -> None:
     """Test creation and analysis of complex patterns."""
     size = 32
     wavelengths = [8.0, 16.0]
@@ -145,7 +154,7 @@ def test_complex_pattern():
     # Check if wavelength matches expected
     assert torch.allclose(computed, torch.tensor([[wavelengths[0]]], dtype=torch.float32), atol=1.0)
 
-def test_complex_pattern_creation():
+def test_complex_pattern_creation() -> None:
     """Test that complex pattern is created with correct wavelengths."""
     size = 32
     wavelengths = [8.0, 16.0]
@@ -176,7 +185,7 @@ def test_complex_pattern_creation():
     for i, (idx, freq) in enumerate(zip(peak_indices, peak_freqs)):
         logger.info(f"Peak {i+1}: index={idx}, freq={freq:.4f}, implied wavelength={1.0/abs(freq) if freq != 0 else float('inf'):.2f}")
 
-def test_pattern_wavelength_scaling():
+def test_pattern_wavelength_scaling() -> None:
     """Test that pattern wavelength is correctly scaled."""
     size = 32
     wavelength = 8.0  # Should see 4 complete cycles in the pattern
