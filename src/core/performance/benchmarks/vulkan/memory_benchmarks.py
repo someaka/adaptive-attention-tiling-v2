@@ -9,15 +9,65 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
+from ctypes import c_void_p, c_uint32, c_int, Structure, POINTER, byref, c_char_p, c_size_t
 
 import matplotlib.pyplot as plt
 import numpy as np
 import vulkan as vk
 
-from ...vulkan.memory.barrier_manager import AccessPattern, BarrierManager
-from ...vulkan.memory.buffer_manager import BufferManager
-from ...vulkan.memory.memory_pool import MemoryPoolManager
+from ....performance.vulkan.memory.barrier_manager import AccessPattern, BarrierManager
+from ....performance.vulkan.memory.buffer_manager import BufferManager
+from ....performance.vulkan.memory.memory_pool import MemoryPoolManager
 
+# Vulkan type definitions
+VkDevice = c_void_p
+VkPhysicalDevice = c_void_p
+VkCommandPool = c_void_p
+VkQueue = c_void_p
+VkBuffer = c_void_p
+VkFence = c_void_p
+VkCommandBuffer = c_void_p
+
+# Vulkan constants
+VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40
+VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42
+VK_STRUCTURE_TYPE_SUBMIT_INFO = 4
+
+VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0
+VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT = 0x00000001
+VK_BUFFER_USAGE_STORAGE_BUFFER_BIT = 0x00000020
+VK_BUFFER_USAGE_TRANSFER_DST_BIT = 0x00000002
+VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT = 0x00000001
+
+class VkCommandBufferAllocateInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("commandPool", c_void_p),
+        ("level", c_uint32),
+        ("commandBufferCount", c_uint32)
+    ]
+
+class VkCommandBufferBeginInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("flags", c_uint32),
+        ("pInheritanceInfo", c_void_p)
+    ]
+
+class VkSubmitInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("waitSemaphoreCount", c_uint32),
+        ("pWaitSemaphores", c_void_p),
+        ("pWaitDstStageMask", POINTER(c_uint32)),
+        ("commandBufferCount", c_uint32),
+        ("pCommandBuffers", POINTER(c_void_p)),
+        ("signalSemaphoreCount", c_uint32),
+        ("pSignalSemaphores", c_void_p)
+    ]
 
 @dataclass
 class BenchmarkResult:
@@ -55,10 +105,10 @@ class VulkanMemoryBenchmark:
 
     def __init__(
         self,
-        device: vk.Device,
-        physical_device: vk.PhysicalDevice,
-        command_pool: vk.CommandPool,
-        queue: vk.Queue,
+        device: VkDevice,
+        physical_device: VkPhysicalDevice,
+        command_pool: VkCommandPool,
+        queue: VkQueue,
     ):
         self.device = device
         self.physical_device = physical_device
@@ -87,8 +137,8 @@ class VulkanMemoryBenchmark:
         # Create device buffer
         device_buffer = self.buffer_manager.create_buffer(
             size=size,
-            usage=vk.BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
-            properties=vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            properties=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         )
 
         # Measure transfer time
@@ -140,18 +190,30 @@ class VulkanMemoryBenchmark:
     def _measure_barrier_overhead(self) -> float:
         """Measure memory barrier insertion overhead."""
         # Create command buffer
-        alloc_info = vk.CommandBufferAllocateInfo(
+        alloc_info = VkCommandBufferAllocateInfo(
+            sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            pNext=None,
             commandPool=self.command_pool,
-            level=vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-            commandBufferCount=1,
+            level=VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            commandBufferCount=1
         )
-        command_buffer = vk.AllocateCommandBuffers(self.device, alloc_info)[0]
+
+        command_buffer = c_void_p()
+        result = vk.vkAllocateCommandBuffers(self.device, byref(alloc_info), byref(command_buffer))
+        if result != 0:
+            raise RuntimeError(f"Failed to allocate command buffer: {result}")
 
         # Begin command buffer
-        begin_info = vk.CommandBufferBeginInfo(
-            flags=vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+        begin_info = VkCommandBufferBeginInfo(
+            sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            pNext=None,
+            flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            pInheritanceInfo=None
         )
-        vk.BeginCommandBuffer(command_buffer, begin_info)
+        
+        result = vk.vkBeginCommandBuffer(command_buffer, byref(begin_info))
+        if result != 0:
+            raise RuntimeError(f"Failed to begin command buffer: {result}")
 
         # Measure barrier insertion time
         start_time = time.perf_counter()
@@ -164,13 +226,31 @@ class VulkanMemoryBenchmark:
         end_time = time.perf_counter()
 
         # End and submit command buffer
-        vk.EndCommandBuffer(command_buffer)
-        submit_info = vk.SubmitInfo(commandBuffers=[command_buffer])
-        vk.QueueSubmit(self.queue, 1, submit_info, vk.Fence(0))
-        vk.QueueWaitIdle(self.queue)
+        result = vk.vkEndCommandBuffer(command_buffer)
+        if result != 0:
+            raise RuntimeError(f"Failed to end command buffer: {result}")
+
+        command_buffers = (c_void_p * 1)(command_buffer)
+        submit_info = VkSubmitInfo(
+            sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            pNext=None,
+            waitSemaphoreCount=0,
+            pWaitSemaphores=None,
+            pWaitDstStageMask=None,
+            commandBufferCount=1,
+            pCommandBuffers=command_buffers,
+            signalSemaphoreCount=0,
+            pSignalSemaphores=None
+        )
+
+        result = vk.vkQueueSubmit(self.queue, 1, byref(submit_info), None)
+        if result != 0:
+            raise RuntimeError(f"Failed to submit queue: {result}")
+
+        vk.vkQueueWaitIdle(self.queue)
 
         # Cleanup
-        vk.FreeCommandBuffers(self.device, self.command_pool, 1, [command_buffer])
+        vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, command_buffers)
 
         return (end_time - start_time) / 100  # Average time per barrier
 
@@ -194,10 +274,10 @@ class VulkanMemoryBenchmark:
                 BenchmarkResult(
                     name=f"Transfer Speed {size/1024/1024}MB",
                     metrics={
-                        "avg_time_ms": np.mean(transfer_times) * 1000,
-                        "avg_speed_mbps": np.mean(transfer_speeds),
-                        "min_speed_mbps": np.min(transfer_speeds),
-                        "max_speed_mbps": np.max(transfer_speeds),
+                        "avg_time_ms": float(np.mean(transfer_times) * 1000),
+                        "avg_speed_mbps": float(np.mean(transfer_speeds)),
+                        "min_speed_mbps": float(np.min(transfer_speeds)),
+                        "max_speed_mbps": float(np.max(transfer_speeds)),
                     },
                     timestamps=timestamps,
                 )
@@ -218,9 +298,9 @@ class VulkanMemoryBenchmark:
                 BenchmarkResult(
                     name=f"Allocation Overhead {size/1024/1024}MB",
                     metrics={
-                        "avg_time_ms": np.mean(alloc_times) * 1000,
-                        "avg_fragmentation": np.mean(fragmentations),
-                        "max_fragmentation": np.max(fragmentations),
+                        "avg_time_ms": float(np.mean(alloc_times) * 1000),
+                        "avg_fragmentation": float(np.mean(fragmentations)),
+                        "max_fragmentation": float(np.max(fragmentations)),
                     },
                     timestamps=timestamps,
                 )
@@ -237,9 +317,9 @@ class VulkanMemoryBenchmark:
             BenchmarkResult(
                 name="Barrier Overhead",
                 metrics={
-                    "avg_time_us": np.mean(barrier_times) * 1_000_000,
-                    "min_time_us": np.min(barrier_times) * 1_000_000,
-                    "max_time_us": np.max(barrier_times) * 1_000_000,
+                    "avg_time_us": float(np.mean(barrier_times) * 1_000_000),
+                    "min_time_us": float(np.min(barrier_times) * 1_000_000),
+                    "max_time_us": float(np.max(barrier_times) * 1_000_000),
                 },
                 timestamps=timestamps,
             )
@@ -249,17 +329,9 @@ class VulkanMemoryBenchmark:
 
     def run_and_report(self, output_dir: str = "benchmark_results") -> None:
         """Run benchmarks and generate reports."""
-        logging.info("Starting Vulkan memory benchmarks...")
-
         results = self.run_benchmarks()
-
-        # Generate plots
         for result in results:
             result.plot(output_dir)
-
-            # Log results
-            logging.info(f"\nBenchmark: {result.name}")
+            logging.info(f"Benchmark: {result.name}")
             for metric, value in result.metrics.items():
-                logging.info(f"{metric}: {value}")
-
-        logging.info("Vulkan memory benchmarks completed.")
+                logging.info(f"  {metric}: {value:.2f}")

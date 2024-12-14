@@ -1,164 +1,196 @@
 """Vulkan Memory Barrier Management.
 
-This module provides tools for managing memory barriers and synchronization
-in Vulkan operations, ensuring proper memory access patterns and dependencies.
+This module provides memory barrier management for synchronizing memory access
+between different Vulkan operations.
 """
 
-from dataclasses import dataclass
+from ctypes import c_void_p, c_uint32, c_int, byref, POINTER, Structure
+from typing import List, Optional
 from enum import Enum, auto
 
 import vulkan as vk
 
+# Vulkan type definitions
+VkCommandBuffer = c_void_p
+VkBuffer = c_void_p
+VkDeviceMemory = c_void_p
+
+# Vulkan pipeline stage flags
+VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 0x00000001
+VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT = 0x00000800
+VK_PIPELINE_STAGE_TRANSFER_BIT = 0x00000400
+
+# Vulkan access flags
+VK_ACCESS_SHADER_READ_BIT = 0x00000020
+VK_ACCESS_SHADER_WRITE_BIT = 0x00000040
+VK_ACCESS_TRANSFER_READ_BIT = 0x00000800
+VK_ACCESS_TRANSFER_WRITE_BIT = 0x00001000
+
+# Vulkan queue family constants
+VK_QUEUE_FAMILY_IGNORED = 0xFFFFFFFF
+
+# Vulkan memory constants
+VK_WHOLE_SIZE = 0xFFFFFFFFFFFFFFFF
 
 class AccessPattern(Enum):
-    """Common access patterns for memory operations."""
-
-    READ_ONLY = auto()
-    WRITE_ONLY = auto()
-    READ_WRITE = auto()
-    TRANSFER_SRC = auto()
-    TRANSFER_DST = auto()
+    """Memory access patterns for barriers."""
     COMPUTE_SHADER = auto()
+    TRANSFER = auto()
+    HOST = auto()
 
-
-@dataclass
-class BarrierInfo:
-    """Information about a memory barrier."""
-
-    src_stage: vk.PipelineStageFlags
-    dst_stage: vk.PipelineStageFlags
-    src_access: vk.AccessFlags
-    dst_access: vk.AccessFlags
-    queue_family_src: int = vk.QUEUE_FAMILY_IGNORED
-    queue_family_dst: int = vk.QUEUE_FAMILY_IGNORED
-
+class VkBufferMemoryBarrier(Structure):
+    """VkBufferMemoryBarrier structure."""
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("srcAccessMask", c_uint32),
+        ("dstAccessMask", c_uint32),
+        ("srcQueueFamilyIndex", c_uint32),
+        ("dstQueueFamilyIndex", c_uint32),
+        ("buffer", c_void_p),
+        ("offset", c_uint32),
+        ("size", c_uint32)
+    ]
 
 class BarrierManager:
-    """Manages memory barriers and synchronization."""
+    """Manages memory barriers for Vulkan operations."""
 
     def __init__(self):
-        self._access_patterns = {
-            AccessPattern.READ_ONLY: BarrierInfo(
-                src_stage=vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                dst_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                src_access=0,
-                dst_access=vk.ACCESS_SHADER_READ_BIT,
-            ),
-            AccessPattern.WRITE_ONLY: BarrierInfo(
-                src_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                dst_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                src_access=vk.ACCESS_SHADER_WRITE_BIT,
-                dst_access=vk.ACCESS_SHADER_WRITE_BIT,
-            ),
-            AccessPattern.READ_WRITE: BarrierInfo(
-                src_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                dst_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                src_access=vk.ACCESS_SHADER_READ_BIT | vk.ACCESS_SHADER_WRITE_BIT,
-                dst_access=vk.ACCESS_SHADER_READ_BIT | vk.ACCESS_SHADER_WRITE_BIT,
-            ),
-            AccessPattern.TRANSFER_SRC: BarrierInfo(
-                src_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                dst_stage=vk.PIPELINE_STAGE_TRANSFER_BIT,
-                src_access=vk.ACCESS_SHADER_WRITE_BIT,
-                dst_access=vk.ACCESS_TRANSFER_READ_BIT,
-            ),
-            AccessPattern.TRANSFER_DST: BarrierInfo(
-                src_stage=vk.PIPELINE_STAGE_TRANSFER_BIT,
-                dst_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                src_access=vk.ACCESS_TRANSFER_WRITE_BIT,
-                dst_access=vk.ACCESS_SHADER_READ_BIT,
-            ),
-            AccessPattern.COMPUTE_SHADER: BarrierInfo(
-                src_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                dst_stage=vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                src_access=vk.ACCESS_SHADER_READ_BIT | vk.ACCESS_SHADER_WRITE_BIT,
-                dst_access=vk.ACCESS_SHADER_READ_BIT | vk.ACCESS_SHADER_WRITE_BIT,
-            ),
-        }
+        self.barriers: List[VkBufferMemoryBarrier] = []
 
-    def get_barrier_info(
+    def add_compute_read_barrier(
         self,
-        pattern: AccessPattern,
-        queue_family_src: int = vk.QUEUE_FAMILY_IGNORED,
-        queue_family_dst: int = vk.QUEUE_FAMILY_IGNORED,
-    ) -> BarrierInfo:
-        """Get barrier info for a specific access pattern."""
-        info = self._access_patterns[pattern]
-        return BarrierInfo(
-            src_stage=info.src_stage,
-            dst_stage=info.dst_stage,
-            src_access=info.src_access,
-            dst_access=info.dst_access,
-            queue_family_src=queue_family_src,
-            queue_family_dst=queue_family_dst,
-        )
-
-    def buffer_barrier(
-        self,
-        command_buffer: vk.CommandBuffer,
-        buffer: vk.Buffer,
-        pattern: AccessPattern,
-        offset: int = 0,
-        size: int = vk.WHOLE_SIZE,
-        queue_family_src: int = vk.QUEUE_FAMILY_IGNORED,
-        queue_family_dst: int = vk.QUEUE_FAMILY_IGNORED,
+        buffer: c_void_p,  # VkBuffer
+        size: int = VK_WHOLE_SIZE,
+        offset: int = 0
     ) -> None:
-        """Insert a buffer memory barrier."""
-        info = self.get_barrier_info(pattern, queue_family_src, queue_family_dst)
-
-        barrier = vk.BufferMemoryBarrier(
-            srcAccessMask=info.src_access,
-            dstAccessMask=info.dst_access,
-            srcQueueFamilyIndex=info.queue_family_src,
-            dstQueueFamilyIndex=info.queue_family_dst,
+        """Add barrier for compute shader read."""
+        barrier = VkBufferMemoryBarrier(
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            pNext=None,
+            srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+            srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
             buffer=buffer,
             offset=offset,
-            size=size,
+            size=size
         )
+        self.barriers.append(barrier)
 
-        vk.CmdPipelineBarrier(
-            command_buffer,
-            info.src_stage,
-            info.dst_stage,
-            0,
-            0,
-            None,
-            1,
-            [barrier],
-            0,
-            None,
+    def add_compute_write_barrier(
+        self,
+        buffer: c_void_p,  # VkBuffer
+        size: int = VK_WHOLE_SIZE,
+        offset: int = 0
+    ) -> None:
+        """Add barrier for compute shader write."""
+        barrier = VkBufferMemoryBarrier(
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            pNext=None,
+            srcAccessMask=VK_ACCESS_SHADER_READ_BIT,
+            dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+            srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            buffer=buffer,
+            offset=offset,
+            size=size
         )
+        self.barriers.append(barrier)
+
+    def add_transfer_read_barrier(
+        self,
+        buffer: c_void_p,  # VkBuffer
+        size: int = VK_WHOLE_SIZE,
+        offset: int = 0
+    ) -> None:
+        """Add barrier for transfer read."""
+        barrier = VkBufferMemoryBarrier(
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            pNext=None,
+            srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,
+            dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,
+            srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            buffer=buffer,
+            offset=offset,
+            size=size
+        )
+        self.barriers.append(barrier)
+
+    def add_transfer_write_barrier(
+        self,
+        buffer: c_void_p,  # VkBuffer
+        size: int = VK_WHOLE_SIZE,
+        offset: int = 0
+    ) -> None:
+        """Add barrier for transfer write."""
+        barrier = VkBufferMemoryBarrier(
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            pNext=None,
+            srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,
+            dstAccessMask=VK_ACCESS_SHADER_READ_BIT,
+            srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            buffer=buffer,
+            offset=offset,
+            size=size
+        )
+        self.barriers.append(barrier)
 
     def global_barrier(
-        self, command_buffer: vk.CommandBuffer, pattern: AccessPattern
-    ) -> None:
-        """Insert a global memory barrier."""
-        info = self.get_barrier_info(pattern)
-
-        barrier = vk.MemoryBarrier(
-            srcAccessMask=info.src_access, dstAccessMask=info.dst_access
-        )
-
-        vk.CmdPipelineBarrier(
-            command_buffer,
-            info.src_stage,
-            info.dst_stage,
-            0,
-            1,
-            [barrier],
-            0,
-            None,
-            0,
-            None,
-        )
-
-    def execution_barrier(
         self,
-        command_buffer: vk.CommandBuffer,
-        src_stage: vk.PipelineStageFlags,
-        dst_stage: vk.PipelineStageFlags,
+        command_buffer: c_void_p,  # VkCommandBuffer
+        pattern: AccessPattern,
     ) -> None:
-        """Insert an execution barrier between pipeline stages."""
-        vk.CmdPipelineBarrier(
-            command_buffer, src_stage, dst_stage, 0, 0, None, 0, None, 0, None
+        """Add a global memory barrier for the specified access pattern."""
+        if pattern == AccessPattern.COMPUTE_SHADER:
+            src_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            dst_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            src_access = VK_ACCESS_SHADER_WRITE_BIT
+            dst_access = VK_ACCESS_SHADER_READ_BIT
+        elif pattern == AccessPattern.TRANSFER:
+            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT
+            dst_stage = VK_PIPELINE_STAGE_TRANSFER_BIT
+            src_access = VK_ACCESS_TRANSFER_WRITE_BIT
+            dst_access = VK_ACCESS_TRANSFER_READ_BIT
+        else:
+            raise ValueError(f"Unsupported access pattern: {pattern}")
+
+        barrier = VkBufferMemoryBarrier(
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+            pNext=None,
+            srcAccessMask=src_access,
+            dstAccessMask=dst_access,
+            srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+            buffer=None,  # Global barrier
+            offset=0,
+            size=VK_WHOLE_SIZE
         )
+        self.barriers.append(barrier)
+        self.record_barriers(command_buffer, src_stage, dst_stage)
+
+    def record_barriers(
+        self,
+        command_buffer: c_void_p,  # VkCommandBuffer
+        src_stage: int = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        dst_stage: int = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    ) -> None:
+        """Record barriers to command buffer."""
+        if not self.barriers:
+            return
+
+        vk.vkCmdPipelineBarrier(
+            command_buffer,
+            src_stage,
+            dst_stage,
+            0,  # dependency flags
+            0,  # memory barrier count
+            None,  # memory barriers
+            len(self.barriers),  # buffer memory barrier count
+            (VkBufferMemoryBarrier * len(self.barriers))(*self.barriers),  # buffer memory barriers
+            0,  # image memory barrier count
+            None  # image memory barriers
+        )
+        self.barriers.clear()
