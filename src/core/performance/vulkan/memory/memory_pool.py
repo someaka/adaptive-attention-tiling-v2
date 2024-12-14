@@ -7,6 +7,7 @@ of Vulkan memory resources, reducing fragmentation and allocation overhead.
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
+from ctypes import c_void_p, c_uint32, c_int, POINTER, Structure, cast, byref
 
 import vulkan as vk
 
@@ -15,7 +16,7 @@ import vulkan as vk
 class MemoryBlock:
     """Represents a block of allocated memory."""
 
-    memory: vk.DeviceMemory
+    memory: c_void_p  # VkDeviceMemory
     size: int
     offset: int
     is_free: bool = True
@@ -34,7 +35,7 @@ class MemoryPool:
 class MemoryPoolManager:
     """Manages memory pools for different memory types."""
 
-    def __init__(self, device: vk.Device, physical_device: vk.PhysicalDevice):
+    def __init__(self, device: c_void_p, physical_device: c_void_p):
         self.device = device
         self.physical_device = physical_device
         self.pools: Dict[int, MemoryPool] = {}  # memory_type_index -> pool
@@ -42,10 +43,11 @@ class MemoryPoolManager:
         self.min_block_size = 1024 * 1024  # 1MB minimum block size
 
         # Get memory properties
-        self.memory_properties = vk.GetPhysicalDeviceMemoryProperties(physical_device)
+        self.memory_properties = vk.VkPhysicalDeviceMemoryProperties()
+        vk.vkGetPhysicalDeviceMemoryProperties(physical_device, byref(self.memory_properties))
 
     def _find_memory_type(
-        self, type_filter: int, properties: vk.MemoryPropertyFlags
+        self, type_filter: int, properties: int
     ) -> int:
         """Find suitable memory type index."""
         for i in range(self.memory_properties.memoryTypeCount):
@@ -58,10 +60,17 @@ class MemoryPoolManager:
     def _create_pool(self, memory_type_index: int, initial_size: int) -> MemoryPool:
         """Create a new memory pool."""
         # Allocate initial memory block
-        alloc_info = vk.MemoryAllocateInfo(
-            allocationSize=initial_size, memoryTypeIndex=memory_type_index
+        alloc_info = vk.VkMemoryAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            pNext=None,
+            allocationSize=initial_size,
+            memoryTypeIndex=memory_type_index
         )
-        memory = vk.AllocateMemory(self.device, alloc_info, None)
+
+        memory = c_void_p()
+        result = vk.vkAllocateMemory(self.device, byref(alloc_info), None, byref(memory))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to allocate memory: {result}")
 
         block = MemoryBlock(memory=memory, size=initial_size, offset=0)
         return MemoryPool(
@@ -125,17 +134,25 @@ class MemoryPoolManager:
 
         # Need to allocate new block
         new_size = max(self.block_size, aligned_size)
-        alloc_info = vk.MemoryAllocateInfo(
-            allocationSize=new_size, memoryTypeIndex=memory_type_index
+        alloc_info = vk.VkMemoryAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            pNext=None,
+            allocationSize=new_size,
+            memoryTypeIndex=memory_type_index
         )
 
+        memory = c_void_p()
         try:
-            memory = vk.AllocateMemory(self.device, alloc_info, None)
-        except vk.error.VulkanError:
+            result = vk.vkAllocateMemory(self.device, byref(alloc_info), None, byref(memory))
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Failed to allocate memory: {result}")
+        except Exception:
             # Try garbage collection
             self.garbage_collect()
             # Retry allocation
-            memory = vk.AllocateMemory(self.device, alloc_info, None)
+            result = vk.vkAllocateMemory(self.device, byref(alloc_info), None, byref(memory))
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Failed to allocate memory after garbage collection: {result}")
 
         block = MemoryBlock(memory=memory, size=new_size, offset=0, is_free=False)
 
@@ -176,14 +193,14 @@ class MemoryPoolManager:
                     i += 1
 
             # Remove completely free memory allocations
-            memory_blocks: Dict[vk.DeviceMemory, List[MemoryBlock]] = defaultdict(list)
+            memory_blocks: Dict[c_void_p, List[MemoryBlock]] = defaultdict(list)
             for block in pool.blocks:
                 memory_blocks[block.memory].append(block)
 
             for memory, blocks in memory_blocks.items():
                 if all(block.is_free for block in blocks):
                     # All blocks in this memory allocation are free
-                    vk.FreeMemory(self.device, memory, None)
+                    vk.vkFreeMemory(self.device, memory, None)
                     pool.blocks = [b for b in pool.blocks if b.memory != memory]
                     pool.total_size -= sum(block.size for block in blocks)
 
@@ -191,13 +208,13 @@ class MemoryPoolManager:
         """Clean up all memory pools."""
         for pool in self.pools.values():
             # Get unique memory handles
-            memory_handles: Set[vk.DeviceMemory] = {
+            memory_handles: Set[c_void_p] = {
                 block.memory for block in pool.blocks
             }
 
             # Free all memory
             for memory in memory_handles:
-                vk.FreeMemory(self.device, memory, None)
+                vk.vkFreeMemory(self.device, memory, None)
 
             pool.blocks.clear()
             pool.total_size = 0
