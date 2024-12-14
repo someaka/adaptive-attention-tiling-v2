@@ -1,11 +1,57 @@
 """Tests for Vulkan shader performance."""
 
 import time
-
+import vulkan as vk
 import numpy as np
 import pytest
+from ctypes import c_void_p, cast, POINTER, c_size_t
 
-from src.core.performance.vulkan.memory_management import VulkanMemoryManager
+from src.core.performance.vulkan_memory import VulkanMemoryManager
+
+
+def create_vulkan_device():
+    """Create Vulkan instance and device for testing."""
+    app_info = vk.VkApplicationInfo(
+        sType=vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        pApplicationName="AAT Tests",
+        applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+        pEngineName="No Engine",
+        engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+        apiVersion=vk.VK_API_VERSION_1_0
+    )
+    
+    create_info = vk.VkInstanceCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        pApplicationInfo=app_info
+    )
+    
+    instance = vk.vkCreateInstance(create_info, None)
+    physical_devices = vk.vkEnumeratePhysicalDevices(instance)
+    if not physical_devices:
+        pytest.skip("No Vulkan devices found")
+        
+    physical_device = physical_devices[0]
+    
+    queue_create_info = vk.VkDeviceQueueCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        queueFamilyIndex=0,
+        queueCount=1,
+        pQueuePriorities=[1.0]
+    )
+    
+    device_create_info = vk.VkDeviceCreateInfo(
+        sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        pQueueCreateInfos=[queue_create_info],
+        queueCreateInfoCount=1
+    )
+    
+    device = vk.vkCreateDevice(physical_device, device_create_info, None)
+    
+    # Convert device handles to c_void_p
+    device_handle = c_void_p(int(device))
+    physical_device_handle = c_void_p(int(physical_device))
+    
+    return device_handle, physical_device_handle
 
 
 def setup_pattern_data(
@@ -56,6 +102,7 @@ class TestVulkanShaders:
         self.pattern_sizes = [128, 256, 512]
         self.manifold_dims = [16, 32, 64]
         self.iterations = 3
+        self.device, self.physical_device = create_vulkan_device()
 
     def test_pattern_evolution_performance(self) -> None:
         """Test pattern evolution shader performance."""
@@ -64,9 +111,11 @@ class TestVulkanShaders:
                 pattern, flow = setup_pattern_data(batch_size, pattern_size)
 
                 # Create Vulkan buffers
-                memory_manager = VulkanMemoryManager()
-                memory_manager.transfer_to_device(pattern)
-                memory_manager.transfer_to_device(flow)
+                memory_manager = VulkanMemoryManager(self.device, self.physical_device)
+                pattern_buffer = memory_manager.allocate_tensor(pattern.shape, pattern.dtype)
+                flow_buffer = memory_manager.allocate_tensor(flow.shape, flow.dtype)
+                memory_manager.copy_to_device(pattern, pattern_buffer)
+                memory_manager.copy_to_device(flow, flow_buffer)
 
                 # Test with different evolution rates
                 rates = [0.01, 0.1, 0.5]
@@ -84,6 +133,9 @@ class TestVulkanShaders:
                     print(f"Rate {rate}: {t:.4f}s")
                 print(f"Batch processing efficiency: {times[0]/times[-1]:.2f}x")
 
+                # Cleanup
+                memory_manager.cleanup()
+
     def test_flow_computation_performance(self) -> None:
         """Test flow computation shader performance."""
         for batch_size in self.batch_sizes:
@@ -91,9 +143,11 @@ class TestVulkanShaders:
                 metric, connection = setup_flow_data(batch_size, dim)
 
                 # Create Vulkan buffers
-                memory_manager = VulkanMemoryManager()
-                memory_manager.transfer_to_device(metric)
-                memory_manager.transfer_to_device(connection)
+                memory_manager = VulkanMemoryManager(self.device, self.physical_device)
+                metric_buffer = memory_manager.allocate_tensor(metric.shape, metric.dtype)
+                connection_buffer = memory_manager.allocate_tensor(connection.shape, connection.dtype)
+                memory_manager.copy_to_device(metric, metric_buffer)
+                memory_manager.copy_to_device(connection, connection_buffer)
 
                 # Test computation
                 start = time.time()
@@ -106,6 +160,9 @@ class TestVulkanShaders:
                 print(f"Average time: {avg_time:.4f}s")
                 print(f"GFLOPS: {2*batch_size*dim*dim*dim/avg_time/1e9:.2f}")
 
+                # Cleanup
+                memory_manager.cleanup()
+
     def test_workgroup_impact(self) -> None:
         """Test impact of different workgroup sizes."""
         pattern_size = 256
@@ -113,9 +170,11 @@ class TestVulkanShaders:
         pattern, flow = setup_pattern_data(batch_size, pattern_size)
 
         # Create Vulkan buffers
-        memory_manager = VulkanMemoryManager()
-        memory_manager.transfer_to_device(pattern)
-        memory_manager.transfer_to_device(flow)
+        memory_manager = VulkanMemoryManager(self.device, self.physical_device)
+        pattern_buffer = memory_manager.allocate_tensor(pattern.shape, pattern.dtype)
+        flow_buffer = memory_manager.allocate_tensor(flow.shape, flow.dtype)
+        memory_manager.copy_to_device(pattern, pattern_buffer)
+        memory_manager.copy_to_device(flow, flow_buffer)
 
         # Test different workgroup sizes
         workgroup_sizes = [8, 16, 32]
@@ -133,6 +192,9 @@ class TestVulkanShaders:
             print(f"Size {size}: {t:.4f}s")
         print(f"Optimal size impact: {(min(times)-max(times))/max(times)*100:.1f}%")
 
+        # Cleanup
+        memory_manager.cleanup()
+
     def test_push_constant_performance(self) -> None:
         """Test push constant vs descriptor performance."""
         pattern_size = 256
@@ -140,9 +202,11 @@ class TestVulkanShaders:
         pattern, flow = setup_pattern_data(batch_size, pattern_size)
 
         # Create Vulkan buffers
-        memory_manager = VulkanMemoryManager()
-        memory_manager.transfer_to_device(pattern)
-        memory_manager.transfer_to_device(flow)
+        memory_manager = VulkanMemoryManager(self.device, self.physical_device)
+        pattern_buffer = memory_manager.allocate_tensor(pattern.shape, pattern.dtype)
+        flow_buffer = memory_manager.allocate_tensor(flow.shape, flow.dtype)
+        memory_manager.copy_to_device(pattern, pattern_buffer)
+        memory_manager.copy_to_device(flow, flow_buffer)
 
         # Test with push constants
         start = time.time()
@@ -163,6 +227,9 @@ class TestVulkanShaders:
         print(f"Descriptor set time: {desc_time:.4f}s")
         print(f"Overhead: {(desc_time-push_time)/push_time*100:.1f}%")
 
+        # Cleanup
+        memory_manager.cleanup()
+
     def test_batch_processing_efficiency(self) -> None:
         """Test batch processing efficiency."""
         pattern_size = 256
@@ -173,23 +240,30 @@ class TestVulkanShaders:
 
         for batch_size in self.batch_sizes:
             # Single processing
-            memory_manager = VulkanMemoryManager()
+            memory_manager = VulkanMemoryManager(self.device, self.physical_device)
             start = time.time()
             for _ in range(batch_size):
-                memory_manager.transfer_to_device(pattern)
-                memory_manager.transfer_to_device(flow)
+                pattern_buffer = memory_manager.allocate_tensor(pattern.shape, pattern.dtype)
+                flow_buffer = memory_manager.allocate_tensor(flow.shape, flow.dtype)
+                memory_manager.copy_to_device(pattern, pattern_buffer)
+                memory_manager.copy_to_device(flow, flow_buffer)
                 # TODO: Implement shader for single item processing
             times_single.append(time.time() - start)
 
             # Batch processing
             pattern_batch = np.tile(pattern, (batch_size, 1, 1))
             flow_batch = np.tile(flow, (batch_size, 1, 1))
-            memory_manager.transfer_to_device(pattern_batch)
-            memory_manager.transfer_to_device(flow_batch)
+            pattern_buffer = memory_manager.allocate_tensor(pattern_batch.shape, pattern_batch.dtype)
+            flow_buffer = memory_manager.allocate_tensor(flow_batch.shape, flow_batch.dtype)
+            memory_manager.copy_to_device(pattern_batch, pattern_buffer)
+            memory_manager.copy_to_device(flow_batch, flow_buffer)
 
             start = time.time()
             # TODO: Implement shader for batch processing
             times_batch.append(time.time() - start)
+
+            # Cleanup
+            memory_manager.cleanup()
 
         print("\nBatch Processing Efficiency")
         for batch_size, t_single, t_batch in zip(

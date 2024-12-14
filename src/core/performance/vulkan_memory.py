@@ -2,10 +2,11 @@
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import ctypes
 import numpy as np
+import torch
 import vulkan as vk
-from ctypes import c_void_p, byref
+from ctypes import c_void_p, byref, cast, POINTER, c_uint32, memmove
 
 from .memory_base import MemoryManagerBase, MemoryError
 
@@ -51,7 +52,7 @@ class VulkanMemoryManager(MemoryManagerBase):
         try:
             # Calculate memory size
             element_size = np.dtype(dtype).itemsize
-            memory_size = element_size * np.prod(size)
+            memory_size = int(element_size * np.prod(size))  # Convert to int
             
             # Check if we need to clear buffer pool
             if self._allocated_memory + memory_size > self._peak_memory + self._buffer_pool_size:
@@ -72,14 +73,15 @@ class VulkanMemoryManager(MemoryManagerBase):
                 
             try:
                 # Get memory requirements
-                mem_requirements = vk.vkGetBufferMemoryRequirements(self.device, buffer)
+                mem_requirements = vk.VkMemoryRequirements()
+                vk.vkGetBufferMemoryRequirements(self.device, buffer, byref(mem_requirements))
                 
                 # Allocate memory
                 alloc_info = vk.VkMemoryAllocateInfo(
                     sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                     allocationSize=mem_requirements.size,
                     memoryTypeIndex=self._find_memory_type(
-                        mem_requirements.memoryTypeBits,
+                        int(mem_requirements.memoryTypeBits),  # Convert to int
                         vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | 
                         vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
                     )
@@ -114,7 +116,7 @@ class VulkanMemoryManager(MemoryManagerBase):
             buffer_id = id(buffer)
             self._buffer_pool[buffer_id] = buffer_info
             self._allocated_memory += memory_size
-            self._peak_memory = max(self._peak_memory, self._allocated_memory)
+            self._peak_memory = max(self._peak_memory, int(self._allocated_memory))  # Convert to int
             
             self.record_metric("allocate")
             return buffer_info
@@ -154,21 +156,14 @@ class VulkanMemoryManager(MemoryManagerBase):
         try:
             # Map memory
             data_ptr = c_void_p()
-            result = vk.vkMapMemory(
-                self.device, 
-                dst.memory,
-                dst.offset,
-                dst.size,
-                0,
-                byref(data_ptr)
-            )
+            result = vk.vkMapMemory(self.device, dst.memory, dst.offset, dst.size, data_ptr)
             if result != vk.VK_SUCCESS:
                 raise MemoryError(f"Failed to map memory: {result}")
                 
             try:
-                # Copy data
-                src_ptr = src.ctypes.data
-                vk.memcpy(data_ptr, src_ptr, dst.size)
+                # Copy data using memmove
+                src_ptr = src.ctypes.data_as(c_void_p)
+                memmove(data_ptr, src_ptr, dst.size)
                 
             finally:
                 # Always unmap
@@ -189,21 +184,14 @@ class VulkanMemoryManager(MemoryManagerBase):
         try:
             # Map memory
             data_ptr = c_void_p()
-            result = vk.vkMapMemory(
-                self.device,
-                src.memory,
-                src.offset,
-                src.size,
-                0,
-                byref(data_ptr)
-            )
+            result = vk.vkMapMemory(self.device, src.memory, src.offset, src.size, data_ptr)
             if result != vk.VK_SUCCESS:
                 raise MemoryError(f"Failed to map memory: {result}")
                 
             try:
-                # Copy data
-                dst_ptr = dst.ctypes.data
-                vk.memcpy(dst_ptr, data_ptr, src.size)
+                # Copy data using memmove
+                dst_ptr = dst.ctypes.data_as(c_void_p)
+                memmove(dst_ptr, data_ptr, src.size)
                 
             finally:
                 # Always unmap
@@ -241,9 +229,10 @@ class VulkanMemoryManager(MemoryManagerBase):
             Memory type index
         """
         try:
-            mem_properties = vk.vkGetPhysicalDeviceMemoryProperties(self.physical_device)
+            mem_properties = vk.VkPhysicalDeviceMemoryProperties()
+            vk.vkGetPhysicalDeviceMemoryProperties(self.physical_device, byref(mem_properties))
             
-            for i in range(mem_properties.memoryTypeCount):
+            for i in range(int(mem_properties.memoryTypeCount)):
                 if (type_filter & (1 << i)) and (
                     mem_properties.memoryTypes[i].propertyFlags & properties
                 ) == properties:
