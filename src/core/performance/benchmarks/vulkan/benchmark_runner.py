@@ -8,31 +8,131 @@ import datetime
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+from ctypes import c_void_p, c_uint32, c_int, Structure, POINTER, byref, c_char_p, c_float, c_bool, Array
 
 import vulkan as vk
 
 from .memory_benchmarks import VulkanMemoryBenchmark
 
+# Vulkan type definitions
+VkInstance = c_void_p
+VkPhysicalDevice = c_void_p
+VkDevice = c_void_p
+VkQueue = c_void_p
+VkCommandPool = c_void_p
+
+# Vulkan constants
+VK_STRUCTURE_TYPE_APPLICATION_INFO = 0
+VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO = 1
+VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO = 3
+VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO = 2
+VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO = 39
+
+VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT = 0x00000002
+VK_QUEUE_COMPUTE_BIT = 0x00000002
+
+class VkExtent3D(Structure):
+    _fields_ = [
+        ("width", c_uint32),
+        ("height", c_uint32),
+        ("depth", c_uint32)
+    ]
+
+class VkQueueFamilyProperties(Structure):
+    _fields_ = [
+        ("queueFlags", c_uint32),
+        ("queueCount", c_uint32),
+        ("timestampValidBits", c_uint32),
+        ("minImageTransferGranularity", VkExtent3D)
+    ]
+
+class VkApplicationInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("pApplicationName", c_char_p),
+        ("applicationVersion", c_uint32),
+        ("pEngineName", c_char_p),
+        ("engineVersion", c_uint32),
+        ("apiVersion", c_uint32)
+    ]
+
+class VkInstanceCreateInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("flags", c_uint32),
+        ("pApplicationInfo", POINTER(VkApplicationInfo)),
+        ("enabledLayerCount", c_uint32),
+        ("ppEnabledLayerNames", POINTER(c_char_p)),
+        ("enabledExtensionCount", c_uint32),
+        ("ppEnabledExtensionNames", POINTER(c_char_p))
+    ]
+
+class VkDeviceQueueCreateInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("flags", c_uint32),
+        ("queueFamilyIndex", c_uint32),
+        ("queueCount", c_uint32),
+        ("pQueuePriorities", POINTER(c_float))
+    ]
+
+class VkPhysicalDeviceFeatures(Structure):
+    _fields_ = [
+        ("robustBufferAccess", c_bool),
+        # Add other feature fields as needed
+    ]
+
+class VkDeviceCreateInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("flags", c_uint32),
+        ("queueCreateInfoCount", c_uint32),
+        ("pQueueCreateInfos", POINTER(VkDeviceQueueCreateInfo)),
+        ("enabledLayerCount", c_uint32),
+        ("ppEnabledLayerNames", POINTER(c_char_p)),
+        ("enabledExtensionCount", c_uint32),
+        ("ppEnabledExtensionNames", POINTER(c_char_p)),
+        ("pEnabledFeatures", POINTER(VkPhysicalDeviceFeatures))
+    ]
+
+class VkCommandPoolCreateInfo(Structure):
+    _fields_ = [
+        ("sType", c_int),
+        ("pNext", c_void_p),
+        ("flags", c_uint32),
+        ("queueFamilyIndex", c_uint32)
+    ]
 
 class VulkanBenchmarkRunner:
     """Runner for Vulkan benchmarks."""
 
     def __init__(
-        self, instance: Optional[vk.Instance] = None, device: Optional[vk.Device] = None
+        self, instance: Optional[VkInstance] = None, device: Optional[VkDevice] = None
     ):
         self.instance = instance or self._create_instance()
         self.device = device or self._create_device()
 
         # Create command pool and queue
         queue_family_index = self._find_queue_family()
-        self.queue = vk.GetDeviceQueue(self.device, queue_family_index, 0)
+        self.queue = c_void_p()
+        vk.vkGetDeviceQueue(self.device, queue_family_index, 0, byref(self.queue))
 
-        pool_info = vk.CommandPoolCreateInfo(
-            queueFamilyIndex=queue_family_index,
-            flags=vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        pool_info = VkCommandPoolCreateInfo(
+            sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            pNext=None,
+            flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            queueFamilyIndex=queue_family_index
         )
-        self.command_pool = vk.CreateCommandPool(self.device, pool_info, None)
+        
+        self.command_pool = c_void_p()
+        result = vk.vkCreateCommandPool(self.device, byref(pool_info), None, byref(self.command_pool))
+        if result != 0:
+            raise RuntimeError(f"Failed to create command pool: {result}")
 
         # Initialize benchmarks
         self.memory_benchmark = VulkanMemoryBenchmark(
@@ -42,52 +142,101 @@ class VulkanBenchmarkRunner:
             queue=self.queue,
         )
 
-    def _create_instance(self) -> vk.Instance:
+    def _create_instance(self) -> VkInstance:
         """Create Vulkan instance."""
-        app_info = vk.ApplicationInfo(
-            applicationName="Vulkan Benchmarks",
-            applicationVersion=vk.MAKE_VERSION(1, 0, 0),
-            engineName="No Engine",
-            engineVersion=vk.MAKE_VERSION(1, 0, 0),
-            apiVersion=vk.API_VERSION_1_0,
+        app_name = b"Vulkan Benchmarks"
+        engine_name = b"No Engine"
+        
+        app_info = VkApplicationInfo(
+            sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            pNext=None,
+            pApplicationName=app_name,
+            applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            pEngineName=engine_name,
+            engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            apiVersion=vk.VK_MAKE_VERSION(1, 0, 0)
         )
 
-        create_info = vk.InstanceCreateInfo(
-            pApplicationInfo=app_info, enabledLayerNames=["VK_LAYER_KHRONOS_validation"]
+        layer_name = b"VK_LAYER_KHRONOS_validation"
+        layer_names = (c_char_p * 1)(layer_name)
+        
+        create_info = VkInstanceCreateInfo(
+            sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            pNext=None,
+            flags=0,
+            pApplicationInfo=byref(app_info),
+            enabledLayerCount=1,
+            ppEnabledLayerNames=layer_names,
+            enabledExtensionCount=0,
+            ppEnabledExtensionNames=None
         )
 
-        return vk.CreateInstance(create_info, None)
+        instance = c_void_p()
+        result = vk.vkCreateInstance(byref(create_info), None, byref(instance))
+        if result != 0:
+            raise RuntimeError(f"Failed to create instance: {result}")
+        
+        return instance
 
-    def _get_physical_device(self) -> vk.PhysicalDevice:
+    def _get_physical_device(self) -> VkPhysicalDevice:
         """Get physical device."""
-        return vk.EnumeratePhysicalDevices(self.instance)[0]
+        # Get devices directly
+        devices = vk.vkEnumeratePhysicalDevices(self.instance)
+        if not devices:
+            raise RuntimeError("No Vulkan physical devices found")
+        
+        return devices[0]
 
     def _find_queue_family(self) -> int:
         """Find suitable queue family index."""
         physical_device = self._get_physical_device()
-        queue_families = vk.GetPhysicalDeviceQueueFamilyProperties(physical_device)
+        
+        # Get queue families directly
+        properties = vk.vkGetPhysicalDeviceQueueFamilyProperties(physical_device)
 
-        for i, family in enumerate(queue_families):
-            if family.queueFlags & vk.QUEUE_COMPUTE_BIT:
+        for i, family in enumerate(properties):
+            if family.queueFlags & VK_QUEUE_COMPUTE_BIT:
                 return i
 
         raise RuntimeError("No compute queue family found")
 
-    def _create_device(self) -> vk.Device:
+    def _create_device(self) -> VkDevice:
         """Create logical device."""
         physical_device = self._get_physical_device()
         queue_family_index = self._find_queue_family()
 
-        queue_info = vk.DeviceQueueCreateInfo(
-            queueFamilyIndex=queue_family_index, queueCount=1, pQueuePriorities=[1.0]
+        priorities = (c_float * 1)(1.0)
+        queue_info = VkDeviceQueueCreateInfo(
+            sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            pNext=None,
+            flags=0,
+            queueFamilyIndex=queue_family_index,
+            queueCount=1,
+            pQueuePriorities=priorities
         )
 
-        device_features = vk.PhysicalDeviceFeatures()
-        device_create_info = vk.DeviceCreateInfo(
-            queueCreateInfos=[queue_info], enabledFeatures=device_features
+        device_features = VkPhysicalDeviceFeatures()
+        queue_infos = (VkDeviceQueueCreateInfo * 1)(queue_info)
+        
+        device_create_info = VkDeviceCreateInfo(
+            sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            pNext=None,
+            flags=0,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=queue_infos,
+            enabledLayerCount=0,
+            ppEnabledLayerNames=None,
+            enabledExtensionCount=0,
+            ppEnabledExtensionNames=None,
+            pEnabledFeatures=byref(device_features)
         )
 
-        return vk.CreateDevice(physical_device, device_create_info, None)
+        device = c_void_p()
+        result = vk.vkCreateDevice(physical_device, byref(device_create_info), None, byref(device))
+        if result != 0:
+            raise RuntimeError(f"Failed to create device: {result}")
+        
+        return device
 
     def run_all_benchmarks(self, output_dir: str = "benchmark_results") -> None:
         """Run all Vulkan benchmarks."""
@@ -111,12 +260,14 @@ class VulkanBenchmarkRunner:
             self.memory_benchmark.run_and_report(str(output_path))
 
             # Save benchmark metadata
+            physical_device = self._get_physical_device()
+            props = vk.VkPhysicalDeviceProperties()
+            vk.vkGetPhysicalDeviceProperties(physical_device, byref(props))
+
             metadata = {
                 "timestamp": datetime.datetime.now().isoformat(),
-                "vulkan_version": vk.API_VERSION_1_0,
-                "device_name": vk.GetPhysicalDeviceProperties(
-                    self._get_physical_device()
-                ).deviceName.decode("utf-8"),
+                "vulkan_version": vk.VK_API_VERSION_1_0,
+                "device_name": props.deviceName.decode("utf-8"),
             }
 
             with open(output_path / "metadata.json", "w") as f:
@@ -130,9 +281,9 @@ class VulkanBenchmarkRunner:
 
     def cleanup(self) -> None:
         """Clean up Vulkan resources."""
-        vk.DestroyCommandPool(self.device, self.command_pool, None)
-        vk.DestroyDevice(self.device, None)
-        vk.DestroyInstance(self.instance, None)
+        vk.vkDestroyCommandPool(self.device, self.command_pool, None)
+        vk.vkDestroyDevice(self.device, None)
+        vk.vkDestroyInstance(self.instance, None)
 
 
 def run_benchmarks(output_dir: str = "benchmark_results") -> None:
