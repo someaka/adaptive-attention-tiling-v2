@@ -10,13 +10,15 @@ This module provides profiling tools for:
 import time
 from dataclasses import dataclass
 from functools import wraps
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Any, TypeVar, cast
 
 import line_profiler
 import memory_profiler
 import numpy as np
 import psutil
 
+
+T = TypeVar('T')
 
 @dataclass
 class ProfileResult:
@@ -35,42 +37,51 @@ class CPUProfiler:
 
     def __init__(self, enable_line_profiling: bool = True):
         self.enable_line_profiling = enable_line_profiling
-        self.line_profiler = (
-            line_profiler.LineProfiler() if enable_line_profiling else None
-        )
+        self.line_profiler: Optional[line_profiler.LineProfiler] = None
+        if enable_line_profiling:
+            try:
+                self.line_profiler = line_profiler.LineProfiler()
+            except Exception as e:
+                print(f"Warning: Failed to initialize line profiler: {e}")
+                self.enable_line_profiling = False
         self.results: List[ProfileResult] = []
 
-    def profile(self, func: Callable) -> Callable:
+    def profile(self, func: Callable[..., T]) -> Callable[..., T]:
         """Profile a function's CPU usage."""
-        if self.enable_line_profiling:
-            func = self.line_profiler(func)
+        profiled_func = func
+        if self.enable_line_profiling and self.line_profiler is not None:
+            profiled_func = self.line_profiler(func)
 
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> T:
             start_time = time.perf_counter()
             process = psutil.Process()
             start_cpu = process.cpu_percent()
 
             # Run the function
-            result = func(*args, **kwargs)
+            result = profiled_func(*args, **kwargs)
 
             end_time = time.perf_counter()
             end_cpu = process.cpu_percent()
 
             # Get line profiling stats if enabled
             line_stats = None
-            if self.enable_line_profiling:
-                self.line_profiler.enable_by_count()
-                stats = self.line_profiler.get_stats()
-                for key, timings in stats.timings.items():
-                    if key[2] == func.__name__:
-                        line_stats = {
-                            line: {
-                                "hits": hits,
-                                "time": timing / 1e6,  # Convert to seconds
-                            }
-                            for line, hits, timing in timings
-                        }
+            if self.enable_line_profiling and self.line_profiler is not None:
+                try:
+                    self.line_profiler.enable_by_count()
+                    stats = self.line_profiler.get_stats()
+                    if hasattr(stats, 'timings'):
+                        for key, timings in stats.timings.items():
+                            if key[2] == func.__name__:
+                                line_stats = {
+                                    line: {
+                                        "hits": hits,
+                                        "time": timing / 1e6,  # Convert to seconds
+                                    }
+                                    for line, hits, timing in timings
+                                }
+                except Exception as e:
+                    print(f"Warning: Failed to collect line profiling stats: {e}")
 
             self.results.append(
                 ProfileResult(

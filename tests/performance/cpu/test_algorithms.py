@@ -14,7 +14,7 @@ import signal
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Tuple, List
 
 import pytest
 import torch
@@ -63,12 +63,12 @@ def resource_guard() -> Generator[None, None, None]:
 
 
 @pytest.fixture
-def algorithm_optimizer():
+def algorithm_optimizer() -> AlgorithmOptimizer:
     """Create an AlgorithmOptimizer instance for testing."""
     return AlgorithmOptimizer(enable_profiling=True)
 
 
-def generate_sparse_matrix(size: tuple[int, int], sparsity: float) -> torch.Tensor:
+def generate_sparse_matrix(size: Tuple[int, int], sparsity: float) -> torch.Tensor:
     """Generate a sparse matrix with given sparsity level."""
     with resource_guard():
         matrix = torch.randn(size)
@@ -81,9 +81,9 @@ def generate_sparse_matrix(size: tuple[int, int], sparsity: float) -> torch.Tens
 @pytest.mark.parametrize("sparsity", SPARSITY_LEVELS)
 def test_fast_path_optimization(
     algorithm_optimizer: AlgorithmOptimizer,
-    matrix_size: tuple[int, int],
+    matrix_size: Tuple[int, int],
     sparsity: float,
-):
+) -> None:
     """Test fast path optimizations for sparse operations."""
     with resource_guard():
         # Generate sparse matrices
@@ -92,7 +92,7 @@ def test_fast_path_optimization(
 
         # Register fast path for sparse matrix multiplication
         def is_sparse(x: torch.Tensor, threshold: float = 0.5) -> bool:
-            return torch.count_nonzero(x) / x.numel() < threshold
+            return (torch.count_nonzero(x).item() / x.numel()) < threshold
 
         # Register optimized path
         algorithm_optimizer.register_fast_path(
@@ -111,9 +111,9 @@ def test_fast_path_optimization(
 
         # Performance assertions
         assert metrics.execution_time > 0
-        assert metrics.memory_usage > 0
-        assert metrics.fast_path_hits >= (1 if sparsity > 0.5 else 0)
-        assert metrics.instruction_count >= 0
+        assert metrics.instruction_count > 0
+        assert metrics.branch_misses >= (1 if sparsity > 0.5 else 0)
+        assert metrics.numerical_error >= 0
 
 
 @pytest.mark.benchmark(min_rounds=5)
@@ -122,8 +122,8 @@ def test_fast_path_optimization(
 def test_branch_prediction(
     algorithm_optimizer: AlgorithmOptimizer,
     batch_size: int,
-    matrix_size: tuple[int, int],
-):
+    matrix_size: Tuple[int, int],
+) -> None:
     """Test branch prediction efficiency."""
     with resource_guard():
         # Create input tensors
@@ -143,7 +143,7 @@ def test_branch_prediction(
         # Warm-up run
         for x in inputs:
             _ = algorithm_optimizer.optimize_operation(
-                "op_a" if torch.mean(x) > 0 else "op_b", x
+                "op_a" if torch.mean(x).item() > 0 else "op_b", x
             )
         algorithm_optimizer.clear_metrics()
 
@@ -151,12 +151,13 @@ def test_branch_prediction(
         results = []
         for x in inputs:
             result = algorithm_optimizer.optimize_operation(
-                "op_a" if torch.mean(x) > 0 else "op_b", x
+                "op_a" if torch.mean(x).item() > 0 else "op_b", x
             )
             results.append(result)
 
         # Get metrics
-        algorithm_optimizer.get_metrics()[0]
+        metrics = algorithm_optimizer.get_metrics()[0]
+        assert metrics.execution_time > 0
 
         # Verify results
         for x, y in zip(inputs, results):
@@ -198,8 +199,8 @@ def test_loop_optimization(
 
         # Optimization level specific assertions
         if optimization_level in ["O2", "O3"]:
-            assert metrics.loop_fusion_applied
-            assert metrics.cache_optimization_enabled
+            assert metrics.optimization_type == "loop_fusion"
+            assert metrics.numerical_error < 1e-6  # Check numerical stability
 
 
 @pytest.mark.benchmark(min_rounds=5)

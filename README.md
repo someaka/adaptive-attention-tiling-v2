@@ -67,21 +67,25 @@ attention = QuantumGeometricAttention(
   - Geometric validation
   - Quantum validation
   - Pattern validation
-- [x] CPU Performance Optimization
+- [ ] CPU Performance Optimization (In Progress)
   - Vectorization
   - Memory management
   - Algorithm efficiency
 - [ ] GPU Acceleration (In Progress)
   - Vulkan integration
-  - Compute shaders
   - Memory optimization
+  - Resource management
+- [x] Testing Framework
+  - Unit tests
+  - Integration tests
+  - Performance benchmarks
 
 ## Performance Targets
 
-- 2x CPU performance improvement
-- 5x GPU acceleration with Vulkan
-- 50% memory usage reduction
-- <1ms latency for core operations
+- [ ] 2x CPU performance improvement
+- [ ] 5x GPU acceleration with Vulkan
+- [ ] 50% memory usage reduction
+- [ ] <1ms latency for core operations
 
 ## Installation
 
@@ -94,7 +98,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Optional: Install Vulkan SDK for GPU acceleration
-# See docs/guides/vulkan.md for detailed instructions
+# Note: GPU acceleration is still in development
 ```
 
 ## Core Dependencies
@@ -105,9 +109,8 @@ pip install -r requirements.txt
 - SciPy >= 1.7.0
 - SymPy >= 1.9.0
 
-### Optional
-- JAX >= 0.3.0 (for additional automatic differentiation)
-- Vulkan SDK >= 1.3.0 (for GPU acceleration)
+### Optional (In Development)
+- torch_vulkan (for GPU acceleration - coming soon)
 - PyViz >= 2.0.0 (for visualization)
 
 ## Project Structure
@@ -115,19 +118,15 @@ pip install -r requirements.txt
 ```
 src/
 ├── core/
-│   ├── patterns/       # Pattern space theory
-│   ├── quantum/       # Quantum framework
-│   └── crystal/       # Crystal structure
-├── neural/
-│   ├── attention/     # Quantum geometric attention
-│   └── flow/         # Geometric flow system
-├── validation/
-│   ├── geometric/     # Geometric validation
-│   ├── quantum/      # Quantum validation
-│   └── pattern/      # Pattern validation
+│   ├── backends/      # CPU and Vulkan backends
+│   ├── tiling/       # Attention tiling system
+│   └── performance/  # Performance optimization
+├── metrics/
+│   ├── geometric/    # Geometric metrics
+│   └── quantum/     # Quantum metrics
 └── utils/
-    ├── metrics.py
-    └── visualization.py
+    ├── testing.py   # Testing utilities
+    └── profiling.py # Performance profiling
 ```
 
 ## Testing
@@ -137,23 +136,24 @@ src/
 venv/bin/pytest tests/
 
 # Run specific test categories
-venv/bin/pytest tests/core/      # Core functionality tests
-venv/bin/pytest tests/neural/    # Neural architecture tests
-venv/bin/pytest tests/validation/ # Validation framework tests
+venv/bin/pytest tests/core/tiling/     # Tiling functionality tests
+venv/bin/pytest tests/core/backends/   # Backend integration tests
+venv/bin/pytest tests/metrics/        # Metrics validation tests
+
+# Run performance benchmarks
+venv/bin/pytest tests/core/tiling/test_strategies.py -m benchmark
 ```
 
 ## Documentation
 
 - [Applied Theory](APPLIED_THEORY.md)
-- [Implementation Plan](oldmds/IMPLEMENTATION_PLAN.md)
-- [Validation Integration](VALIDATION_INTEGRATION_PLAN.md)
 - [Project Notes](PROJECT_NOTES.md)
 
 ## Contributing
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Review the implementation plan
+3. Run the test suite
 4. Submit a pull request
 
 ## License

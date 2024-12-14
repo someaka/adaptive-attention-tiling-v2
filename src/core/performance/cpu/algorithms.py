@@ -8,10 +8,20 @@ This module provides optimizations for core algorithms including:
 """
 
 from dataclasses import dataclass
-from functools import wraps
-from typing import Any, Callable, Dict, List
+from functools import wraps, reduce
+from typing import Any, Callable, Dict, List, TypeVar, Union, TypedDict
+import dis
+import inspect
 
 import torch
+
+
+T = TypeVar('T')
+
+class FastPathDict(TypedDict):
+    """Type definition for fast path dictionary."""
+    condition: Callable[..., bool]
+    implementation: Callable[..., Any]
 
 
 @dataclass
@@ -25,19 +35,50 @@ class AlgorithmMetrics:
     optimization_type: str
 
 
+def count_instructions(func: Callable) -> int:
+    """Count the number of bytecode instructions in a function."""
+    bytecode = dis.Bytecode(func)
+    return sum(1 for _ in bytecode)
+
+
+class InstructionCounter:
+    """Tracks instruction counts for functions."""
+    
+    def __init__(self):
+        self.instruction_counts: Dict[str, int] = {}
+        
+    def get_instruction_count(self, func: Callable) -> int:
+        """Get instruction count for a function, caching the result."""
+        func_name = func.__name__
+        if func_name not in self.instruction_counts:
+            # Count instructions in the main function
+            main_count = count_instructions(func)
+            
+            # Count instructions in any nested functions
+            source = inspect.getsource(func)
+            nested_funcs = [
+                obj for name, obj in inspect.getmembers(func)
+                if inspect.isfunction(obj) and obj.__code__.co_firstlineno > func.__code__.co_firstlineno
+            ]
+            nested_count = sum(count_instructions(f) for f in nested_funcs)
+            
+            self.instruction_counts[func_name] = main_count + nested_count
+        return self.instruction_counts[func_name]
+
+
 class FastPathOptimizer:
     """Optimizes common execution paths."""
 
     def __init__(self):
-        self.fast_paths: Dict[str, Callable] = {}
+        self.fast_paths: Dict[str, FastPathDict] = {}
         self.path_stats: Dict[str, int] = {}
 
     def register_fast_path(
-        self, name: str, condition: Callable[..., bool], implementation: Callable
+        self, name: str, condition: Callable[..., bool], implementation: Callable[..., Any]
     ) -> None:
         """Register a fast path implementation."""
 
-        def fast_path_wrapper(*args, **kwargs):
+        def fast_path_wrapper(*args: Any, **kwargs: Any) -> Any:
             self.path_stats[name] = self.path_stats.get(name, 0) + 1
             return implementation(*args, **kwargs)
 
@@ -46,11 +87,11 @@ class FastPathOptimizer:
             "implementation": fast_path_wrapper,
         }
 
-    def optimize(self, func: Callable) -> Callable:
+    def optimize(self, func: Callable[..., T]) -> Callable[..., T]:
         """Decorator to apply fast path optimizations."""
 
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> T:
             # Check for applicable fast paths
             for name, path in self.fast_paths.items():
                 if path["condition"](*args, **kwargs):
@@ -93,8 +134,8 @@ class LoopOptimizer:
         self.loop_stats: Dict[str, Dict[str, int]] = {}
 
     def unroll(
-        self, loop_id: str, iterations: int, operation: Callable[[int], Any]
-    ) -> List[Any]:
+        self, loop_id: str, iterations: int, operation: Callable[[int], T]
+    ) -> List[T]:
         """Manually unroll a loop."""
         if iterations <= self.unroll_threshold:
             self.loop_stats.setdefault(loop_id, {})["unrolled"] = (
@@ -107,7 +148,7 @@ class LoopOptimizer:
         )
         return list(map(operation, range(iterations)))
 
-    def fuse_loops(self, operations: List[Callable[[Any], Any]], data: Any) -> Any:
+    def fuse_loops(self, operations: List[Callable[[T], T]], data: T) -> T:
         """Fuse multiple loop operations."""
         return reduce(lambda x, f: f(x), operations, data)
 
@@ -168,6 +209,7 @@ class AlgorithmOptimizer:
         self.metrics: List[AlgorithmMetrics] = []
         self.operations: Dict[str, Callable] = {}
         self.optimization_level = "O0"
+        self.instruction_counter = InstructionCounter()
 
     def register_fast_path(
         self, name: str, implementation: Callable, condition: Callable[..., bool]
@@ -227,17 +269,23 @@ class AlgorithmOptimizer:
         if self.branch_opt:
             optimized_func = self.branch_opt.optimize_branches(optimized_func)
 
+        # Get initial instruction count
+        base_instruction_count = self.instruction_counter.get_instruction_count(func)
+
         @wraps(optimized_func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             start_time = torch.cuda.Event(enable_timing=True)
             end_time = torch.cuda.Event(enable_timing=True)
 
-            start_time.record()
+            start_time.record(torch.cuda.current_stream())
             result = optimized_func(*args, **kwargs)
-            end_time.record()
+            end_time.record(torch.cuda.current_stream())
 
             torch.cuda.synchronize()
             execution_time = start_time.elapsed_time(end_time)
+
+            # Get optimized instruction count
+            optimized_instruction_count = self.instruction_counter.get_instruction_count(optimized_func)
 
             # Collect metrics
             self.metrics.append(
@@ -251,23 +299,15 @@ class AlgorithmOptimizer:
                         if self.branch_opt
                         else 0
                     ),
-                    instruction_count=(
-                        sum(
-                            sum(stats.values())
-                            for stats in self.loop_opt.loop_stats.values()
-                        )
-                        if self.loop_opt
-                        else 0
-                    ),
+                    instruction_count=optimized_instruction_count,
                     numerical_error=(
-                        max(self.numerical_opt.numerical_stats.values())
+                        sum(self.numerical_opt.numerical_stats.values())
                         if self.numerical_opt
                         else 0.0
                     ),
-                    optimization_type=func.__name__,
+                    optimization_type=self.optimization_level,
                 )
             )
-
             return result
 
         return wrapper

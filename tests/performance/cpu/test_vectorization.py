@@ -318,7 +318,6 @@ def test_memory_layout_optimization(
         except (
             ValueError,
             RuntimeError,
-            AssertionError,
-            torch.testing.AssertionError,
+            AssertionError
         ) as e:
             pytest.fail(f"Memory layout optimization test failed: {e}")

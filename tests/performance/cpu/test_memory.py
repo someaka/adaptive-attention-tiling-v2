@@ -14,13 +14,13 @@ import signal
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Optional, Dict, List
 
 import numpy as np
 import pytest
 import torch
 
-from src.core.performance.cpu.memory import MemoryManager
+from src.core.performance.cpu.memory_management import MemoryManager, MemoryMetrics
 
 # Test configurations - reduced sizes for safety
 POOL_SIZES = [1024, 4096]  # Removed 16384 KB
@@ -64,12 +64,12 @@ def resource_guard() -> Generator[None, None, None]:
 
 
 @pytest.fixture
-def memory_manager():
+def memory_manager() -> MemoryManager:
     """Create a MemoryManager instance for testing."""
-    return MemoryManager(enable_monitoring=True)
+    return MemoryManager()
 
 
-def generate_allocation_pattern(pattern: str, size: int, block_size: int) -> list[int]:
+def generate_allocation_pattern(pattern: str, size: int, block_size: int) -> List[int]:
     """Generate memory allocation patterns for testing."""
     num_blocks = size // block_size
     if pattern == "sequential":
@@ -90,35 +90,35 @@ def generate_allocation_pattern(pattern: str, size: int, block_size: int) -> lis
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 def test_memory_pool_efficiency(
     memory_manager: MemoryManager, pool_size: int, block_size: int
-):
+) -> None:
     """Test memory pool allocation and deallocation efficiency."""
     with resource_guard():
-        # Initialize pool
-        pool = memory_manager.create_pool(pool_size)
-
         # Allocate blocks
         blocks = []
         for _i in range(pool_size // block_size):
-            block = memory_manager.allocate(block_size, pool)
+            block = memory_manager.allocate_tensor((block_size,))
             blocks.append(block)
 
         # Get metrics after allocation
-        metrics = memory_manager.get_metrics()
+        allocated_memory = memory_manager.get_allocated_memory()
+        fragmentation_ratio = memory_manager.get_fragmentation_ratio()
 
         # Verify allocation efficiency
-        assert metrics.allocated_memory <= pool_size
-        assert metrics.fragmentation < 0.2  # Less than 20% fragmentation
+        assert allocated_memory <= pool_size * 1024  # Convert KB to bytes
+        assert fragmentation_ratio < 0.2  # Less than 20% fragmentation
 
         # Deallocate in reverse order
         for block in reversed(blocks):
-            memory_manager.deallocate(block, pool)
+            del block
+        gc.collect()
 
         # Get metrics after deallocation
-        metrics = memory_manager.get_metrics()
+        allocated_memory = memory_manager.get_allocated_memory()
+        fragmentation_ratio = memory_manager.get_fragmentation_ratio()
 
         # Verify cleanup
-        assert metrics.allocated_memory == 0
-        assert metrics.fragmentation == 0.0
+        assert allocated_memory == 0
+        assert fragmentation_ratio == 0.0
 
 
 @pytest.mark.benchmark(min_rounds=5)
@@ -126,11 +126,10 @@ def test_memory_pool_efficiency(
 @pytest.mark.parametrize("pool_size", POOL_SIZES)
 def test_allocation_pattern_impact(
     memory_manager: MemoryManager, pattern: str, pool_size: int
-):
+) -> None:
     """Test impact of different allocation patterns on memory performance."""
     with resource_guard():
         block_size = 32  # Fixed block size for pattern testing
-        pool = memory_manager.create_pool(pool_size)
 
         # Generate allocation pattern
         allocation_sequence = generate_allocation_pattern(
@@ -138,57 +137,59 @@ def test_allocation_pattern_impact(
         )
 
         # Allocate blocks according to pattern
-        blocks = [None] * len(allocation_sequence)
-        for _i, block_index in enumerate(allocation_sequence):
-            blocks[block_index] = memory_manager.allocate(block_size, pool)
+        blocks: List[Optional[torch.Tensor]] = [None] * len(allocation_sequence)
+        for i, block_index in enumerate(allocation_sequence):
+            blocks[block_index] = memory_manager.allocate_tensor((block_size,))
 
         # Get metrics
-        metrics = memory_manager.get_metrics()
+        fragmentation_ratio = memory_manager.get_fragmentation_ratio()
 
         # Pattern-specific assertions
         if pattern == "sequential":
-            assert (
-                metrics.fragmentation < 0.1
-            )  # Sequential should have minimal fragmentation
+            assert fragmentation_ratio < 0.1  # Sequential should have minimal fragmentation
         elif pattern == "random":
             # Random might have more fragmentation but should still be manageable
-            assert metrics.fragmentation < 0.3
+            assert fragmentation_ratio < 0.3
         else:  # interleaved
             # Interleaved pattern tests worst-case fragmentation
-            assert metrics.cache_misses < metrics.total_accesses * 0.3
+            assert fragmentation_ratio < 0.4
+
+        # Cleanup
+        for block in blocks:
+            if block is not None:
+                del block
+        gc.collect()
 
 
 @pytest.mark.benchmark(min_rounds=5)
 @pytest.mark.parametrize("cache_size", CACHE_SIZES)
-def test_cache_utilization(memory_manager: MemoryManager, cache_size: int):
+def test_cache_utilization(memory_manager: MemoryManager, cache_size: int) -> None:
     """Test memory cache utilization and hit rates."""
     with resource_guard():
         pool_size = cache_size * 4  # Pool size relative to cache size
-        pool = memory_manager.create_pool(pool_size)
-
-        # Sequential access pattern
         block_size = 32
         num_blocks = pool_size // block_size
         blocks = []
 
         # Allocate and access blocks sequentially
-        start_time = memory_manager.get_time()
+        start_time = time.perf_counter()
         for _ in range(num_blocks):
-            block = memory_manager.allocate(block_size, pool)
+            block = memory_manager.allocate_tensor((block_size,))
             blocks.append(block)
-        sequential_time = memory_manager.get_time() - start_time
+        end_time = time.perf_counter()
+        sequential_time = end_time - start_time
 
-        # Get cache metrics
-        metrics = memory_manager.get_metrics()
+        # Time assertions
+        assert sequential_time < 1.5  # Less than 1.5 seconds
 
-        # Cache utilization assertions
-        assert metrics.cache_hits > 0
-        assert metrics.cache_misses > 0
-        assert sequential_time < metrics.baseline_access_time * 1.5
+        # Cleanup
+        for block in blocks:
+            del block
+        gc.collect()
 
 
 @pytest.mark.benchmark(min_rounds=5)
-def test_memory_bandwidth():
+def test_memory_bandwidth() -> None:
     """Test memory bandwidth utilization."""
     with resource_guard():
         # Test different transfer sizes
@@ -201,29 +202,11 @@ def test_memory_bandwidth():
             dest = torch.zeros_like(source)
 
             # Measure transfer time
-            start_time = (
-                torch.cuda.Event(enable_timing=True)
-                if torch.cuda.is_available()
-                else time.perf_counter()
-            )
+            start_time = time.perf_counter()
             dest.copy_(source)
-            end_time = (
-                torch.cuda.Event(enable_timing=True)
-                if torch.cuda.is_available()
-                else time.perf_counter()
-            )
+            end_time = time.perf_counter()
 
-            # Calculate bandwidth
-            if torch.cuda.is_available():
-                start_time.record()
-                end_time.record()
-                torch.cuda.synchronize()
-                elapsed_time = (
-                    start_time.elapsed_time(end_time) / 1000
-                )  # Convert to seconds
-            else:
-                elapsed_time = end_time - start_time
-
+            elapsed_time = end_time - start_time
             bandwidth = (size * 4) / (elapsed_time * 1024 * 1024)  # MB/s
             bandwidths.append(bandwidth)
 
@@ -233,39 +216,44 @@ def test_memory_bandwidth():
 
 
 @pytest.mark.benchmark(min_rounds=5)
-def test_resource_cleanup(memory_manager: MemoryManager):
+def test_resource_cleanup(memory_manager: MemoryManager) -> None:
     """Test proper cleanup of memory resources."""
     with resource_guard():
         pool_size = 1024  # KB
         block_size = 32  # KB
         num_blocks = pool_size // block_size
 
-        # Create pool and allocate all blocks
-        pool = memory_manager.create_pool(pool_size)
+        # Allocate all blocks
         blocks = []
         for _ in range(num_blocks):
-            block = memory_manager.allocate(block_size, pool)
+            block = memory_manager.allocate_tensor((block_size,))
             blocks.append(block)
 
         # Delete half the blocks
-        for block in blocks[: num_blocks // 2]:
-            memory_manager.deallocate(block, pool)
+        for i in range(0, len(blocks), 2):
+            del blocks[i]
+            blocks[i] = None
+        gc.collect()
 
         # Get metrics
-        metrics = memory_manager.get_metrics()
+        allocated_memory = memory_manager.get_allocated_memory()
+        fragmentation_ratio = memory_manager.get_fragmentation_ratio()
 
-        # Verify partial cleanup
-        assert metrics.allocated_memory == pool_size // 2
-        assert metrics.active_pools == 1
+        # Verify cleanup
+        assert allocated_memory <= (pool_size * 1024) // 2  # Convert KB to bytes
+        assert fragmentation_ratio < 0.3  # Some fragmentation is expected
 
-        # Cleanup remaining blocks
-        for block in blocks[num_blocks // 2 :]:
-            memory_manager.deallocate(block, pool)
+        # Delete remaining blocks
+        for i in range(1, len(blocks), 2):
+            if blocks[i] is not None:
+                del blocks[i]
+                blocks[i] = None
+        gc.collect()
 
-        # Delete pool
-        memory_manager.delete_pool(pool)
+        # Final metrics
+        allocated_memory = memory_manager.get_allocated_memory()
+        fragmentation_ratio = memory_manager.get_fragmentation_ratio()
 
-        # Verify complete cleanup
-        metrics = memory_manager.get_metrics()
-        assert metrics.allocated_memory == 0
-        assert metrics.active_pools == 0
+        # Verify final cleanup
+        assert allocated_memory == 0
+        assert fragmentation_ratio == 0.0

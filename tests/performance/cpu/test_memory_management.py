@@ -1,11 +1,13 @@
 import gc
+from typing import Tuple
 
 import pytest
+import torch
 
 from src.core.performance.cpu.memory_management import MemoryManager
 
 
-def test_memory_allocation_deallocation():
+def test_memory_allocation_deallocation() -> None:
     """Test memory allocation and deallocation behavior."""
     manager = MemoryManager()
 
@@ -31,28 +33,27 @@ def test_memory_allocation_deallocation():
     assert final_memory < initial_memory
 
 
-def test_memory_fragmentation():
+def test_memory_fragmentation() -> None:
     """Test memory fragmentation prevention."""
     manager = MemoryManager()
 
-    # Allocate tensors using list comprehension
+    # Allocate tensors
     tensors = [manager.allocate_tensor((10, 10)) for _ in range(10)]
-
-    # Delete alternate tensors
-    for i in range(0, len(tensors), 2):
-        tensors[i] = None  # Replace with None instead of deleting
-    tensors = [t for t in tensors if t is not None]  # Remove None values
+    
+    # Create new list without alternate tensors
+    tensors = [t for i, t in enumerate(tensors) if i % 2 == 1]
     gc.collect()
 
-    # Allocate new tensors using list comprehension
-    [manager.allocate_tensor((10, 10)) for _ in range(5)]
+    # Allocate new tensors
+    new_tensors = [manager.allocate_tensor((10, 10)) for _ in range(5)]
+    tensors.extend(new_tensors)
 
     # Check fragmentation metrics
     fragmentation = manager.get_fragmentation_ratio()
     assert fragmentation < 0.2  # Less than 20% fragmentation
 
 
-def test_memory_efficient_operations():
+def test_memory_efficient_operations() -> None:
     """Test memory-efficient tensor operations."""
     manager = MemoryManager()
 
@@ -61,8 +62,14 @@ def test_memory_efficient_operations():
     initial_memory = manager.get_allocated_memory()
 
     # Perform operations that should be memory efficient
-    manager.inplace_operation(x, lambda t: t.add_(1))
-    manager.inplace_operation(x, lambda t: t.mul_(2))
+    def add_inplace(t: torch.Tensor) -> None:
+        t.add_(1)
+        
+    def mul_inplace(t: torch.Tensor) -> None:
+        t.mul_(2)
+
+    manager.inplace_operation(x, add_inplace)
+    manager.inplace_operation(x, mul_inplace)
 
     final_memory = manager.get_allocated_memory()
 
@@ -70,14 +77,14 @@ def test_memory_efficient_operations():
     assert abs(final_memory - initial_memory) < 1024  # Allow small overhead
 
 
-def test_memory_peak_tracking():
+def test_memory_peak_tracking() -> None:
     """Test peak memory usage tracking."""
     manager = MemoryManager()
 
     # Record initial peak
     initial_peak = manager.get_peak_memory()
 
-    # Perform operations that should increase memory usage using list comprehension
+    # Perform operations that should increase memory usage
     tensors = [manager.allocate_tensor((100, 100)) for _ in range(5)]
 
     # Check peak memory increased
@@ -90,7 +97,7 @@ def test_memory_peak_tracking():
     gc.collect()
 
 
-def test_memory_optimization_strategies():
+def test_memory_optimization_strategies() -> None:
     """Test memory optimization strategies."""
     manager = MemoryManager()
 
@@ -114,7 +121,7 @@ def test_memory_optimization_strategies():
 @pytest.mark.parametrize(
     "size", [(10, 10), (100, 100), (500, 500)]
 )  # Reduced from 5000x5000
-def test_memory_scaling(size):
+def test_memory_scaling(size: Tuple[int, int]) -> None:
     """Test memory usage scaling with different tensor sizes."""
     manager = MemoryManager()
 
