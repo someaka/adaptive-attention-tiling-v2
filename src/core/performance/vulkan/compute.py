@@ -1,5 +1,5 @@
 """Compatibility module for old imports."""
 
-from ...backends.vulkan.tensor_ops import VulkanCompute
+from ...backends.vulkan.compute import VulkanCompute
 
 __all__ = ["VulkanCompute"]

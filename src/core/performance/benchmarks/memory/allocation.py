@@ -8,7 +8,7 @@ This module provides benchmarks for memory operations including:
 
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import torch
 
@@ -21,7 +21,7 @@ class MemoryBenchmarkResult:
 
     operation: str
     data_size: int
-    allocation_time: float
+    allocation_time: Optional[float]
     transfer_time: Optional[float]
     bandwidth: Optional[float]
     cache_hits: Optional[int]
@@ -185,8 +185,8 @@ class MemoryBenchmarks:
                 allocation_time=None,
                 transfer_time=sum(access_times) / len(access_times),
                 bandwidth=None,
-                cache_hits=sum(cache_hits) / len(cache_hits),
-                cache_misses=sum(cache_misses) / len(cache_misses),
+                cache_hits=int(sum(cache_hits) / len(cache_hits)),
+                cache_misses=int(sum(cache_misses) / len(cache_misses)),
                 fragmentation=0.0,
             )
 
@@ -213,7 +213,7 @@ class MemoryBenchmarks:
                     "avg_allocation_time": result.allocation_time or 0.0,
                     "avg_transfer_time": result.transfer_time or 0.0,
                     "avg_bandwidth": result.bandwidth or 0.0,
-                    "avg_cache_hits": result.cache_hits or 0.0,
+                    "avg_cache_hits": float(result.cache_hits or 0),
                     "avg_fragmentation": result.fragmentation,
                     "count": 1,
                 }
@@ -238,7 +238,7 @@ class MemoryBenchmarks:
                     ) / (stats["count"] + 1)
                 if result.cache_hits:
                     stats["avg_cache_hits"] = (
-                        stats["avg_cache_hits"] * stats["count"] + result.cache_hits
+                        stats["avg_cache_hits"] * stats["count"] + float(result.cache_hits)
                     ) / (stats["count"] + 1)
                 stats["avg_fragmentation"] = (
                     stats["avg_fragmentation"] * stats["count"] + result.fragmentation

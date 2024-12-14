@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Optional
+from ctypes import c_void_p, cast, POINTER, c_uint32, byref
 
 import vulkan as vk
 
@@ -27,13 +28,18 @@ class ShaderStage:
     stage: int  # vk.VkShaderStageFlagBits
 
 
+def handle_to_int(handle: c_void_p) -> int:
+    """Convert a Vulkan handle (CData) to integer."""
+    return cast(handle, POINTER(c_uint32)).contents.value
+
+
 class VulkanPipeline:
     """Manages Vulkan compute pipelines."""
 
     def __init__(self, device: int):  # vk.VkDevice
         self.device = device
-        self.pipeline_cache: int = self._create_pipeline_cache()
-        self.descriptor_pool: int = self._create_descriptor_pool()
+        self.pipeline_cache = handle_to_int(self._create_pipeline_cache())
+        self.descriptor_pool = handle_to_int(self._create_descriptor_pool())
         self.pipelines: Dict[PipelineType, int] = {}  # vk.VkPipeline
         self.pipeline_layouts: Dict[PipelineType, int] = {}  # vk.VkPipelineLayout
         self.descriptor_set_layouts: Dict[PipelineType, int] = {}  # vk.VkDescriptorSetLayout
@@ -43,13 +49,13 @@ class VulkanPipeline:
     ) -> int:  # vk.VkPipeline
         """Create a compute pipeline."""
         # Create shader module
-        shader_module = self._create_shader_module(shader_code)
+        shader_module = handle_to_int(self._create_shader_module(shader_code))
         shader_stage = vk.VkPipelineShaderStageCreateInfo(
             stage=vk.VK_SHADER_STAGE_COMPUTE_BIT, module=shader_module, pName="main"
         )
 
         # Create descriptor set layout
-        descriptor_layout = self._create_descriptor_set_layout(type)
+        descriptor_layout = handle_to_int(self._create_descriptor_set_layout(type))
         self.descriptor_set_layouts[type] = descriptor_layout
 
         # Create pipeline layout
@@ -67,17 +73,26 @@ class VulkanPipeline:
             pushConstantRangeCount=1 if push_constant_range else 0,
             pPushConstantRanges=[push_constant_range] if push_constant_range else None,
         )
-        pipeline_layout = vk.vkCreatePipelineLayout(self.device, layout_info, None)
+        
+        pipeline_layout_handle = c_void_p()
+        result = vk.vkCreatePipelineLayout(self.device, byref(layout_info), None, byref(pipeline_layout_handle))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create pipeline layout: {result}")
+        pipeline_layout = handle_to_int(pipeline_layout_handle)
         self.pipeline_layouts[type] = pipeline_layout
 
         # Create compute pipeline
         pipeline_info = vk.VkComputePipelineCreateInfo(
             stage=shader_stage, layout=pipeline_layout
         )
-
-        pipeline = vk.vkCreateComputePipelines(
-            self.device, self.pipeline_cache, 1, [pipeline_info], None
-        )[0]
+        
+        pipeline_handle = c_void_p()
+        result = vk.vkCreateComputePipelines(
+            self.device, self.pipeline_cache, 1, [pipeline_info], None, byref(pipeline_handle)
+        )
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create compute pipeline: {result}")
+        pipeline = handle_to_int(pipeline_handle)
 
         self.pipelines[type] = pipeline
         vk.vkDestroyShaderModule(self.device, shader_module, None)
@@ -98,12 +113,16 @@ class VulkanPipeline:
         """Get descriptor set layout."""
         return self.descriptor_set_layouts.get(type)
 
-    def _create_pipeline_cache(self) -> int:  # vk.VkPipelineCache
+    def _create_pipeline_cache(self) -> c_void_p:  # vk.VkPipelineCache
         """Create pipeline cache."""
         cache_info = vk.VkPipelineCacheCreateInfo()
-        return vk.vkCreatePipelineCache(self.device, cache_info, None)
+        pipeline_cache = c_void_p()
+        result = vk.vkCreatePipelineCache(self.device, byref(cache_info), None, byref(pipeline_cache))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create pipeline cache: {result}")
+        return pipeline_cache
 
-    def _create_descriptor_pool(self) -> int:  # vk.VkDescriptorPool
+    def _create_descriptor_pool(self) -> c_void_p:  # vk.VkDescriptorPool
         """Create descriptor pool."""
         pool_sizes = [
             vk.VkDescriptorPoolSize(
@@ -120,16 +139,24 @@ class VulkanPipeline:
             maxSets=100, poolSizeCount=len(pool_sizes), pPoolSizes=pool_sizes
         )
 
-        return vk.vkCreateDescriptorPool(self.device, pool_info, None)
+        descriptor_pool = c_void_p()
+        result = vk.vkCreateDescriptorPool(self.device, byref(pool_info), None, byref(descriptor_pool))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create descriptor pool: {result}")
+        return descriptor_pool
 
-    def _create_shader_module(self, code: bytes) -> int:  # vk.VkShaderModule
+    def _create_shader_module(self, code: bytes) -> c_void_p:  # vk.VkShaderModule
         """Create shader module from SPIR-V code."""
         create_info = vk.VkShaderModuleCreateInfo(codeSize=len(code), pCode=code)
-        return vk.vkCreateShaderModule(self.device, create_info, None)
+        shader_module = c_void_p()
+        result = vk.vkCreateShaderModule(self.device, byref(create_info), None, byref(shader_module))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create shader module: {result}")
+        return shader_module
 
     def _create_descriptor_set_layout(
         self, type: PipelineType
-    ) -> int:  # vk.VkDescriptorSetLayout
+    ) -> c_void_p:  # vk.VkDescriptorSetLayout
         """Create descriptor set layout based on pipeline type."""
         bindings = []
 
@@ -178,7 +205,11 @@ class VulkanPipeline:
         layout_info = vk.VkDescriptorSetLayoutCreateInfo(
             bindingCount=len(bindings), pBindings=bindings
         )
-        return vk.vkCreateDescriptorSetLayout(self.device, layout_info, None)
+        descriptor_layout = c_void_p()
+        result = vk.vkCreateDescriptorSetLayout(self.device, byref(layout_info), None, byref(descriptor_layout))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create descriptor set layout: {result}")
+        return descriptor_layout
 
     def cleanup(self) -> None:
         """Clean up Vulkan resources."""

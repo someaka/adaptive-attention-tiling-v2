@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Optional
+from ctypes import c_void_p, cast, POINTER, c_uint32, byref
 
 import vulkan as vk
 
@@ -24,6 +25,11 @@ class ShaderConfig:
     local_size_x: int = 256
     use_fp16: bool = True
     enable_validation: bool = True
+
+
+def handle_to_int(handle: c_void_p) -> int:
+    """Convert a Vulkan handle (CData) to integer."""
+    return cast(handle, POINTER(c_uint32)).contents.value
 
 
 class ShaderManager:
@@ -58,10 +64,15 @@ class ShaderManager:
             pCode=shader_code,
         )
 
-        shader_module = vk.vkCreateShaderModule(self.device, create_info, None)
-        self._shader_modules[type] = shader_module
+        shader_module = c_void_p()
+        result = vk.vkCreateShaderModule(self.device, byref(create_info), None, byref(shader_module))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create shader module: {result}")
+            
+        shader_module_int = handle_to_int(shader_module)
+        self._shader_modules[type] = shader_module_int
 
-        return shader_module
+        return shader_module_int
 
     def get_shader(self, type: ShaderType) -> Optional[int]:  # Optional[VkShaderModule]
         """Get an existing shader module."""
