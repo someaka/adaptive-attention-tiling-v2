@@ -32,6 +32,82 @@ from .quantum_attention_tile import QuantumMotivicTile
 
 
 @dataclass
+class GeometricStructures:
+    """Geometric structures for attention."""
+    
+    dim: int
+    manifold_type: str
+    curvature: float
+    parallel_transport_method: str
+
+    def __post_init__(self):
+        """Initialize geometric operations."""
+        if self.manifold_type == "hyperbolic":
+            self.exp_map = HyperbolicExponential(self.dim, self.curvature)
+            self.log_map = HyperbolicLogarithm(self.dim, self.curvature)
+        else:
+            self.exp_map = EuclideanExponential(self.dim)
+            self.log_map = EuclideanLogarithm(self.dim)
+        self.transport = ParallelTransport(self.dim)
+
+
+class PatternDynamics:
+    """Pattern dynamics for attention."""
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_patterns: int,
+        temperature: float = 0.1,
+        adaptation_rate: float = 0.01
+    ):
+        """Initialize pattern dynamics.
+        
+        Args:
+            dim: Hidden dimension
+            num_heads: Number of attention heads
+            num_patterns: Number of patterns to track
+            temperature: Temperature for pattern adaptation
+            adaptation_rate: Rate of pattern adaptation
+        """
+        self.dim = dim
+        self.num_heads = num_heads
+        self.num_patterns = num_patterns
+        self.temperature = temperature
+        self.adaptation_rate = adaptation_rate
+
+        # Initialize pattern memory
+        self.patterns = nn.Parameter(torch.randn(num_patterns, dim))
+        self.pattern_scores = nn.Parameter(torch.zeros(num_patterns))
+
+    def update_patterns(self, x: torch.Tensor) -> torch.Tensor:
+        """Update pattern memory with new input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, dim)
+            
+        Returns:
+            Updated pattern scores
+        """
+        # Compute pattern similarities
+        similarities = F.cosine_similarity(
+            x.unsqueeze(2),  # (batch, seq, 1, dim)
+            self.patterns.unsqueeze(0).unsqueeze(0),  # (1, 1, num_patterns, dim)
+            dim=-1
+        )
+        
+        # Update pattern scores with temperature
+        scores = F.softmax(similarities / self.temperature, dim=-1)
+        
+        # Adapt patterns with learning rate
+        pattern_updates = torch.einsum('bsn,bsd->nd', scores, x)
+        self.patterns.data += self.adaptation_rate * pattern_updates
+        
+        return scores
+
+
+@dataclass
 class AttentionState:
     """State for quantum geometric attention."""
     
@@ -57,6 +133,7 @@ class FlowMetrics:
     curvature: torch.Tensor  # Shape: (batch_size,)
     parallel_transport: torch.Tensor  # Shape: (batch_size, hidden_dim)
     geodesic_distance: torch.Tensor  # Shape: (batch_size,)
+    energy: torch.Tensor  # Shape: (batch_size,)
 
 
 class QuantumGeometricAttention(nn.Module):
@@ -66,6 +143,10 @@ class QuantumGeometricAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int = 8,
+        dropout: float = 0.1,
+        motive_rank: int = 4,
+        manifold_dim: int = 8,
+        num_layers: int = 3,
         tile_size: int = 16,
         manifold_type: str = "hyperbolic",
         curvature: float = -1.0,
@@ -76,21 +157,25 @@ class QuantumGeometricAttention(nn.Module):
         self.tile_size = tile_size
         self.manifold_type = manifold_type
         self.curvature = curvature
+        self.dropout = dropout
+        self.motive_rank = motive_rank
+        self.manifold_dim = manifold_dim
+        self.num_layers = num_layers
 
         # Initialize components
         self.attention = QuantumMotivicTile(
             size=tile_size,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            dropout=0.1,  # Default dropout
+            dropout=dropout,
             resolution=1.0,  # Default resolution
-            cohomology_dim=8,  # Default cohomology dimension
-            motive_rank=4  # Default motive rank
+            cohomology_dim=manifold_dim,
+            motive_rank=motive_rank
         )
         self.flow = PatternFlow(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
-            manifold_dim=hidden_dim  # Use same dimension for simplicity
+            manifold_dim=manifold_dim
         )
         self.arithmetic = ArithmeticPattern(
             input_dim=hidden_dim,

@@ -11,7 +11,7 @@ Provides:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Generator, Optional
 
 import numpy as np
 import pytest
@@ -97,9 +97,8 @@ class NumericalStability:
         loss = loss_fn(model(data))
         loss.backward()
 
-        max_grad = max(
-            p.grad.abs().max() for p in model.parameters() if p.grad is not None
-        )
+        grads = [p.grad.abs().max().item() for p in model.parameters() if p.grad is not None]
+        max_grad = max(grads) if grads else 0.0
         return max_grad < threshold
 
     @staticmethod
@@ -112,7 +111,7 @@ class NumericalStability:
         mean_loss = np.mean(recent_losses)
         std_loss = np.std(recent_losses)
 
-        return std_loss / (abs(mean_loss) + 1e-8) < 0.1
+        return bool(std_loss / (abs(mean_loss) + 1e-8) < 0.1)
 
     @staticmethod
     def check_numerical_accuracy(
@@ -148,16 +147,24 @@ class NumericalStability:
 class PerformanceBenchmark:
     """Performance benchmarking utilities."""
 
+    class TimerResult:
+        """Container for timer result."""
+        def __init__(self):
+            self.elapsed: float = 0.0
+
     @staticmethod
     @contextmanager
-    def timer(name: Optional[str] = None) -> float:
+    def timer(name: Optional[str] = None) -> Generator[TimerResult, None, None]:
         """Context manager for timing code blocks."""
+        result = PerformanceBenchmark.TimerResult()
         start = time.perf_counter()
-        yield
-        end = time.perf_counter()
-        if name:
-            print(f"{name}: {end - start:.4f} seconds")
-        return end - start
+        try:
+            yield result
+        finally:
+            end = time.perf_counter()
+            result.elapsed = end - start
+            if name:
+                print(f"{name}: {result.elapsed:.4f} seconds")
 
     @staticmethod
     def benchmark_function(
@@ -184,8 +191,8 @@ class PerformanceBenchmark:
             times.append(end - start)
 
         return BenchmarkResult(
-            mean_time=np.mean(times),
-            std_time=np.std(times),
+            mean_time=float(np.mean(times)),
+            std_time=float(np.std(times)),
             peak_memory=peak_memory,
             flops=0,  # TODO: Implement FLOPS counting
             iterations=n_runs,
@@ -344,7 +351,7 @@ def test_performance_benchmark():
     # Test timer
     with PerformanceBenchmark.timer("test_operation") as t:
         torch.randn(100, 100)
-    assert isinstance(t, float)
+    assert isinstance(t.elapsed, float)
 
     # Test benchmark function
     data = torch.randn(100, 100)

@@ -114,10 +114,10 @@ class TestValidationFramework:
     def pattern_validator(self, model_geometry: ModelGeometry) -> StabilityValidator:
         """Create pattern validator."""
         return StabilityValidator(
-            tolerance=1e-6,
-            stability_threshold=0.0,
-            basin_samples=100,
-            parameter_range=0.1
+            linear_validator=LinearStabilityValidator(stability_threshold=0.0),
+            nonlinear_validator=NonlinearStabilityValidator(),
+            lyapunov_threshold=1e-6,
+            perturbation_threshold=1e-6
         )
 
     @pytest.fixture

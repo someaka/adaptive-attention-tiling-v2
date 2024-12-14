@@ -78,7 +78,7 @@ def benchmark_forward_backward(
         
         model.zero_grad()
     
-    return np.mean(forward_times), np.mean(backward_times)
+    return float(np.mean(forward_times)), float(np.mean(backward_times))
 
 
 def assert_tensor_equal(tensor1: torch.Tensor, tensor2: torch.Tensor, tolerance: float = 1e-6) -> None:
@@ -111,12 +111,19 @@ def assert_manifold_properties(metric_tensor: torch.Tensor, tolerance: float = 1
         "Metric tensor must be positive definite"
 
 
-def generate_test_quantum_state(num_qubits: int, batch_size: int = 1) -> QuantumState:
+def generate_test_quantum_state(
+    num_qubits: int,
+    batch_size: int = 1,
+    basis_labels: Optional[List[str]] = None,
+    phase: float = 0.0
+) -> QuantumState:
     """Generate a test quantum state.
     
     Args:
         num_qubits: Number of qubits
         batch_size: Batch size
+        basis_labels: Optional list of basis state labels
+        phase: Global phase for the state
         
     Returns:
         Test quantum state
@@ -124,7 +131,18 @@ def generate_test_quantum_state(num_qubits: int, batch_size: int = 1) -> Quantum
     dim = 2 ** num_qubits
     state = torch.randn(batch_size, dim, dtype=torch.complex64)
     state = state / torch.norm(state, dim=-1, keepdim=True)
-    return QuantumState(state)
+    
+    # Apply global phase if specified
+    if phase != 0.0:
+        phase_tensor = torch.tensor(phase, dtype=torch.float32)
+        state = state * torch.exp(1j * phase_tensor)
+        
+    # Create quantum state with optional basis labels
+    return QuantumState(
+        state,
+        basis_labels=basis_labels or [f"|{i}⟩" for i in range(dim)],
+        phase=torch.tensor(phase, dtype=torch.float32)
+    )
 
 
 def generate_test_density_matrix(num_qubits: int, pure: bool = True) -> torch.Tensor:

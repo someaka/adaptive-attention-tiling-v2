@@ -42,6 +42,10 @@ class StabilityMetrics:
 class ControlSignal:
     """Control signal for pattern dynamics."""
 
+    signal: torch.Tensor
+    direction: torch.Tensor
+    constraints: List[Callable]
+
     def __init__(
         self,
         signal: torch.Tensor,
@@ -58,6 +62,15 @@ class ControlSignal:
         self.signal = signal
         self.direction = direction if direction is not None else torch.zeros_like(signal)
         self.constraints = constraints if constraints is not None else []
+
+    @property
+    def magnitude(self) -> torch.Tensor:
+        """Get control signal magnitude.
+        
+        Returns:
+            Magnitude of the control signal
+        """
+        return torch.norm(self.signal)
 
     def apply(self, state: torch.Tensor) -> torch.Tensor:
         """Apply control signal to state.

@@ -230,6 +230,8 @@ class StatePreparationValidator:
 
     def __init__(self, tolerance: float = 1e-6):
         self.tolerance = tolerance
+        self.density_validator = DensityMatrixValidator(tolerance)
+        self.tomography_validator = TomographyValidator()
 
     def validate_preparation(
         self, target: QuantumState, prepared: QuantumState
@@ -350,6 +352,126 @@ class StatePreparationValidator:
             torch.tensor(0.0),
             eigenvalues[0] - eigenvalues[1] - eigenvalues[2] - eigenvalues[3],
         )
+
+    def _validate_density_matrix(self, density: torch.Tensor) -> DensityMatrixValidation:
+        """Validate density matrix properties."""
+        # Check Hermiticity
+        hermitian = torch.allclose(density, density.conj().T, atol=self.tolerance)
+
+        # Check trace normalization
+        trace = torch.trace(density)
+        trace_one = torch.allclose(
+            trace,
+            torch.tensor(1.0, dtype=torch.complex64),
+            atol=self.tolerance,
+        )
+
+        # Compute eigenvalues
+        eigenvalues = torch.real(torch.linalg.eigvals(density))
+
+        # Check positivity
+        positive = torch.all(eigenvalues > -self.tolerance)
+
+        return DensityMatrixValidation(
+            hermitian=bool(hermitian),
+            positive=bool(positive),
+            trace_one=bool(trace_one),
+            eigenvalues=eigenvalues
+        )
+
+    def _validate_tomography(
+        self, state: QuantumState, projectors: List[torch.Tensor]
+    ) -> TomographyValidation:
+        """Validate state tomography results."""
+        # Perform state reconstruction
+        reconstructed, error = self._reconstruct_state(state, projectors)
+
+        # Compute completeness
+        completeness = self._compute_tomography_completeness(projectors)
+
+        # Compute confidence
+        confidence = self._compute_tomography_confidence(state, reconstructed, projectors)
+
+        return TomographyValidation(
+            reconstruction_error=float(error.item()),
+            completeness=float(completeness.item()),
+            confidence=float(confidence.item()),
+            estimated_state=reconstructed
+        )
+
+    def _reconstruct_state(
+        self, state: QuantumState, projectors: List[torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Perform quantum state reconstruction."""
+        # Initialize estimated state
+        dim = projectors[0].shape[0]
+        rho = torch.eye(dim, dtype=torch.complex64) / dim
+
+        # Get measurement probabilities from true state
+        true_probs = torch.stack([
+            torch.trace(torch.matmul(state.density_matrix(), proj))
+            for proj in projectors
+        ])
+
+        # Maximum likelihood estimation
+        error = torch.tensor(float('inf'))
+        for _ in range(1000):  # Maximum iterations
+            # Compute expected measurements
+            expected = torch.stack([
+                torch.trace(torch.matmul(rho, proj))
+                for proj in projectors
+            ])
+
+            # Compute error
+            new_error = torch.norm(expected - true_probs)
+            if torch.abs(error - new_error) < 1e-6:
+                break
+            error = new_error
+
+            # Update state estimate
+            gradient = sum(
+                (true_probs[i] - expected[i].real) * projectors[i]
+                for i in range(len(projectors))
+            )
+            rho = rho + 0.01 * gradient
+            rho = 0.5 * (rho + rho.conj().T)  # Ensure Hermiticity
+            rho = rho / torch.trace(rho)  # Normalize
+
+        return rho, error
+
+    def _compute_tomography_completeness(self, projectors: List[torch.Tensor]) -> torch.Tensor:
+        """Compute measurement completeness using singular values."""
+        # Stack projectors into matrix
+        basis_matrix = torch.stack([proj.flatten() for proj in projectors])
+        
+        # Compute singular values
+        singular_values = torch.linalg.svdvals(basis_matrix)
+        
+        # Compute completeness measure (ratio of smallest to largest singular value)
+        return torch.min(singular_values) / torch.max(singular_values)
+
+    def _compute_tomography_confidence(
+        self, state: QuantumState, reconstructed: torch.Tensor, projectors: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """Compute statistical confidence in reconstruction."""
+        # Get measurement probabilities from true state
+        true_probs = torch.stack([
+            torch.trace(torch.matmul(state.density_matrix(), proj))
+            for proj in projectors
+        ])
+
+        # Compute expected measurements from reconstructed state
+        expected = torch.stack([
+            torch.trace(torch.matmul(reconstructed, proj))
+            for proj in projectors
+        ])
+
+        # Compute chi-squared statistic
+        chi_squared = torch.sum((true_probs - expected.real)**2 / (true_probs + 1e-10))
+        
+        # Convert to confidence level (using exponential decay)
+        confidence = torch.exp(-chi_squared / len(projectors))
+        return confidence
 
 
 class DensityMatrixValidator:

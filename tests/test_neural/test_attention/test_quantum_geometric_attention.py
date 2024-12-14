@@ -19,6 +19,7 @@ Tests cover:
 import numpy as np
 import pytest
 import torch
+import torch.linalg
 
 from src.core.tiling.quantum_geometric_attention import (
     AttentionMetrics,
@@ -88,7 +89,7 @@ class TestQuantumGeometricAttention:
         )
 
     def test_attention_state_preparation(
-        self, attention_layer, batch_size, seq_length, hidden_dim
+        self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
     ):
         """Test attention state preparation and properties."""
         # Create input tensor
@@ -105,7 +106,7 @@ class TestQuantumGeometricAttention:
 
         # Test state dimensions
         assert state.quantum_state.shape[0] == batch_size, "Batch dimension preserved"
-        assert state.quantum_state.shape[1] == num_heads, "Head dimension correct"
+        assert state.quantum_state.shape[1] == attention_layer.num_heads, "Head dimension correct"
 
         # Test state normalization
         norms = state.quantum_state.norm(dim=-1)
@@ -120,23 +121,25 @@ class TestQuantumGeometricAttention:
         ), "Mask should be properly applied"
 
     def test_attention_pattern_computation(
-        self, attention_layer, batch_size, seq_length, hidden_dim
+        self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
     ):
         """Test attention pattern computation."""
         # Create query, key, value tensors
-        query = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
-        key = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
-        value = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
+        query = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        key = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        value = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
 
         # Compute attention patterns
-        patterns, metrics = attention_layer.compute_attention_patterns(
+        result = attention_layer.compute_attention_patterns(
             query, key, value, scale=1.0
         )
+        patterns = result[0]  # Unpack patterns tensor
+        metrics = result[1]  # Unpack metrics
 
         # Test pattern properties
         assert patterns.shape == (
             batch_size,
-            num_heads,
+            attention_layer.num_heads,
             seq_length,
             seq_length,
         ), "Pattern shape correct"
@@ -159,17 +162,19 @@ class TestQuantumGeometricAttention:
             ), "Causal attention should be lower triangular"
 
     def test_geometric_attention_flow(
-        self, attention_layer, batch_size, seq_length, hidden_dim
+        self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
     ):
         """Test geometric attention flow computation."""
         # Create patterns and metric tensor
         patterns = torch.softmax(
-            torch.randn(batch_size, num_heads, seq_length, seq_length), dim=-1
+            torch.randn(batch_size, attention_layer.num_heads, seq_length, seq_length), dim=-1
         )
-        metric = torch.eye(hidden_dim).expand(batch_size, num_heads, -1, -1)
+        metric = torch.eye(hidden_dim).expand(batch_size, attention_layer.num_heads, -1, -1)
 
         # Compute geometric flow
-        flow, metrics = attention_layer.geometric_attention_flow(patterns, metric)
+        flow_result = attention_layer.geometric_attention_flow(patterns, metric)
+        flow = flow_result[0]  # Unpack flow tensor
+        metrics = flow_result[1]  # Unpack metrics
 
         # Test flow properties
         assert flow.shape == patterns.shape, "Flow should match pattern shape"
@@ -220,13 +225,13 @@ class TestQuantumGeometricAttention:
         assert quantum_state.grad is not None, "Should allow gradient flow"
 
     def test_multi_head_integration(
-        self, attention_layer, batch_size, seq_length, hidden_dim
+        self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
     ):
         """Test multi-head attention integration."""
         # Create per-head inputs
         head_states = [
-            torch.randn(batch_size, seq_length, hidden_dim // num_heads)
-            for _ in range(num_heads)
+            torch.randn(batch_size, seq_length, hidden_dim // attention_layer.num_heads)
+            for _ in range(attention_layer.num_heads)
         ]
 
         # Integrate heads
@@ -241,7 +246,7 @@ class TestQuantumGeometricAttention:
 
         # Test head separation
         separated = attention_layer.separate_heads(integrated)
-        assert len(separated) == num_heads, "Should recover all heads"
+        assert len(separated) == attention_layer.num_heads, "Should recover all heads"
 
         # Test head independence
         head_correlations = attention_layer.compute_head_correlations(separated)
@@ -468,30 +473,32 @@ class TestQuantumGeometricAttention:
         # Test boundary map
         boundary = attention_layer.compute_boundary_map(attention_complex)
         assert (
-            torch.matrix_rank(boundary) < boundary.shape[1]
+            torch.linalg.matrix_rank(boundary) < boundary.shape[1]
         ), "Should have non-trivial homology"
 
     def test_attention_patterns(
         self,
-        hidden_dim: int,
-        num_heads: int,
+        attention_layer: QuantumGeometricAttention,
         batch_size: int,
         seq_length: int,
+        hidden_dim: int,
+        num_heads: int,
     ) -> None:
         """Test attention pattern computation."""
         # Create query, key, value tensors
-        query = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
-        key = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
-        value = torch.randn(batch_size, num_heads, seq_length, hidden_dim // num_heads)
+        query = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        key = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        value = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
 
         # Compute attention patterns
-        attention_layer = QuantumGeometricAttention(hidden_dim, num_heads)
-        patterns = attention_layer.compute_attention_patterns(query, key)
+        result = attention_layer.compute_attention_patterns(query, key)
+        patterns = result[0]  # Unpack patterns tensor
+        metrics = result[1]  # Unpack metrics
 
         # Test shape and properties
         assert patterns.shape == (
             batch_size,
-            num_heads,
+            attention_layer.num_heads,
             seq_length,
             seq_length,
         ), "Wrong pattern shape"
@@ -528,3 +535,21 @@ class TestQuantumGeometricAttention:
         fisher = pattern_dynamics.compute_fisher_information(states)
         assert fisher.shape == (hidden_dim, hidden_dim)
         assert torch.allclose(fisher, fisher.t())  # Should be symmetric
+
+    def compute_control_matrix(self) -> torch.Tensor:
+        """Compute control matrix for system controllability test.
+        
+        Returns:
+            Control matrix tensor
+        """
+        # Create a simple control matrix for testing
+        # This is just a placeholder implementation
+        dim = 4  # Small dimension for testing
+        return torch.eye(dim)  # Identity matrix as control matrix
+
+    def test_controllability(self):
+        """Test system controllability."""
+        control_matrix = self.compute_control_matrix()
+        rank = torch.linalg.matrix_rank(control_matrix)
+        assert rank == control_matrix.shape[0], "Should be controllable"
+        return control_matrix

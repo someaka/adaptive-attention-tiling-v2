@@ -217,7 +217,7 @@ class TestScaleCohomology:
         def test_completeness(structure):
             """Test if invariants form complete set."""
             values = torch.tensor([inv(structure) for inv in invariants])
-            return len(values) >= scale_system.minimal_invariant_number()
+            return len(values) >= torch.tensor(scale_system.minimal_invariant_number())
 
         assert test_completeness(structure), "Should find complete set of invariants"
 
@@ -284,7 +284,7 @@ class TestScaleCohomology:
         x_near = torch.tensor(0.1)
         direct = op1(x_near) * op2(torch.tensor(0.0))
         expanded = sum(c * o(x_near) for c, o in ope)
-
+        expanded = torch.as_tensor(expanded)
         assert torch.allclose(
             direct, expanded, rtol=1e-2
         ), "OPE should converge for nearby points"
@@ -353,7 +353,7 @@ class TestScaleCohomology:
             I12 = scale_system.mutual_information(state, regions[0], regions[1])
             I13 = scale_system.mutual_information(state, regions[0], regions[2])
             I23 = scale_system.mutual_information(state, regions[1], regions[2])
-            return I12 + I13 + I23 >= 0
+            return torch.all(I12 + I13 + I23 >= torch.tensor(0.0))
 
         # Create test regions
         test_regions = [
@@ -371,9 +371,7 @@ class TestScaleCohomology:
 
         # Test radial evolution
         bulk_field = scale_system.holographic_lift(boundary_field, radial_coordinate)
-        assert bulk_field.shape[0] == len(
-            radial_coordinate
-        ), "Bulk field should extend along radial direction"
+        assert bulk_field.shape[0] == radial_coordinate.shape[0], "Bulk field should extend along radial direction"
 
         # Test UV/IR connection
         def test_uv_ir_connection(field):
@@ -381,14 +379,14 @@ class TestScaleCohomology:
             uv_data = scale_system.extract_uv_data(field)
             ir_data = scale_system.extract_ir_data(field)
             reconstructed = scale_system.reconstruct_from_ir(ir_data)
-            return torch.allclose(uv_data, reconstructed, rtol=1e-2)
+            return torch.allclose(uv_data, reconstructed, atol=0.0, rtol=1e-2)
 
         assert test_uv_ir_connection(bulk_field), "Should satisfy UV/IR connection"
 
         # Test holographic c-theorem
         c_function = scale_system.compute_c_function(bulk_field, radial_coordinate)
         assert torch.all(
-            c_function[1:] - c_function[:-1] <= torch.tensor(0.0)
+            c_function[1:] - c_function[:-1] <= 0
         ), "C-function should decrease monotonically"
 
         # Test holographic entanglement
@@ -396,9 +394,9 @@ class TestScaleCohomology:
         entanglement = scale_system.holographic_entanglement(
             bulk_field, subsystem, radial_coordinate
         )
-        assert entanglement > torch.tensor(0.0), "Entanglement entropy should be positive"
+        assert entanglement > 0, "Entanglement entropy should be positive"
 
-    def test_entanglement_scaling(self, scale_system):
+    def test_entanglement_scaling(self, scale_system, space_dim):
         """Test entanglement entropy scaling."""
         # Create test state
         state = torch.randn(32, 32)  # Lattice state
@@ -428,7 +426,7 @@ class TestScaleCohomology:
             I12 = scale_system.mutual_information(state, regions[0], regions[1])
             I13 = scale_system.mutual_information(state, regions[0], regions[2])
             I23 = scale_system.mutual_information(state, regions[1], regions[2])
-            return I12 + I13 + I23 >= 0
+            return torch.all(I12 + I13 + I23 >= torch.tensor(0.0))
 
         test_regions = [torch.ones(4, 4), torch.ones(4, 4), torch.ones(4, 4)]
         assert test_mutual_info_monogamy(

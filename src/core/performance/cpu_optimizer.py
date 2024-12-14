@@ -11,7 +11,7 @@ import cProfile
 import time
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Callable
 
 import line_profiler
 import memory_profiler
@@ -51,7 +51,7 @@ class CPUOptimizer:
         self.line_profiler = line_profiler.LineProfiler()
         self.memory_profiler = memory_profiler.profile
 
-    def profile_execution(self, func):
+    def profile_execution(self, func: Callable) -> Callable:
         """Decorator for profiling function execution."""
 
         @wraps(func)
@@ -102,7 +102,7 @@ class CPUOptimizer:
 
     def vectorize_operation(
         self,
-        func: callable,
+        func: Callable[..., torch.Tensor],
         inputs: List[torch.Tensor],
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
