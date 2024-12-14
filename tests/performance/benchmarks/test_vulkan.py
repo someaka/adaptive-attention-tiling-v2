@@ -65,8 +65,8 @@ class TestVulkanBenchmarks:
         assert result == vk.VK_SUCCESS
         
         # Initialize managers
-        device_handle = int(self.device.value)
-        physical_device_handle = int(self.physical_device.value)
+        device_handle = int(cast(self.device, c_void_p).value or 0)
+        physical_device_handle = int(cast(self.physical_device, c_void_p).value or 0)
         self.memory = VulkanMemory(device=device_handle, physical_device=physical_device_handle)
         self.resources = VulkanResources(device=device_handle, memory_manager=self.memory)
         self.sizes = [512, 1024, 2048, 4096]
@@ -152,7 +152,7 @@ class TestVulkanBenchmarks:
 
             # Map memory
             data_ptr = c_void_p()
-            result = vk.vkMapMemory(self.device, buffer.memory.memory, buffer.memory.offset, buffer.size, 0, byref(data_ptr))
+            result = vk.vkMapMemory(self.device, buffer.memory.memory, buffer.memory.offset, buffer.size, data_ptr)
             if result != vk.VK_SUCCESS:
                 raise RuntimeError(f"Failed to map memory: {result}")
 
