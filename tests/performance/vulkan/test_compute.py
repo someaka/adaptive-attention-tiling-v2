@@ -11,13 +11,12 @@ in the Adaptive Attention Tiling system, focusing on:
 import os
 import subprocess
 import time
-from typing import Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple
 import pytest
 import torch
 import numpy as np
 
-from src.core.backends.vulkan.compute import VulkanCompute
-from src.core.backends.vulkan.tensor_ops import TensorDescriptor
+from src.core.backends.vulkan.compute import VulkanCompute, TensorDescriptor
 
 # Test configurations
 WORKGROUP_SIZES = [(8, 8), (16, 16), (32, 32)]

@@ -16,7 +16,7 @@ from .command_buffer import CommandConfig
 from .shader_manager import ShaderManager, ShaderType, ShaderConfig
 from .pipeline import VulkanPipeline, PipelineType
 from .memory_manager import BufferUsage
-from .barrier_manager import BarrierManager, AccessPattern
+from src.core.performance.vulkan.memory.barrier_manager import BarrierManager, AccessPattern
 from src.core.common.constants import SHADER_DIR
 
 
@@ -25,6 +25,11 @@ class TensorDescriptor(BaseTensorDescriptor):
     """Extended descriptor for tensor layout and memory."""
     descriptor_set: Optional[c_void_p] = None  # VkDescriptorSet handle
     tensor: Optional[torch.Tensor] = None
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.descriptor_set = kwargs.get('descriptor_set', None)
+        self.tensor = kwargs.get('tensor', None)
 
 
 @dataclass
@@ -73,6 +78,9 @@ class VulkanCompute:
         # Convert device handle to int first
         raw_device = self.device.device
         raw_queue = self.device.compute_queue
+        
+        if raw_queue is None:
+            raise RuntimeError("Compute queue is not available")
         
         device_int = handle_to_int(raw_device)
         queue_int = handle_to_int(raw_queue)
@@ -128,7 +136,7 @@ class VulkanCompute:
         desc = self.register_tensor(data)
         
         # Convert device handle to c_void_p for Vulkan API
-        device_handle = c_void_p(self.device.device)
+        device_handle = c_void_p(handle_to_int(self.device.device))
         
         # Allocate descriptor set
         desc.descriptor_set = self.pipeline_manager.allocate_descriptor_set(
@@ -231,7 +239,7 @@ class VulkanCompute:
         """Register a tensor for Vulkan operations."""
         base_desc = self.tensor_ops.register_tensor(tensor)
         # Create extended descriptor with additional fields
-        desc = TensorDescriptor(
+        return TensorDescriptor(
             shape=base_desc.shape,
             dtype=base_desc.dtype,
             strides=base_desc.strides,
@@ -243,7 +251,6 @@ class VulkanCompute:
             descriptor_set=None,  # Will be set when needed
             tensor=tensor  # Store reference to original tensor
         )
-        return desc
 
     def compile_shader(self, shader_type: str, matrix_size: Tuple[int, int]) -> ShaderInfo:
         """Compile a shader for the given type and size."""
@@ -319,8 +326,8 @@ class VulkanCompute:
     def execute_compute(self, data: torch.Tensor, shader_type: str = "compute") -> torch.Tensor:
         """Execute a compute operation."""
         # Get last two dimensions as tuple for shader compilation
-        width, height = int(data.shape[-2]), int(data.shape[-1])
-        matrix_size = (width, height)
+        width, height = data.shape[-2:]
+        matrix_size = (int(width), int(height))
         
         # Register input tensor
         input_desc = self.register_tensor(data)
@@ -336,18 +343,34 @@ class VulkanCompute:
         command_buffer = self.tensor_ops.command_manager.allocate_command_buffer()
         
         # Memory barriers for input/output
-        self.barrier_manager.add_compute_read_barrier(input_desc.buffer)
+        self.barrier_manager.add_compute_read_barrier(c_void_p(input_desc.buffer))
         self.barrier_manager.record_barriers(command_buffer)
         
         # Calculate dispatch dimensions
         dispatch_x = (width + self.workgroup_size[0] - 1) // self.workgroup_size[0]
         dispatch_y = (height + self.workgroup_size[1] - 1) // self.workgroup_size[1]
         
-        # Create command config
+        # Create push constants struct
+        push_constants = {
+            "sequence_length": width,
+            "d_model": height,
+            "density_threshold": 0.1  # Configurable threshold
+        }
+        
+        # Ensure descriptor sets are not None and cast to List[c_void_p]
+        if input_desc.descriptor_set is None or output_desc.descriptor_set is None:
+            raise RuntimeError("Descriptor sets must be allocated before compute execution")
+            
+        descriptor_sets = [
+            input_desc.descriptor_set,  # Now we know these are not None
+            output_desc.descriptor_set
+        ]
+        
+        # Create command config with validated descriptor sets
         config = CommandConfig(
-            pipeline_type=PipelineType.TILE_PROCESSOR,  # Convert string to enum
-            descriptor_sets=[input_desc.descriptor_set, output_desc.descriptor_set],
-            push_constants=b'',  # Empty for now
+            pipeline_type=PipelineType.TILE_PROCESSOR,  # Use proper enum
+            descriptor_sets=[c_void_p(int(input_desc.descriptor_set)), c_void_p(int(output_desc.descriptor_set))],  # Convert to c_void_p
+            push_constants=bytes(str(push_constants), 'utf-8'),
             dispatch_x=dispatch_x,
             dispatch_y=dispatch_y,
             dispatch_z=1
@@ -362,13 +385,17 @@ class VulkanCompute:
         )
         
         # Memory barrier for output
-        self.barrier_manager.add_compute_write_barrier(output_desc.buffer)
+        self.barrier_manager.add_compute_write_barrier(c_void_p(output_desc.buffer))
         self.barrier_manager.record_barriers(command_buffer)
         
         # Submit and wait
+        compute_queue = self.device.compute_queue
+        if compute_queue is None:
+            raise RuntimeError("Compute queue is not available")
+            
         self.tensor_ops.command_manager.submit_commands(
             command_buffer,
-            self.device.compute_queue,
+            compute_queue,  # Now guaranteed to be non-None
             batch=False
         )
         
@@ -391,6 +418,9 @@ class VulkanCompute:
 
     def transfer_to_host(self, device_data: TensorDescriptor) -> torch.Tensor:
         """Transfer data from device to host memory."""
+        if device_data.tensor is None:
+            raise RuntimeError("Device data tensor is not available")
+        
         output = torch.empty_like(device_data.tensor)
         self.tensor_ops._copy_from_device(device_data, output)
         
@@ -413,8 +443,12 @@ class VulkanCompute:
         # Copy input data to device
         self.tensor_ops._copy_to_device(input_tensor, input_descriptor)
         
+        # Get matrix dimensions and convert to tuple
+        width, height = input_tensor.shape[-2:]
+        matrix_size = (int(width), int(height))
+        
         # Compile tile processor shader
-        shader_info = self.compile_shader("pattern", input_tensor.shape[-2:])  # Use last two dimensions
+        shader_info = self.compile_shader("pattern", matrix_size)
         
         # Record compute commands
         command_buffer = self.tensor_ops.command_manager.allocate_command_buffer(
@@ -422,11 +456,10 @@ class VulkanCompute:
         )
         
         # Memory barrier for input
-        self.barrier_manager.add_compute_read_barrier(input_descriptor.buffer)
+        self.barrier_manager.add_compute_read_barrier(c_void_p(input_descriptor.buffer))
         self.barrier_manager.record_barriers(command_buffer)
         
         # Calculate dispatch dimensions
-        width, height = input_tensor.shape[-2:]
         dispatch_x = (width + self.workgroup_size[0] - 1) // self.workgroup_size[0]
         dispatch_y = (height + self.workgroup_size[1] - 1) // self.workgroup_size[1]
         
@@ -439,10 +472,14 @@ class VulkanCompute:
             "density_threshold": 0.1  # Configurable threshold
         }
         
-        # Create command config
+        # Ensure descriptor sets are not None
+        if input_descriptor.descriptor_set is None or output_descriptor.descriptor_set is None:
+            raise RuntimeError("Descriptor sets must be allocated before compute execution")
+            
+        # Create command config with validated descriptor sets
         config = CommandConfig(
             pipeline_type=PipelineType.TILE_PROCESSOR,  # Use proper enum
-            descriptor_sets=[input_descriptor.descriptor_set, output_descriptor.descriptor_set],
+            descriptor_sets=[c_void_p(int(input_descriptor.descriptor_set)), c_void_p(int(output_descriptor.descriptor_set))],  # Convert to c_void_p
             push_constants=bytes(str(push_constants), 'utf-8'),
             dispatch_x=dispatch_x,
             dispatch_y=dispatch_y,
@@ -458,13 +495,17 @@ class VulkanCompute:
         )
         
         # Memory barrier for output
-        self.barrier_manager.add_compute_write_barrier(output_descriptor.buffer)
+        self.barrier_manager.add_compute_write_barrier(c_void_p(output_descriptor.buffer))
         self.barrier_manager.record_barriers(command_buffer)
         
         # Submit and wait
+        compute_queue = self.device.compute_queue
+        if compute_queue is None:
+            raise RuntimeError("Compute queue is not available")
+            
         self.tensor_ops.command_manager.submit_commands(
             command_buffer,
-            self.device.compute_queue,
+            compute_queue,  # Now guaranteed to be non-None
             batch=False
         )
         
