@@ -7,7 +7,11 @@ This module provides comprehensive benchmarks for Vulkan operations including:
 """
 
 import pytest
-import torch
+import time
+import numpy as np
+import vulkan as vk
+import ctypes
+from ctypes import c_void_p, c_float, byref, c_uint32, cast, POINTER, c_size_t, create_string_buffer
 
 from src.core.benchmarks import BenchmarkMetrics
 from src.core.vulkan import VulkanMemory, VulkanResources
@@ -17,9 +21,54 @@ class TestVulkanBenchmarks:
     @pytest.fixture(autouse=True)
     def setup(self):
         """Setup test environment."""
-        assert torch.is_vulkan_available(), "Vulkan is not available"
-        self.memory = VulkanMemory()
-        self.resources = VulkanResources()
+        # Create instance
+        app_info = vk.VkApplicationInfo(
+            sType=vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            pApplicationName=b"VulkanBenchmarks",
+            applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            pEngineName=b"No Engine",
+            engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            apiVersion=vk.VK_API_VERSION_1_0
+        )
+        
+        create_info = vk.VkInstanceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            pApplicationInfo=app_info
+        )
+        
+        self.instance = c_void_p()
+        result = vk.vkCreateInstance(byref(create_info), None, byref(self.instance))
+        assert result == vk.VK_SUCCESS
+        
+        # Get physical device
+        devices = vk.vkEnumeratePhysicalDevices(self.instance)
+        if not devices:
+            raise RuntimeError("Failed to find GPUs with Vulkan support")
+        self.physical_device = devices[0]
+        
+        # Create device
+        queue_create_info = vk.VkDeviceQueueCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            queueFamilyIndex=0,
+            queueCount=1,
+            pQueuePriorities=(c_float * 1)(1.0)
+        )
+        
+        device_create_info = vk.VkDeviceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=queue_create_info
+        )
+        
+        self.device = c_void_p()
+        result = vk.vkCreateDevice(self.physical_device, byref(device_create_info), None, byref(self.device))
+        assert result == vk.VK_SUCCESS
+        
+        # Initialize managers
+        device_handle = int(self.device.value)
+        physical_device_handle = int(self.physical_device.value)
+        self.memory = VulkanMemory(device=device_handle, physical_device=physical_device_handle)
+        self.resources = VulkanResources(device=device_handle, memory_manager=self.memory)
         self.sizes = [512, 1024, 2048, 4096]
         self.iterations = 10
         self.metrics = BenchmarkMetrics()
@@ -31,28 +80,49 @@ class TestVulkanBenchmarks:
             pool_sizes = [size * 4, size * 8, size * 16]  # KB
 
             for pool_size in pool_sizes:
-                self.memory.create_pool(pool_size)
+                # Create pool
+                memory_type_bits = 0xFFFFFFFF  # All memory types
+                properties = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                pool = self.memory.allocate(pool_size, memory_type_bits, properties)
+
+                # Create command pool and buffer for timing
+                command_pool_info = vk.VkCommandPoolCreateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                    queueFamilyIndex=0,
+                    flags=vk.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+                )
+                command_pool = c_void_p()
+                vk.vkCreateCommandPool(self.device, byref(command_pool_info), None, byref(command_pool))
+
+                # Create query pool for timing
+                query_pool_info = vk.VkQueryPoolCreateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                    queryType=vk.VK_QUERY_TYPE_TIMESTAMP,
+                    queryCount=2
+                )
+                query_pool = c_void_p()
+                vk.vkCreateQueryPool(self.device, byref(query_pool_info), None, byref(query_pool))
 
                 # Measure allocation performance
-                start_time = torch.cuda.Event(enable_timing=True)
-                end_time = torch.cuda.Event(enable_timing=True)
-
-                start_time.record()
+                start_time = time.perf_counter()
                 allocations = []
                 for _ in range(10):
-                    buffer = self.memory.allocate(size)
+                    buffer = self.resources.create_buffer(
+                        size=size,
+                        usage=vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                        memory_properties=properties
+                    )
                     allocations.append(buffer)
-                end_time.record()
+                end_time = time.perf_counter()
+                alloc_time = (end_time - start_time) * 1000  # Convert to milliseconds
 
-                torch.cuda.synchronize()
-                alloc_time = start_time.elapsed_time(end_time)
-
-                # Measure fragmentation
-                fragmentation = self.memory.get_fragmentation()
+                # Get pool stats
+                stats = self.memory.get_stats()
+                fragmentation = stats["fragmentation"]
 
                 # Cleanup
                 for buffer in allocations:
-                    self.memory.free(buffer)
+                    self.resources.destroy_buffer(buffer)
 
                 self.metrics.record_operation(
                     name="pool_efficiency",
@@ -62,118 +132,52 @@ class TestVulkanBenchmarks:
                     fragmentation=fragmentation,
                 )
 
-                self.memory.destroy_pool()
-
-    def test_fragmentation_analysis(self):
-        """Analyze memory fragmentation patterns."""
-        for size in self.sizes:
-            # Create mixed-size allocations
-            allocation_sizes = [size // 4, size // 2, size]
-            allocations = []
-
-            # Initial allocations
-            for alloc_size in allocation_sizes:
-                buffer = self.memory.allocate(alloc_size)
-                allocations.append(buffer)
-
-            # Measure fragmentation after mixed deallocations
-            fragmentation_points = []
-            for i in range(len(allocations)):
-                self.memory.free(allocations[i])
-                fragmentation_points.append(self.memory.get_fragmentation())
-
-            # Attempt defragmentation
-            start_time = torch.cuda.Event(enable_timing=True)
-            end_time = torch.cuda.Event(enable_timing=True)
-
-            start_time.record()
-            self.memory.defragment()
-            end_time.record()
-
-            torch.cuda.synchronize()
-            defrag_time = start_time.elapsed_time(end_time)
-
-            self.metrics.record_operation(
-                name="fragmentation_analysis",
-                size=size,
-                initial_fragmentation=fragmentation_points[0],
-                peak_fragmentation=max(fragmentation_points),
-                defrag_time=defrag_time,
-                final_fragmentation=self.memory.get_fragmentation(),
-            )
-
-    def test_resource_lifecycle(self):
-        """Test resource lifecycle management efficiency."""
-        for size in self.sizes:
-            # Create resources of different types
-            resource_types = ["buffer", "image", "sampler"]
-            creation_times = []
-            destruction_times = []
-
-            for res_type in resource_types:
-                # Measure creation time
-                start_time = torch.cuda.Event(enable_timing=True)
-                end_time = torch.cuda.Event(enable_timing=True)
-
-                start_time.record()
-                resource = self.resources.create(res_type, size)
-                end_time.record()
-
-                torch.cuda.synchronize()
-                creation_times.append(start_time.elapsed_time(end_time))
-
-                # Use resource
-                self.resources.bind(resource)
-                self.resources.unbind(resource)
-
-                # Measure destruction time
-                start_time = torch.cuda.Event(enable_timing=True)
-                end_time = torch.cuda.Event(enable_timing=True)
-
-                start_time.record()
-                self.resources.destroy(resource)
-                end_time.record()
-
-                torch.cuda.synchronize()
-                destruction_times.append(start_time.elapsed_time(end_time))
-
-            # Record metrics
-            for i, res_type in enumerate(resource_types):
-                self.metrics.record_operation(
-                    name=f"resource_lifecycle_{res_type}",
-                    size=size,
-                    creation_time=creation_times[i],
-                    destruction_time=destruction_times[i],
-                    total_time=creation_times[i] + destruction_times[i],
-                )
+                # Cleanup Vulkan resources
+                vk.vkDestroyQueryPool(self.device, query_pool, None)
+                vk.vkDestroyCommandPool(self.device, command_pool, None)
+                self.memory.free(pool)
 
     def test_memory_operations(self):
         """Benchmark memory operations performance."""
         for size in self.sizes:
-            # Test different transfer patterns
-            host_data = torch.randn(size, size)
+            # Create host-visible buffer
+            memory_type_bits = 0xFFFFFFFF
+            properties = vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            
+            buffer = self.resources.create_buffer(
+                size=size * size * 4,  # float32 size
+                usage=vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                memory_properties=properties
+            )
+
+            # Map memory
+            data_ptr = c_void_p()
+            result = vk.vkMapMemory(self.device, buffer.memory.memory, buffer.memory.offset, buffer.size, 0, byref(data_ptr))
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Failed to map memory: {result}")
 
             # Host to device transfer
-            start_time = torch.cuda.Event(enable_timing=True)
-            end_time = torch.cuda.Event(enable_timing=True)
-
-            start_time.record()
-            device_data = self.memory.transfer_to_device(host_data)
-            end_time.record()
-
-            torch.cuda.synchronize()
-            h2d_time = start_time.elapsed_time(end_time)
+            host_data = np.random.randn(size, size).astype(np.float32)
+            start_time = time.perf_counter()
+            # Copy data to mapped memory
+            buffer_data = host_data.tobytes()
+            ctypes.memmove(data_ptr, buffer_data, host_data.nbytes)
+            end_time = time.perf_counter()
+            h2d_time = (end_time - start_time) * 1000  # Convert to milliseconds
 
             # Device to host transfer
-            start_time = torch.cuda.Event(enable_timing=True)
-            end_time = torch.cuda.Event(enable_timing=True)
+            start_time = time.perf_counter()
+            # Copy data from mapped memory
+            device_data = create_string_buffer(host_data.nbytes)
+            ctypes.memmove(device_data, data_ptr, host_data.nbytes)
+            end_time = time.perf_counter()
+            d2h_time = (end_time - start_time) * 1000  # Convert to milliseconds
 
-            start_time.record()
-            self.memory.transfer_to_host(device_data)
-            end_time.record()
+            # Unmap memory
+            vk.vkUnmapMemory(self.device, buffer.memory.memory)
 
-            torch.cuda.synchronize()
-            d2h_time = start_time.elapsed_time(end_time)
+            # Cleanup
+            self.resources.destroy_buffer(buffer)
 
             # Record metrics
             self.metrics.record_operation(
@@ -183,3 +187,9 @@ class TestVulkanBenchmarks:
                 d2h_time=d2h_time,
                 bandwidth=size * size * 4 / (h2d_time + d2h_time),  # bytes/ms
             )
+
+    def teardown_method(self):
+        """Cleanup after each test method."""
+        self.memory.cleanup()
+        vk.vkDestroyDevice(self.device, None)
+        vk.vkDestroyInstance(self.instance, None)

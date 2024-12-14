@@ -1,17 +1,35 @@
 """Vulkan resource management."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union, Any, cast as type_cast, Type, TypeVar
+from typing import Dict, List, Optional, Union, Any, cast as type_cast, Type, TypeVar, Protocol
 
-from ctypes import c_void_p, cast, POINTER, Structure, c_uint32, c_uint64, _CData, _CArgObject
+from ctypes import c_void_p, cast, POINTER, Structure, c_uint32, c_uint64, _CData, _CArgObject, byref
 
 import vulkan as vk
 
 from .memory import MemoryBlock, VulkanMemory
 
 
+class ConvertibleToInt(Protocol):
+    """Protocol for objects that can be converted to int."""
+    def __int__(self) -> int: ...
+
+
 # Type aliases for Vulkan handles
-VkHandle = Any  # Opaque handle type for Vulkan objects
+VkHandle = int  # Store handles as integers internally
+
+
+def _to_handle(obj: Union[ConvertibleToInt, int]) -> VkHandle:
+    """Convert a Vulkan object to an integer handle."""
+    if isinstance(obj, int):
+        return obj
+    return int(obj)
+
+
+def _from_handle(handle: VkHandle) -> c_void_p:
+    """Convert an integer handle back to a Vulkan object."""
+    return c_void_p(handle)
+
 
 # Type variable for structure types
 T = TypeVar('T', bound=Structure)
@@ -61,10 +79,10 @@ class ImageResource:
     memory: MemoryBlock
     view: VkHandle  # VkImageView handle
     format: int
-    extent: VkHandle  # VkExtent3D structure
+    extent: Any  # VkExtent3D structure
 
 
-def _cast_to_struct(obj: Any, struct_type: Type[Structure]) -> Any:
+def _cast_to_struct(obj: Any, struct_type: Type[Structure]) -> POINTER(Structure):
     """Safely cast a CData object to a structure pointer.
     
     Args:
@@ -83,7 +101,7 @@ def _cast_to_struct(obj: Any, struct_type: Type[Structure]) -> Any:
 class VulkanResources:
     """Manages Vulkan resources."""
     
-    def __init__(self, device: int, memory_manager: VulkanMemory):
+    def __init__(self, device: VkHandle, memory_manager: VulkanMemory):
         """Initialize resource manager.
         
         Args:
@@ -122,12 +140,13 @@ class VulkanResources:
             usage=usage,
             sharingMode=sharing_mode,
         )
-        buffer = vk.vkCreateBuffer(self.device, create_info, None)
+        buffer = vk.vkCreateBuffer(_from_handle(self.device), create_info, None)
+        buffer_handle = _to_handle(buffer)
         
         # Get memory requirements
-        raw_reqs = vk.vkGetBufferMemoryRequirements(self.device, buffer)
-        reqs_ptr = _cast_to_struct(raw_reqs, VkMemoryRequirements)
-        requirements = MemoryRequirements.from_vulkan(reqs_ptr.contents)
+        mem_reqs = vk.VkMemoryRequirements()
+        vk.vkGetBufferMemoryRequirements(_from_handle(self.device), _from_handle(buffer_handle), byref(mem_reqs))
+        requirements = MemoryRequirements.from_vulkan(mem_reqs)
         
         # Allocate memory
         block = self.memory.allocate(
@@ -137,18 +156,18 @@ class VulkanResources:
         )
         
         # Bind memory
-        vk.vkBindBufferMemory(self.device, buffer, block.memory, 0)
+        vk.vkBindBufferMemory(_from_handle(self.device), _from_handle(buffer_handle), block.memory, 0)
         
         # Create resource
         resource = BufferResource(
-            buffer=buffer,  # Already a Vulkan handle
+            buffer=buffer_handle,
             memory=block,
             size=size,
             usage=usage,
         )
         
         # Track resource
-        self.buffers[id(buffer)] = resource
+        self.buffers[buffer_handle] = resource
         
         return resource
         
@@ -193,12 +212,13 @@ class VulkanResources:
             sharingMode=sharing_mode,
             initialLayout=vk.VK_IMAGE_LAYOUT_UNDEFINED,
         )
-        image = vk.vkCreateImage(self.device, create_info, None)
+        image = vk.vkCreateImage(_from_handle(self.device), create_info, None)
+        image_handle = _to_handle(image)
         
         # Get memory requirements
-        raw_reqs = vk.vkGetImageMemoryRequirements(self.device, image)
-        reqs_ptr = _cast_to_struct(raw_reqs, VkMemoryRequirements)
-        requirements = MemoryRequirements.from_vulkan(reqs_ptr.contents)
+        mem_reqs = vk.VkMemoryRequirements()
+        vk.vkGetImageMemoryRequirements(_from_handle(self.device), _from_handle(image_handle), byref(mem_reqs))
+        requirements = MemoryRequirements.from_vulkan(mem_reqs)
         
         # Allocate memory
         block = self.memory.allocate(
@@ -208,12 +228,12 @@ class VulkanResources:
         )
         
         # Bind memory
-        vk.vkBindImageMemory(self.device, image, block.memory, 0)
+        vk.vkBindImageMemory(_from_handle(self.device), _from_handle(image_handle), block.memory, 0)
         
         # Create image view
         view_create_info = vk.VkImageViewCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            image=image,
+            image=_from_handle(image_handle),
             viewType=vk.VK_IMAGE_VIEW_TYPE_2D,
             format=format,
             components=vk.VkComponentMapping(
@@ -230,19 +250,20 @@ class VulkanResources:
                 layerCount=1,
             ),
         )
-        view = vk.vkCreateImageView(self.device, view_create_info, None)
+        view = vk.vkCreateImageView(_from_handle(self.device), view_create_info, None)
+        view_handle = _to_handle(view)
         
         # Create resource
         resource = ImageResource(
-            image=image,  # Already a Vulkan handle
+            image=image_handle,
             memory=block,
-            view=view,  # Already a Vulkan handle
+            view=view_handle,
             format=format,
-            extent=extent,  # Already a Vulkan structure
+            extent=extent,
         )
         
         # Track resource
-        self.images[id(image)] = resource
+        self.images[image_handle] = resource
         
         return resource
         
@@ -252,9 +273,9 @@ class VulkanResources:
         Args:
             resource: Buffer resource to destroy
         """
-        vk.vkDestroyBuffer(self.device, resource.buffer, None)
+        vk.vkDestroyBuffer(_from_handle(self.device), _from_handle(resource.buffer), None)
         self.memory.free(resource.memory)
-        del self.buffers[id(resource.buffer)]
+        del self.buffers[resource.buffer]
         
     def destroy_image(self, resource: ImageResource):
         """Destroy image resource.
@@ -262,10 +283,10 @@ class VulkanResources:
         Args:
             resource: Image resource to destroy
         """
-        vk.vkDestroyImageView(self.device, resource.view, None)
-        vk.vkDestroyImage(self.device, resource.image, None)
+        vk.vkDestroyImageView(_from_handle(self.device), _from_handle(resource.view), None)
+        vk.vkDestroyImage(_from_handle(self.device), _from_handle(resource.image), None)
         self.memory.free(resource.memory)
-        del self.images[id(resource.image)]
+        del self.images[resource.image]
         
     def cleanup(self):
         """Cleanup all resources."""

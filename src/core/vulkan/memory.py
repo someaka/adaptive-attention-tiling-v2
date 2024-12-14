@@ -1,7 +1,7 @@
 """Vulkan memory management."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from ctypes import c_void_p, cast, POINTER, Structure
 
 import vulkan as vk
@@ -20,7 +20,7 @@ class MemoryBlock:
 class VulkanMemory:
     """Manages Vulkan memory allocation."""
     
-    def __init__(self, device: int, physical_device: int):
+    def __init__(self, device: Union[int, c_void_p], physical_device: Union[int, c_void_p]):
         """Initialize memory manager.
         
         Args:
@@ -40,6 +40,8 @@ class VulkanMemory:
         
         # Track allocations
         self.allocations: Dict[int, MemoryBlock] = {}
+        self.total_allocated = 0
+        self.peak_allocated = 0
         
     def allocate(
         self,
@@ -78,6 +80,8 @@ class VulkanMemory:
         
         # Track allocation
         self.allocations[id(memory)] = block
+        self.total_allocated += size
+        self.peak_allocated = max(self.peak_allocated, self.total_allocated)
         
         return block
         
@@ -88,6 +92,7 @@ class VulkanMemory:
             block: Memory block to free
         """
         vk.vkFreeMemory(self.device, block.memory, None)
+        self.total_allocated -= block.size
         del self.allocations[id(block.memory)]
         
     def _find_memory_type(self, type_bits: int, properties: int) -> int:
@@ -107,3 +112,26 @@ class VulkanMemory:
             ) == properties:
                 return i
         raise RuntimeError("Failed to find suitable memory type")
+
+    def get_stats(self) -> Dict[str, float]:
+        """Get memory statistics.
+        
+        Returns:
+            Dictionary with memory statistics
+        """
+        total_size = sum(block.size for block in self.allocations.values())
+        fragmentation = 0.0 if total_size == 0 else 1.0 - (self.total_allocated / total_size)
+        
+        return {
+            "total_allocated": self.total_allocated,
+            "peak_allocated": self.peak_allocated,
+            "fragmentation": fragmentation,
+            "num_allocations": len(self.allocations),
+        }
+
+    def cleanup(self):
+        """Clean up all allocations."""
+        for block in list(self.allocations.values()):
+            self.free(block)
+        self.total_allocated = 0
+        self.peak_allocated = 0
