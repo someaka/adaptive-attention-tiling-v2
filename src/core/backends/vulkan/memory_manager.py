@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, List, Tuple
+from ctypes import c_void_p, Structure, c_uint32, c_int, POINTER, cast, byref
 
 import vulkan as vk
 
@@ -20,12 +21,28 @@ class BufferUsage(Enum):
     UNIFORM = auto()
 
 
+# Define Vulkan structures
+class VkMemoryType(Structure):
+    _fields_ = [
+        ("propertyFlags", c_int),
+        ("heapIndex", c_uint32),
+    ]
+
+class VkPhysicalDeviceMemoryProperties(Structure):
+    _fields_ = [
+        ("memoryTypeCount", c_uint32),
+        ("memoryTypes", VkMemoryType * 32),  # VK_MAX_MEMORY_TYPES
+        ("memoryHeapCount", c_uint32),
+        ("memoryHeaps", c_void_p * 16),  # VK_MAX_MEMORY_HEAPS
+    ]
+
+
 @dataclass
 class BufferBlock:
     """Represents a block of Vulkan memory."""
 
-    buffer: int  # VkBuffer
-    memory: int  # VkDeviceMemory
+    buffer: c_void_p  # VkBuffer
+    memory: c_void_p  # VkDeviceMemory
     size: int
     offset: int
     is_free: bool = True
@@ -36,7 +53,7 @@ class MemoryPool:
 
     def __init__(
         self,
-        device: int,  # VkDevice
+        device: c_void_p,  # VkDevice
         usage: BufferUsage,
         block_size: int = DEFAULT_BUFFER_BLOCK_SIZE,
     ):
@@ -46,46 +63,54 @@ class MemoryPool:
         self.blocks: List[BufferBlock] = []
         self.allocations: Dict[int, BufferBlock] = {}  # id -> block mapping
 
-    def allocate(self, size: int) -> Tuple[int, int, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
+    def allocate(self, size: int) -> Tuple[c_void_p, c_void_p, int]:  # (buffer, memory, offset)
         """Allocate a buffer of specified size."""
-        # Find existing free block that fits
-        for block in self.blocks:
-            if block.is_free and block.size >= size:
-                block.is_free = False
-                self.allocations[id(block.buffer)] = block
-                return block.buffer, block.memory, block.offset
-
-        # Create new block if none found
-        block_size = max(size, self.block_size)
+        # Create buffer
         buffer_info = vk.VkBufferCreateInfo(
-            size=block_size,
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            size=size,
             usage=self._get_usage_flags(),
             sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
         )
-
-        buffer = vk.vkCreateBuffer(self.device, buffer_info, None)
+        
+        buffer = c_void_p()
+        result = vk.vkCreateBuffer(self.device, buffer_info, None, byref(buffer))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create buffer: {result}")
 
         # Get memory requirements
-        mem_reqs = vk.vkGetBufferMemoryRequirements(self.device, buffer)
+        mem_reqs = vk.VkMemoryRequirements()
+        vk.vkGetBufferMemoryRequirements(self.device, buffer, byref(mem_reqs))
 
         # Allocate memory
+        memory_type = self._find_memory_type(mem_reqs.memoryTypeBits)
         alloc_info = vk.VkMemoryAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
             allocationSize=mem_reqs.size,
-            memoryTypeIndex=self._find_memory_type(mem_reqs.memoryTypeBits),
+            memoryTypeIndex=memory_type,
         )
 
-        memory = vk.vkAllocateMemory(self.device, alloc_info, None)
+        memory = c_void_p()
+        result = vk.vkAllocateMemory(self.device, alloc_info, None, byref(memory))
+        if result != vk.VK_SUCCESS:
+            vk.vkDestroyBuffer(self.device, buffer, None)
+            raise RuntimeError(f"Failed to allocate memory: {result}")
 
-        # Bind memory to buffer
-        vk.vkBindBufferMemory(self.device, buffer, memory, 0)
+        # Bind memory
+        result = vk.vkBindBufferMemory(self.device, buffer, memory, 0)
+        if result != vk.VK_SUCCESS:
+            vk.vkFreeMemory(self.device, memory, None)
+            vk.vkDestroyBuffer(self.device, buffer, None)
+            raise RuntimeError(f"Failed to bind buffer memory: {result}")
 
-        block = BufferBlock(buffer=buffer, memory=memory, size=block_size, offset=0, is_free=False)
+        # Create block
+        block = BufferBlock(buffer=buffer, memory=memory, size=size, offset=0)
         self.blocks.append(block)
         self.allocations[id(buffer)] = block
 
         return buffer, memory, 0
 
-    def free(self, buffer: int) -> None:  # VkBuffer
+    def free(self, buffer: c_void_p) -> None:  # VkBuffer
         """Free an allocated buffer."""
         if buffer_id := id(buffer) in self.allocations:
             block = self.allocations[buffer_id]
@@ -112,12 +137,12 @@ class MemoryPool:
 
     def _find_memory_type(self, type_filter: int) -> int:
         """Find suitable memory type index."""
-        props = vk.vkGetPhysicalDeviceMemoryProperties(self.device)
+        props = VkPhysicalDeviceMemoryProperties()
+        vk.vkGetPhysicalDeviceMemoryProperties(self.device, byref(props))
+        
         for i in range(props.memoryTypeCount):
-            if (type_filter & (1 << i)) and (
-                props.memoryTypes[i].propertyFlags
-                & vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-            ):
+            if ((type_filter & (1 << i)) and 
+                (props.memoryTypes[i].propertyFlags & vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)):
                 return i
         raise RuntimeError("Failed to find suitable memory type")
 
@@ -125,29 +150,29 @@ class MemoryPool:
 class VulkanMemoryManager:
     """Manages Vulkan memory allocation and buffers."""
 
-    def __init__(self, device: int):  # VkDevice
+    def __init__(self, device: c_void_p):  # VkDevice
         self.device = device
         self._pools: Dict[BufferUsage, MemoryPool] = {
             usage: MemoryPool(device, usage) for usage in BufferUsage
         }
 
-    def allocate_tile_state(self, size: int) -> Tuple[int, int, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
+    def allocate_tile_state(self, size: int) -> Tuple[c_void_p, c_void_p, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
         """Allocate memory for tile state."""
         return self._pools[BufferUsage.TILE_STATE].allocate(size)
 
-    def allocate_cross_tile(self, size: int) -> Tuple[int, int, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
+    def allocate_cross_tile(self, size: int) -> Tuple[c_void_p, c_void_p, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
         """Allocate memory for cross-tile communication."""
         return self._pools[BufferUsage.CROSS_TILE].allocate(size)
 
-    def allocate_metrics(self, size: int) -> Tuple[int, int, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
+    def allocate_metrics(self, size: int) -> Tuple[c_void_p, c_void_p, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
         """Allocate memory for metrics collection."""
         return self._pools[BufferUsage.METRICS].allocate(size)
 
-    def allocate_uniform(self, size: int) -> Tuple[int, int, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
+    def allocate_uniform(self, size: int) -> Tuple[c_void_p, c_void_p, int]:  # Returns (VkBuffer, VkDeviceMemory, offset)
         """Allocate memory for uniform buffers."""
         return self._pools[BufferUsage.UNIFORM].allocate(size)
 
-    def free_buffer(self, buffer: int, usage: BufferUsage) -> None:  # VkBuffer
+    def free_buffer(self, buffer: c_void_p, usage: BufferUsage) -> None:  # VkBuffer
         """Free an allocated buffer."""
         self._pools[usage].free(buffer)
 

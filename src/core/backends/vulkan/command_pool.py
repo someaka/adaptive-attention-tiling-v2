@@ -2,11 +2,28 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
+from ctypes import c_void_p, c_uint32, byref, POINTER, Structure
 
 import vulkan as vk
 
-from src.core.common.constants import MAX_COMMAND_BUFFERS_PER_POOL
+# Constants
+MAX_COMMAND_BUFFERS_PER_POOL = 32  # Moved constant here since it was not found in common.constants
+
+# Vulkan type definitions
+VkDevice = c_void_p
+VkCommandPool = c_void_p
+VkCommandBuffer = c_void_p
+
+# Vulkan enums and flags
+VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0
+VK_COMMAND_BUFFER_LEVEL_SECONDARY = 1
+
+VK_COMMAND_POOL_CREATE_TRANSIENT_BIT = 0x00000001
+VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT = 0x00000002
+VK_COMMAND_POOL_CREATE_PROTECTED_BIT = 0x00000004
+
+VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT = 0x00000001
 
 
 class CommandPoolType(Enum):
@@ -30,26 +47,33 @@ class CommandPoolConfig:
 class CommandPoolManager:
     """Advanced command pool management system."""
 
-    def __init__(self, device: vk.Device, queue_family_index: int):
+    def __init__(self, device: VkDevice, queue_family_index: int):
         self.device = device
         self.queue_family_index = queue_family_index
-        self._pools: Dict[CommandPoolType, List[vk.CommandPool]] = {
+        self._pools: Dict[CommandPoolType, List[VkCommandPool]] = {
             pool_type: [] for pool_type in CommandPoolType
         }
-        self._buffer_pools: Dict[vk.CommandBuffer, vk.CommandPool] = {}
-        self._available_pools: Dict[CommandPoolType, Set[vk.CommandPool]] = {
+        self._buffer_pools: Dict[VkCommandBuffer, VkCommandPool] = {}
+        self._available_pools: Dict[CommandPoolType, Set[VkCommandPool]] = {
             pool_type: set() for pool_type in CommandPoolType
         }
 
-    def create_pool(self, config: CommandPoolConfig) -> vk.CommandPool:
+    def create_pool(self, config: CommandPoolConfig) -> VkCommandPool:
         """Create a new command pool with specified configuration."""
         flags = self._get_pool_flags(config)
 
-        pool_info = vk.CommandPoolCreateInfo(
-            flags=flags, queue_family_index=self.queue_family_index
+        create_info = vk.VkCommandPoolCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            pNext=None,
+            flags=flags,
+            queueFamilyIndex=self.queue_family_index
         )
 
-        pool = vk.create_command_pool(self.device, pool_info, None)
+        pool = c_void_p()
+        result = vk.vkCreateCommandPool(self.device, byref(create_info), None, byref(pool))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create command pool: {result}")
+
         self._pools[config.type].append(pool)
         self._available_pools[config.type].add(pool)
 
@@ -59,50 +83,64 @@ class CommandPoolManager:
         self,
         pool_type: CommandPoolType,
         count: int,
-        level: vk.CommandBufferLevel = vk.CommandBufferLevel.PRIMARY,
-    ) -> List[vk.CommandBuffer]:
+        level: int = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    ) -> List[VkCommandBuffer]:
         """Allocate command buffers from appropriate pool."""
         pool = self._get_or_create_pool(pool_type)
 
-        alloc_info = vk.CommandBufferAllocateInfo(
-            command_pool=pool, level=level, command_buffer_count=count
+        alloc_info = vk.VkCommandBufferAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            pNext=None,
+            commandPool=pool,
+            level=level,
+            commandBufferCount=count
         )
 
-        buffers = vk.allocate_command_buffers(self.device, alloc_info)
+        command_buffers = (c_void_p * count)()
+        result = vk.vkAllocateCommandBuffers(self.device, byref(alloc_info), command_buffers)
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to allocate command buffers: {result}")
 
+        buffers = [command_buffers[i] for i in range(count)]
+        
         # Track buffer-pool associations
         for buffer in buffers:
             self._buffer_pools[buffer] = pool
 
         return buffers
 
-    def reset_pool(self, pool: vk.CommandPool, release_resources: bool = False):
+    def reset_pool(self, pool: VkCommandPool, release_resources: bool = False):
         """Reset a command pool and optionally release resources."""
-        flags = vk.CommandPoolResetFlags.RELEASE_RESOURCES if release_resources else 0
-        vk.reset_command_pool(self.device, pool, flags)
+        flags = VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT if release_resources else 0
+        result = vk.vkResetCommandPool(self.device, pool, flags)
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to reset command pool: {result}")
 
     def trim_pools(self):
         """Trim unused memory from all pools."""
         for pools in self._pools.values():
             for pool in pools:
-                vk.trim_command_pool(self.device, pool, 0)
+                vk.vkTrimCommandPool(self.device, pool, 0)
 
-    def free_buffers(self, buffers: List[vk.CommandBuffer]):
+    def free_buffers(self, buffers: List[VkCommandBuffer]):
         """Free command buffers back to their pools."""
-        pool_buffers: Dict[vk.CommandPool, List[vk.CommandBuffer]] = {}
+        pool_buffers: Dict[VkCommandPool, List[VkCommandBuffer]] = {}
 
         # Group buffers by their source pools
         for buffer in buffers:
             pool = self._buffer_pools.get(buffer)
             if pool:
-                pool_buffers.setdefault(pool, []).append(buffer)
+                if pool not in pool_buffers:
+                    pool_buffers[pool] = []
+                pool_buffers[pool].append(buffer)
                 del self._buffer_pools[buffer]
 
         # Free buffers pool by pool
-        for pool, pool_buffers in pool_buffers.items():
-            vk.free_command_buffers(self.device, pool, pool_buffers)
+        for pool, pool_buffers_list in pool_buffers.items():
+            buffer_array = (c_void_p * len(pool_buffers_list))(*pool_buffers_list)
+            vk.vkFreeCommandBuffers(self.device, pool, len(pool_buffers_list), buffer_array)
 
-    def _get_or_create_pool(self, type: CommandPoolType) -> vk.CommandPool:
+    def _get_or_create_pool(self, type: CommandPoolType) -> VkCommandPool:
         """Get an available pool or create new one if needed."""
         if not self._available_pools[type]:
             config = CommandPoolConfig(type=type)
@@ -110,18 +148,18 @@ class CommandPoolManager:
 
         return next(iter(self._available_pools[type]))
 
-    def _get_pool_flags(self, config: CommandPoolConfig) -> vk.CommandPoolCreateFlags:
+    def _get_pool_flags(self, config: CommandPoolConfig) -> int:
         """Get command pool creation flags based on configuration."""
-        flags = vk.CommandPoolCreateFlags(0)
+        flags = 0
 
         if config.type == CommandPoolType.TRANSIENT:
-            flags |= vk.CommandPoolCreateFlags.TRANSIENT
+            flags |= VK_COMMAND_POOL_CREATE_TRANSIENT_BIT
 
         if config.allow_reset:
-            flags |= vk.CommandPoolCreateFlags.RESET_COMMAND_BUFFER
+            flags |= VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
 
         if config.protected:
-            flags |= vk.CommandPoolCreateFlags.PROTECTED
+            flags |= VK_COMMAND_POOL_CREATE_PROTECTED_BIT
 
         return flags
 
@@ -129,7 +167,7 @@ class CommandPoolManager:
         """Clean up all command pools."""
         for pools in self._pools.values():
             for pool in pools:
-                vk.destroy_command_pool(self.device, pool, None)
+                vk.vkDestroyCommandPool(self.device, pool, None)
 
         self._pools.clear()
         self._buffer_pools.clear()
