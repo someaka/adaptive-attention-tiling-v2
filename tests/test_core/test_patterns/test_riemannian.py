@@ -37,7 +37,7 @@ class TestRiemannianStructure:
     @pytest.fixture
     def riemannian_structure(self, manifold_dim):
         """Create a test Riemannian structure."""
-        return PatternRiemannianStructure(dim=manifold_dim)
+        return PatternRiemannianStructure(manifold_dim=manifold_dim)
 
     def test_metric_tensor(self, riemannian_structure, manifold_dim):
         """Test metric tensor properties."""

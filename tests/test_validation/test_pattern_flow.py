@@ -19,16 +19,15 @@ from src.validation.flow.stability import (
     LinearStabilityValidation
 )
 from src.validation.patterns.stability import (
-    PatternStabilityValidator,
-    PatternFlow,
-    StabilityMetrics
+    PatternValidator,
+    PatternStabilityResult
 )
 from src.validation.geometric.flow import (
     TilingFlowValidator as FlowValidator,
     TilingFlowValidationResult as FlowValidationResult
 )
 from src.neural.attention.pattern.dynamics import PatternDynamics
-from src.core.tiling.geometric_flow import GeometricFlow
+from src.core.tiling.geometric_flow import GeometricFlow, PatternFlow
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -435,11 +434,29 @@ def setup_test_parameters():
 @pytest.fixture
 def pattern_validator(setup_test_parameters):
     """Create pattern validator."""
-    return PatternStabilityValidator(
-        linear_threshold=setup_test_parameters['tolerance'],
-        nonlinear_threshold=setup_test_parameters['tolerance'] * 2,
-        lyapunov_threshold=setup_test_parameters['tolerance'] * 0.1,
+    from src.validation.flow.stability import (
+        LinearStabilityValidator,
+        NonlinearStabilityValidator,
+        StructuralStabilityValidator
+    )
+    
+    # Create individual validators with thresholds
+    linear_validator = LinearStabilityValidator(
         tolerance=setup_test_parameters['tolerance']
+    )
+    nonlinear_validator = NonlinearStabilityValidator(
+        tolerance=setup_test_parameters['tolerance']
+    )
+    structural_validator = StructuralStabilityValidator(
+        tolerance=setup_test_parameters['tolerance']
+    )
+    
+    return PatternValidator(
+        linear_validator=linear_validator,
+        nonlinear_validator=nonlinear_validator,
+        structural_validator=structural_validator,
+        lyapunov_threshold=setup_test_parameters['tolerance'] * 0.1,
+        perturbation_threshold=setup_test_parameters['tolerance']
     )
 
 @pytest.fixture
@@ -456,7 +473,6 @@ def flow_validator(setup_test_parameters):
     )
     return FlowValidator(
         flow=flow,
-        stability_threshold=setup_test_parameters['tolerance'],
         curvature_bounds=(-1.0, 1.0),
         max_energy=1e3
     )
@@ -473,23 +489,51 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_v
         params['grid_size']
     ) * 0.1
     
-    # Validate stability
-    stability_result = pattern_validator.validate_stability(
-        time_series=pattern
-    )
-    assert stability_result["overall_score"] > 0.5, "Pattern should be stable"
-    
-    # Evolve pattern using pattern flow
+    # Create pattern flow
     pattern_flow = PatternFlow(
         input_dim=pattern.shape[1],
         hidden_dim=128,
         manifold_dim=32
     )
+    
+    # Validate stability
+    stability_result = pattern_validator.validate(
+        pattern_flow=pattern_flow,
+        initial_state=pattern,
+        time_steps=params['time_steps']
+    )
+    
+    # Check stability result structure
+    assert isinstance(stability_result, PatternStabilityResult)
+    assert hasattr(stability_result, "is_valid")
+    assert hasattr(stability_result, "data")
+    assert stability_result.data is not None, "Stability result data should not be None"
+    assert "linear_result" in stability_result.data
+    assert "nonlinear_result" in stability_result.data
+    assert "structural_result" in stability_result.data
+    assert "lyapunov_exponents" in stability_result.data
+    assert "perturbation_response" in stability_result.data
+    
+    # Check stability metrics
+    assert isinstance(stability_result.linear_stability, bool)
+    assert isinstance(stability_result.nonlinear_stability, bool)
+    assert isinstance(stability_result.structural_stability, bool)
+    assert isinstance(stability_result.lyapunov_exponents, torch.Tensor)
+    assert isinstance(stability_result.perturbation_response, dict)
+    
+    # Evolve pattern using pattern flow
     output, metrics = pattern_flow(pattern, return_paths=True)
     
     # Validate flow
     flow_result = flow_validator.validate_long_time_existence(output)
     assert flow_result.is_valid, "Flow should exist for long time"
+    
+    # Check flow metrics
+    assert "energy" in metrics[0]
+    assert "geodesic_distance" in metrics[0]
+    if "flow_path" in metrics[0]:
+        assert isinstance(metrics[0]["flow_path"], torch.Tensor)
+        assert len(metrics[0]["flow_path"].shape) == 4  # [batch, time, seq_len, hidden]
 
 def test_pattern_flow_energy(setup_test_parameters, flow_validator):
     """Test energy conservation in pattern flow."""

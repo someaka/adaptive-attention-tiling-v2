@@ -9,7 +9,7 @@ This module validates geometric properties:
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, Any
 import torch
 from torch import Tensor
 from torch.nn import functional as F
@@ -17,205 +17,19 @@ import numpy as np
 from src.core.patterns.riemannian import RiemannianFramework
 
 @dataclass
-class SmoothnessMetrics:
-    """Metrics for measuring smoothness of geometric quantities."""
-
-    def __init__(self, tolerance: float = 1e-5):
-        """Initialize smoothness metrics.
-        
-        Args:
-            tolerance: Numerical tolerance for smoothness checks
-        """
-        self.tolerance = tolerance
-        
-    def compute_derivatives(
-        self,
-        metric: Tensor,
-        coords: Tensor,
-        order: int = 1
-    ) -> Tensor:
-        """Compute derivatives of metric tensor.
-        
-        Args:
-            metric: Metric tensor
-            coords: Coordinate points
-            order: Order of derivatives to compute
-            
-        Returns:
-            Tensor of derivatives
-        """
-        # Initialize list to store derivatives
-        derivatives = []
-        current = None  # Initialize current to None
-        
-        # Compute derivatives up to specified order
-        for i in range(order):
-            if i == 0:
-                current = metric
-            else:
-                # Use autograd to compute higher derivatives
-                if current is not None:
-                    grad_result = torch.autograd.grad(
-                        current.sum(),
-                        coords,
-                        create_graph=True,
-                        allow_unused=True
-                    )
-                    current = grad_result[0] if grad_result[0] is not None else torch.zeros_like(coords)
-                else:
-                    current = torch.zeros_like(coords)
-                
-            if current is not None:  # Only append if current is not None
-                derivatives.append(current)
-            
-        return torch.stack(derivatives)
-        
-    def check_continuity(
-        self,
-        metric: Tensor,
-        coords: Tensor
-    ) -> bool:
-        """Check if metric is continuous.
-        
-        Args:
-            metric: Metric tensor
-            coords: Coordinate points
-            
-        Returns:
-            True if metric is continuous
-        """
-        # Compute first derivatives
-        derivatives = self.compute_derivatives(metric, coords, order=1)
-        
-        # Check if derivatives are finite
-        return bool(torch.all(torch.isfinite(derivatives)))
-        
-    def check_differentiability(
-        self,
-        metric: Tensor,
-        coords: Tensor,
-        order: int = 2
-    ) -> bool:
-        """Check if metric is differentiable up to given order.
-        
-        Args:
-            metric: Metric tensor
-            coords: Coordinate points
-            order: Order of differentiability to check
-            
-        Returns:
-            True if metric is differentiable up to given order
-        """
-        # Compute derivatives up to specified order
-        derivatives = self.compute_derivatives(metric, coords, order=order)
-        
-        # Check if all derivatives exist and are finite
-        return bool(torch.all(torch.isfinite(derivatives)))
-        
-    def compute_smoothness_error(
-        self,
-        metric: Tensor,
-        coords: Tensor,
-        order: int = 2
-    ) -> float:
-        """Compute error in smoothness.
-        
-        Args:
-            metric: Metric tensor
-            coords: Coordinate points
-            order: Order of derivatives to check
-            
-        Returns:
-            Smoothness error measure
-        """
-        # Compute derivatives
-        derivatives = self.compute_derivatives(metric, coords, order=order)
-        
-        # Compute magnitude of derivatives
-        magnitudes = torch.norm(derivatives, dim=(-2, -1))
-        
-        # Return maximum magnitude as error measure
-        return float(torch.max(magnitudes).item())
-        
-    def validate_smoothness(
-        self,
-        metric: Tensor,
-        coords: Tensor,
-        order: int = 2
-    ) -> Dict[str, Union[bool, float]]:
-        """Validate smoothness of metric tensor.
-        
-        Args:
-            metric: Metric tensor
-            coords: Coordinate points
-            order: Order of smoothness to check
-            
-        Returns:
-            Dictionary with validation results containing both boolean and float values
-        """
-        results = {
-            "is_continuous": self.check_continuity(metric, coords),
-            "is_differentiable": self.check_differentiability(
-                metric, coords, order
-            ),
-            "smoothness_error": self.compute_smoothness_error(
-                metric, coords, order
-            ),
-            "meets_tolerance": False
-        }
-        
-        # Check if smoothness error is within tolerance
-        results["meets_tolerance"] = (
-            results["smoothness_error"] < self.tolerance
-        )
-        
-        return results
-
-
-@dataclass
-class CurvatureBounds:
-    """Bounds on curvature tensors."""
-    ricci_lower: float
-    ricci_upper: float
-    sectional_lower: float
-    sectional_upper: float
-
-@dataclass
-class MetricProperties:
-    """Properties of Riemannian metric."""
+class MetricValidation:
+    """Result of metric validation."""
     is_positive_definite: bool
-    is_compatible: bool
-    is_complete: bool
-    has_bounded_curvature: bool
     eigenvalues: Optional[Tensor] = None
-    christoffel_symbols: Optional[Tensor] = None
-    curvature_bounds: Optional[CurvatureBounds] = None
+    condition_number: Optional[float] = None
+    positive_definite: bool = False  # For backward compatibility
 
     def __post_init__(self):
-        """Validate property combinations."""
-        if not self.is_positive_definite:
-            self.is_complete = False
-            self.has_bounded_curvature = False
-
-@dataclass
-class MetricValidation:
-    """Validation result for metric tensor."""
-    
-    def __init__(
-        self,
-        positive_definite: bool,
-        eigenvalues: torch.Tensor,
-        condition_number: float,
-        error_bounds: torch.Tensor
-    ):
-        self.positive_definite = positive_definite
-        self.eigenvalues = eigenvalues
-        self.condition_number = condition_number
-        self.error_bounds = error_bounds
+        self.positive_definite = self.is_positive_definite
 
 @dataclass
 class ConnectionValidation:
-    """Results of connection validation."""
+    """Result of connection validation."""
     compatible: bool
     torsion_free: bool
     symmetry: Tensor
@@ -223,92 +37,151 @@ class ConnectionValidation:
 
 @dataclass
 class CurvatureValidation:
-    """Validation result for curvature tensor."""
-    
-    def __init__(
-        self,
-        bounds_satisfied: bool,
-        sectional: torch.Tensor,
-        scalar: float,
-        error_bounds: torch.Tensor
-    ):
-        self.bounds_satisfied = bounds_satisfied
-        self.sectional = sectional
-        self.scalar = scalar
-        self.error_bounds = error_bounds
+    """Result of curvature validation."""
+    bounds_satisfied: bool
+    sectional: Tensor
+    scalar: float
+    error_bounds: Tensor
 
+@dataclass
+class MetricProperties:
+    """Properties of a metric tensor."""
+    is_positive_definite: bool
+    is_compatible: bool  
+    is_complete: bool
+    has_bounded_curvature: bool
+    determinant: Optional[Tensor] = None
+    trace: Optional[Tensor] = None
+    eigenvalues: Optional[Tensor] = None
+    condition_number: Optional[float] = None
+    volume_form: Optional[Tensor] = None
+    christoffel_symbols: Optional[Tensor] = None
+    sectional_curvature: Optional[Tensor] = None
+    ricci_curvature: Optional[Tensor] = None
+    scalar_curvature: Optional[Tensor] = None
+
+@dataclass 
+class CurvatureBounds:
+    """Bounds on various curvature tensors."""
+    ricci_lower: float
+    ricci_upper: float
+    sectional_lower: float
+    sectional_upper: float
+    sectional_bounds: Optional[Tuple[float, float]] = None
+    ricci_bounds: Optional[Tuple[float, float]] = None
+    scalar_bounds: Optional[Tuple[float, float]] = None
 
 class MetricValidator:
-    """Validation of metric properties."""
+    """Validator for metric properties."""
 
     def __init__(self, manifold_dim: int, tolerance: float = 1e-6):
         self.manifold_dim = manifold_dim
         self.tolerance = tolerance
-
-        # Validation thresholds
-        self.eigenvalue_threshold = 1e-10
+        self.eigenvalue_threshold = 1e-6
+        self.energy_threshold = 1e3
         self.condition_threshold = 1e4
-        self.energy_threshold = 1e-5
 
     def validate_metric(self, metric: Tensor) -> MetricValidation:
-        """Validate metric tensor properties."""
-        # Check symmetry
-        is_symmetric = torch.allclose(
-            metric, metric.transpose(-1, -2), atol=self.tolerance
-        )
-
-        # Compute eigenvalues
-        eigenvalues = torch.linalg.eigvalsh(metric)
-
-        # Check positive definiteness
-        is_positive = bool((eigenvalues > self.eigenvalue_threshold).all())
-
-        # Compute condition number
-        condition = torch.max(eigenvalues) / torch.min(eigenvalues.abs())
-
-        # Compute error bounds
-        error_bounds = torch.sqrt(eigenvalues) * condition
-
-        return MetricValidation(
-            positive_definite=is_positive and is_symmetric,
-            eigenvalues=eigenvalues,
-            condition_number=condition.item(),
-            error_bounds=error_bounds,
-        )
-
-    def check_completeness(self, metric: Tensor, points: Tensor) -> bool:
-        """Check if the metric is geodesically complete.
+        """Validate metric properties.
         
         Args:
             metric: Metric tensor
-            points: Points tensor
             
         Returns:
-            True if metric is geodesically complete
+            MetricValidation object containing validation results
         """
-        # Generate random tangent vectors
-        batch_size = points.shape[0]
-        vectors = torch.randn_like(points)
+        # Check shape
+        if len(metric.shape) != 3:
+            raise ValueError("Invalid metric shape")
+            
+        # Check symmetry
+        if not torch.allclose(metric, metric.transpose(-1, -2), atol=self.tolerance):
+            raise ValueError("Non-symmetric metric")
+            
+        # Check for invalid values
+        if torch.any(torch.isnan(metric)) or torch.any(torch.isinf(metric)):
+            raise ValueError("Contains NaN or Inf values")
+            
+        # Check dimensions
+        if metric.shape[-1] != self.manifold_dim:
+            raise ValueError("Incompatible dimensions")
+            
+        # Compute eigenvalues
+        eigenvalues = torch.linalg.eigvalsh(metric)
         
-        # Check local completeness
-        if not self.check_local_completeness(points, vectors):
+        # Check positive definiteness
+        is_positive_definite = bool(torch.all(eigenvalues > self.eigenvalue_threshold))
+        
+        # Compute condition number
+        condition_number = float(eigenvalues.max() / eigenvalues.min())
+        
+        return MetricValidation(
+            is_positive_definite=is_positive_definite,
+            eigenvalues=eigenvalues,
+            condition_number=condition_number
+        )
+
+    def check_metric_bounds(self) -> bool:
+        """Check if metric satisfies bounds needed for completeness.
+        
+        Returns:
+            True if metric bounds are satisfied
+        """
+        # Check local height bounds
+        local_heights = self.compute_local_heights()
+        if not self._validate_local_bounds(local_heights):
             return False
             
-        # Check normal neighborhoods exist
-        if not self.check_normal_neighborhood(points):
-            return False
-            
-        # Check Hopf-Rinow conditions
-        if not self.check_hopf_rinow_conditions():
-            return False
-            
-        # Check metric bounds
-        if not self.check_metric_bounds():
+        # Check global height bounds
+        global_height = self.compute_global_height()
+        if not self.validate_global_bounds(global_height):
             return False
             
         return True
+
+    def compute_metric_values(self, points: Tensor) -> Tensor:
+        """Compute metric tensor values at points using Fisher-Rao structure.
         
-    def check_local_completeness(self, points: Tensor, vectors: Tensor) -> bool:
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Metric tensor values (batch_size x dim x dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Compute Fisher-Rao metric components
+        # g_ij = E[∂_i log p(x|θ) ∂_j log p(x|θ)]
+        score_fn = self._compute_score_function(points)
+        metric = torch.einsum('bi,bj->bij', score_fn, score_fn)
+        
+        # Add regularization for numerical stability
+        metric = metric + self.eigenvalue_threshold * torch.eye(self.manifold_dim).expand(batch_size, -1, -1)
+        
+        return metric
+
+    def _check_completeness(self, metric: Tensor) -> bool:
+        """Check if metric is complete.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            True if metric is complete
+        """
+        # Check local completeness
+        points = torch.randn(metric.shape[0], self.manifold_dim)
+        vectors = torch.randn(metric.shape[0], self.manifold_dim)
+        if not self._check_local_completeness(points, vectors):
+            return False
+            
+        # Check global completeness
+        if not self._check_geodesic_completeness():
+            return False
+            
+        return True
+
+    def _check_local_completeness(self, points: Tensor, vectors: Tensor) -> bool:
         """Check if metric is locally complete.
         
         Args:
@@ -327,13 +200,13 @@ class MetricValidator:
             return False
             
         # Check that geodesic equation has local solutions
-        christoffel = self.compute_christoffel_symbols(points)
+        christoffel = self._compute_christoffel_symbols(points)
         acceleration = self._compute_geodesic_acceleration(points, vectors, christoffel)
         
         # Acceleration should be bounded
         return bool(torch.all(torch.isfinite(acceleration)))
-        
-    def check_normal_neighborhood(self, points: Tensor) -> bool:
+
+    def _check_normal_neighborhood(self, points: Tensor) -> bool:
         """Check existence of normal neighborhood.
         
         Args:
@@ -353,21 +226,21 @@ class MetricValidator:
         # Check condition number is bounded
         condition = eigenvals.max(dim=-1)[0] / eigenvals.min(dim=-1)[0]
         return bool((condition < self.condition_threshold).all())
-        
-    def check_hopf_rinow_conditions(self) -> bool:
+
+    def _check_hopf_rinow_conditions(self) -> bool:
         """Check Hopf-Rinow conditions for completeness.
         
         Returns:
             True if Hopf-Rinow conditions are satisfied
         """
         # Check metric completeness using energy functionals
-        energy = self.compute_pattern_energy()
+        energy = self._compute_pattern_energy()
         if energy > self.energy_threshold:
             return False
             
         # Check geodesic completeness using height functions
         height = self.compute_height_function()
-        if not self.validate_height_bounds(height):
+        if not self._validate_height_bounds(height):
             return False
             
         # Verify A¹-homotopy invariants
@@ -375,60 +248,17 @@ class MetricValidator:
             return False
             
         return True
-        
-    def check_metric_bounds(self) -> bool:
-        """Check if metric satisfies bounds needed for completeness.
-        
-        Returns:
-            True if metric bounds are satisfied
-        """
-        # Check local height bounds
-        local_heights = self.compute_local_heights()
-        if not self.validate_local_bounds(local_heights):
-            return False
-            
-        # Check global height bounds
-        global_height = self.compute_global_height()
-        if not self.validate_global_bounds(global_height):
-            return False
-            
-        # Verify Northcott property
-        if not self.check_northcott_property():
-            return False
-            
-        return True
-        
-    def compute_metric_values(self, points: Tensor) -> Tensor:
-        """Compute metric tensor values at points using Fisher-Rao structure.
-        
-        Args:
-            points: Points tensor (batch_size x dim)
-            
-        Returns:
-            Metric tensor values (batch_size x dim x dim)
-        """
-        batch_size, dim = points.shape
-        
-        # Compute Fisher-Rao metric components
-        # g_ij = E[∂_i log p(x|θ) ∂_j log p(x|θ)]
-        score_fn = self.compute_score_function(points)
-        metric = torch.einsum('bi,bj->bij', score_fn, score_fn)
-        
-        # Add regularization for numerical stability
-        metric = metric + self.eigenvalue_threshold * torch.eye(dim).expand(batch_size, dim, dim)
-        
-        return metric
-        
-    def compute_christoffel_symbols(self, points: Tensor) -> Tensor:
+
+    def _compute_christoffel_symbols(self, points: Tensor) -> Tensor:
         """Compute Christoffel symbols using Levi-Civita connection.
         
         Args:
-            points: Points tensor (batch_size x dim)
+            points: Points tensor
             
         Returns:
-            Christoffel symbols (batch_size x dim x dim x dim)
+            Christoffel symbols
         """
-        batch_size, dim = points.shape
+        batch_size = points.shape[0]
         
         # Get metric and its derivatives
         metric = self.compute_metric_values(points)
@@ -438,7 +268,6 @@ class MetricValidator:
         metric_inv = torch.linalg.inv(metric)
         
         # Compute Christoffel symbols
-        # Γ^k_ij = 1/2 g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
         christoffel = torch.einsum(
             'bkl,bijl->bijk',
             metric_inv,
@@ -450,7 +279,44 @@ class MetricValidator:
         )
         
         return christoffel
+
+    def _compute_score_function(self, points: Tensor) -> Tensor:
+        """Compute score function ∂_i log p(x|θ).
         
+        Args:
+            points: Points tensor
+            
+        Returns:
+            Score function values
+        """
+        # For Gaussian distribution, score is -x
+        return -points
+
+    def _check_geodesic_completeness(self, metric: Optional[Tensor] = None) -> bool:
+        """Check geodesic completeness.
+        
+        Args:
+            metric: Optional metric tensor. If not provided, will use random points.
+            
+        Returns:
+            True if metric is complete
+        """
+        # Check local completeness
+        points = torch.randn(10, self.manifold_dim)
+        vectors = torch.randn(10, self.manifold_dim)
+        if not self.check_local_completeness(points, vectors):
+            return False
+            
+        # Check global conditions
+        if not self.check_hopf_rinow_conditions():
+            return False
+            
+        # Check metric bounds
+        if not self.check_metric_bounds():
+            return False
+            
+        return True
+
     def _compute_geodesic_acceleration(
         self,
         points: Tensor,
@@ -480,60 +346,41 @@ class MetricValidator:
         )
         
         return acceleration
-        
-    def compute_score_function(self, points: Tensor) -> Tensor:
-        """Compute score function ∂_i log p(x|θ).
-        
-        Args:
-            points: Points tensor (batch_size x dim)
-            
-        Returns:
-            Score function values (batch_size x dim)
-        """
-        # Compute log probability gradient
-        log_prob = -0.5 * torch.sum(points ** 2, dim=-1)
-        score = -points  # Gradient of log probability
-        return score
-        
-    def compute_metric_gradient(self, points: Tensor) -> Tensor:
-        """Compute metric gradient ∂_k g_ij.
-        
-        Args:
-            points: Points tensor (batch_size x dim)
-            
-        Returns:
-            Metric gradient tensor (batch_size x dim x dim x dim)
-        """
-        batch_size = points.shape[0]
-        
-        # Get metric values
-        g_ij = self.compute_metric_values(points)
-        
-        # Compute gradient using autograd
-        grad_g = torch.autograd.grad(
-            g_ij.sum(), points, create_graph=True, retain_graph=True
-        )[0]
-        
-        return grad_g.view(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
 
-    def compute_pattern_energy(self) -> Tensor:
-        """Compute pattern energy functional.
+    def compute_score_function(self, points: Tensor) -> Tensor:
+        """Compute score function for Fisher-Rao metric.
         
+        Args:
+            points: Points tensor
+            
         Returns:
-            Pattern energy tensor
+            Score function values
         """
-        # Initialize energy tensor
-        energy = torch.zeros(self.manifold_dim)
+        return self._compute_score_function(points)
+
+    def compute_metric_gradient(self, metric: Tensor) -> Tensor:
+        """Compute metric gradient tensor.
         
-        # Get metric values at sample points
-        points = torch.randn(100, self.manifold_dim)  # Sample points
-        metric_values = self.compute_metric_values(points)
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Metric gradient tensor
+        """
+        batch_size = metric.shape[0]
         
-        # Compute energy using metric values
-        energy = torch.sum(torch.abs(metric_values), dim=(0,1,2))
-        energy = energy / points.shape[0]  # Average over samples
-        
-        return energy
+        # Compute gradient
+        grad = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                grad_ij = torch.autograd.grad(
+                    metric[:, i, j].sum(),
+                    metric,
+                    create_graph=True
+                )[0]
+                grad[:, i, j] = grad_ij
+                
+        return grad
 
     def compute_height_function(self) -> Tensor:
         """Compute height function.
@@ -552,6 +399,63 @@ class MetricValidator:
         
         return height
 
+    def _validate_height_bounds(self, height: Tensor) -> bool:
+        """Validate height function bounds."""
+        return bool(torch.all(height < self.energy_threshold))
+
+    def compute_local_heights(self) -> Tensor:
+        """Compute local height functions.
+        
+        Returns:
+            Local height function values
+        """
+        # Sample points
+        points = torch.randn(100, self.manifold_dim)
+        
+        # Compute metric values
+        metric = self.compute_metric_values(points)
+        
+        # Compute local heights as eigenvalues
+        heights = torch.linalg.eigvalsh(metric)
+        
+        return heights
+
+    def _validate_local_bounds(self, heights: Tensor) -> bool:
+        """Validate local height bounds.
+        
+        Args:
+            heights: Local height function values
+            
+        Returns:
+            True if bounds are satisfied
+        """
+        # Check bounds
+        min_h = heights.min().item()
+        max_h = heights.max().item()
+        
+        # Check if heights are within reasonable bounds
+        return (
+            min_h > self.eigenvalue_threshold and
+            max_h < 1.0/self.eigenvalue_threshold
+        )
+
+    def compute_global_height(self) -> float:
+        """Compute global height function.
+        
+        Returns:
+            Global height value
+        """
+        # Sample points
+        points = torch.randn(100, self.manifold_dim)
+        
+        # Compute metric values
+        metric = self.compute_metric_values(points)
+        
+        # Compute global height as maximum eigenvalue
+        height = torch.linalg.eigvalsh(metric).max().item()
+        
+        return height
+
     def validate_global_bounds(self, height: float) -> bool:
         """Validate global height bounds.
         
@@ -561,32 +465,28 @@ class MetricValidator:
         Returns:
             True if bounds are satisfied
         """
-        # Check upper bound
-        if height > self.energy_threshold:
-            return False
-            
-        # Check lower bound relative to manifold dimension
-        lower_bound = -self.manifold_dim * np.log(self.manifold_dim)
-        if height < lower_bound:
-            return False
-            
-        return True
-        
+        # Check if height is within reasonable bounds
+        return (
+            height > self.eigenvalue_threshold and
+            height < 1.0/self.eigenvalue_threshold
+        )
+
     def check_homotopy_invariants(self) -> bool:
         """Check A¹-homotopy invariants."""
         # TODO: Implement proper invariant checks
         return True
+
+    def check_geodesic_completeness(self, metric: Optional[Tensor] = None) -> bool:
+        """Check if metric is geodesically complete.
         
-    def compute_local_heights(self) -> Tensor:
-        """Compute local height functions."""
-        # TODO: Implement proper local height computation
-        return torch.zeros(1)
-        
-    def compute_global_height(self) -> float:
-        """Compute global height function."""
-        # TODO: Implement proper global height computation
-        return 0.0
-        
+        Args:
+            metric: Optional metric tensor
+            
+        Returns:
+            True if metric is complete
+        """
+        return self._check_geodesic_completeness(metric)
+
     def check_northcott_property(self) -> bool:
         """Check Northcott property."""
         # TODO: Implement proper Northcott check
@@ -601,6 +501,556 @@ class MetricValidator:
         """Validate local height bounds."""
         # TODO: Implement proper local bound validation
         return True
+
+    def get_test_connection(self) -> torch.Tensor:
+        """Get test connection for compatibility checks."""
+        # Generate Levi-Civita connection
+        connection = torch.zeros(self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    connection[i,j,k] = 0.5 * (i + j + k) * self.tolerance
+        return connection
+
+    def validate_connection_compatibility(self, connection: torch.Tensor) -> bool:
+        """Validate connection compatibility with metric."""
+        # Check connection shape
+        if connection.shape != (self.manifold_dim, self.manifold_dim, self.manifold_dim):
+            return False
+            
+        # Check symmetry in lower indices
+        for i in range(self.manifold_dim):
+            if not torch.allclose(
+                connection[i,:,:], 
+                connection[i,:,:].transpose(0,1), 
+                atol=self.tolerance
+            ):
+                return False
+                
+        return True
+
+    def compute_torsion(self, connection: torch.Tensor) -> torch.Tensor:
+        """Compute torsion tensor of connection."""
+        torsion = torch.zeros(self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    torsion[i,j,k] = (
+                        connection[i,j,k] - connection[i,k,j]
+                    )
+        return torsion
+
+    def get_holonomy_group(self) -> torch.Tensor:
+        """Get holonomy group generators."""
+        # Generate SO(n) generators
+        generators = torch.zeros(
+            self.manifold_dim * (self.manifold_dim-1) // 2,
+            self.manifold_dim,
+            self.manifold_dim
+        )
+        idx = 0
+        for i in range(self.manifold_dim):
+            for j in range(i+1, self.manifold_dim):
+                generators[idx,i,j] = 1.0
+                generators[idx,j,i] = -1.0
+                idx += 1
+        return generators
+
+    def validate_holonomy_reduction(self, holonomy: torch.Tensor) -> bool:
+        """Validate holonomy reduction."""
+        # Check holonomy dimension
+        max_dim = self.manifold_dim * (self.manifold_dim-1) // 2
+        return holonomy.shape[0] <= max_dim
+
+    def get_holonomy_algebra(self, holonomy: torch.Tensor) -> torch.Tensor:
+        """Get holonomy Lie algebra."""
+        # Compute Lie brackets
+        algebra = torch.zeros_like(holonomy)
+        for i in range(holonomy.shape[0]):
+            for j in range(holonomy.shape[0]):
+                algebra[i] += torch.matmul(holonomy[i], holonomy[j]) - torch.matmul(holonomy[j], holonomy[i])
+        return algebra
+
+    def validate_holonomy_algebra(self, algebra: torch.Tensor) -> bool:
+        """Validate holonomy Lie algebra.
+        
+        Args:
+            algebra: Holonomy Lie algebra tensor
+            
+        Returns:
+            True if algebra satisfies Jacobi identity
+        """
+        # Check Jacobi identity
+        for i in range(algebra.shape[0]):
+            for j in range(algebra.shape[0]):
+                for k in range(algebra.shape[0]):
+                    # Compute Jacobi identity terms
+                    term1 = torch.matmul(algebra[i], torch.matmul(algebra[j], algebra[k]))
+                    term2 = torch.matmul(algebra[j], torch.matmul(algebra[k], algebra[i]))
+                    term3 = torch.matmul(algebra[k], torch.matmul(algebra[i], algebra[j]))
+                    
+                    # Sum the terms
+                    jacobi = term1 + term2 + term3
+                    
+                    # Check if sum is zero (within tolerance)
+                    if not torch.allclose(jacobi, torch.zeros_like(jacobi), atol=self.tolerance):
+                        return False
+        
+        # If we get here, all checks passed
+        return True
+
+    def compute_chern_classes(self) -> torch.Tensor:
+        """Compute Chern classes."""
+        # For real manifolds, only even Chern classes are non-zero
+        chern = torch.zeros(self.manifold_dim // 2 + 1)
+        chern[0] = 1.0  # c₀ = 1
+        return chern
+
+    def validate_chern_classes(self, chern: torch.Tensor) -> bool:
+        """Validate Chern classes."""
+        # Check normalization
+        if not torch.isclose(chern[0], torch.tensor(1.0)):
+            return False
+            
+        # Check vanishing of high degree classes
+        if not torch.allclose(chern[self.manifold_dim//2+1:], torch.zeros_like(chern[self.manifold_dim//2+1:])):
+            return False
+            
+        return True
+
+    def compute_pontryagin_classes(self) -> torch.Tensor:
+        """Compute Pontryagin classes."""
+        # For oriented manifolds
+        pont = torch.zeros(self.manifold_dim // 4 + 1)
+        pont[0] = 1.0  # p₀ = 1
+        return pont
+
+    def validate_pontryagin_classes(self, pont: torch.Tensor) -> bool:
+        """Validate Pontryagin classes."""
+        # Check normalization
+        if not torch.isclose(pont[0], torch.tensor(1.0)):
+            return False
+            
+        # Check vanishing of high degree classes
+        if not torch.allclose(pont[self.manifold_dim//4+1:], torch.zeros_like(pont[self.manifold_dim//4+1:])):
+            return False
+            
+        return True
+
+    def check_local_completeness(self, points: torch.Tensor, vectors: torch.Tensor) -> bool:
+        """Check local geodesic completeness."""
+        return self._check_local_completeness(points, vectors)
+
+    def check_normal_neighborhood(self, points: torch.Tensor) -> bool:
+        """Check existence of normal neighborhood."""
+        return self._check_normal_neighborhood(points)
+
+    def check_hopf_rinow_conditions(self) -> bool:
+        """Check Hopf-Rinow conditions for completeness."""
+        return self._check_hopf_rinow_conditions()
+
+    def _compute_pattern_energy(self) -> Tensor:
+        """Compute pattern energy spectrum."""
+        # Generate random patterns
+        patterns = torch.randn(100, self.manifold_dim)
+        
+        # Compute energy using metric
+        metric = self.compute_metric_values(patterns)
+        energy = torch.diagonal(metric, dim1=-2, dim2=-1).mean(0)
+        
+        return energy
+
+    def validate_torsion_free(self, torsion: torch.Tensor) -> bool:
+        """Validate that connection is torsion-free.
+        
+        Args:
+            torsion: Torsion tensor
+            
+        Returns:
+            True if torsion-free
+        """
+        return bool(torch.allclose(torsion, torch.zeros_like(torsion), atol=self.tolerance))
+
+    def validate_fisher_rao(self, metric: torch.Tensor) -> bool:
+        """Validate Fisher-Rao metric properties.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            True if metric satisfies Fisher-Rao properties
+        """
+        # Check positive definiteness
+        result = self.validate_metric(metric)
+        if not result.positive_definite:
+            return False
+            
+        # Check compatibility with score function
+        points = torch.randn(metric.shape[0], self.manifold_dim)
+        score = self.compute_score_function(points)
+        
+        # Compute Fisher-Rao metric
+        fisher_metric = torch.einsum('bi,bj->bij', score, score)
+        
+        # Check if close to input metric
+        return bool(torch.allclose(metric, fisher_metric, atol=self.tolerance))
+
+    def check_completeness(self, metric: torch.Tensor) -> bool:
+        """Check metric completeness.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            True if metric is complete
+        """
+        # Check local completeness
+        points = torch.randn(metric.shape[0], self.manifold_dim)
+        vectors = torch.randn(metric.shape[0], self.manifold_dim)
+        if not self.check_local_completeness(points, vectors):
+            return False
+            
+        # Check global completeness
+        if not self.check_geodesic_completeness():
+            return False
+            
+        return True
+
+    def validate_height_functions(self, metric: torch.Tensor) -> bool:
+        """Validate height function properties.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            True if height functions satisfy bounds
+        """
+        # Compute local heights
+        local_heights = self.compute_local_heights()
+        if not self._validate_local_bounds(local_heights):
+            return False
+            
+        # Compute global height
+        global_height = self.compute_global_height()
+        if not self.validate_global_bounds(global_height):
+            return False
+            
+        return True
+
+    def compute_volume_form(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute volume form from metric.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Volume form
+        """
+        # Volume form is sqrt(det(g))
+        return torch.sqrt(torch.linalg.det(metric))
+
+    def compute_christoffel_symbols(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute Christoffel symbols from metric.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Christoffel symbols
+        """
+        batch_size = metric.shape[0]
+        
+        # Compute metric inverse
+        metric_inv = torch.linalg.inv(metric)
+        
+        # Compute metric derivatives
+        grad = self.compute_metric_gradient(metric)
+        
+        # Compute Christoffel symbols
+        christoffel = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    christoffel[:,i,j,k] = 0.5 * torch.sum(
+                        metric_inv[:,i,:] * (
+                            grad[:,j,k,:] + grad[:,k,j,:] - grad[:,:,j,k]
+                        ),
+                        dim=1
+                    )
+                    
+        return christoffel
+
+    def compute_sectional_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute sectional curvature.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Sectional curvature tensor
+        """
+        # Get Christoffel symbols
+        christoffel = self.compute_christoffel_symbols(metric)
+        
+        # Compute Riemann curvature tensor
+        riemann = torch.zeros_like(christoffel)
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    for l in range(self.manifold_dim):
+                        # R^i_{jkl} = ∂_k Γ^i_{jl} - ∂_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
+                        riemann[:,i,j,k,l] = (
+                            torch.autograd.grad(christoffel[:,i,j,l].sum(), metric, create_graph=True)[0][:,k] -
+                            torch.autograd.grad(christoffel[:,i,j,k].sum(), metric, create_graph=True)[0][:,l]
+                        )
+                        for m in range(self.manifold_dim):
+                            riemann[:,i,j,k,l] += (
+                                christoffel[:,i,m,k] * christoffel[:,m,j,l] -
+                                christoffel[:,i,m,l] * christoffel[:,m,j,k]
+                            )
+                            
+        # Compute sectional curvature
+        sectional = torch.zeros(metric.shape[0], self.manifold_dim, self.manifold_dim)
+        for i in range(self.manifold_dim):
+            for j in range(i+1, self.manifold_dim):
+                sectional[:,i,j] = riemann[:,i,j,i,j] / (
+                    metric[:,i,i] * metric[:,j,j] - metric[:,i,j]**2
+                )
+                sectional[:,j,i] = sectional[:,i,j]
+                
+        return sectional
+
+    def compute_ricci_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute Ricci curvature.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Ricci curvature tensor
+        """
+        # Get sectional curvature
+        sectional = self.compute_sectional_curvature(metric)
+        
+        # Compute Ricci curvature by tracing
+        ricci = torch.zeros_like(metric)
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                ricci[:,i,j] = torch.sum(sectional[:,i,:] * metric[:,j,:], dim=1)
+                
+        return ricci
+
+    def compute_scalar_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute scalar curvature.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            Scalar curvature
+        """
+        # Get Ricci curvature
+        ricci = self.compute_ricci_curvature(metric)
+        
+        # Compute scalar curvature by tracing
+        scalar = torch.sum(ricci * torch.linalg.inv(metric), dim=(1,2))
+        
+        return scalar
+
+    def validate_metric_properties(self, metric: torch.Tensor) -> MetricProperties:
+        """Validate metric properties."""
+        # Compute basic properties
+        determinant = torch.linalg.det(metric)
+        trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
+        eigenvalues = torch.linalg.eigvalsh(metric)
+        condition_number = eigenvalues.max() / eigenvalues.min()
+        
+        # Compute derived properties
+        volume_form = self.compute_volume_form(metric)
+        christoffel = self._compute_christoffel_symbols(metric)
+        
+        # Compute curvature properties
+        sectional = self.compute_sectional_curvature(metric)
+        ricci = self.compute_ricci_curvature(metric)
+        scalar = self.compute_scalar_curvature(metric)
+        
+        return MetricProperties(
+            is_positive_definite=bool(torch.all(eigenvalues > self.eigenvalue_threshold)),
+            is_compatible=self.validate_connection_compatibility(self.get_test_connection()),
+            is_complete=self._check_completeness(metric),
+            has_bounded_curvature=self.check_metric_bounds(),
+            determinant=determinant,
+            trace=trace,
+            eigenvalues=eigenvalues,
+            condition_number=condition_number,
+            volume_form=volume_form,
+            christoffel_symbols=christoffel,
+            sectional_curvature=sectional,
+            ricci_curvature=ricci,
+            scalar_curvature=scalar
+        )
+
+    def validate_curvature_bounds(self, metric: torch.Tensor) -> CurvatureBounds:
+        """Validate curvature bounds.
+        
+        Args:
+            metric: Metric tensor
+            
+        Returns:
+            CurvatureBounds object containing validation results
+        """
+        # Compute curvature tensors
+        sectional = self.compute_sectional_curvature(metric)
+        ricci = self.compute_ricci_curvature(metric)
+        scalar = self.compute_scalar_curvature(metric)
+        
+        # Compute bounds
+        sectional_bounds = (sectional.min().item(), sectional.max().item())
+        ricci_bounds = (ricci.min().item(), ricci.max().item())
+        scalar_bounds = (scalar.min().item(), scalar.max().item())
+        
+        return CurvatureBounds(
+            ricci_lower=ricci_bounds[0],
+            ricci_upper=ricci_bounds[1],
+            sectional_lower=sectional_bounds[0],
+            sectional_upper=sectional_bounds[1],
+            sectional_bounds=sectional_bounds,
+            ricci_bounds=ricci_bounds,
+            scalar_bounds=scalar_bounds
+        )
+
+    def validate_curvature_symmetries(self, curvature: torch.Tensor) -> bool:
+        """Validate curvature tensor symmetries.
+        
+        Args:
+            curvature: Riemann curvature tensor
+            
+        Returns:
+            True if symmetries are satisfied
+        """
+        # Check first Bianchi identity
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    for l in range(self.manifold_dim):
+                        bianchi = (
+                            curvature[:,i,j,k,l] +
+                            curvature[:,i,k,l,j] +
+                            curvature[:,i,l,j,k]
+                        )
+                        if not torch.allclose(bianchi, torch.zeros_like(bianchi), atol=self.tolerance):
+                            return False
+                            
+        # Check symmetries
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    for l in range(self.manifold_dim):
+                        # R_ijkl = -R_ijlk
+                        if not torch.allclose(
+                            curvature[:,i,j,k,l],
+                            -curvature[:,i,j,l,k],
+                            atol=self.tolerance
+                        ):
+                            return False
+                            
+                        # R_ijkl = -R_jikl
+                        if not torch.allclose(
+                            curvature[:,i,j,k,l],
+                            -curvature[:,j,i,k,l],
+                            atol=self.tolerance
+                        ):
+                            return False
+                            
+                        # R_ijkl = R_klij
+                        if not torch.allclose(
+                            curvature[:,i,j,k,l],
+                            curvature[:,k,l,i,j],
+                            atol=self.tolerance
+                        ):
+                            return False
+                            
+        return True
+
+    def validate_sectional_bounds(self, sectional: torch.Tensor) -> bool:
+        """Validate sectional curvature bounds.
+        
+        Args:
+            sectional: Sectional curvature tensor
+            
+        Returns:
+            True if bounds are satisfied
+        """
+        # Check bounds
+        min_k = sectional.min().item()
+        max_k = sectional.max().item()
+        
+        # For compact manifolds, sectional curvature should be bounded
+        return -float('inf') < min_k and max_k < float('inf')
+
+    def validate_ricci_bounds(self, ricci: torch.Tensor) -> bool:
+        """Validate Ricci curvature bounds.
+        
+        Args:
+            ricci: Ricci curvature tensor
+            
+        Returns:
+            True if bounds are satisfied
+        """
+        # Check bounds
+        min_ric = ricci.min().item()
+        max_ric = ricci.max().item()
+        
+        # For compact manifolds, Ricci curvature should be bounded
+        return -float('inf') < min_ric and max_ric < float('inf')
+
+    def validate_metric_family(self, metric: torch.Tensor, parameters: torch.Tensor) -> Dict[str, bool]:
+        """Validate metric family over parameter range.
+        
+        Args:
+            metric: Metric tensor
+            parameters: Parameter values
+            
+        Returns:
+            Dictionary of validation results
+        """
+        results = {}
+        
+        # Check positive definiteness
+        results["positive_definite"] = all(
+            self.validate_metric(metric[i]).positive_definite
+            for i in range(len(parameters))
+        )
+        
+        # Check smoothness
+        condition_numbers = torch.tensor([
+            self.validate_metric(metric[i]).condition_number
+            for i in range(len(parameters))
+        ])
+        condition_diff = condition_numbers[1:] - condition_numbers[:-1]
+        results["smooth_variation"] = bool(torch.all(torch.abs(condition_diff) < 1.0))
+        
+        # Check parameter dependence
+        results["parameter_dependence"] = bool(torch.std(condition_numbers) > self.tolerance)
+        
+        return results
+
+    def get_validation_summary(self, result: Dict[str, bool]) -> str:
+        """Get human-readable validation summary.
+        
+        Args:
+            result: Dictionary of validation results
+            
+        Returns:
+            Summary string
+        """
+        summary = []
+        
+        # Add validation results
+        for key, value in result.items():
+            summary.append(f"{key}: {'passed' if value else 'failed'}")
+            
+        return "\n".join(summary)
 
 
 class ConnectionValidator:
@@ -790,7 +1240,7 @@ class GeometricMetricValidator:
 
         # Overall validation status
         is_valid = (
-            metric_validation.positive_definite and
+            metric_validation.is_positive_definite and
             connection_validation.compatible and
             curvature_validation.bounds_satisfied
         )
@@ -817,4 +1267,4 @@ class GeometricMetricValidator:
             True if metric is geodesically complete
         """
         metric = framework.compute_metric(points)
-        return self.metric_validator.check_completeness(metric, points)
+        return self.metric_validator.check_completeness(metric)
