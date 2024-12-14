@@ -1,14 +1,36 @@
 """Benchmark metrics for performance evaluation."""
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Union, Any
 import time
 import torch
+
+from ..performance.vulkan.memory.memory_pool import MemoryPoolManager
+
+
+@dataclass
+class OperationMetrics:
+    """Metrics for a single operation."""
+    name: str
+    size: int
+    avg_time: float
+    avg_memory: float = 0.0
+    throughput: float = 0.0
+    batch_size: Optional[int] = None
+    stability: Optional[float] = None
+    accuracy: Optional[float] = None
+    efficiency: Optional[float] = None
+    sequential_time: Optional[float] = None
+    batch_time: Optional[float] = None
+    convergence_rate: Optional[float] = None
 
 
 @dataclass
 class BenchmarkMetrics:
     """Collection of benchmark metrics."""
+    
+    # Operation metrics
+    operations: List[OperationMetrics] = field(default_factory=list)
     
     # Timing metrics
     forward_time: float = 0.0
@@ -28,7 +50,20 @@ class BenchmarkMetrics:
     num_parameters: int = 0
     batch_size: int = 0
     device: str = 'cpu'
+
+    # Vulkan memory tracking
+    memory_pool: Optional[MemoryPoolManager] = None
     
+    def record_operation(self, name: str, **kwargs):
+        """Record metrics for an operation.
+        
+        Args:
+            name: Operation name
+            **kwargs: Operation metrics
+        """
+        metrics = OperationMetrics(name=name, **kwargs)
+        self.operations.append(metrics)
+        
     @classmethod
     def from_model(cls, model: torch.nn.Module, input_size: tuple) -> 'BenchmarkMetrics':
         """Create metrics from model.
@@ -66,22 +101,30 @@ class BenchmarkMetrics:
         
     def update_memory(self):
         """Update memory metrics."""
-        if torch.cuda.is_available():
-            self.peak_memory_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
-            self.memory_allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+        if self.memory_pool is not None:
+            # Get total allocated memory across all pools
+            total_allocated = 0
+            peak_allocated = 0
+            
+            for pool in self.memory_pool.pools.values():
+                total_allocated += pool.used_size
+                peak_allocated = max(peak_allocated, pool.total_size)
+            
+            self.memory_allocated_mb = total_allocated / (1024 * 1024)  # Convert to MB
+            self.peak_memory_mb = peak_allocated / (1024 * 1024)  # Convert to MB
             
     def compute_throughput(self):
         """Compute throughput metrics."""
         if self.total_time > 0:
             self.throughput = self.batch_size / self.total_time
             
-    def to_dict(self) -> Dict[str, float]:
+    def to_dict(self) -> Dict[str, Union[float, int, Dict[str, Any]]]:
         """Convert metrics to dictionary.
         
         Returns:
             Dictionary of metrics
         """
-        return {
+        metrics_dict = {
             'forward_time': self.forward_time,
             'backward_time': self.backward_time,
             'total_time': self.total_time,
@@ -92,4 +135,14 @@ class BenchmarkMetrics:
             'efficiency': self.efficiency,
             'num_parameters': self.num_parameters,
             'batch_size': self.batch_size,
+            'operations': {}
         }
+        
+        # Add operation metrics
+        operations_dict = {}
+        for op in self.operations:
+            op_dict = {k: v for k, v in vars(op).items() if v is not None}
+            operations_dict[f"{op.name}_{op.size}"] = op_dict
+        metrics_dict['operations'] = operations_dict
+            
+        return metrics_dict
