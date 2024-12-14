@@ -506,29 +506,7 @@ class ValidationFramework:
             if isinstance(geometric_flow, (nn.Module, torch.Tensor)):
                 # Convert to GeometricFlow if needed
                 if not isinstance(geometric_flow, GeometricFlow):
-                    try:
-                        if isinstance(geometric_flow, torch.Tensor):
-                            # Create GeometricFlow from tensor
-                            hidden_dim = self.safe_int_cast(geometric_flow.shape[-1])
-                            manifold_dim = self.safe_int_cast(data.shape[-1])
-                        else:
-                            # Create GeometricFlow from module
-                            if hasattr(geometric_flow, 'out_features'):
-                                hidden_dim = self.safe_int_cast(geometric_flow.out_features)
-                            else:
-                                hidden_dim = self.safe_int_cast(data.shape[-1])
-                            manifold_dim = self.safe_int_cast(data.shape[-1])
-                            
-                        geometric_flow = GeometricFlow(
-                            hidden_dim=hidden_dim,
-                            manifold_dim=manifold_dim
-                        )
-                    except ValueError as e:
-                        raise TypeError(f"Failed to create GeometricFlow: {str(e)}")
-            
-            # Ensure geometric_flow is of correct type
-            if not isinstance(geometric_flow, GeometricFlow):
-                raise TypeError(f"Expected GeometricFlow, got {type(geometric_flow)}")
+                    raise TypeError(f"Expected GeometricFlow, got {type(geometric_flow)}")
             
             flow_validator = FlowValidator(
                 flow=geometric_flow,

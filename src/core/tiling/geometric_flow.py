@@ -12,14 +12,13 @@ The core insight is that attention patterns naturally live on a
 Riemannian manifold with rich geometric structure.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from .arithmetic_dynamics import ArithmeticDynamics
-
 
 class RiemannianMetric(nn.Module):
     """Learnable Riemannian metric tensor implementing Fisher-Rao metric."""
@@ -433,14 +432,27 @@ class GeometricFlow(nn.Module):
         return scalar_curvature
 
 
-class PatternFlow(nn.Module):
+class PatternFlow(GeometricFlow):
     """Pattern detection through geometric flow."""
 
     def __init__(self, input_dim: int, hidden_dim: int, manifold_dim: int):
-        super().__init__()
+        """Initialize pattern flow.
+        
+        Args:
+            input_dim: Input dimension
+            hidden_dim: Hidden dimension
+            manifold_dim: Manifold dimension
+        """
+        super().__init__(
+            hidden_dim=hidden_dim,
+            manifold_dim=manifold_dim,
+            motive_rank=4,  # Default value for pattern detection
+            num_charts=1,  # Single chart for pattern flow
+            integration_steps=10,  # Default integration steps
+            dt=0.1,  # Default timestep
+            stability_threshold=1e-6  # Default stability threshold
+        )
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.manifold_dim = manifold_dim
 
         # Manifold projection layers
         self.manifold_proj = nn.Sequential(
@@ -458,7 +470,9 @@ class PatternFlow(nn.Module):
 
         # Energy computation
         self.energy_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1)
+            nn.Linear(manifold_dim, hidden_dim), 
+            nn.ReLU(), 
+            nn.Linear(hidden_dim, 1),
         )
 
         # Output projection
@@ -468,6 +482,102 @@ class PatternFlow(nn.Module):
             nn.Linear(hidden_dim, input_dim),
         )
 
+        # Metric computation layers
+        self.metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim),
+        )
+
+        # Ricci tensor computation layers
+        self.ricci_net = nn.Sequential(
+            nn.Linear(manifold_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim),
+        )
+
+    def compute_metric(self, flow: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor from flow."""
+        batch_size = flow.shape[0]
+        
+        # Project flow to metric space
+        metric_components = self.metric_net(flow)
+        metric = metric_components.view(batch_size, self.manifold_dim, self.manifold_dim)
+        
+        # Ensure metric is symmetric and positive definite
+        metric = 0.5 * (metric + metric.transpose(-1, -2))
+        metric = metric + torch.eye(self.manifold_dim, device=flow.device) * 1e-6
+        
+        return metric
+
+    def compute_ricci_tensor(self, metric: torch.Tensor, connection: torch.Tensor) -> torch.Tensor:
+        """Compute Ricci tensor from metric and connection."""
+        batch_size = metric.shape[0]
+        
+        # Flatten metric and connection for network input
+        metric_flat = metric.reshape(batch_size, -1)
+        connection_flat = connection.reshape(batch_size, -1)
+        combined = torch.cat([metric_flat, connection_flat], dim=-1)
+        
+        # Compute Ricci tensor components
+        ricci_components = self.ricci_net(combined)
+        ricci = ricci_components.view(batch_size, self.manifold_dim, self.manifold_dim)
+        
+        # Ensure symmetry
+        ricci = 0.5 * (ricci + ricci.transpose(-1, -2))
+        
+        return ricci
+
+    def flow_step(
+        self,
+        metric: torch.Tensor,
+        ricci: torch.Tensor,
+        timestep: float = 0.1
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Evolve metric using Ricci flow."""
+        # Evolve metric using Ricci flow equation
+        evolved_metric = metric - 2 * timestep * ricci
+        
+        # Compute flow metrics
+        metrics = {
+            "flow_magnitude": torch.norm(ricci.reshape(metric.shape[0], -1), dim=1),
+            "metric_determinant": torch.linalg.det(evolved_metric),
+            "ricci_scalar": torch.diagonal(ricci, dim1=1, dim2=2).sum(dim=1),
+            "energy": torch.linalg.det(evolved_metric),
+            "singularity": torch.linalg.det(metric),
+            "normalized_flow": torch.linalg.det(evolved_metric)
+        }
+        
+        return evolved_metric, metrics
+
+    def detect_singularities(
+        self,
+        flow: torch.Tensor,
+        threshold: float = 1e-6
+    ) -> Dict[str, Any]:
+        """Detect singularities in the flow."""
+        batch_size = flow.shape[0]
+        
+        # Compute flow derivatives
+        flow_grad = torch.gradient(flow, dim=-1)[0]
+        
+        # Check for singular points (where flow vanishes)
+        flow_norm = torch.norm(flow, dim=-1)
+        singular_points = flow_norm < threshold
+        
+        # Check for derivative singularities
+        grad_norm = torch.norm(flow_grad.reshape(batch_size, -1), dim=-1)
+        derivative_singularities = grad_norm > 1.0 / threshold
+        
+        # Collect singularity information
+        singularities = {
+            "singular_points": singular_points,
+            "derivative_singularities": derivative_singularities,
+            "flow_norm": flow_norm,
+            "grad_norm": grad_norm
+        }
+        
+        return singularities
     def forward(
         self, x: torch.Tensor, return_paths: bool = False
     ) -> Tuple[torch.Tensor, List[Dict]]:
@@ -527,3 +637,4 @@ class PatternFlow(nn.Module):
             metrics[0]["flow_path"] = torch.stack(path, dim=1)
 
         return output, metrics
+

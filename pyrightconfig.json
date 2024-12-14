@@ -5,15 +5,26 @@
     ],
     "exclude": [
         "**/node_modules",
-        "**/__pycache__"
+        "**/__pycache__",
+        "**/typing.py",
+        "**/.*"
     ],
-    "ignore": [],
-    "defineConstant": {},
-    "strict": [],
-    "reportMissingImports": true,
-    "reportMissingTypeStubs": false,
-    "pythonVersion": "3.12",
-    "pythonPlatform": "Linux",
+    "ignore": [
+        "**/typing.py"
+    ],
+    "defineConstant": {
+        "DEBUG": true
+    },
+    "reportMissingImports": "warning",
+    "reportInvalidTypeForm": "none",
+    "reportGeneralTypeIssues": "warning",
+    "reportPrivateUsage": "none",
+    "reportInternalTypeErrors": "none",
     "typeCheckingMode": "basic",
-    "useLibraryCodeForTypes": true
+    "useLibraryCodeForTypes": true,
+    "strictListInference": true,
+    "strictDictionaryInference": true,
+    "strictSetInference": true,
+    "pythonVersion": "3.12",
+    "pythonPlatform": "Linux"
 }

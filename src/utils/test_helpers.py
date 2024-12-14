@@ -83,7 +83,7 @@ def benchmark_forward_backward(
         torch.cuda.synchronize()
         backward_times.append(time.time() - start)
         
-    return np.mean(forward_times), np.mean(backward_times)
+    return float(np.mean(forward_times)), float(np.mean(backward_times))
 
 
 def assert_tensor_equal(tensor1: torch.Tensor, tensor2: torch.Tensor, tolerance: float = 1e-6):
@@ -128,7 +128,19 @@ def generate_test_quantum_state(num_qubits: int, batch_size: int = 1) -> Quantum
     state_dim = 2 ** num_qubits
     state = torch.randn(batch_size, state_dim, dtype=torch.complex64)
     state = state / torch.norm(state, dim=-1, keepdim=True)
-    return QuantumState(state, num_qubits)
+    
+    # Generate basis labels
+    basis_labels = [f"|{format(i, f'0{num_qubits}b')}⟩" for i in range(state_dim)]
+    
+    # Generate random phase
+    phase = torch.rand(batch_size, 1, dtype=torch.complex64) * 2 * np.pi
+    state = state * torch.exp(1j * phase)
+    
+    return QuantumState(
+        amplitudes=state,
+        basis_labels=basis_labels,
+        phase=phase
+    )
 
 
 def generate_test_density_matrix(num_qubits: int, pure: bool = True) -> torch.Tensor:

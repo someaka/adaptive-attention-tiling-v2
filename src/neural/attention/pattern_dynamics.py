@@ -33,8 +33,8 @@ class PatternDynamics(_PatternDynamics):
     
     def __init__(
         self,
-        size: int = 32,
-        dim: int = 2,
+        grid_size: int = 32,
+        space_dim: int = 2,
         boundary: str = "periodic",
         dt: float = 0.01,
         hidden_dim: int = 64,
@@ -43,22 +43,22 @@ class PatternDynamics(_PatternDynamics):
         """Initialize pattern dynamics system.
         
         Args:
-            size (int): Grid size
-            dim (int): Spatial dimensions
+            grid_size (int): Grid size
+            space_dim (int): Spatial dimensions
             boundary (str): Boundary conditions
             dt (float): Time step
             hidden_dim (int): Hidden dimension
             num_modes (int): Number of modes
         """
         super().__init__(
-            size=size,
-            dim=dim,
+            grid_size=grid_size,
+            space_dim=space_dim,
             boundary=boundary,
             dt=dt,
             hidden_dim=hidden_dim,
             num_modes=num_modes
         )
-        self.diffusion = DiffusionSystem(grid_size=size)
+        self.diffusion = DiffusionSystem(grid_size=grid_size)
         self.max_concentration = 1.0  # Maximum allowed concentration
         self.min_concentration = 0.0  # Minimum allowed concentration
 

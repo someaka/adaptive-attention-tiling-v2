@@ -41,14 +41,17 @@ class MetricsTracker:
         metrics["output_size"] = output_tensor.numel()
 
         # Memory metrics
-        if hasattr(torch, "vulkan") and torch.vulkan.is_available():
-            backend = self.get_vulkan_backend()
-            backend_metrics = backend.get_metrics()
-            metrics["peak_memory"] = backend_metrics["peak_memory"]
-            metrics["memory_allocated"] = backend_metrics["memory_usage"]
+        process = psutil.Process()
+        metrics["peak_memory"] = process.memory_info().rss
+        metrics["memory_allocated"] = process.memory_info().vms
+        
+        # PyTorch memory metrics
+        if torch.cuda.is_available():
+            metrics["torch_allocated"] = torch.cuda.memory_allocated()
+            metrics["torch_reserved"] = torch.cuda.memory_reserved()
         else:
-            metrics["peak_memory"] = psutil.Process().memory_info().rss
-            metrics["memory_allocated"] = psutil.Process().memory_info().vms
+            metrics["torch_allocated"] = 0
+            metrics["torch_reserved"] = 0
 
         # Model metrics
         total_params = sum(p.numel() for p in model.parameters())

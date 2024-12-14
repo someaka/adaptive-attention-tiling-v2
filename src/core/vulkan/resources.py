@@ -1,18 +1,53 @@
 """Vulkan resource management."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any, cast as type_cast, Type, TypeVar
+
+from ctypes import c_void_p, cast, POINTER, Structure, c_uint32, c_uint64, _CData, _CArgObject
 
 import vulkan as vk
 
 from .memory import MemoryBlock, VulkanMemory
 
 
+# Type aliases for Vulkan handles
+VkHandle = Any  # Opaque handle type for Vulkan objects
+
+# Type variable for structure types
+T = TypeVar('T', bound=Structure)
+
+
+class VkMemoryRequirements(Structure):
+    """Memory requirements structure."""
+    _fields_ = [
+        ("size", c_uint64),
+        ("alignment", c_uint64),
+        ("memoryTypeBits", c_uint32)
+    ]
+
+
+@dataclass
+class MemoryRequirements:
+    """Memory requirements wrapper."""
+    size: int
+    alignment: int
+    memory_type_bits: int
+
+    @classmethod
+    def from_vulkan(cls, vulkan_reqs: VkMemoryRequirements) -> 'MemoryRequirements':
+        """Create from Vulkan structure."""
+        return cls(
+            size=vulkan_reqs.size,
+            alignment=vulkan_reqs.alignment,
+            memory_type_bits=vulkan_reqs.memoryTypeBits
+        )
+
+
 @dataclass
 class BufferResource:
     """Buffer resource."""
     
-    buffer: int  # VkBuffer
+    buffer: VkHandle  # VkBuffer handle
     memory: MemoryBlock
     size: int
     usage: int
@@ -22,11 +57,27 @@ class BufferResource:
 class ImageResource:
     """Image resource."""
     
-    image: int  # VkImage
+    image: VkHandle  # VkImage handle
     memory: MemoryBlock
-    view: int  # VkImageView
+    view: VkHandle  # VkImageView handle
     format: int
-    extent: vk.VkExtent3D
+    extent: VkHandle  # VkExtent3D structure
+
+
+def _cast_to_struct(obj: Any, struct_type: Type[Structure]) -> Any:
+    """Safely cast a CData object to a structure pointer.
+    
+    Args:
+        obj: CData object to cast
+        struct_type: Target structure type
+        
+    Returns:
+        Cast pointer to structure
+    """
+    # First cast to void pointer to ensure compatibility
+    void_ptr = cast(obj, c_void_p)
+    # Then cast to target structure pointer
+    return cast(void_ptr, POINTER(struct_type))
 
 
 class VulkanResources:
@@ -66,6 +117,7 @@ class VulkanResources:
         """
         # Create buffer
         create_info = vk.VkBufferCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             size=size,
             usage=usage,
             sharingMode=sharing_mode,
@@ -73,12 +125,14 @@ class VulkanResources:
         buffer = vk.vkCreateBuffer(self.device, create_info, None)
         
         # Get memory requirements
-        requirements = vk.vkGetBufferMemoryRequirements(self.device, buffer)
+        raw_reqs = vk.vkGetBufferMemoryRequirements(self.device, buffer)
+        reqs_ptr = _cast_to_struct(raw_reqs, VkMemoryRequirements)
+        requirements = MemoryRequirements.from_vulkan(reqs_ptr.contents)
         
         # Allocate memory
         block = self.memory.allocate(
             requirements.size,
-            requirements.memoryTypeBits,
+            requirements.memory_type_bits,
             memory_properties,
         )
         
@@ -87,7 +141,7 @@ class VulkanResources:
         
         # Create resource
         resource = BufferResource(
-            buffer=buffer,
+            buffer=buffer,  # Already a Vulkan handle
             memory=block,
             size=size,
             usage=usage,
@@ -101,8 +155,10 @@ class VulkanResources:
     def create_image(
         self,
         format: int,
-        extent: vk.VkExtent3D,
-        usage: int,
+        width: int,
+        height: int,
+        depth: int = 1,
+        usage: int = vk.VK_IMAGE_USAGE_SAMPLED_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         sharing_mode: int = vk.VK_SHARING_MODE_EXCLUSIVE,
         memory_properties: int = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
     ) -> ImageResource:
@@ -110,7 +166,9 @@ class VulkanResources:
         
         Args:
             format: Image format
-            extent: Image extent
+            width: Image width
+            height: Image height
+            depth: Image depth (default: 1 for 2D images)
             usage: Image usage flags
             sharing_mode: Image sharing mode
             memory_properties: Memory property flags
@@ -118,8 +176,12 @@ class VulkanResources:
         Returns:
             Image resource
         """
+        # Create extent structure
+        extent = vk.VkExtent3D(width=width, height=height, depth=depth)
+        
         # Create image
         create_info = vk.VkImageCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             imageType=vk.VK_IMAGE_TYPE_2D,
             format=format,
             extent=extent,
@@ -134,12 +196,14 @@ class VulkanResources:
         image = vk.vkCreateImage(self.device, create_info, None)
         
         # Get memory requirements
-        requirements = vk.vkGetImageMemoryRequirements(self.device, image)
+        raw_reqs = vk.vkGetImageMemoryRequirements(self.device, image)
+        reqs_ptr = _cast_to_struct(raw_reqs, VkMemoryRequirements)
+        requirements = MemoryRequirements.from_vulkan(reqs_ptr.contents)
         
         # Allocate memory
         block = self.memory.allocate(
             requirements.size,
-            requirements.memoryTypeBits,
+            requirements.memory_type_bits,
             memory_properties,
         )
         
@@ -148,6 +212,7 @@ class VulkanResources:
         
         # Create image view
         view_create_info = vk.VkImageViewCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             image=image,
             viewType=vk.VK_IMAGE_VIEW_TYPE_2D,
             format=format,
@@ -169,11 +234,11 @@ class VulkanResources:
         
         # Create resource
         resource = ImageResource(
-            image=image,
+            image=image,  # Already a Vulkan handle
             memory=block,
-            view=view,
+            view=view,  # Already a Vulkan handle
             format=format,
-            extent=extent,
+            extent=extent,  # Already a Vulkan structure
         )
         
         # Track resource

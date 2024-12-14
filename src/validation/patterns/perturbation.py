@@ -146,7 +146,9 @@ class PerturbationAnalyzer:
         # Simulate until recovery
         current = perturbed
         for t in range(self.max_time):
-            current = dynamics.evolve(current, 1)
+            # Use evolve_pattern with single step
+            evolved = dynamics.evolve_pattern(current, steps=1)
+            current = evolved[-1]  # Get final state
             
             # Check if recovered
             if torch.norm(current - pattern) < self.tolerance:
@@ -201,7 +203,8 @@ class PerturbationAnalyzer:
             
             # Check if stable
             perturbed = pattern + perturbation
-            final = dynamics.evolve(perturbed, self.max_time)
+            evolved = dynamics.evolve_pattern(perturbed, steps=self.max_time)
+            final = evolved[-1]  # Get final state
             
             if torch.norm(final - pattern) < self.tolerance:
                 low = mid  # Stable, try larger

@@ -135,7 +135,7 @@ class SyntheticDataGenerator:
         """Generate batch of test sequences with varying lengths."""
         return [
             self.generate_density_pattern(
-                torch.randint(min_length, max_length + 1, (1,)).item(),
+                int(torch.randint(min_length, max_length + 1, (1,)).item()),
             )
             for _ in range(num_sequences)
         ]

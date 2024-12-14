@@ -1,7 +1,8 @@
 """Vulkan memory management."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+from ctypes import c_void_p, cast, POINTER, Structure
 
 import vulkan as vk
 
@@ -10,7 +11,7 @@ import vulkan as vk
 class MemoryBlock:
     """Block of allocated memory."""
     
-    memory: int  # VkDeviceMemory
+    memory: Any  # VkDeviceMemory handle as CData
     size: int
     offset: int
     type_index: int
@@ -30,9 +31,12 @@ class VulkanMemory:
         self.physical_device = physical_device
         
         # Get memory properties
-        self.memory_properties = vk.vkGetPhysicalDeviceMemoryProperties(
-            physical_device
+        memory_props = vk.VkPhysicalDeviceMemoryProperties()
+        vk.vkGetPhysicalDeviceMemoryProperties(
+            physicalDevice=physical_device,
+            pMemoryProperties=memory_props
         )
+        self.memory_properties = memory_props
         
         # Track allocations
         self.allocations: Dict[int, MemoryBlock] = {}
@@ -58,6 +62,7 @@ class VulkanMemory:
         
         # Allocate memory
         alloc_info = vk.VkMemoryAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
             allocationSize=size,
             memoryTypeIndex=type_index,
         )
@@ -65,7 +70,7 @@ class VulkanMemory:
         
         # Create block
         block = MemoryBlock(
-            memory=memory,
+            memory=memory,  # CData object from Vulkan
             size=size,
             offset=0,
             type_index=type_index,
@@ -95,6 +100,7 @@ class VulkanMemory:
         Returns:
             Memory type index
         """
+        # Access memory properties directly
         for i in range(self.memory_properties.memoryTypeCount):
             if (type_bits & (1 << i)) and (
                 self.memory_properties.memoryTypes[i].propertyFlags & properties

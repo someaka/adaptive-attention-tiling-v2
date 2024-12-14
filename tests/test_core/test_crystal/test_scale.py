@@ -283,7 +283,7 @@ class TestScaleCohomology:
         # Test convergence
         x_near = torch.tensor(0.1)
         direct = op1(x_near) * op2(torch.tensor(0.0))
-        expanded = torch.tensor(sum(c * o(x_near) for c, o in ope))
+        expanded = sum(c * o(x_near) for c, o in ope)
 
         assert torch.allclose(
             direct, expanded, rtol=1e-2
@@ -398,7 +398,7 @@ class TestScaleCohomology:
         )
         assert entanglement > torch.tensor(0.0), "Entanglement entropy should be positive"
 
-    def test_entanglement_scaling(self, scale_system, space_dim):
+    def test_entanglement_scaling(self, scale_system):
         """Test entanglement entropy scaling."""
         # Create test state
         state = torch.randn(32, 32)  # Lattice state
@@ -411,7 +411,7 @@ class TestScaleCohomology:
             for size in region_sizes:
                 region = torch.ones(size, size)
                 entropy = scale_system.entanglement_entropy(state, region)
-                area = torch.tensor(4 * size, dtype=torch.float)  # Perimeter of square region
+                area = 4 * size  # Perimeter of square region
                 entropies.append(entropy)
                 areas.append(area)
 
@@ -428,7 +428,7 @@ class TestScaleCohomology:
             I12 = scale_system.mutual_information(state, regions[0], regions[1])
             I13 = scale_system.mutual_information(state, regions[0], regions[2])
             I23 = scale_system.mutual_information(state, regions[1], regions[2])
-            return I12 + I13 + I23 >= torch.tensor(0.0)
+            return I12 + I13 + I23 >= 0
 
         test_regions = [torch.ones(4, 4), torch.ones(4, 4), torch.ones(4, 4)]
         assert test_mutual_info_monogamy(

@@ -142,6 +142,38 @@ class QuantumMotivicTile(nn.Module):
         self._resolution_history = []
         self._neighbors = []
 
+    @property
+    def neighbors(self) -> List["QuantumMotivicTile"]:
+        """Get list of neighboring tiles."""
+        return self._neighbors
+
+    def get_memory_stats(self) -> Dict[str, float]:
+        """Get memory usage statistics.
+        
+        Returns:
+            Dictionary containing memory usage metrics
+        """
+        # Compute current memory usage based on quantum metrics
+        current_memory = (
+            self.size * self.hidden_dim * 4  # Base memory for attention
+            + self.cohomology_dim * self.motive_rank * 4  # Quantum structure
+            + sum(p.numel() * 4 for p in self.parameters())  # Parameters
+        )
+        
+        # Scale by quantum entropy to account for information density
+        current_memory *= (1.0 + self._metrics["quantum_entropy"] / 5.0)
+        
+        # Get peak memory from metrics history
+        peak_memory = current_memory
+        if self._metrics_log:
+            peak_memory = max(current_memory, max(m.get("memory_usage", 0.0) for m in self._metrics_log))
+            
+        return {
+            "current_memory": float(current_memory),
+            "peak_memory": float(peak_memory),
+            "quantum_overhead": float(self._metrics["quantum_entropy"] * current_memory / 5.0)
+        }
+
     def _initialize_quantum_structure(self) -> None:
         """Initialize quantum motivic structure."""
         # Initialize with proper scaling

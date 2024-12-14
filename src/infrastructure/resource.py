@@ -115,17 +115,17 @@ class ResourceAllocator:
             
         del self.allocations[name]
         
-    def get_available_memory(self) -> int:
-        """Get available memory.
+    def get_available_memory(self) -> float:
+        """Get available memory in bytes.
         
         Returns:
             Available memory in bytes
         """
         if self.memory_limit is None:
             return float("inf")
-        return self.memory_limit - self.memory_allocated
+        return float(self.memory_limit - self.memory_allocated)
         
-    def get_available_compute(self) -> int:
+    def get_available_compute(self) -> float:
         """Get available compute units.
         
         Returns:
@@ -133,7 +133,7 @@ class ResourceAllocator:
         """
         if self.compute_limit is None:
             return float("inf")
-        return self.compute_limit - self.compute_allocated
+        return float(self.compute_limit - self.compute_allocated)
         
     def cleanup(self):
         """Clean up all allocations."""

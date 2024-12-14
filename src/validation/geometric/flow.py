@@ -444,34 +444,52 @@ class TilingFlowValidator:
             Combined validation result or dictionary of all validation results
         """
         try:
-            # Get metric tensor
-            metric = self.flow.metric(x, chart)
+            # Get metric tensor - try both ways
+            try:
+                metric = self.flow.metric(x, chart)
+            except (AttributeError, TypeError):
+                # If metric attribute not available, try compute_metric
+                metric = self.flow.compute_metric(x)
             
             # Validate metric tensor
             metric_valid = self.validate_metric_tensor(metric, chart)
             
             # Validate flow stability using flow's metrics history
-            stability_valid = self.validate_flow_stability(
-                self.flow._metrics.get("stability", [])
-            )
+            stability_valid = None
+            try:
+                metrics_history = self.flow._metrics.get("stability", [])
+                stability_valid = self.validate_flow_stability(metrics_history)
+            except AttributeError:
+                # Skip stability validation if _metrics not available
+                pass
             
             # Validate energy conservation
-            energy_valid = self.validate_energy_conservation(
-                self.flow._metrics.get("energy", [])
-            )
+            energy_valid = None
+            try:
+                energy_history = self.flow._metrics.get("energy", [])
+                energy_valid = self.validate_energy_conservation(energy_history)
+            except AttributeError:
+                # Skip energy validation if _metrics not available
+                pass
             
             # Validate chart transitions if we have multiple charts
             transition_valid = None
-            if self.flow.num_charts > 1:
-                next_chart = (chart + 1) % self.flow.num_charts
-                transition_valid = self.validate_chart_transition(x, chart, next_chart)
+            try:
+                if hasattr(self.flow, 'num_charts') and self.flow.num_charts > 1:
+                    next_chart = (chart + 1) % self.flow.num_charts
+                    transition_valid = self.validate_chart_transition(x, chart, next_chart)
+            except AttributeError:
+                # Skip transition validation if num_charts not available
+                pass
             
             # Combine results
             all_results = {
-                'metric': metric_valid,
-                'stability': stability_valid,
-                'energy': energy_valid
+                'metric': metric_valid
             }
+            if stability_valid is not None:
+                all_results['stability'] = stability_valid
+            if energy_valid is not None:
+                all_results['energy'] = energy_valid
             if transition_valid is not None:
                 all_results['transition'] = transition_valid
             

@@ -544,8 +544,11 @@ def geometric_flow_validator(flow_validator):
 def pattern_validator(pattern_dynamics, flow_validator):
     """Get pattern validator for testing."""
     return PatternValidator(
-        dynamics=pattern_dynamics,
-        flow=flow_validator.flow
+        linear_validator=flow_validator.linear_validator,
+        nonlinear_validator=flow_validator.nonlinear_validator,
+        structural_validator=flow_validator.structural_validator,
+        lyapunov_threshold=0.1,
+        perturbation_threshold=0.1
     )
 
 # Quantum validation fixtures

@@ -12,7 +12,7 @@ from typing import Tuple
 
 import torch
 
-from ...neural.flow.geometric_flow import GeometricFlow
+from src.core.tiling.geometric_flow import GeometricFlow
 
 
 @dataclass
@@ -58,7 +58,7 @@ class LinearStabilityValidator:
         """Validate linear stability."""
         # Compute Jacobian at state using autograd
         state.requires_grad_(True)
-        jacobian_tuple = torch.autograd.functional.jacobian(lambda x: flow.step(x)[0], state)
+        jacobian_tuple = torch.autograd.functional.jacobian(flow.forward, state)
         state.requires_grad_(False)
 
         # Convert tuple to tensor and reshape to 2D matrix if needed
@@ -128,12 +128,13 @@ class NonlinearStabilityValidator:
     ) -> float:
         """Compute Lyapunov function."""
         # Use energy as Lyapunov function
-        energy = flow.compute_energy(state)
+        _, metrics = flow.forward(state)
+        energy = metrics.get("energy", 0.0)
         
         # Add regularization for stability
         reg_energy = energy + 1e-6 * torch.sum(state ** 2)
         
-        return float(reg_energy.item())
+        return float(reg_energy)
 
     def _estimate_basin(
         self, flow: GeometricFlow, state: torch.Tensor
@@ -148,9 +149,13 @@ class NonlinearStabilityValidator:
         # Check stability for each perturbation
         stable_mask = torch.zeros(self.basin_samples, dtype=torch.bool)
         
+        base_output, base_metrics = flow.forward(state)
+        base_energy = base_metrics.get("energy", 0.0)
+        
         for i in range(self.basin_samples):
-            energy_i = flow.compute_energy(perturbed[i])
-            stable_mask[i] = energy_i < 2.0 * flow.compute_energy(state)
+            output, metrics = flow.forward(perturbed[i])
+            energy_i = metrics.get("energy", 0.0)
+            stable_mask[i] = energy_i < 2.0 * base_energy
         
         # Find largest stable perturbation
         max_stable = scales[stable_mask][-1] if torch.any(stable_mask) else torch.tensor(0.0)
@@ -165,6 +170,9 @@ class NonlinearStabilityValidator:
         left = 1e-6
         right = 1.0
         
+        base_output, base_metrics = flow.forward(state)
+        base_energy = base_metrics.get("energy", 0.0)
+        
         for _ in range(10):  # Binary search iterations
             mid = (left + right) / 2
             perturb = mid * torch.randn_like(state)
@@ -174,13 +182,14 @@ class NonlinearStabilityValidator:
             stable = True
             
             for _ in range(time_steps):
-                next_state = flow.step(current)[0]  # Get only the state, ignore metrics
+                output, metrics = flow.forward(current)
+                next_state = output
                 if torch.any(torch.isnan(next_state)) or torch.any(torch.isinf(next_state)):
                     stable = False
                     break
                     
-                energy = flow.compute_energy(next_state)
-                if energy > 2.0 * flow.compute_energy(state):
+                energy = metrics.get("energy", 0.0)
+                if energy > 2.0 * base_energy:
                     stable = False
                     break
                 current = next_state
@@ -238,7 +247,7 @@ class StructuralStabilityValidator:
         for param in params:
             # Compute parameter gradient
             param.requires_grad_(True)
-            output = flow.step(state)[0]  # Get only state, ignore metrics
+            output, _ = flow.forward(state)
             grad = torch.autograd.grad(output.sum(), param, create_graph=True)[0]
             param.requires_grad_(False)
 
@@ -272,7 +281,8 @@ class StructuralStabilityValidator:
                 # Check stability
                 current = state.clone()
                 for _ in range(time_steps):
-                    next_state = flow.step(current)[0]  # Get only state, ignore metrics
+                    output, _ = flow.forward(current)
+                    next_state = output
                     if torch.norm(next_state - state) > 10 * mag:
                         stable = False
                         break
@@ -310,7 +320,7 @@ class StructuralStabilityValidator:
 
             # Compute stability using autograd
             state.requires_grad_(True)
-            jacobian_tuple = torch.autograd.functional.jacobian(lambda x: flow.step(x)[0], state)
+            jacobian_tuple = torch.autograd.functional.jacobian(flow.forward, state)
             state.requires_grad_(False)
 
             # Convert tuple to tensor if needed

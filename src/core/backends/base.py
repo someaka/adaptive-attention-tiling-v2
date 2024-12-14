@@ -1,7 +1,7 @@
 """Backend interface definitions."""
 
 from enum import Enum, auto
-from typing import Any, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 import torch
 
@@ -28,6 +28,11 @@ class AttentionTile(Protocol):
     def adapt_resolution(
         self, strategy: ResolutionStrategy, scale_factor: float
     ) -> None: ...
+
+    def get_memory_stats(self) -> Dict[str, float]: ...
+
+    @property
+    def neighbors(self) -> List["AttentionTile"]: ...
 
 
 class ResourceProfile:

@@ -6,11 +6,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from src.core.common.constants import (
-    LOAD_VARIANCE_THRESHOLD,
-    RELATIVE_LOAD_HIGH,
-    RELATIVE_LOAD_LOW,
-)
+# Load balancing thresholds
+LOAD_VARIANCE_THRESHOLD = 0.25  # Maximum acceptable variance in load distribution
+RELATIVE_LOAD_HIGH = 0.8  # Threshold for overloaded tiles
+RELATIVE_LOAD_LOW = 0.2  # Threshold for underutilized tiles
+
 from src.core.tiling.base import AttentionTile
 
 logger = logging.getLogger(__name__)
@@ -114,8 +114,13 @@ class LoadBalanceAnalyzer:
             Dictionary containing network statistics
 
         """
-        loads = [t._last_compute_cost for t in tiles]
-        neighbor_counts = [len(t._neighbors) for t in tiles]
+        # Get compute costs from metrics
+        loads = []
+        for t in tiles:
+            metrics = t.get_memory_stats()
+            loads.append(metrics["current_memory"])  # Using memory usage as compute cost
+            
+        neighbor_counts = [len(t.neighbors) for t in tiles]  # Using neighbors property
 
         load_stats = {
             "mean": float(np.mean(loads)),

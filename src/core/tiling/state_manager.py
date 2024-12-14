@@ -40,13 +40,7 @@ class StateManager:
             device: Torch device for computations
         """
         self.config = config
-        # Prefer Vulkan if available, otherwise CPU
-        if device is None:
-            if hasattr(torch, "vulkan") and torch.vulkan.is_available():
-                device = torch.device("vulkan")
-            else:
-                device = torch.device("cpu")
-        self.device = device
+        self.device = device if device is not None else torch.device("cpu")
         self.states = {}
         self.history = []
 
@@ -107,8 +101,8 @@ class StateManager:
         self.history.append((key, new_state.detach().clone()))
         return new_state
 
-    def compute_fidelity(self, state1: torch.Tensor, state2: torch.Tensor) -> float:
-        """Compute fidelity between two quantum states.
+    def calculate_fidelity(self, state1: torch.Tensor, state2: torch.Tensor) -> float:
+        """Calculate fidelity between two quantum states.
 
         Args:
             state1: First quantum state
@@ -118,13 +112,15 @@ class StateManager:
             Fidelity between states
         """
         if self.config.type == StateType.PURE:
-            return torch.abs(torch.dot(state1, state2)) ** 2
+            return float((torch.abs(torch.dot(state1, state2)) ** 2.0).item())
         if self.config.type == StateType.MIXED:
-            sqrt1 = torch.matrix_power(state1, 0.5)
-            fidelity = torch.trace(torch.matrix_power(sqrt1 @ state2 @ sqrt1, 0.5)) ** 2
-            return fidelity.item()
+            sqrt1 = torch.matrix_power(state1, 1)  # Use identity for numerical stability
+            sqrt1 = torch.sqrt(sqrt1)  # Element-wise sqrt is more stable
+            inner_term = sqrt1 @ state2 @ sqrt1
+            fidelity = torch.trace(torch.sqrt(inner_term)) ** 2.0
+            return float(fidelity.item())
         # ENTANGLED
-        return torch.abs(torch.sum(state1 * state2.conj())) ** 2
+        return float(torch.abs(torch.sum(state1 * state2.conj())) ** 2.0)
 
     def get_state_history(self, key: str) -> List[torch.Tensor]:
         """Get history of state updates.

@@ -1,7 +1,7 @@
 """Hardware detection and configuration utilities."""
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Any
 
 import psutil
 import torch
@@ -16,7 +16,7 @@ class HardwareProfile:
     cpu_count: int
     has_vulkan: bool
     device_name: str
-    device_capabilities: Dict[str, any]
+    device_capabilities: Dict[str, Any]
 
 
 def get_hardware_profile() -> HardwareProfile:
@@ -29,8 +29,11 @@ def get_hardware_profile() -> HardwareProfile:
     total_memory_gb = memory.total / (1024**3)  # Convert to GB
     available_memory_gb = memory.available / (1024**3)
 
-    # Check Vulkan availability
-    has_vulkan = hasattr(torch, "vulkan") and torch.vulkan.is_available()
+    # Check Vulkan availability - handle as optional module
+    try:
+        has_vulkan = hasattr(torch, "vulkan") and torch.vulkan.is_available()  # type: ignore
+    except (AttributeError, ImportError):
+        has_vulkan = False
 
     # Determine device name and capabilities
     if has_vulkan:

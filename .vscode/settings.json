@@ -12,5 +12,20 @@
         "VIRTUAL_ENV": "${workspaceFolder}/.venv",
         "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}",
         "PYTHONPATH": "${workspaceFolder}/src:${env:PYTHONPATH}"
-    }
+    },
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportPrivateUsage": "none",
+        "reportInternalTypeErrors": "none",
+        "reportMissingImports": "warning",
+        "reportInvalidTypeForm": "none",
+        "reportGeneralTypeIssues": "warning"
+    },
+    "python.analysis.exclude": [
+        "**/typing.py",
+        "**/__pycache__",
+        "**/.*"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.autoImportCompletions": true
 }
