@@ -46,11 +46,14 @@ def create_vulkan_memory_barrier(barrier_dict: dict) -> Any:
 class VulkanSync:
     """Synchronization primitives for Vulkan operations."""
     
-    def __init__(self, device: c_void_p):  # device: VkDevice
+    def __init__(self, device: c_void_p, enable_profiling: bool = False):  # device: VkDevice
         """Initialize sync primitives."""
         self.device = device
+        self.enable_profiling = enable_profiling
         self.fences: Dict[int, c_void_p] = {}  # Dict[id, VkFence]
         self.semaphores: Dict[int, c_void_p] = {}  # Dict[id, VkSemaphore]
+        self.events: Dict[int, c_void_p] = {}  # Dict[id, VkEvent]
+        self.queue = None  # Will be set by the user
         
     def create_fence(self, signaled: bool = False) -> c_void_p:
         """Create a fence."""
@@ -59,25 +62,72 @@ class VulkanSync:
             flags=vk.VK_FENCE_CREATE_SIGNALED_BIT if signaled else 0
         )
         fence = c_void_p()
-        result = vk.vkCreateFence(self.device, create_info, None, byref(fence))
+        result = vk.vkCreateFence(self.device, byref(create_info), None, byref(fence))
         if result != vk.VK_SUCCESS:
             raise RuntimeError(f"Failed to create fence: {result}")
         self.fences[id(fence)] = fence
         return fence
         
-    def create_semaphore(self) -> c_void_p:
-        """Create a semaphore."""
+    def create_binary_semaphore(self) -> c_void_p:
+        """Create a binary semaphore."""
         create_info = vk.VkSemaphoreCreateInfo(
             sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
         )
         semaphore = c_void_p()
-        result = vk.vkCreateSemaphore(self.device, create_info, None, byref(semaphore))
+        result = vk.vkCreateSemaphore(self.device, byref(create_info), None, byref(semaphore))
         if result != vk.VK_SUCCESS:
             raise RuntimeError(f"Failed to create semaphore: {result}")
         self.semaphores[id(semaphore)] = semaphore
         return semaphore
+
+    def create_timeline_semaphore(self) -> c_void_p:
+        """Create a timeline semaphore."""
+        type_info = vk.VkSemaphoreTypeCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+            semaphoreType=vk.VK_SEMAPHORE_TYPE_TIMELINE,
+            initialValue=0
+        )
+        create_info = vk.VkSemaphoreCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+            pNext=byref(type_info)
+        )
+        semaphore = c_void_p()
+        result = vk.vkCreateSemaphore(self.device, byref(create_info), None, byref(semaphore))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create timeline semaphore: {result}")
+        self.semaphores[id(semaphore)] = semaphore
+        return semaphore
+
+    def create_event(self) -> c_void_p:
+        """Create an event."""
+        create_info = vk.VkEventCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_EVENT_CREATE_INFO
+        )
+        event = c_void_p()
+        result = vk.vkCreateEvent(self.device, byref(create_info), None, byref(event))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to create event: {result}")
+        self.events[id(event)] = event
+        return event
+
+    def signal_fence(self, fence: c_void_p) -> None:
+        """Signal a fence using an empty command buffer submission."""
+        if self.queue is None:
+            raise RuntimeError("Queue not set. Call set_queue() first.")
+            
+        # Create an empty submit info
+        submit_info = vk.VkSubmitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            commandBufferCount=0,
+            pCommandBuffers=None
+        )
         
-    def wait_for_fence(self, fence: c_void_p, timeout: Optional[int] = None) -> bool:
+        # Submit empty work with the fence
+        result = vk.vkQueueSubmit(self.queue, 1, byref(submit_info), fence)
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to submit queue for fence signaling: {result}")
+
+    def wait_fence(self, fence: c_void_p, timeout: Optional[int] = None) -> bool:
         """Wait for a fence to be signaled."""
         result = vk.vkWaitForFences(
             self.device,
@@ -87,11 +137,99 @@ class VulkanSync:
             timeout if timeout is not None else c_uint64(-1).value
         )
         return result == vk.VK_SUCCESS
-        
-    def reset_fence(self, fence: c_void_p) -> None:
-        """Reset a fence to unsignaled state."""
-        vk.vkResetFences(self.device, 1, [fence])
-        
+
+    def wait_semaphore(self, semaphore: c_void_p, value: int, timeout: Optional[int] = None) -> bool:
+        """Wait for a timeline semaphore to reach a value."""
+        wait_info = vk.VkSemaphoreWaitInfo(
+            sType=vk.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            semaphoreCount=1,
+            pSemaphores=[semaphore],
+            pValues=[value]
+        )
+        result = vk.vkWaitSemaphores(
+            self.device,
+            byref(wait_info),
+            timeout if timeout is not None else c_uint64(-1).value
+        )
+        return result == vk.VK_SUCCESS
+
+    def set_event(self, event: c_void_p) -> None:
+        """Set an event."""
+        result = vk.vkSetEvent(self.device, event)
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to set event: {result}")
+
+    def reset_event(self, event: c_void_p) -> None:
+        """Reset an event."""
+        result = vk.vkResetEvent(self.device, event)
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to reset event: {result}")
+
+    def memory_barrier(self) -> None:
+        """Insert a memory barrier."""
+        barrier = create_memory_barrier(
+            vk.VK_ACCESS_SHADER_WRITE_BIT,
+            vk.VK_ACCESS_SHADER_READ_BIT
+        )
+        vk.vkCmdPipelineBarrier(
+            self.device,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1,
+            [create_vulkan_memory_barrier(barrier)],
+            0,
+            None,
+            0,
+            None
+        )
+
+    def pipeline_barrier(self) -> None:
+        """Insert a pipeline barrier."""
+        vk.vkCmdPipelineBarrier(
+            self.device,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            vk.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0,
+            None,
+            0,
+            None,
+            0,
+            None
+        )
+
+    def queue_submit(
+        self,
+        data: Any,
+        wait_semaphore: Optional[c_void_p] = None,
+        signal_semaphore: Optional[c_void_p] = None,
+        timeline_value: Optional[int] = None,
+        queue_index: int = 0
+    ) -> None:
+        """Submit work to a queue with synchronization."""
+        if self.queue is None:
+            raise RuntimeError("Queue not set. Call set_queue() first.")
+            
+        # Create command buffer and record commands
+        # This is a simplified version - you'll need to implement proper command recording
+        pass
+
+    def compute_operation(self, data: Any) -> Any:
+        """Perform a compute operation."""
+        # This is a placeholder - implement actual compute operation
+        pass
+
+    def wait_idle(self) -> None:
+        """Wait for device to be idle."""
+        result = vk.vkDeviceWaitIdle(self.device)
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to wait for device idle: {result}")
+
+    def set_queue(self, queue: c_void_p) -> None:
+        """Set the queue to use for submissions."""
+        self.queue = queue
+
     def destroy_fence(self, fence: c_void_p) -> None:
         """Destroy a fence."""
         vk.vkDestroyFence(self.device, fence, None)
@@ -101,6 +239,11 @@ class VulkanSync:
         """Destroy a semaphore."""
         vk.vkDestroySemaphore(self.device, semaphore, None)
         del self.semaphores[id(semaphore)]
+
+    def destroy_event(self, event: c_void_p) -> None:
+        """Destroy an event."""
+        vk.vkDestroyEvent(self.device, event, None)
+        del self.events[id(event)]
         
     def cleanup(self) -> None:
         """Cleanup all sync primitives."""
@@ -108,6 +251,8 @@ class VulkanSync:
             self.destroy_fence(fence)
         for semaphore in list(self.semaphores.values()):
             self.destroy_semaphore(semaphore)
+        for event in list(self.events.values()):
+            self.destroy_event(event)
 
 
 class CommandBufferManager:

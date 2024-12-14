@@ -224,3 +224,35 @@ class VulkanPipeline:
 
         vk.vkDestroyDescriptorPool(self.device, self.descriptor_pool, None)
         vk.vkDestroyPipelineCache(self.device, self.pipeline_cache, None)
+
+    def allocate_descriptor_set(self, type: PipelineType) -> c_void_p:  # vk.VkDescriptorSet
+        """Allocate a descriptor set from the pool."""
+        layout = self.descriptor_set_layouts.get(type)
+        if layout is None:
+            raise RuntimeError(f"No descriptor set layout found for pipeline type {type}")
+            
+        alloc_info = vk.VkDescriptorSetAllocateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            descriptorPool=self.descriptor_pool,
+            descriptorSetCount=1,
+            pSetLayouts=[layout]
+        )
+        
+        descriptor_set = c_void_p()
+        result = vk.vkAllocateDescriptorSets(self.device, byref(alloc_info), byref(descriptor_set))
+        if result != vk.VK_SUCCESS:
+            raise RuntimeError(f"Failed to allocate descriptor set: {result}")
+            
+        return descriptor_set
+
+    def free_descriptor_set(self, descriptor_set: c_void_p) -> None:  # vk.VkDescriptorSet
+        """Free a descriptor set back to the pool."""
+        if descriptor_set is not None:
+            result = vk.vkFreeDescriptorSets(self.device, self.descriptor_pool, 1, [descriptor_set])
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Failed to free descriptor set: {result}")
+
+    @property
+    def descriptor_pool_size(self) -> int:
+        """Get the maximum number of descriptor sets that can be allocated."""
+        return 100  # This matches the maxSets value in _create_descriptor_pool

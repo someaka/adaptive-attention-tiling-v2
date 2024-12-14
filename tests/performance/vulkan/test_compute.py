@@ -10,10 +10,14 @@ in the Adaptive Attention Tiling system, focusing on:
 
 import os
 import subprocess
+import time
+from typing import Dict, Any, Tuple
 import pytest
 import torch
+import numpy as np
 
-from src.core.performance.vulkan.compute import VulkanCompute
+from src.core.backends.vulkan.compute import VulkanCompute
+from src.core.backends.vulkan.tensor_ops import TensorDescriptor
 
 # Test configurations
 WORKGROUP_SIZES = [(8, 8), (16, 16), (32, 32)]
@@ -22,7 +26,7 @@ BATCH_SIZES = [1, 8, 32]
 SHADER_TYPES = ["pattern", "flow", "attention"]
 
 # Shader paths
-SHADER_DIR = os.path.join("src", "core", "performance", "vulkan", "shaders")
+SHADER_DIR = os.path.join("src", "core", "backends", "vulkan", "shaders")
 SHADER_PATHS = {
     "pattern": os.path.join(SHADER_DIR, "pattern_compute.comp"),
     "flow": os.path.join(SHADER_DIR, "flow_compute.comp"),
@@ -57,16 +61,18 @@ def vulkan_compute():
     # Ensure all shaders are compiled
     for shader_path in SHADER_PATHS.values():
         compile_shader(shader_path)
-    return VulkanCompute(enable_profiling=True)
+    compute = VulkanCompute(enable_profiling=True)
+    yield compute
+    compute.cleanup()  # Ensure proper cleanup after tests
 
-def generate_test_data(size: tuple[int, int], batch_size: int) -> torch.Tensor:
+def generate_test_data(size: Tuple[int, int], batch_size: int) -> torch.Tensor:
     """Generate test data for compute operations."""
-    return torch.randn(batch_size, *size)
+    return torch.randn(batch_size, *size, dtype=torch.float32)
 
 @pytest.mark.parametrize("shader_type", SHADER_TYPES)
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
 def test_shader_compilation(
-    vulkan_compute: VulkanCompute, shader_type: str, matrix_size: tuple[int, int]
+    vulkan_compute: VulkanCompute, shader_type: str, matrix_size: Tuple[int, int]
 ):
     """Test shader compilation performance and efficiency."""
     # Ensure shader is compiled
@@ -75,15 +81,9 @@ def test_shader_compilation(
     assert os.path.exists(spv_path), f"SPIR-V shader {spv_path} not found"
 
     # Test shader loading and compilation
-    start_time = torch.cuda.Event(enable_timing=True)
-    end_time = torch.cuda.Event(enable_timing=True)
-
-    start_time.record()
+    start_time = time.perf_counter()
     shader = vulkan_compute.compile_shader(shader_type, matrix_size)
-    end_time.record()
-
-    torch.cuda.synchronize()
-    compilation_time = start_time.elapsed_time(end_time)
+    compilation_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
 
     metrics = vulkan_compute.get_metrics()
 
@@ -101,9 +101,9 @@ def test_shader_compilation(
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
 def test_workgroup_optimization(
     vulkan_compute: VulkanCompute,
-    workgroup_size: tuple[int, int],
-    matrix_size: tuple[int, int],
-):
+    workgroup_size: Tuple[int, int],
+    matrix_size: Tuple[int, int],
+) -> Dict[str, Any]:
     """Test impact of different workgroup sizes on performance."""
     data = generate_test_data(matrix_size, batch_size=1)
 
@@ -111,15 +111,9 @@ def test_workgroup_optimization(
     vulkan_compute.set_workgroup_size(*workgroup_size)
 
     # Run compute operation
-    start_time = torch.cuda.Event(enable_timing=True)
-    end_time = torch.cuda.Event(enable_timing=True)
-
-    start_time.record()
+    start_time = time.perf_counter()
     vulkan_compute.execute_compute(data)
-    end_time.record()
-
-    torch.cuda.synchronize()
-    execution_time = start_time.elapsed_time(end_time)
+    execution_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
 
     metrics = vulkan_compute.get_metrics()
 
@@ -139,34 +133,22 @@ def test_workgroup_optimization(
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("matrix_size", MATRIX_SIZES)
 def test_memory_transfer(
-    vulkan_compute: VulkanCompute, batch_size: int, matrix_size: tuple[int, int]
+    vulkan_compute: VulkanCompute, batch_size: int, matrix_size: Tuple[int, int]
 ):
     """Test memory transfer performance between host and device."""
     data = generate_test_data(matrix_size, batch_size)
 
     # Test host to device transfer
-    start_time = torch.cuda.Event(enable_timing=True)
-    end_time = torch.cuda.Event(enable_timing=True)
-
-    start_time.record()
+    start_time = time.perf_counter()
     device_data = vulkan_compute.transfer_to_device(data)
-    end_time.record()
-
-    torch.cuda.synchronize()
-    h2d_time = start_time.elapsed_time(end_time)
+    h2d_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
 
     # Test device to host transfer
-    start_time = torch.cuda.Event(enable_timing=True)
-    end_time = torch.cuda.Event(enable_timing=True)
-
-    start_time.record()
+    start_time = time.perf_counter()
     host_data = vulkan_compute.transfer_to_host(device_data)
-    end_time.record()
+    d2h_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
 
-    torch.cuda.synchronize()
-    d2h_time = start_time.elapsed_time(end_time)
-
-    vulkan_compute.get_metrics()
+    metrics = vulkan_compute.get_metrics()
 
     # Performance assertions
     data_size = data.numel() * data.element_size()
@@ -188,17 +170,11 @@ def test_resource_management(vulkan_compute: VulkanCompute, shader_type: str):
     _ = vulkan_compute.execute_compute(data, shader_type)
 
     # Test resource creation and deletion
-    start_time = torch.cuda.Event(enable_timing=True)
-    end_time = torch.cuda.Event(enable_timing=True)
-
-    start_time.record()
+    start_time = time.perf_counter()
     for _ in range(100):
-        buffer = vulkan_compute.create_buffer(data.size())
+        buffer = vulkan_compute.create_buffer(data.numel() * data.element_size())
         vulkan_compute.delete_buffer(buffer)
-    end_time.record()
-
-    torch.cuda.synchronize()
-    resource_time = start_time.elapsed_time(end_time)
+    resource_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
 
     metrics = vulkan_compute.get_metrics()
 
@@ -214,19 +190,13 @@ def test_descriptor_set_optimization(vulkan_compute: VulkanCompute):
     num_sets = 100
 
     # Create multiple descriptor sets
-    start_time = torch.cuda.Event(enable_timing=True)
-    end_time = torch.cuda.Event(enable_timing=True)
-
-    start_time.record()
-    descriptor_sets = []
+    start_time = time.perf_counter()
+    descriptor_sets: List[TensorDescriptor] = []
     for _ in range(num_sets):
         data = generate_test_data(size, batch_size=1)
         desc_set = vulkan_compute.create_descriptor_set(data)
         descriptor_sets.append(desc_set)
-    end_time.record()
-
-    torch.cuda.synchronize()
-    creation_time = start_time.elapsed_time(end_time)
+    creation_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
 
     metrics = vulkan_compute.get_metrics()
 

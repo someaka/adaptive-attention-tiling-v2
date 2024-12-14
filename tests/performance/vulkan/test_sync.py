@@ -10,9 +10,11 @@ mechanisms in the Adaptive Attention Tiling system, focusing on:
 """
 
 import time
+from ctypes import c_void_p, c_char_p, byref, c_float, c_uint32
 
 import pytest
 import torch
+import vulkan as vk
 
 from src.core.performance.vulkan.sync import VulkanSync
 
@@ -24,9 +26,76 @@ class TestVulkanSync:
     def setup(self):
         """Setup test environment."""
         assert torch.is_vulkan_available(), "Vulkan is not available"
-        self.sync = VulkanSync(enable_profiling=True)
+
+        # Create instance
+        app_info = vk.VkApplicationInfo(
+            sType=vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            pApplicationName=b"VulkanSyncTest",
+            applicationVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            pEngineName=b"No Engine",
+            engineVersion=vk.VK_MAKE_VERSION(1, 0, 0),
+            apiVersion=vk.VK_API_VERSION_1_0
+        )
+
+        create_info = vk.VkInstanceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            pApplicationInfo=app_info
+        )
+
+        self.instance = c_void_p()
+        result = vk.vkCreateInstance(byref(create_info), None, byref(self.instance))
+        assert result == vk.VK_SUCCESS
+
+        # Get physical device
+        physical_devices = vk.vkEnumeratePhysicalDevices(self.instance)
+        if not physical_devices:
+            raise RuntimeError("No Vulkan devices found")
+        self.physical_device = physical_devices[0]
+
+        # Find queue family
+        queue_props = vk.vkGetPhysicalDeviceQueueFamilyProperties(self.physical_device)
+        self.queue_family_index = next(
+            i for i, prop in enumerate(queue_props)
+            if prop.queueFlags & vk.VK_QUEUE_COMPUTE_BIT
+        )
+
+        # Create device
+        queue_create_info = vk.VkDeviceQueueCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            queueFamilyIndex=self.queue_family_index,
+            queueCount=1,
+            pQueuePriorities=(c_float * 1)(1.0)
+        )
+
+        device_create_info = vk.VkDeviceCreateInfo(
+            sType=vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            queueCreateInfoCount=1,
+            pQueueCreateInfos=queue_create_info
+        )
+
+        self.device = c_void_p()
+        result = vk.vkCreateDevice(self.physical_device, byref(device_create_info), None, byref(self.device))
+        assert result == vk.VK_SUCCESS
+
+        # Get queue
+        self.queue = c_void_p()
+        vk.vkGetDeviceQueue(self.device, self.queue_family_index, 0, byref(self.queue))
+
+        # Create sync manager
+        self.sync = VulkanSync(device=self.device, enable_profiling=True)
+        self.sync.set_queue(self.queue)
+
         self.sizes = [512, 1024, 2048]
         self.iterations = 10
+
+    def teardown_method(self):
+        """Cleanup after each test."""
+        if hasattr(self, 'sync'):
+            self.sync.cleanup()
+        if hasattr(self, 'device'):
+            vk.vkDestroyDevice(self.device, None)
+        if hasattr(self, 'instance'):
+            vk.vkDestroyInstance(self.instance, None)
 
     def test_fence_performance(self):
         """Test fence creation and wait performance."""
