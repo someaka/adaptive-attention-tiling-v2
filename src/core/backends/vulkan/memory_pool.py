@@ -10,17 +10,29 @@ implementing best practices for memory management including:
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
-from ctypes import c_void_p
+from ctypes import c_void_p, Structure, c_uint32, c_int, POINTER, cast, byref, addressof, c_buffer
 
 import vulkan as vk
-from vulkan.ext_types import VkDevice, VkPhysicalDevice, VkDeviceMemory, VkBuffer
 
+# Define Vulkan structures
+class VkMemoryType(Structure):
+    _fields_ = [
+        ("propertyFlags", c_int),
+        ("heapIndex", c_uint32),
+    ]
+
+class VkPhysicalDeviceMemoryProperties(Structure):
+    _fields_ = [
+        ("memoryTypeCount", c_uint32),
+        ("memoryTypes", VkMemoryType * 32),  # VK_MAX_MEMORY_TYPES
+        ("memoryHeapCount", c_uint32),
+        ("memoryHeaps", c_void_p * 16),  # VK_MAX_MEMORY_HEAPS
+    ]
 
 @dataclass
 class MemoryBlock:
     """Represents a block of GPU memory."""
-
-    memory: VkDeviceMemory
+    memory: c_void_p  # VkDeviceMemory
     size: int
     offset: int
     is_free: bool
@@ -34,8 +46,8 @@ class MemoryPool:
 
     def __init__(
         self,
-        device: VkDevice,
-        physical_device: VkPhysicalDevice,
+        device: c_void_p,  # VkDevice
+        physical_device: c_void_p,  # VkPhysicalDevice
         initial_size: int = 1024 * 1024,
     ):
         self.device = device
@@ -43,7 +55,9 @@ class MemoryPool:
         self.initial_size = initial_size
 
         # Get memory properties
-        self.memory_properties = vk.vkGetPhysicalDeviceMemoryProperties(physical_device)
+        memory_props = VkPhysicalDeviceMemoryProperties()
+        vk.vkGetPhysicalDeviceMemoryProperties(physical_device, memory_props)
+        self.memory_properties = memory_props
 
         # Memory pools for different usage patterns
         self.pools: Dict[int, List[MemoryBlock]] = {
@@ -66,18 +80,8 @@ class MemoryPool:
         alignment: int,
         memory_properties: int,
         memory_type_bits: int,
-    ) -> Tuple[VkDeviceMemory, int]:
-        """Allocate memory from the pool.
-        
-        Args:
-            size: Size in bytes
-            alignment: Required alignment
-            memory_properties: Desired memory properties flags
-            memory_type_bits: Memory type bits from requirements
-            
-        Returns:
-            Tuple of (memory handle, offset)
-        """
+    ) -> Tuple[c_void_p, int]:  # (VkDeviceMemory, offset)
+        """Allocate memory from the pool."""
         # Find suitable memory type
         memory_type = self._find_memory_type(memory_type_bits, memory_properties)
         if memory_type == -1:
@@ -123,7 +127,7 @@ class MemoryPool:
         self.pools[memory_properties].append(block)
         return memory, 0
 
-    def free(self, memory: VkDeviceMemory, offset: int):
+    def free(self, memory: c_void_p, offset: int):
         """Return memory block to the pool."""
         for blocks in self.pools.values():
             for block in blocks:
@@ -138,11 +142,13 @@ class MemoryPool:
                     return
 
     def bind_buffer(
-        self, buffer: VkBuffer, memory: VkDeviceMemory, offset: int
+        self, buffer: c_void_p, memory: c_void_p, offset: int
     ) -> None:
         """Bind buffer to allocated memory."""
         try:
-            vk.vkBindBufferMemory(self.device, buffer, memory, offset)
+            result = vk.vkBindBufferMemory(self.device, buffer, memory, offset)
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Failed to bind buffer memory: {result}")
         except Exception as e:
             raise RuntimeError(f"Failed to bind buffer memory: {e}")
 
@@ -150,10 +156,9 @@ class MemoryPool:
         self, type_filter: int, properties: int
     ) -> int:
         """Find suitable memory type index."""
-        mem_properties = self.memory_properties
-        for i in range(mem_properties.memoryTypeCount):
+        for i in range(self.memory_properties.memoryTypeCount):
             if ((type_filter & (1 << i)) and 
-                (mem_properties.memoryTypes[i].propertyFlags & properties) == properties):
+                (self.memory_properties.memoryTypes[i].propertyFlags & properties) == properties):
                 return i
         return -1
 
@@ -184,7 +189,7 @@ class MemoryPool:
 
         return best_fit
 
-    def _allocate_memory(self, size: int, memory_type: int) -> VkDeviceMemory:
+    def _allocate_memory(self, size: int, memory_type: int) -> c_void_p:
         """Allocate new Vulkan memory."""
         alloc_info = vk.VkMemoryAllocateInfo(
             sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
@@ -193,21 +198,29 @@ class MemoryPool:
             memoryTypeIndex=memory_type,
         )
 
+        memory = c_void_p()
         try:
-            return vk.vkAllocateMemory(self.device, alloc_info, None)
+            result = vk.vkAllocateMemory(self.device, alloc_info, None, memory)
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Memory allocation failed: {result}")
+            return memory
         except Exception as e:
             raise RuntimeError(f"Memory allocation failed: {e}")
 
     def _map_memory(self, block: MemoryBlock) -> c_void_p:
         """Map host-visible memory."""
         try:
-            return vk.vkMapMemory(
+            data_ptr = c_void_p()
+            result = vk.vkMapMemory(
                 self.device,
                 block.memory,
-                offset=block.offset,
-                size=block.size,
-                flags=0,
+                block.offset,
+                block.size,
+                byref(data_ptr)
             )
+            if result != vk.VK_SUCCESS:
+                raise RuntimeError(f"Memory mapping failed: {result}")
+            return data_ptr
         except Exception as e:
             raise RuntimeError(f"Memory mapping failed: {e}")
 
