@@ -28,23 +28,13 @@ class TestScaleCohomology:
         return 4
 
     @pytest.fixture
-    def scale_range(self):
-        """Range of scales to test."""
-        return (0.1, 10.0)
-
-    @pytest.fixture
-    def num_scales(self):
-        """Number of discrete scales."""
-        return 32
-
-    @pytest.fixture
-    def scale_system(self, space_dim, scale_range, num_scales):
-        """Create a test scale cohomology system."""
+    def scale_system(self, space_dim):
+        """Create scale system fixture."""
         return ScaleCohomology(
             dim=space_dim,
-            scale_min=scale_range[0],
-            scale_max=scale_range[1],
-            num_scales=num_scales,
+            num_scales=4,
+            min_scale=0.1,
+            max_scale=10.0
         )
 
     def test_scale_connection(self, scale_system, space_dim):
@@ -259,7 +249,7 @@ class TestScaleCohomology:
         cs_result = cs_operator(correlation, x1, x2, g)
 
         assert torch.allclose(
-            cs_result, torch.tensor(0.0), atol=1e-4
+            cs_result, torch.tensor(0.0, dtype=cs_result.dtype), atol=1e-4
         ), "Correlation should satisfy CS equation"
 
         # Test scaling behavior
@@ -293,7 +283,7 @@ class TestScaleCohomology:
         # Test convergence
         x_near = torch.tensor(0.1)
         direct = op1(x_near) * op2(torch.tensor(0.0))
-        expanded = sum(c * o(x_near) for c, o in ope)
+        expanded = torch.tensor(sum(c * o(x_near) for c, o in ope))
 
         assert torch.allclose(
             direct, expanded, rtol=1e-2
@@ -320,8 +310,9 @@ class TestScaleCohomology:
 
     def test_conformal_symmetry(self, scale_system, space_dim):
         """Test conformal symmetry properties."""
-        # Create test field
+        # Create test field and state
         field = torch.randn(10, 10)
+        state = torch.randn(10, space_dim)  # Define state for mutual information tests
 
         # Test special conformal transformations
         def test_special_conformal(b_vector):
@@ -347,16 +338,30 @@ class TestScaleCohomology:
         def test_primary_scaling(field, dimension):
             """Test primary field scaling."""
             lambda_ = torch.tensor(2.0)
-            transformed = scale_system.transform_primary(field, lambda_, dimension)
+            transformed = scale_system.transform_primary(field, lambda_, dimension=dimension)
             return torch.allclose(transformed, field * lambda_**dimension, rtol=1e-3)
 
-        assert test_primary_scaling(
-            field, dim=1.0
-        ), "Primary fields should transform correctly"
+        assert test_primary_scaling(field, dimension=torch.tensor(1.0)), "Primary fields should transform correctly"
 
         # Test conformal blocks
-        blocks = scale_system.conformal_blocks(field)
+        blocks = scale_system.conformal_blocks(field, dimension=space_dim)
         assert len(blocks) > 0, "Should decompose into conformal blocks"
+
+        # Test mutual information
+        def test_mutual_info_monogamy(regions):
+            """Test strong subadditivity via mutual information."""
+            I12 = scale_system.mutual_information(state, regions[0], regions[1])
+            I13 = scale_system.mutual_information(state, regions[0], regions[2])
+            I23 = scale_system.mutual_information(state, regions[1], regions[2])
+            return I12 + I13 + I23 >= 0
+
+        # Create test regions
+        test_regions = [
+            torch.tensor([[0, 0], [1, 1]]),
+            torch.tensor([[1, 1], [2, 2]]),
+            torch.tensor([[2, 2], [3, 3]])
+        ]
+        assert test_mutual_info_monogamy(test_regions), "Mutual information should satisfy monogamy"
 
     def test_holographic_scaling(self, scale_system, space_dim):
         """Test holographic scaling relations."""
@@ -383,7 +388,7 @@ class TestScaleCohomology:
         # Test holographic c-theorem
         c_function = scale_system.compute_c_function(bulk_field, radial_coordinate)
         assert torch.all(
-            c_function[1:] - c_function[:-1] <= 0
+            c_function[1:] - c_function[:-1] <= torch.tensor(0.0)
         ), "C-function should decrease monotonically"
 
         # Test holographic entanglement
@@ -391,9 +396,9 @@ class TestScaleCohomology:
         entanglement = scale_system.holographic_entanglement(
             bulk_field, subsystem, radial_coordinate
         )
-        assert entanglement > 0, "Entanglement entropy should be positive"
+        assert entanglement > torch.tensor(0.0), "Entanglement entropy should be positive"
 
-    def test_entanglement_scaling(self, scale_system):
+    def test_entanglement_scaling(self, scale_system, space_dim):
         """Test entanglement entropy scaling."""
         # Create test state
         state = torch.randn(32, 32)  # Lattice state
@@ -406,7 +411,7 @@ class TestScaleCohomology:
             for size in region_sizes:
                 region = torch.ones(size, size)
                 entropy = scale_system.entanglement_entropy(state, region)
-                area = 4 * size  # Perimeter of square region
+                area = torch.tensor(4 * size, dtype=torch.float)  # Perimeter of square region
                 entropies.append(entropy)
                 areas.append(area)
 
@@ -423,7 +428,7 @@ class TestScaleCohomology:
             I12 = scale_system.mutual_information(state, regions[0], regions[1])
             I13 = scale_system.mutual_information(state, regions[0], regions[2])
             I23 = scale_system.mutual_information(state, regions[1], regions[2])
-            return I12 + I13 + I23 >= 0
+            return I12 + I13 + I23 >= torch.tensor(0.0)
 
         test_regions = [torch.ones(4, 4), torch.ones(4, 4), torch.ones(4, 4)]
         assert test_mutual_info_monogamy(
@@ -433,5 +438,8 @@ class TestScaleCohomology:
         # Test critical scaling
         if hasattr(scale_system, "is_critical"):
             critical_state = scale_system.prepare_critical_state(32)
-            log_terms = scale_system.logarithmic_corrections(critical_state)
+            log_terms = scale_system.logarithmic_corrections(
+                critical_state,
+                dimension=space_dim
+            )
             assert len(log_terms) > 0, "Critical state should have log corrections"

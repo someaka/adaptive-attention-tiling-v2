@@ -10,8 +10,7 @@ from ..backends.base import AttentionBackend
 class BaseAttention(Protocol):
     """Base protocol for attention mechanisms."""
 
-    def __init__(self, backend: AttentionBackend):
-        self.backend = backend
+    backend: AttentionBackend
 
     def forward(
         self,

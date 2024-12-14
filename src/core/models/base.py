@@ -5,7 +5,7 @@ This module provides base classes for representing geometric properties of neura
 - LayerGeometry: Base class for layer-specific geometry
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -73,6 +73,15 @@ class LayerGeometry(nn.Module):
         return framework
 
 
+class LayerGeometryDict(nn.ModuleDict):
+    """ModuleDict that preserves LayerGeometry type information."""
+    
+    def __getitem__(self, key: str) -> LayerGeometry:
+        """Get layer by name with proper type."""
+        module = super().__getitem__(key)
+        return cast(LayerGeometry, module)
+
+
 class ModelGeometry(nn.Module):
     """Base class for model geometry."""
 
@@ -98,7 +107,7 @@ class ModelGeometry(nn.Module):
         self.query_dim = query_dim
         self.key_dim = key_dim
         
-        self.layers = nn.ModuleDict(layers or {})
+        self.layers = LayerGeometryDict(layers or {})
         self.attention_heads = nn.ModuleList(attention_heads or [])
 
     def add_layer(self, name: str, layer: LayerGeometry):
@@ -126,6 +135,9 @@ class ModelGeometry(nn.Module):
             
         Returns:
             Layer geometry
+            
+        Raises:
+            ValueError: If layer name is unknown
         """
         if name not in self.layers:
             raise ValueError(f"Unknown layer: {name}")

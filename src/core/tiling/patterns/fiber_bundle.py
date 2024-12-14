@@ -7,13 +7,14 @@ understanding pattern relationships and transformations.
 """
 
 from dataclasses import dataclass
-from typing import Generic, Protocol, Tuple, TypeVar
+from typing import Generic, Protocol, Tuple, TypeVar, Optional, Union
 
 import torch
 from torch import nn
 
 T = TypeVar("T")
 S = TypeVar("S")
+StructureGroup = TypeVar("StructureGroup", torch.Tensor, str)
 
 
 @dataclass
@@ -26,11 +27,11 @@ class LocalChart(Generic[T]):
 
 
 @dataclass
-class FiberChart(Generic[T]):
+class FiberChart(Generic[T, StructureGroup]):
     """Local trivialization of the fiber."""
 
     fiber_coordinates: T
-    structure_group: T
+    structure_group: StructureGroup
     transition_functions: dict
 
 
@@ -41,7 +42,7 @@ class FiberBundle(Protocol[T]):
         """Projects from total space to base space."""
         ...
 
-    def local_trivialization(self, point: T) -> Tuple[LocalChart[T], FiberChart[T]]:
+    def local_trivialization(self, point: T) -> Tuple[LocalChart[T], FiberChart[T, str]]:
         """Provides local product structure."""
         ...
 
@@ -66,7 +67,7 @@ class PatternFiberBundle(nn.Module):
         base_dim: int,
         fiber_dim: int,
         structure_group: str = "O(n)",
-        device: torch.device = None,
+        device: Optional[torch.device] = None,
     ):
         super().__init__()
         self.base_dim = base_dim
@@ -88,7 +89,7 @@ class PatternFiberBundle(nn.Module):
 
     def local_trivialization(
         self, point: torch.Tensor
-    ) -> Tuple[LocalChart[torch.Tensor], FiberChart[torch.Tensor]]:
+    ) -> Tuple[LocalChart[torch.Tensor], FiberChart[torch.Tensor, str]]:
         """Provides local product structure."""
         base_coords = self.bundle_projection(point)
         fiber_coords = point[..., self.base_dim :]

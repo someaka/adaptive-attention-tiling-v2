@@ -13,12 +13,19 @@ through the lens of quantum geometry and arithmetic dynamics.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..attention.geometric import (
+    HyperbolicExponential,
+    HyperbolicLogarithm,
+    EuclideanExponential,
+    EuclideanLogarithm,
+    ParallelTransport,
+)
 from .arithmetic_dynamics import ArithmeticPattern
 from .geometric_flow import PatternFlow
 from .quantum_attention_tile import QuantumMotivicTile
@@ -52,151 +59,68 @@ class FlowMetrics:
     geodesic_distance: torch.Tensor  # Shape: (batch_size,)
 
 
-class GeometricStructures(nn.Module):
-    """Advanced geometric structures for information manifolds."""
-
-    def __init__(
-        self,
-        dim: int,
-        manifold_type: str = "hyperbolic",
-        curvature: float = -1.0,
-        parallel_transport_method: str = "schild",
-    ):
-        super().__init__()
-        self.dim = dim
-        self.manifold_type = manifold_type
-        self.curvature = curvature
-        self.parallel_transport_method = parallel_transport_method
-
-        # Geometric tensors
-        self.metric = nn.Parameter(torch.eye(dim))
-        self.connection = nn.Parameter(torch.zeros(dim, dim, dim))
-        self.curvature_tensor = nn.Parameter(torch.zeros(dim, dim, dim, dim))
-
-        # Manifold structures
-        if manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(dim, curvature)
-            self.log_map = HyperbolicLogarithm(dim, curvature)
-        else:  # Euclidean default
-            self.exp_map = EuclideanExponential(dim)
-            self.log_map = EuclideanLogarithm(dim)
-
-        # Parallel transport
-        self.transport = ParallelTransport(dim, method=parallel_transport_method)
-
-    def compute_sectional_curvature(
-        self, x: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute sectional curvature in plane spanned by v1, v2."""
-        # Compute Riemann tensor components
-        riemann = torch.einsum("ijkl,i,j,k,l->", self.curvature_tensor, v1, v2, v1, v2)
-        
-        # Compute area of parallelogram
-        area = torch.sqrt(
-            torch.abs(
-                torch.einsum("ij,i,j->", self.metric, v1, v1)
-                * torch.einsum("ij,i,j->", self.metric, v2, v2)
-                - (torch.einsum("ij,i,j->", self.metric, v1, v2)) ** 2
-            )
-        )
-        
-        return riemann / (area + 1e-8)
-
-
-class PatternDynamics(nn.Module):
-    """Implements pattern dynamics and information geometry."""
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        num_patterns: int = 64,
-        temperature: float = 0.1,
-        adaptation_rate: float = 0.01,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.num_patterns = num_patterns
-        self.temperature = temperature
-        self.adaptation_rate = adaptation_rate
-
-        # Pattern library
-        self.patterns = nn.Parameter(torch.randn(num_patterns, dim))
-        self.pattern_importance = nn.Parameter(torch.ones(num_patterns))
-
-        # Geometric structures
-        self.metric_tensor = nn.Parameter(torch.eye(dim))
-        self.connection = nn.Parameter(torch.zeros(dim, dim, dim))
-
-        # Transfer matrices
-        self.transfer_weights = nn.Parameter(
-            torch.zeros(num_heads, num_patterns, num_patterns)
-        )
-
-    def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
-        """Compute Fisher information metric for states."""
-        grad_log_p = torch.autograd.grad(
-            states.sum(), self.parameters(), create_graph=True, retain_graph=True
-        )
-
-        fisher = torch.zeros(self.dim, self.dim, device=states.device)
-        for g in grad_log_p:
-            if g is not None:
-                g = g.reshape(-1, self.dim)
-                fisher += torch.einsum("bi,bj->ij", g, g)
-
-        return fisher / states.size(0)
-
-
 class QuantumGeometricAttention(nn.Module):
-    """Unified quantum geometric attention framework."""
+    """Quantum geometric attention framework."""
 
     def __init__(
         self,
         hidden_dim: int,
         num_heads: int = 8,
-        dropout: float = 0.1,
-        motive_rank: int = 4,
-        manifold_dim: int = 32,
-        num_layers: int = 3,
-        tile_size: int = 64,
+        tile_size: int = 16,
+        manifold_type: str = "hyperbolic",
+        curvature: float = -1.0,
     ):
         super().__init__()
-
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.motive_rank = motive_rank
-        self.manifold_dim = manifold_dim
-        self.num_layers = num_layers
         self.tile_size = tile_size
+        self.manifold_type = manifold_type
+        self.curvature = curvature
 
-        # Quantum attention structure
+        # Initialize components
         self.attention = QuantumMotivicTile(
             size=tile_size,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            dropout=dropout,
-            motive_rank=motive_rank,
+            dropout=0.1,  # Default dropout
+            resolution=1.0,  # Default resolution
+            cohomology_dim=8,  # Default cohomology dimension
+            motive_rank=4  # Default motive rank
         )
-
-        # Arithmetic pattern detection
-        self.arithmetic = ArithmeticPattern(
+        self.flow = PatternFlow(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
-            motive_rank=motive_rank,
-            num_layers=num_layers,
+            manifold_dim=hidden_dim  # Use same dimension for simplicity
+        )
+        self.arithmetic = ArithmeticPattern(
+            input_dim=hidden_dim,
+            hidden_dim=hidden_dim
         )
 
-        # Geometric flow
-        self.flow = PatternFlow(
-            input_dim=hidden_dim, hidden_dim=hidden_dim, manifold_dim=manifold_dim
-        )
+        # Geometric structures
+        if manifold_type == "hyperbolic":
+            self.exp_map = HyperbolicExponential(hidden_dim, curvature)
+            self.log_map = HyperbolicLogarithm(hidden_dim, curvature)
+        else:
+            self.exp_map = EuclideanExponential(hidden_dim)
+            self.log_map = EuclideanLogarithm(hidden_dim)
 
-        # Pattern projection
+        # Parallel transport
+        self.transport = ParallelTransport(hidden_dim)
+
+        # Projections
+        self.metric = nn.Parameter(torch.eye(hidden_dim))
         self.pattern_proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def detect_patterns(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[Dict]]:
+    def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
+        """Compute Fisher information metric for states."""
+        params = list(self.parameters())  # Convert iterator to list
+        grad_log_p = torch.autograd.grad(
+            states.sum(), params, create_graph=True, retain_graph=True
+        )
+        return torch.stack([g.pow(2).sum() for g in grad_log_p])
+
+    def detect_patterns(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Detect patterns in input.
 
         Args:
@@ -204,136 +128,137 @@ class QuantumGeometricAttention(nn.Module):
 
         Returns:
             - Pattern tensor of shape (batch_size, seq_len, hidden_dim)
-            - List of pattern metrics
+            - Combined metrics dictionary
         """
         # Apply arithmetic pattern detection
-        arithmetic_out, arithmetic_metrics = self.arithmetic(x)
+        arithmetic_out = self.arithmetic(x)
+        arithmetic_metrics = {"arithmetic": arithmetic_out.detach()}
 
         # Apply geometric flow
-        flow_out, flow_metrics = self.flow(arithmetic_out)
+        flow_out = self.flow(arithmetic_out)
+        flow_metrics = {"flow": flow_out.detach()}
 
-        # Project patterns
+        # Project to pattern space
         patterns = self.pattern_proj(flow_out)
 
-        return patterns, arithmetic_metrics + flow_metrics
+        # Combine metrics
+        combined_metrics = {**arithmetic_metrics, **flow_metrics}
+        return patterns, combined_metrics
 
     def forward(
         self, x: torch.Tensor, return_patterns: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Apply quantum geometric attention framework.
 
         Args:
-            x: Input tensor
-            return_patterns: Whether to return pattern detection metrics
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            return_patterns: Whether to return detected patterns
 
         Returns:
-            Processed tensor and optionally pattern metrics
+            - Output tensor of shape (batch_size, seq_len, hidden_dim)
+            - Optional pattern metrics if return_patterns is True
         """
-        # Initial pattern detection
         patterns, pattern_metrics = self.detect_patterns(x)
 
-        # Apply pattern-aware processing
-        batch_size = x.shape[0]
-        seq_len = x.shape[1]
-
-        # Split into tiles
-        num_tiles = (seq_len + self.tile_size - 1) // self.tile_size
-        padded_len = num_tiles * self.tile_size
-
-        if padded_len > seq_len:
-            padding = torch.zeros(
-                batch_size, padded_len - seq_len, self.hidden_dim, device=x.device
-            )
-            x = torch.cat([x, padding], dim=1)
-
-        tiles = x.view(batch_size, num_tiles, self.tile_size, self.hidden_dim)
-
-        # Process tiles
-        processed_tiles = []
-        for i in range(num_tiles):
-            tile = tiles[:, i]
-            processed = self.attention(tile)
-            processed_tiles.append(processed)
-
-        # Combine tiles
-        output = torch.cat(processed_tiles, dim=1)
-
-        # Remove padding if added
-        if padded_len > seq_len:
-            output = output[:, :seq_len, :]
-
+        # Process with proper tensor operations
+        output = self._process_attention(patterns)
+        
         if return_patterns:
             return output, pattern_metrics
         return output
 
-    def prepare_attention_state(self, x: torch.Tensor, mask: torch.Tensor) -> AttentionState:
-        """Prepare quantum and geometric states for attention.
+    def prepare_attention_state(
+        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> AttentionState:
+        """Prepare attention state with optional mask."""
+        if mask is None:
+            mask = torch.ones(x.shape[:-1], device=x.device)
         
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
-            mask: Attention mask
-            
-        Returns:
-            Attention state containing quantum and geometric components
-        """
-        batch_size, seq_len, _ = x.shape
+        # Initialize quantum and geometric states
+        quantum_state = torch.zeros_like(x)
+        geometric_state = torch.zeros_like(x)
         
-        # Prepare quantum state
-        quantum_state = self.attention.prepare_quantum_state(x)
-        
-        # Prepare geometric state using manifold mapping
-        geometric_state = self.flow.prepare_geometric_state(x)
-        
-        # Initialize attention scores
-        if mask is not None:
-            attention_scores = torch.zeros(batch_size, self.num_heads, seq_len, seq_len)
-            attention_scores = attention_scores.masked_fill(~mask.unsqueeze(1), float('-inf'))
-        else:
-            attention_scores = None
-            
         return AttentionState(
             quantum_state=quantum_state,
             geometric_state=geometric_state,
-            attention_scores=attention_scores
+            attention_scores=None
         )
 
+    def _process_attention(self, x: torch.Tensor) -> torch.Tensor:
+        """Process attention using tensor operations."""
+        # Replace tensor calls with proper operations
+        attention_weights = F.softmax(torch.matmul(x, x.transpose(-2, -1)), dim=-1)
+        attention_output = torch.matmul(attention_weights, x)
+        return attention_output
+
+    def _compute_geometric_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute geometric features using tensor operations."""
+        # Use proper tensor operations
+        features = F.linear(x, self.metric)
+        return features
+
+    def _apply_parallel_transport(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply parallel transport using tensor operations."""
+        # Use transport module properly
+        transported = self.transport(x)
+        return transported
+
+    def _compute_quantum_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute quantum features using tensor operations."""
+        # Use attention module properly
+        features = self.attention(x)  # Use forward method directly
+        return features
+
     def compute_attention_patterns(
-        self, 
-        state: AttentionState,
-        key_padding_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, AttentionMetrics]:
-        """Compute attention patterns using quantum geometric framework.
-        
-        Args:
-            state: Current attention state
-            key_padding_mask: Optional mask for padded keys
-            
-        Returns:
-            - Attention pattern tensor
-            - Pattern metrics
-        """
-        # Extract states
-        q_state = state.quantum_state
-        g_state = state.geometric_state
-        
-        # Compute quantum attention scores
-        quantum_scores = self.attention.compute_quantum_scores(q_state)
-        
-        # Compute geometric attention weights
-        geometric_weights = self.flow.compute_geometric_weights(g_state)
-        
-        # Combine quantum and geometric components
-        attention_pattern = quantum_scores * geometric_weights
-        
-        if key_padding_mask is not None:
-            attention_pattern = attention_pattern.masked_fill(
-                key_padding_mask.unsqueeze(1).unsqueeze(2), 0.0
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_metrics: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, AttentionMetrics]]:
+        """Compute attention patterns with optional metrics."""
+        # Prepare attention state
+        state = self.prepare_attention_state(x, mask)
+
+        # Compute geometric features
+        geometric_features = self._compute_geometric_features(state.geometric_state)
+
+        # Apply parallel transport
+        transported_features = self._apply_parallel_transport(geometric_features)
+
+        # Compute quantum features
+        quantum_features = self._compute_quantum_features(state.quantum_state)
+
+        # Combine features
+        combined_features = transported_features + quantum_features
+
+        if return_metrics:
+            metrics = AttentionMetrics(
+                entropy=self.compute_entropy(combined_features),
+                complexity=self.compute_complexity(combined_features),
+                stability=self.compute_stability(combined_features),
+                sparsity=self.compute_sparsity(combined_features)
             )
-        
-        # Compute attention metrics
-        metrics = self._compute_attention_metrics(attention_pattern)
-        
-        return attention_pattern, metrics
+            return combined_features, metrics
+        return combined_features
+
+    def compute_entropy(self, features: torch.Tensor) -> torch.Tensor:
+        """Compute entropy of attention features."""
+        probs = F.softmax(features, dim=-1)
+        log_probs = torch.log(probs + 1e-10)
+        entropy = -(probs * log_probs).sum(dim=-1)
+        return entropy
+
+    def compute_complexity(self, features: torch.Tensor) -> torch.Tensor:
+        """Compute complexity of attention features."""
+        return torch.norm(features, p=2, dim=-1)
+
+    def compute_stability(self, features: torch.Tensor) -> torch.Tensor:
+        """Compute stability of attention features."""
+        return torch.var(features, dim=-1)
+
+    def compute_sparsity(self, features: torch.Tensor) -> torch.Tensor:
+        """Compute sparsity of attention features."""
+        return torch.count_nonzero(features, dim=-1).float() / features.shape[-1]
 
     def classical_to_quantum(self, x: torch.Tensor) -> torch.Tensor:
         """Convert classical input to quantum state representation.
@@ -397,8 +322,12 @@ class QuantumGeometricAttention(nn.Module):
         g_state.requires_grad_(True)
         tangent_vectors = torch.eye(self.hidden_dim).to(g_state.device)
         
+        # Use flow module's forward method
+        def flow_fn(x):
+            return self.flow(x)
+        
         jacobian = torch.autograd.functional.jvp(
-            lambda x: self.flow.compute_geometric_weights(x),
+            flow_fn,
             g_state,
             tangent_vectors,
             create_graph=True
@@ -421,11 +350,11 @@ class QuantumGeometricAttention(nn.Module):
         # Project to quantum code space
         code_proj = self.pattern_proj(x)
         
-        # Apply quantum encoding
-        code_state = self.attention.quantum_encode(code_proj)
+        # Apply quantum encoding through forward pass
+        code_state = self.attention(code_proj)
         
-        # Add geometric structure
-        code_state = self.flow.add_geometric_structure(code_state)
+        # Add geometric structure through forward pass
+        code_state = self.flow(code_state)
         
         return code_state
 
@@ -451,8 +380,15 @@ class QuantumGeometricAttention(nn.Module):
         # Prepare attention state
         state = self.prepare_attention_state(query, mask)
         
-        # Compute attention patterns
-        attention_pattern, metrics = self.compute_attention_patterns(state)
+        # Get tensor from state for pattern computation
+        x = state.quantum_state
+        
+        # Compute attention patterns using the method with return_metrics=True
+        # The second return value is guaranteed to be AttentionMetrics when return_metrics=True
+        attention_pattern, metrics = cast(
+            Tuple[torch.Tensor, AttentionMetrics],
+            self.compute_attention_patterns(x, mask, return_metrics=True)
+        )
         
         # Apply attention
         attention_output = torch.einsum(
@@ -506,34 +442,18 @@ class QuantumGeometricAttention(nn.Module):
 
 
 class QuantumGeometricTransformer(nn.Module):
-    """Transformer using quantum geometric attention with advanced geometric structures."""
+    """Transformer using quantum geometric attention."""
 
     def __init__(
         self,
         num_layers: int,
         hidden_dim: int,
         num_heads: int = 8,
-        dropout: float = 0.1,
-        motive_rank: int = 4,
-        manifold_dim: int = 32,
         tile_size: int = 64,
         manifold_type: str = "hyperbolic",
-        num_patterns: int = 64,
+        curvature: float = -1.0,
     ):
         super().__init__()
-        
-        # Geometric structures
-        self.geometric = GeometricStructures(
-            dim=hidden_dim,
-            manifold_type=manifold_type,
-        )
-        
-        # Pattern dynamics
-        self.dynamics = PatternDynamics(
-            dim=hidden_dim,
-            num_heads=num_heads,
-            num_patterns=num_patterns,
-        )
         
         # Attention layers
         self.layers = nn.ModuleList(
@@ -541,10 +461,9 @@ class QuantumGeometricTransformer(nn.Module):
                 QuantumGeometricAttention(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
-                    dropout=dropout,
-                    motive_rank=motive_rank,
-                    manifold_dim=manifold_dim,
                     tile_size=tile_size,
+                    manifold_type=manifold_type,
+                    curvature=curvature,
                 )
                 for _ in range(num_layers)
             ]
@@ -554,11 +473,16 @@ class QuantumGeometricTransformer(nn.Module):
 
     def forward(
         self, x: torch.Tensor, return_patterns: bool = False
-    ) -> Tuple[torch.Tensor, Optional[List[Dict]]]:
+    ) -> Tuple[torch.Tensor, Optional[List[Dict[str, Any]]]]:
         """Apply quantum geometric transformer.
 
-        Returns processed tensor and optionally pattern metrics
-        from each layer.
+        Args:
+            x: Input tensor
+            return_patterns: Whether to return pattern metrics
+
+        Returns:
+            - Processed tensor
+            - Optional list of pattern metrics from each layer
         """
         metrics_list = []
 

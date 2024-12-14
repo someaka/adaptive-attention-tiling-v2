@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from ...core.quantum.state_space import QuantumState
+from .state import StateValidator
 
 
 @dataclass
@@ -119,6 +120,7 @@ class DecoherenceValidator:
 
     def __init__(self, time_steps: int = 100):
         self.time_steps = time_steps
+        self.state_validator = StateValidator()  # Add StateValidator instance
 
     def validate_decoherence(
         self, initial: QuantumState, trajectory: List[QuantumState]
@@ -137,10 +139,10 @@ class DecoherenceValidator:
         entropy_increase = self._compute_entropy_increase(initial, trajectory[-1])
 
         return DecoherenceValidation(
-            decoherence_time=decoherence_time.item(),
-            decay_rate=decay_rate.item(),
-            purity_loss=purity_loss.item(),
-            entropy_increase=entropy_increase.item(),
+            decoherence_time=float(decoherence_time.item()),
+            decay_rate=float(decay_rate.item()),
+            purity_loss=float(purity_loss.item()),
+            entropy_increase=float(entropy_increase.item()),
         )
 
     def _compute_decoherence_time(self, trajectory: List[QuantumState]) -> torch.Tensor:
@@ -169,8 +171,10 @@ class DecoherenceValidator:
         energies = []
 
         for state in trajectory:
+            # Get Hamiltonian from validator
+            H = self.state_validator._hamiltonian(state.num_qubits)
             energy = torch.trace(
-                torch.matmul(state.density_matrix(), state.hamiltonian())
+                torch.matmul(state.density_matrix(), H)
             )
             energies.append(energy)
 
@@ -231,24 +235,37 @@ class AdiabaticValidator:
         trajectory: List[QuantumState],
         hamiltonians: List[torch.Tensor],
     ) -> AdiabaticValidation:
-        """Validate adiabatic evolution."""
-        # Check energy gap
-        gap = self._compute_energy_gap(hamiltonians)
+        """Validate adiabatic evolution.
+        
+        Args:
+            initial: Initial quantum state
+            trajectory: Evolution trajectory
+            hamiltonians: Time-dependent Hamiltonians
+            
+        Returns:
+            Validation results for adiabatic evolution
+        """
+        # Compute minimum energy gap
+        energy_gap = self._compute_energy_gap(hamiltonians)
 
         # Compute transition probability
-        transition = self._compute_transition(initial, trajectory, hamiltonians)
+        transition_prob = self._compute_transition(initial, trajectory, hamiltonians)
 
-        # Check if evolution is adiabatic
-        adiabatic = transition < self.tolerance
-
-        # Compute ground state fidelity
+        # Compute final fidelity
         fidelity = self._compute_fidelity(trajectory[-1], hamiltonians[-1])
 
+        # Check adiabaticity
+        is_adiabatic = bool(
+            energy_gap > self.tolerance and
+            transition_prob < self.tolerance and
+            fidelity > (1 - self.tolerance)
+        )
+
         return AdiabaticValidation(
-            adiabatic=adiabatic,
-            energy_gap=gap.item(),
-            transition_prob=transition.item(),
-            fidelity=fidelity.item(),
+            adiabatic=is_adiabatic,  # Use boolean instead of tensor
+            energy_gap=float(energy_gap.item()),
+            transition_prob=float(transition_prob.item()),
+            fidelity=float(fidelity.item())
         )
 
     def _compute_energy_gap(self, hamiltonians: List[torch.Tensor]) -> torch.Tensor:

@@ -9,13 +9,38 @@ This module implements the cohomological structure of pattern spaces, integratin
 """
 
 from dataclasses import dataclass
-from typing import List, TypeVar
+from typing import List, TypeVar, Protocol, Generic, Optional
 
 import torch
 from torch import nn
 
-from .fiber_bundle import FiberBundle
-from .riemannian import PatternRiemannianStructure
+from ...patterns.riemannian import PatternRiemannianStructure
+
+
+class FiberBundle(Protocol):
+    """Protocol for fiber bundles."""
+    
+    def get_fiber(self, point: torch.Tensor) -> torch.Tensor: ...
+    def get_connection(self, point: torch.Tensor) -> torch.Tensor: ...
+
+
+class RiemannianFiberBundle(nn.Module):
+    """Concrete implementation of FiberBundle for Riemannian manifolds."""
+    
+    def __init__(self, dimension: int):
+        super().__init__()
+        self.dimension = dimension
+        self.fiber_map = nn.Linear(dimension, dimension)
+        self.connection_map = nn.Linear(dimension, dimension * dimension)
+        
+    def get_fiber(self, point: torch.Tensor) -> torch.Tensor:
+        """Get fiber at a point."""
+        return self.fiber_map(point)
+        
+    def get_connection(self, point: torch.Tensor) -> torch.Tensor:
+        """Get connection at a point."""
+        return self.connection_map(point).view(-1, self.dimension, self.dimension)
+
 
 T = TypeVar("T", bound="ArithmeticForm")
 
@@ -50,7 +75,7 @@ class ArithmeticForm:
         """Initialize dynamical system state."""
         return self.coefficients.clone()
 
-    def wedge(self, other: T) -> T:
+    def wedge(self, other: "ArithmeticForm") -> "ArithmeticForm":
         """Compute the wedge product with arithmetic height consideration."""
         new_degree = self.degree + other.degree
         new_coeffs = torch.einsum("i,j->ij", self.coefficients, other.coefficients)
@@ -71,17 +96,39 @@ class ArithmeticForm:
         # Implement dynamics following arithmetic_dynamics.py
         return self.dynamics_state + other_state  # Placeholder
 
+    def exterior_derivative(self) -> "ArithmeticForm":
+        """Compute the exterior derivative of the form."""
+        # For a k-form, d increases degree by 1
+        new_degree = self.degree + 1
+        
+        # Compute exterior derivative coefficients
+        # This is a simplified implementation - in practice would depend on form degree
+        d_coeffs = torch.gradient(self.coefficients)[0]
+        
+        result = ArithmeticForm(new_degree, d_coeffs)
+        result.height_data = self.height_data
+        result.dynamics_state = self.dynamics_state
+        return result
+
 
 class MotivicCohomology:
     """Represents motivic cohomology for attention patterns."""
 
     def __init__(
         self,
-        base_space: FiberBundle,
+        base_space: RiemannianFiberBundle,
         hidden_dim: int,
         motive_rank: int = 4,
         num_primes: int = 8,
     ):
+        """Initialize motivic cohomology.
+        
+        Args:
+            base_space: Base space fiber bundle
+            hidden_dim: Hidden dimension for quantum states
+            motive_rank: Rank of the motive
+            num_primes: Number of prime bases for height computations
+        """
         self.base_space = base_space
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
@@ -179,13 +226,27 @@ class QuantumMotivicCohomology:
     def __init__(
         self, metric: PatternRiemannianStructure, hidden_dim: int, motive_rank: int = 4
     ):
+        """Initialize quantum motivic cohomology.
+        
+        Args:
+            metric: Riemannian structure for pattern space
+            hidden_dim: Hidden dimension for quantum states
+            motive_rank: Rank of the motive
+        """
         self.metric = metric
-        self.motivic = MotivicCohomology(metric.base_space, hidden_dim, motive_rank)
+        # Create a RiemannianFiberBundle with the correct dimension
+        base_space = RiemannianFiberBundle(dimension=metric.manifold_dim)
+        self.motivic = MotivicCohomology(base_space, hidden_dim, motive_rank)
         self.quantum_structure = self._initialize_quantum()
 
     def _initialize_quantum(self) -> torch.Tensor:
-        """Initialize quantum structure."""
-        return torch.eye(self.metric.dimension)
+        """Initialize quantum structure.
+        
+        Returns:
+            Quantum structure matrix of shape [dimension × dimension]
+        """
+        # Use manifold_dim which is guaranteed to be an int
+        return torch.eye(self.metric.manifold_dim, dtype=torch.float32)
 
     def compute_quantum_motive(self, form: ArithmeticForm) -> torch.Tensor:
         """Compute quantum motivic cohomology."""
@@ -237,9 +298,14 @@ class CohomologyGroup:
         return new_group
 
     def _is_closed(self, form: ArithmeticForm) -> bool:
-        """Check if a form is closed (has zero exterior derivative)."""
+        """Check if a form is closed (has zero exterior derivative).
+        
+        Returns:
+            bool: True if the form is closed (d_form ≈ 0)
+        """
         d_form = form.exterior_derivative()
-        return torch.all(torch.abs(d_form.coefficients) < 1e-6)
+        # Convert tensor comparison to Python bool
+        return bool(torch.all(torch.abs(d_form.coefficients) < 1e-6).item())
 
 
 class DeRhamCohomology:
@@ -257,9 +323,10 @@ class DeRhamCohomology:
 
     def _compute_kth_cohomology(self, k: int) -> CohomologyGroup:
         """Compute the k-th cohomology group."""
-        # Implement computation using harmonic forms
-        # This is a placeholder for the actual computation
-        bundle = FiberBundle()  # Need to properly initialize this
+        # Create a fiber bundle with the same dimension as the manifold
+        # Convert manifold dimension to int
+        manifold_dim = int(self.manifold.manifold_dim)
+        bundle = RiemannianFiberBundle(manifold_dim)
         return CohomologyGroup(k, bundle)
 
     def betti_numbers(self) -> List[int]:

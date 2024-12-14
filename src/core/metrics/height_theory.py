@@ -8,7 +8,7 @@ This module implements arithmetic height theory for analyzing patterns:
 """
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union, Callable
 
 import torch
 from torch import nn
@@ -29,9 +29,12 @@ class HeightStructure:
         )
 
         # Initialize local height functions
-        self.local_heights = {p: self._init_local_height(p) for p in self.prime_bases}
+        self.local_heights = {
+            int(p.item()): self._init_local_height(int(p.item())) 
+            for p in self.prime_bases
+        }
 
-    def _init_local_height(self, prime: int) -> nn.Module:
+    def _init_local_height(self, prime: int) -> Union[nn.Module, Callable[[torch.Tensor], torch.Tensor]]:
         """Initialize local height computation for given prime."""
         if self.base_field == "real":
             return nn.Sequential(nn.Linear(1, prime), nn.ReLU(), nn.Linear(prime, 1))
@@ -48,7 +51,8 @@ class HeightStructure:
         """Compute canonical height combining all local heights."""
         local_contributions = []
         for p in self.prime_bases:
-            local_height = self.compute_local_height(point, p)
+            p_int = int(p.item())
+            local_height = self.compute_local_height(point, p_int)
             local_contributions.append(local_height)
 
         return torch.sum(torch.stack(local_contributions, dim=-1), dim=-1)

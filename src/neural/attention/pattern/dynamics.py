@@ -43,6 +43,8 @@ class PatternDynamics:
         self.dim = space_dim
         self.dt = dt
         self.boundary = boundary
+        self.num_modes = num_modes
+        self.hidden_dim = hidden_dim
         
         # Initialize subsystems
         self.diffusion = DiffusionSystem(self.size)
@@ -853,3 +855,42 @@ class PatternDynamics:
         
         # Normalize to preserve total intensity
         return transformed / transformed.sum(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+
+    def forward(self, states: torch.Tensor, return_patterns: bool = False) -> dict[str, torch.Tensor]:
+        """Forward pass through pattern dynamics.
+        
+        Args:
+            states: Input states [batch, heads, seq_len, dim]
+            return_patterns: Whether to return pattern information
+            
+        Returns:
+            Dictionary containing:
+                - routing_scores: Attention routing scores
+                - patterns: Pattern states if return_patterns=True
+                - pattern_scores: Pattern importance scores if return_patterns=True
+        """
+        # Compute pattern evolution
+        patterns = self.evolve_pattern(states)
+        
+        # Compute routing scores from final pattern state
+        routing_scores = torch.softmax(patterns[-1].mean(dim=-1), dim=-1)
+        
+        # Prepare results
+        results = {
+            "routing_scores": routing_scores
+        }
+        
+        if return_patterns:
+            results.update({
+                "patterns": torch.stack(patterns),
+                "pattern_scores": torch.softmax(
+                    torch.stack([self.compute_energy(p) for p in patterns]), 
+                    dim=0
+                )
+            })
+            
+        return results
+
+    def __call__(self, states: torch.Tensor, return_patterns: bool = False) -> dict[str, torch.Tensor]:
+        """Make the class callable."""
+        return self.forward(states, return_patterns)

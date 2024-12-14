@@ -411,19 +411,19 @@ class QuantumMotivicTile(nn.Module):
         if not resolution_history or not load_variance_history:
             return 1.0
             
-        # Compute resolution adaptation smoothness
+        # Compute resolution smoothness
         res_diffs = [
             abs(resolution_history[i + 1] - resolution_history[i])
             for i in range(len(resolution_history) - 1)
         ]
-        smoothness = 1.0 / (1.0 + np.mean(res_diffs) if res_diffs else 1.0)
+        smoothness = 1.0 / (1.0 + float(np.mean(res_diffs)) if res_diffs else 1.0)
         
         # Compute load balancing effectiveness
-        load_balance = 1.0 / (1.0 + np.mean(load_variance_history))
+        load_balance = 1.0 / (1.0 + float(np.mean(load_variance_history)))
         
         # Combine metrics
         ae = 0.5 * (smoothness + load_balance)
-        return ae
+        return float(ae)
 
     def add_neighbor(self, neighbor: "QuantumMotivicTile") -> None:
         """Add a neighboring tile."""

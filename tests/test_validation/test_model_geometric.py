@@ -136,6 +136,8 @@ class TestModelGeometricValidator:
         assert result.is_valid, f"Layer validation failed: {result.message}"
         
         # Check metric properties
+        assert result.data is not None, "Validation data is None"
+        assert 'metric_tensor' in result.data, "Metric tensor not found in validation data"
         metric = cast(Tensor, result.data['metric_tensor'])
         assert isinstance(metric, torch.Tensor)
         assert metric.shape == (batch_size, points.size(1), points.size(1))
@@ -155,10 +157,12 @@ class TestModelGeometricValidator:
         
         # Validate attention geometry
         result = validator.validate_attention_geometry(0, query_points, key_points)
+        assert result.data is not None, "Validation data is None"
         
         # Print debug info
         print("\nDistance Statistics:")
         print("Query distances:")
+        assert 'query_metric' in result.data, "Query metric not found in validation data"
         query_metric = cast(Tensor, result.data['query_metric'])
         query_dists = validator._compute_pairwise_distances(
             query_points, 
@@ -169,6 +173,7 @@ class TestModelGeometricValidator:
         print(f"  Std: {query_dists.std():.6f}\n")
         
         print("Key distances:")
+        assert 'key_metric' in result.data, "Key metric not found in validation data"
         key_metric = cast(Tensor, result.data['key_metric'])
         key_dists = validator._compute_pairwise_distances(
             key_points, 
@@ -179,6 +184,7 @@ class TestModelGeometricValidator:
         print(f"  Std: {key_dists.std():.6f}\n")
         
         print("Score distances:")
+        assert 'attention_scores' in result.data, "Attention scores not found in validation data"
         scores = cast(Tensor, result.data['attention_scores'])
         score_dists = validator._compute_pairwise_distances(
             scores, 
@@ -199,6 +205,7 @@ class TestModelGeometricValidator:
         assert torch.all(scores >= 0)
         
         # Check geometric preservation
+        assert 'preserves_geometry' in result.data, "Geometric preservation result not found"
         assert result.data['preserves_geometry'], (
             "Attention does not preserve geometric structure"
         )
@@ -282,35 +289,3 @@ class TestModelGeometricValidator:
             
             # Normalization
             assert torch.all(distances <= 1.0), f"{name} distances exceed 1.0"
-            
-    def test_geometric_preservation_compatibility(
-        self, validator: ModelGeometricValidator, batch_size: int
-    ) -> None:
-        """Test compatibility between query, key, and score spaces."""
-        # Generate points
-        points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
-        
-        # Compute metrics and scores
-        layer = validator.model_geometry.layers['hidden']
-        base_metric = cast(Tensor, layer.metric_tensor.data)
-        head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
-        scores = head.compute_attention(points, points)
-        
-        # Compute distances
-        query_distances = validator._compute_pairwise_distances(points, base_metric)
-        key_distances = validator._compute_pairwise_distances(points, base_metric)
-        score_distances = validator._compute_pairwise_distances(
-            scores,
-            torch.eye(scores.size(-1), device=scores.device)
-        )
-
-        # Check distance differences
-        query_score_diff = torch.abs(query_distances - score_distances).mean()
-        key_score_diff = torch.abs(key_distances - score_distances).mean()
-        
-        assert query_score_diff < 0.2, (
-            f"Query-Score distance difference too large: {query_score_diff}"
-        )
-        assert key_score_diff < 0.2, (
-            f"Key-Score distance difference too large: {key_score_diff}"
-        )

@@ -17,7 +17,7 @@ from torch import nn
 
 
 @dataclass
-class ScaleConnection:
+class ScaleConnectionData:
     """Represents a connection between different scales."""
 
     source_scale: float
@@ -249,15 +249,27 @@ class ScaleInvariance:
 class ScaleCohomology:
     """Analysis of scale cohomology and obstructions."""
     
-    def __init__(self, dim: int, num_scales: int = 4):
+    def __init__(self, dim: int, num_scales: int = 4, min_scale: float = 0.1, max_scale: float = 10.0):
         """Initialize scale cohomology analysis.
         
         Args:
             dim: Dimension of state space
             num_scales: Number of scales to analyze
+            min_scale: Minimum scale value
+            max_scale: Maximum scale value
         """
         self.dim = dim
         self.num_scales = num_scales
+        self.min_scale = min_scale
+        self.max_scale = max_scale
+        
+        # Generate scale points
+        self.scale_points = torch.logspace(
+            np.log10(min_scale),
+            np.log10(max_scale),
+            num_scales,
+            dtype=torch.float32
+        )
         
         # Cohomology computation networks
         self.cocycle_network = nn.Sequential(

@@ -18,10 +18,12 @@ import numpy as np
 import pytest
 import torch
 
+from src.validation.flow.stability import (
+    LinearStabilityValidator,
+    NonlinearStabilityValidator,
+)
 from src.validation.patterns.stability import (
-    LinearStabilityAnalyzer,
-    LyapunovAnalyzer,
-    NonlinearStabilityAnalyzer,
+    LyapunovValidator,
     PatternStabilityValidator,
     StabilityMetrics,
 )
@@ -52,7 +54,7 @@ class TestPatternStability:
     ):
         """Test linear stability analysis."""
         # Create linear stability analyzer
-        analyzer = LinearStabilityAnalyzer()
+        analyzer = LinearStabilityValidator()
 
         # Generate test patterns with known stability
         def generate_stable_pattern():
@@ -90,7 +92,7 @@ class TestPatternStability:
     ):
         """Test nonlinear stability analysis."""
         # Create nonlinear stability analyzer
-        analyzer = NonlinearStabilityAnalyzer()
+        analyzer = NonlinearStabilityValidator()
 
         # Generate test patterns with nonlinear dynamics
         def generate_pattern(stability: str) -> torch.Tensor:
@@ -169,7 +171,7 @@ class TestPatternStability:
     ):
         """Test Lyapunov stability analysis."""
         # Create Lyapunov analyzer
-        analyzer = LyapunovAnalyzer()
+        analyzer = LyapunovValidator()
 
         # Generate test trajectory
         def generate_trajectory() -> torch.Tensor:

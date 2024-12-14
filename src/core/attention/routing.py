@@ -1,8 +1,7 @@
-
 import torch
 from torch import nn
 
-from .pattern_dynamics import PatternDynamics
+from src.neural.attention.pattern import PatternDynamics
 
 
 class InformationRouter(nn.Module):
@@ -24,7 +23,12 @@ class InformationRouter(nn.Module):
 
         # Pattern dynamics system
         self.pattern_dynamics = PatternDynamics(
-            dim=dim, num_heads=num_heads, num_patterns=num_patterns
+            grid_size=dim,
+            space_dim=num_heads,
+            hidden_dim=num_patterns,
+            boundary='periodic',
+            dt=0.01,
+            num_modes=8
         )
 
         # Routing networks

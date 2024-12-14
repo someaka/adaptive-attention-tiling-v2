@@ -1,6 +1,6 @@
 """Compatibility module for old imports."""
 
-from .tiling.config import AdaptiveParameterManager, ParameterMonitor
+from .tiling.optimization.parameter_manager import AdaptiveParameterManager, ParameterMonitor
 
 __all__ = [
     "AdaptiveParameterManager",

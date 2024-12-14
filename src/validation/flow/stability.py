@@ -56,8 +56,18 @@ class LinearStabilityValidator:
         self, flow: GeometricFlow, state: torch.Tensor
     ) -> LinearStabilityValidation:
         """Validate linear stability."""
-        # Compute Jacobian at state
-        jacobian = flow.compute_jacobian(state)
+        # Compute Jacobian at state using autograd
+        state.requires_grad_(True)
+        jacobian_tuple = torch.autograd.functional.jacobian(lambda x: flow.step(x)[0], state)
+        state.requires_grad_(False)
+
+        # Convert tuple to tensor and reshape to 2D matrix if needed
+        if isinstance(jacobian_tuple, tuple):
+            jacobian = torch.stack(list(jacobian_tuple))
+        
+        batch_size = state.size(0) if len(state.shape) > 1 else 1
+        state_size = state.numel() // batch_size
+        jacobian = jacobian.view(batch_size, state_size, state_size)
 
         # Compute eigendecomposition
         eigenvalues, eigenvectors = torch.linalg.eig(jacobian)
@@ -68,8 +78,8 @@ class LinearStabilityValidator:
         # Compute growth rates
         growth_rates = torch.exp(real_parts)
 
-        # Check stability
-        stable = torch.all(real_parts <= self.stability_threshold)
+        # Check stability - convert tensor to bool
+        stable = bool(torch.all(real_parts <= self.stability_threshold).item())
 
         return LinearStabilityValidation(
             stable=stable,
@@ -100,7 +110,7 @@ class NonlinearStabilityValidator:
         bound = self._find_perturbation_bound(flow, state, time_steps)
         
         # Check overall stability
-        stable = (
+        stable = bool(
             lyapunov < 1.0 and  # Energy bounded
             basin > 0.01 and  # Reasonable basin size
             bound > 1e-3  # Meaningful perturbation tolerance
@@ -108,9 +118,9 @@ class NonlinearStabilityValidator:
         
         return NonlinearStabilityValidation(
             stable=stable,
-            lyapunov_function=lyapunov,
-            basin_size=basin,
-            perturbation_bound=bound,
+            lyapunov_function=float(lyapunov),
+            basin_size=float(basin),
+            perturbation_bound=float(bound),
         )
 
     def _compute_lyapunov(
@@ -143,7 +153,7 @@ class NonlinearStabilityValidator:
             stable_mask[i] = energy_i < 2.0 * flow.compute_energy(state)
         
         # Find largest stable perturbation
-        max_stable = scales[stable_mask][-1] if torch.any(stable_mask) else 0.0
+        max_stable = scales[stable_mask][-1] if torch.any(stable_mask) else torch.tensor(0.0)
         
         return float(max_stable.item())
 
@@ -164,15 +174,16 @@ class NonlinearStabilityValidator:
             stable = True
             
             for _ in range(time_steps):
-                current = flow.evolve(current)
-                if torch.any(torch.isnan(current)) or torch.any(torch.isinf(current)):
+                next_state = flow.step(current)[0]  # Get only the state, ignore metrics
+                if torch.any(torch.isnan(next_state)) or torch.any(torch.isinf(next_state)):
                     stable = False
                     break
                     
-                energy = flow.compute_energy(current)
+                energy = flow.compute_energy(next_state)
                 if energy > 2.0 * flow.compute_energy(state):
                     stable = False
                     break
+                current = next_state
             
             if stable:
                 left = mid
@@ -203,7 +214,7 @@ class StructuralStabilityValidator:
         bifurcation = self._estimate_bifurcation(flow, state)
 
         # Check stability
-        stable = (
+        stable = bool(
             sensitivity < 1.0 / self.tolerance
             and robustness > self.tolerance
             and bifurcation > self.tolerance
@@ -211,9 +222,9 @@ class StructuralStabilityValidator:
 
         return StructuralStabilityValidation(
             stable=stable,
-            sensitivity=sensitivity.item(),
-            robustness=robustness.item(),
-            bifurcation_distance=bifurcation.item(),
+            sensitivity=float(sensitivity),
+            robustness=float(robustness),
+            bifurcation_distance=float(bifurcation),
         )
 
     def _compute_sensitivity(
@@ -221,13 +232,13 @@ class StructuralStabilityValidator:
     ) -> torch.Tensor:
         """Compute parameter sensitivity."""
         # Get nominal parameters
-        params = flow.get_parameters()
+        params = list(flow.parameters())  # Use parameters() instead of get_parameters()
 
         sensitivities = []
         for param in params:
             # Compute parameter gradient
             param.requires_grad_(True)
-            output = flow.step(state)
+            output = flow.step(state)[0]  # Get only state, ignore metrics
             grad = torch.autograd.grad(output.sum(), param, create_graph=True)[0]
             param.requires_grad_(False)
 
@@ -242,7 +253,8 @@ class StructuralStabilityValidator:
     ) -> torch.Tensor:
         """Measure robustness to perturbations."""
         # Get nominal parameters
-        params = flow.get_parameters()
+        params = list(flow.parameters())  # Use parameters() instead of get_parameters()
+        original_params = [p.clone().detach() for p in params]  # Store original parameters
 
         # Test parameter perturbations
         magnitudes = torch.logspace(-3, 0, 10) * self.parameter_range
@@ -254,24 +266,24 @@ class StructuralStabilityValidator:
             # Try random perturbations
             for _ in range(10):
                 # Perturb parameters
-                perturbed_params = [p + mag * torch.randn_like(p) for p in params]
-
-                # Set perturbed parameters
-                flow.set_parameters(perturbed_params)
+                for param, orig_param in zip(params, original_params):
+                    param.data = orig_param + mag * torch.randn_like(orig_param)
 
                 # Check stability
                 current = state.clone()
                 for _ in range(time_steps):
-                    current = flow.step(current)
-                    if torch.norm(current - state) > 10 * mag:
+                    next_state = flow.step(current)[0]  # Get only state, ignore metrics
+                    if torch.norm(next_state - state) > 10 * mag:
                         stable = False
                         break
+                    current = next_state
 
                 if not stable:
                     break
 
             # Restore parameters
-            flow.set_parameters(params)
+            for param, orig_param in zip(params, original_params):
+                param.data = orig_param.clone()
 
             if stable:
                 robust_magnitude = mag
@@ -285,25 +297,36 @@ class StructuralStabilityValidator:
     ) -> torch.Tensor:
         """Estimate distance to bifurcation."""
         # Get nominal parameters
-        params = flow.get_parameters()
+        params = list(flow.parameters())  # Use parameters() instead of get_parameters()
+        original_params = [p.clone().detach() for p in params]  # Store original parameters
 
         # Compute eigenvalues at different parameter values
         eigenvalues = []
 
         for eps in torch.linspace(0, self.parameter_range, 10):
             # Perturb parameters
-            perturbed_params = [p + eps * torch.randn_like(p) for p in params]
+            for param, orig_param in zip(params, original_params):
+                param.data = orig_param + eps * torch.randn_like(orig_param)
 
-            # Set perturbed parameters
-            flow.set_parameters(perturbed_params)
+            # Compute stability using autograd
+            state.requires_grad_(True)
+            jacobian_tuple = torch.autograd.functional.jacobian(lambda x: flow.step(x)[0], state)
+            state.requires_grad_(False)
 
-            # Compute stability
-            jacobian = flow.compute_jacobian(state)
+            # Convert tuple to tensor if needed
+            if isinstance(jacobian_tuple, tuple):
+                jacobian = torch.stack(list(jacobian_tuple))
+            
+            batch_size = state.size(0) if len(state.shape) > 1 else 1
+            state_size = state.numel() // batch_size
+            jacobian = jacobian.view(batch_size, state_size, state_size)
+
             eigs = torch.real(torch.linalg.eigvals(jacobian))
             eigenvalues.append(eigs)
 
             # Restore parameters
-            flow.set_parameters(params)
+            for param, orig_param in zip(params, original_params):
+                param.data = orig_param.clone()
 
         eigenvalues = torch.stack(eigenvalues)
 

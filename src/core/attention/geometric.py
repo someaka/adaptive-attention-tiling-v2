@@ -39,8 +39,8 @@ class GeometricStructures(nn.Module):
 
         # Manifold structures
         if manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(dim)
-            self.log_map = HyperbolicLogarithm(dim)
+            self.exp_map = HyperbolicExponential(dim, curvature)
+            self.log_map = HyperbolicLogarithm(dim, curvature)
         else:  # Euclidean default
             self.exp_map = EuclideanExponential(dim)
             self.log_map = EuclideanLogarithm(dim)
@@ -238,12 +238,14 @@ class HyperbolicExponential(nn.Module):
     """Exponential map for hyperbolic space.
     
     Maps a tangent vector at a point to the hyperbolic manifold.
+    Includes curvature parameter to control the geometry of the space.
     """
     
-    def __init__(self, dim: int):
-        """Initialize exponential map."""
+    def __init__(self, dim: int, curvature: float = -1.0):
+        """Initialize exponential map with curvature parameter."""
         super().__init__()
         self.dim = dim
+        self.curvature = torch.nn.Parameter(torch.tensor(curvature), requires_grad=False)
     
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski inner product <x,y> = -x₀y₀ + ∑ᵢxᵢyᵢ.
@@ -262,7 +264,7 @@ class HyperbolicExponential(nn.Module):
         Returns:
             Minkowski inner product with shape (...)
         """
-        # Handle time and space components separately
+        # Handle time and space components separately with improved stability
         time_inner = x[..., 0] * y[..., 0]  # Time component
         space_inner = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)  # Space components
         
@@ -282,21 +284,25 @@ class HyperbolicExponential(nn.Module):
     def minkowski_norm(self, x: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski norm √(<x,x>)."""
         inner = self.minkowski_inner(x, x)
-        # Handle numerical stability
+        # Handle numerical stability with improved bounds
         return torch.sqrt(torch.clamp(inner, min=1e-12))
 
     def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a point onto the unit hyperboloid H³ = {x | <x,x> = -1, x₀ > 0}.
+        """Project a point onto the unit hyperboloid H³ = {x | <x,x> = 1/K, x₀ > 0}.
         
         The hyperboloid model represents hyperbolic space as the upper sheet of a 
-        two-sheeted hyperboloid in Minkowski space.
+        two-sheeted hyperboloid in Minkowski space. The curvature K determines the
+        radius of the hyperboloid.
         
         Args:
             x: Point to project with shape (..., dim)
             
         Returns:
-            Projected point with shape (..., dim) satisfying <x,x> = -1
+            Projected point with shape (..., dim) satisfying <x,x> = 1/K
         """
+        # Scale by curvature
+        K = torch.abs(self.curvature)  # Use absolute value for stability
+        
         # Compute space-like norm
         space_norm = torch.norm(x[..., 1:], p=2, dim=-1)
         
@@ -305,7 +311,7 @@ class HyperbolicExponential(nn.Module):
         t = torch.where(
             space_norm > torch.abs(x[..., 0]),  # Spacelike case
             space_norm * 0.9,  # Make time component smaller than space norm
-            torch.sqrt(1.0 + space_norm.pow(2))  # Timelike case (standard formula)
+            torch.sqrt(1.0/K + space_norm.pow(2))  # Timelike case with curvature
         )
         
         # Project onto hyperboloid
@@ -315,8 +321,8 @@ class HyperbolicExponential(nn.Module):
         """Project a vector onto the tangent space at x.
         
         The tangent space at x consists of vectors v satisfying <x,v> = 0.
-        For a timelike vector x with <x,x> = -1, the projection formula is:
-        v_proj = v + <x,v>x
+        For a timelike vector x with <x,x> = 1/K, the projection formula is:
+        v_proj = v + K<x,v>x
         
         Args:
             x: Point on hyperboloid with shape (..., dim)
@@ -325,14 +331,17 @@ class HyperbolicExponential(nn.Module):
         Returns:
             Projected vector in tangent space with shape (..., dim)
         """
-        # First normalize x to have Minkowski norm -1
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        
+        # First normalize x to have Minkowski norm 1/K
         x_norm = self.project_to_hyperboloid(x)
         inner_xx = self.minkowski_inner(x_norm, x_norm)
-        x_norm = x_norm / torch.sqrt(torch.abs(inner_xx)).unsqueeze(-1)
+        x_norm = x_norm / torch.sqrt(torch.abs(inner_xx * K)).unsqueeze(-1)
         
         # Project v to be orthogonal to x using the Minkowski metric
         inner_xv = self.minkowski_inner(x_norm, v)
-        v_proj = v + inner_xv.unsqueeze(-1) * x_norm
+        v_proj = v + K * inner_xv.unsqueeze(-1) * x_norm
         
         # Normalize the spatial components while preserving orthogonality
         # This maintains stability by keeping spatial components bounded
@@ -341,17 +350,21 @@ class HyperbolicExponential(nn.Module):
         v_proj_normalized[..., 1:] = v_proj[..., 1:] / space_norm
         
         # Ensure exact orthogonality by computing the time component
-        # From <x,v> = 0 and x₀² - Σᵢxᵢ² = 1, we can solve for v₀
+        # From <x,v> = 0 and x₀² - Σᵢxᵢ² = 1/K, we can solve for v₀
         space_inner = torch.sum(x_norm[..., 1:] * v_proj_normalized[..., 1:], dim=-1)
         v_proj_normalized[..., 0] = space_inner / x_norm[..., 0]
         
         return v_proj_normalized
 
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Apply exponential map."""
+        """Apply exponential map with curvature scaling."""
         # Project x to hyperbolic space and v to tangent space
         x = self.project_to_hyperboloid(x)
         v = self.project_to_tangent(x, v)
+        
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        v = v * torch.sqrt(K)
         
         # Compute the norm of v in the tangent space
         v_norm = self.minkowski_norm(v)
@@ -370,7 +383,7 @@ class HyperbolicExponential(nn.Module):
         v_norm = torch.clamp(v_norm, min=1e-7)  # Prevent division by zero
         v_normalized = v / v_norm.unsqueeze(-1)
         
-        # Map to hyperbolic space with improved stability
+        # Map to hyperbolic space with improved stability and curvature scaling
         result = cosh.unsqueeze(-1) * x + sinh.unsqueeze(-1) * v_normalized
         
         # Ensure result is on the hyperboloid
@@ -378,12 +391,17 @@ class HyperbolicExponential(nn.Module):
 
 
 class HyperbolicLogarithm(nn.Module):
-    """Logarithm map for hyperbolic space."""
+    """Logarithm map for hyperbolic space.
     
-    def __init__(self, dim: int):
-        """Initialize logarithm map."""
+    Maps a point on the hyperbolic manifold back to the tangent space.
+    Includes curvature parameter to control the geometry of the space.
+    """
+    
+    def __init__(self, dim: int, curvature: float = -1.0):
+        """Initialize logarithm map with curvature parameter."""
         super().__init__()
         self.dim = dim
+        self.curvature = torch.nn.Parameter(torch.tensor(curvature), requires_grad=False)
     
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski inner product <x,y> = -x₀y₀ + ∑ᵢxᵢyᵢ.
@@ -402,7 +420,7 @@ class HyperbolicLogarithm(nn.Module):
         Returns:
             Minkowski inner product with shape (...)
         """
-        # Handle time and space components separately
+        # Handle time and space components separately with improved stability
         time_inner = x[..., 0] * y[..., 0]  # Time component
         space_inner = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)  # Space components
         
@@ -422,21 +440,25 @@ class HyperbolicLogarithm(nn.Module):
     def minkowski_norm(self, x: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski norm √(<x,x>)."""
         inner = self.minkowski_inner(x, x)
-        # Handle numerical stability
+        # Handle numerical stability with improved bounds
         return torch.sqrt(torch.clamp(inner, min=1e-12))
 
     def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a point onto the unit hyperboloid H³ = {x | <x,x> = -1, x₀ > 0}.
+        """Project a point onto the unit hyperboloid H³ = {x | <x,x> = 1/K, x₀ > 0}.
         
         The hyperboloid model represents hyperbolic space as the upper sheet of a 
-        two-sheeted hyperboloid in Minkowski space.
+        two-sheeted hyperboloid in Minkowski space. The curvature K determines the
+        radius of the hyperboloid.
         
         Args:
             x: Point to project with shape (..., dim)
             
         Returns:
-            Projected point with shape (..., dim) satisfying <x,x> = -1
+            Projected point with shape (..., dim) satisfying <x,x> = 1/K
         """
+        # Scale by curvature
+        K = torch.abs(self.curvature)  # Use absolute value for stability
+        
         # Compute space-like norm
         space_norm = torch.norm(x[..., 1:], p=2, dim=-1)
         
@@ -445,7 +467,7 @@ class HyperbolicLogarithm(nn.Module):
         t = torch.where(
             space_norm > torch.abs(x[..., 0]),  # Spacelike case
             space_norm * 0.9,  # Make time component smaller than space norm
-            torch.sqrt(1.0 + space_norm.pow(2))  # Timelike case (standard formula)
+            torch.sqrt(1.0/K + space_norm.pow(2))  # Timelike case with curvature
         )
         
         # Project onto hyperboloid
@@ -455,8 +477,8 @@ class HyperbolicLogarithm(nn.Module):
         """Project a vector onto the tangent space at x.
         
         The tangent space at x consists of vectors v satisfying <x,v> = 0.
-        For a timelike vector x with <x,x> = -1, the projection formula is:
-        v_proj = v + <x,v>x
+        For a timelike vector x with <x,x> = 1/K, the projection formula is:
+        v_proj = v + K<x,v>x
         
         Args:
             x: Point on hyperboloid with shape (..., dim)
@@ -465,14 +487,17 @@ class HyperbolicLogarithm(nn.Module):
         Returns:
             Projected vector in tangent space with shape (..., dim)
         """
-        # First normalize x to have Minkowski norm -1
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        
+        # First normalize x to have Minkowski norm 1/K
         x_norm = self.project_to_hyperboloid(x)
         inner_xx = self.minkowski_inner(x_norm, x_norm)
-        x_norm = x_norm / torch.sqrt(torch.abs(inner_xx)).unsqueeze(-1)
+        x_norm = x_norm / torch.sqrt(torch.abs(inner_xx * K)).unsqueeze(-1)
         
         # Project v to be orthogonal to x using the Minkowski metric
         inner_xv = self.minkowski_inner(x_norm, v)
-        v_proj = v + inner_xv.unsqueeze(-1) * x_norm
+        v_proj = v + K * inner_xv.unsqueeze(-1) * x_norm
         
         # Normalize the spatial components while preserving orthogonality
         # This maintains stability by keeping spatial components bounded
@@ -481,14 +506,17 @@ class HyperbolicLogarithm(nn.Module):
         v_proj_normalized[..., 1:] = v_proj[..., 1:] / space_norm
         
         # Ensure exact orthogonality by computing the time component
-        # From <x,v> = 0 and x₀² - Σᵢxᵢ² = 1, we can solve for v₀
+        # From <x,v> = 0 and x₀² - Σᵢxᵢ² = 1/K, we can solve for v₀
         space_inner = torch.sum(x_norm[..., 1:] * v_proj_normalized[..., 1:], dim=-1)
         v_proj_normalized[..., 0] = space_inner / x_norm[..., 0]
         
         return v_proj_normalized
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Apply logarithm map."""
+        """Apply logarithm map with curvature scaling."""
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        
         # Project points to hyperbolic space
         x = self.project_to_hyperboloid(x)
         y = self.project_to_hyperboloid(y)
@@ -498,9 +526,9 @@ class HyperbolicLogarithm(nn.Module):
             return torch.zeros_like(x)
         
         # Compute hyperbolic distance with improved numerical stability
-        inner = -self.minkowski_inner(x, y)  # Should be ≥ 1
-        inner = torch.clamp(inner, min=1.0 + 1e-7, max=5.0)  # Reduced max value
-        dist = torch.acosh(inner)
+        inner = -self.minkowski_inner(x, y)  # Should be ≥ 1/K
+        inner = torch.clamp(inner, min=1.0/K + 1e-7, max=5.0/K)  # Reduced max value and scaled by curvature
+        dist = torch.acosh(inner * K)  # Scale by curvature
         
         # For very close points, use first-order approximation
         if torch.all(dist <= 1e-7):
@@ -518,6 +546,7 @@ class HyperbolicLogarithm(nn.Module):
         
         # Final projection to ensure we're in the tangent space
         return self.project_to_tangent(x, result)
+
 
 class EuclideanExponential(nn.Module):
     """Exponential map for Euclidean space."""

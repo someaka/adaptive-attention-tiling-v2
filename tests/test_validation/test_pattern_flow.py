@@ -13,7 +13,11 @@ import logging
 import numpy as np
 import math
 from src.validation.patterns.formation import SpatialValidator
-from src.validation.patterns.stability import PatternValidator as PatternStabilityValidator
+from src.validation.patterns.stability import (
+    PatternStabilityValidator,
+    PatternFlow,
+    StabilityMetrics
+)
 from src.validation.geometric.flow import (
     TilingFlowValidator as FlowValidator,
     TilingFlowValidationResult as FlowValidationResult
@@ -421,24 +425,12 @@ def setup_test_parameters():
 
 @pytest.fixture
 def pattern_validator(setup_test_parameters):
-    """Create pattern stability validator."""
-    dynamics = PatternDynamics(
-        grid_size=setup_test_parameters['grid_size'],
-        space_dim=setup_test_parameters['space_dim'],
-        dt=setup_test_parameters['dt']
-    )
-    flow = GeometricFlow(
-        hidden_dim=setup_test_parameters['grid_size'],
-        manifold_dim=setup_test_parameters['grid_size'],
-        motive_rank=4,
-        num_charts=1,
-        integration_steps=setup_test_parameters['time_steps'],
-        dt=setup_test_parameters['dt'],
-        stability_threshold=setup_test_parameters['tolerance']
-    )
+    """Create pattern validator."""
     return PatternStabilityValidator(
-        dynamics=dynamics,
-        flow=flow
+        linear_threshold=setup_test_parameters['tolerance'],
+        nonlinear_threshold=setup_test_parameters['tolerance'] * 2,
+        lyapunov_threshold=setup_test_parameters['tolerance'] * 0.1,
+        tolerance=setup_test_parameters['tolerance']
     )
 
 @pytest.fixture
@@ -472,38 +464,29 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_v
         params['grid_size']
     ) * 0.1
     
-    # Create dynamics
-    dynamics = PatternDynamics(
-        grid_size=params['grid_size'],
-        space_dim=params['space_dim'],
-        dt=params['dt']
-    )
-    
     # Validate stability
-    stability_result = pattern_validator.validate(
-        dynamics,
-        pattern,
-        parameter_name='dt'
+    stability_result = pattern_validator.validate_stability(
+        time_series=pattern
     )
-    assert stability_result.is_valid, "Pattern should be stable"
+    assert stability_result["overall_score"] > 0.5, "Pattern should be stable"
     
-    # Evolve pattern
-    evolution = dynamics.evolve_pattern(
-        pattern,
-        diffusion_coefficient=0.1,
-        steps=params['time_steps']
+    # Evolve pattern using pattern flow
+    pattern_flow = PatternFlow(
+        input_dim=pattern.shape[1],
+        hidden_dim=128,
+        manifold_dim=32
     )
-    flow = torch.stack(evolution)
+    output, metrics = pattern_flow(pattern, return_paths=True)
     
     # Validate flow
-    flow_result = flow_validator.validate_long_time_existence(flow)
+    flow_result = flow_validator.validate_long_time_existence(output)
     assert flow_result.is_valid, "Flow should exist for long time"
 
 def test_pattern_flow_energy(setup_test_parameters, flow_validator):
     """Test energy conservation in pattern flow."""
     params = setup_test_parameters
     
-    # Create pattern and evolve
+    # Create pattern
     pattern = torch.randn(
         params['batch_size'],
         params['space_dim'],
@@ -511,21 +494,16 @@ def test_pattern_flow_energy(setup_test_parameters, flow_validator):
         params['grid_size']
     ) * 0.1
     
-    dynamics = PatternDynamics(
-        grid_size=params['grid_size'],
-        space_dim=params['space_dim'],
-        dt=params['dt']
+    # Create and evolve pattern flow
+    pattern_flow = PatternFlow(
+        input_dim=pattern.shape[1],
+        hidden_dim=128,
+        manifold_dim=32
     )
-    
-    evolution = dynamics.evolve_pattern(
-        pattern,
-        diffusion_coefficient=0.1,
-        steps=params['time_steps']
-    )
-    flow = torch.stack(evolution)
+    output, metrics = pattern_flow(pattern, return_paths=True)
     
     # Validate energy conservation
-    energy_result = flow_validator.validate_energy_conservation(flow)
+    energy_result = flow_validator.validate_energy_conservation(output)
     assert energy_result.is_valid, "Flow should conserve energy"
     assert energy_result.data['energy_variation'] < params['energy_threshold']
 

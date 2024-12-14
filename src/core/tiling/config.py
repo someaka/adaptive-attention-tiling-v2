@@ -31,6 +31,9 @@ class GeometricFlowConfig:
     stability_threshold: float = 0.05
     min_delta: float = 1e-8
     max_delta: float = 1.0
+    MIN_RESOLUTION: float = 1e-4  # Minimum resolution for geometric computations
+    MIN_DENSITY: float = 0.1  # Minimum density threshold for attention patterns
+    MAX_DENSITY: float = 0.9  # Maximum density threshold for attention patterns
 
     # Quantum parameters
     quantum_dim: int = 32

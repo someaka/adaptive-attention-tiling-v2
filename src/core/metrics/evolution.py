@@ -129,10 +129,13 @@ class OrbitAnalysis:
 
         acf = torch.zeros(len(orbit) // 2)
         for lag in range(len(acf)):
-            correlation = torch.corrcoef(
-                normalized[lag:].flatten(),
-                normalized[: -lag if lag > 0 else None].flatten(),
-            )[0, 1]
+            # Stack the lagged sequences as rows
+            x1 = normalized[lag:].flatten()
+            x2 = normalized[: -lag if lag > 0 else None].flatten()
+            stacked = torch.stack([x1, x2])
+            
+            # Compute correlation matrix and extract correlation coefficient
+            correlation = torch.corrcoef(stacked)[0, 1]
             acf[lag] = correlation
 
         # Find first peak after lag 0
@@ -192,9 +195,14 @@ class EvolutionAnalyzer:
 
     def analyze_evolution(self, pattern: torch.Tensor) -> EvolutionMetrics:
         """Perform complete evolution analysis."""
+        l_values = self.l_function.compute_l_values(pattern)
+        flow_metrics = self.flow.compute_flow(pattern)
+        orbit_stats = self.orbit.analyze_orbit(pattern)
+        ergodic_avg = self.ergodic.compute_ergodic_average(pattern)
+        
         return EvolutionMetrics(
-            l_values=self.l_function.compute_l_values(pattern),
-            flow_metrics=self.flow.compute_flow(pattern),
-            orbit_stats=self.orbit.analyze_orbit(pattern),
-            ergodic_avg=self.ergodic.compute_ergodic_average(pattern),
+            l_values=l_values,
+            flow_metrics=flow_metrics,
+            orbit_stats=orbit_stats,
+            ergodic_avg=ergodic_avg
         )

@@ -1,10 +1,11 @@
 """Attention computation module."""
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
 
-class AttentionCompute:
+class AttentionCompute(nn.Module):
     """Compute attention scores and outputs."""
     
     def __init__(self, dropout: float = 0.0):
@@ -13,6 +14,7 @@ class AttentionCompute:
         Args:
             dropout: Dropout probability
         """
+        super().__init__()
         self.dropout = dropout
     
     def compute_scores(
