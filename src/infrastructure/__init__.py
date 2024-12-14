@@ -1,23 +1,21 @@
-"""Infrastructure module for optimizers and backend integration."""
+"""Infrastructure components for Adaptive Attention Tiling."""
 
-from .cpu_optimizer import CPUOptimizer
-from .memory_manager import MemoryManager
-from .vulkan_integration import VulkanIntegration
-from .metrics import (
+from .base import (
+    CPUOptimizer,
+    MemoryManager,
+    VulkanIntegration,
+    ParallelProcessor,
+    ResourceAllocator,
     InfrastructureMetrics,
-    ResourceMetrics,
-    PerformanceMetrics,
+    ResourceAllocationError,
 )
-from .parallel import ParallelProcessor
-from .resource import ResourceAllocator
 
 __all__ = [
     "CPUOptimizer",
-    "MemoryManager",
+    "MemoryManager", 
     "VulkanIntegration",
-    "InfrastructureMetrics",
-    "ResourceMetrics",
-    "PerformanceMetrics",
     "ParallelProcessor",
     "ResourceAllocator",
+    "InfrastructureMetrics",
+    "ResourceAllocationError",
 ]
