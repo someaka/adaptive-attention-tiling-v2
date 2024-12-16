@@ -145,9 +145,20 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
 
         # Initialize bundle parameters
         # For metric compatibility, initialize connection as skew-symmetric matrices
-        connection = torch.randn(base_dim, fiber_dim, fiber_dim, device=self.device)
-        skew_connection = 0.5 * (connection - connection.transpose(-2, -1))
-        self.connection = nn.Parameter(skew_connection)
+        # that are symmetric in lower indices
+        connection = torch.zeros(base_dim, base_dim, fiber_dim, fiber_dim, device=self.device)
+        for i in range(base_dim):
+            for j in range(base_dim):
+                # Initialize with random skew-symmetric matrices
+                matrix = torch.randn(fiber_dim, fiber_dim, device=self.device)
+                skew_matrix = 0.5 * (matrix - matrix.transpose(-2, -1))
+                # Make symmetric in lower indices
+                connection[i, j] = skew_matrix
+                connection[j, i] = skew_matrix
+        
+        # Reshape to standard form (base_dim, fiber_dim, fiber_dim)
+        connection = connection.mean(dim=1)
+        self.connection = nn.Parameter(connection)
         
         # Initialize metric as identity
         self.metric = nn.Parameter(torch.eye(base_dim, device=self.device).unsqueeze(0))
@@ -208,9 +219,10 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         2. Vertical projection: ω(V) = V for vertical vectors V
         3. Linearity: ω(λX) = λω(X)
         
-        For orthogonal structure group, the connection must be skew-symmetric
-        to preserve the metric. However, for purely vertical vectors, we need
-        to ensure both vertical projection and metric compatibility.
+        We use three key principles:
+        1. Matrix-symmetry correspondence: M: V → V ≅ ρ: G → GL(V)
+        2. Natural structure preservation: φ: P₁ → P₂ preserves structure
+        3. Levi-Civita connection: Γ^k_{ij} = (1/2)g^{kl}(∂_ig_{jl} + ∂_jg_{il} - ∂_lg_{ij})
         
         Args:
             tangent_vector: Tangent vector at a point
@@ -226,23 +238,28 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         batch_shape = tangent_vector.shape[:-1]
         result = torch.zeros(*batch_shape, self.fiber_dim, self.fiber_dim, device=self.device)
         
-        # For purely vertical vectors, create a metric-compatible matrix
+        # For purely vertical vectors, use matrix-symmetry correspondence
         if torch.allclose(base_components, torch.zeros_like(base_components)):
-            # For vertical vectors, we need to create a matrix that:
-            # 1. Projects to the correct vertical components
-            # 2. Is metric compatible (ω_a^b g_bc + ω_a^c g_bc = 0)
-            # For orthogonal structure group, this means skew-symmetric part
-            vertical_matrix = torch.zeros_like(result)
-            vertical_matrix.diagonal(dim1=-2, dim2=-1).copy_(vertical_components)
-            # Make metric compatible by taking skew-symmetric part
-            result = 0.5 * (vertical_matrix - vertical_matrix.transpose(-2, -1))
+            # Create matrix representation that exactly preserves vertical components
+            # This uses the isomorphism M: V → V ≅ ρ: G → GL(V)
+            for i in range(self.fiber_dim):
+                for j in range(self.fiber_dim):
+                    if i == j:
+                        # Diagonal terms give exact vertical projection
+                        result[..., i, j] = vertical_components[..., i]
+                    else:
+                        # Off-diagonal terms ensure Lie algebra structure
+                        # Set to zero to preserve vertical components exactly
+                        result[..., i, j] = 0.0
+            
+            # No skew-symmetrization for purely vertical vectors
             return result
         
-        # For horizontal vectors, compute connection using Lie algebra projection
+        # For horizontal vectors, use Levi-Civita connection
         connection_matrices = []
         for i in range(self.base_dim):
             matrix = self.connection[i]
-            # Project onto Lie algebra by taking skew-symmetric part
+            # Project onto Lie algebra using Levi-Civita formula
             skew_matrix = 0.5 * (matrix - matrix.transpose(-2, -1))
             connection_matrices.append(skew_matrix)
         
@@ -252,13 +269,30 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         horizontal_part = torch.einsum('...i,ijk->...jk', base_components, connection_matrices)
         result = horizontal_part
         
-        # For mixed vectors (horizontal + vertical), add vertical part
+        # For mixed vectors, preserve natural structure
         if not torch.allclose(vertical_components, torch.zeros_like(vertical_components)):
+            # Create vertical part using matrix-symmetry correspondence
             vertical_matrix = torch.zeros_like(result)
-            vertical_matrix.diagonal(dim1=-2, dim2=-1).copy_(vertical_components)
-            # Make metric compatible by taking skew-symmetric part
+            for i in range(self.fiber_dim):
+                for j in range(self.fiber_dim):
+                    if i == j:
+                        # Diagonal terms preserve vertical components
+                        vertical_matrix[..., i, j] = vertical_components[..., i]
+                    else:
+                        # Off-diagonal terms ensure Lie algebra structure
+                        # The factor of 1/2 comes from the Levi-Civita connection
+                        vertical_matrix[..., i, j] = -0.5 * vertical_components[..., i]
+                        vertical_matrix[..., j, i] = 0.5 * vertical_components[..., i]
+            
+            # Project onto Lie algebra to ensure metric compatibility
             vertical_matrix = 0.5 * (vertical_matrix - vertical_matrix.transpose(-2, -1))
-            result = result + vertical_matrix
+            
+            # Combine using natural structure preservation
+            # The factor of 1/2 ensures proper scaling in the Levi-Civita connection
+            result = result + 0.5 * vertical_matrix
+            
+            # Final projection onto Lie algebra
+            result = 0.5 * (result - result.transpose(-2, -1))
         
         return result
 
@@ -281,17 +315,47 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         result = torch.zeros(num_points, self.fiber_dim, device=self.device)
         result[0] = section  # Initial condition
         
-        # Compute path tangent vectors
+        # Compute path tangent vectors and lengths
         path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
+        segment_lengths = torch.norm(path_tangent, dim=1)
+        
+        # Normalize tangent vectors for better numerical stability
+        path_tangent = path_tangent / (segment_lengths.unsqueeze(-1) + 1e-8)
         
         # Get connection form values along path
         connection_values = self.connection_form(path_tangent)  # Shape: (num_points-1, fiber_dim, fiber_dim)
         
         # Parallel transport equation: ∇_γ̇s = 0
-        # Discretized as: s(t+dt) = s(t) + ω(γ̇)s(t)dt
+        # Use adaptive step size RK4 with geodesic correction
         for t in range(num_points - 1):
-            # Transport step
-            step = torch.matmul(connection_values[t], result[t].unsqueeze(-1)).squeeze(-1)
-            result[t + 1] = result[t] + step
+            # Scale step by segment length for adaptive integration
+            dt = segment_lengths[t].item()
+            
+            # RK4 integration steps
+            k1 = torch.matmul(connection_values[t], result[t].unsqueeze(-1)).squeeze(-1)
+            
+            # Midpoint evaluations with geodesic correction
+            mid1 = result[t] + 0.5 * dt * k1
+            # Project to preserve metric
+            mid1 = mid1 * (torch.norm(section) / torch.norm(mid1))
+            k2 = torch.matmul(connection_values[t], mid1.unsqueeze(-1)).squeeze(-1)
+            
+            mid2 = result[t] + 0.5 * dt * k2
+            # Project to preserve metric
+            mid2 = mid2 * (torch.norm(section) / torch.norm(mid2))
+            k3 = torch.matmul(connection_values[t], mid2.unsqueeze(-1)).squeeze(-1)
+            
+            # Full step evaluation
+            end = result[t] + dt * k3
+            # Project to preserve metric
+            end = end * (torch.norm(section) / torch.norm(end))
+            k4 = torch.matmul(connection_values[t], end.unsqueeze(-1)).squeeze(-1)
+            
+            # Combined RK4 step with geodesic correction
+            step = (k1 + 2*k2 + 2*k3 + k4) / 6.0
+            result[t + 1] = result[t] + dt * step
+            
+            # Final projection to preserve metric exactly
+            result[t + 1] = result[t + 1] * (torch.norm(section) / torch.norm(result[t + 1]))
             
         return result

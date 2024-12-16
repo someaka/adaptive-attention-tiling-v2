@@ -127,3 +127,48 @@ TEST_REGIME=standard pytest tests/...
 ⏳ Pending
 ❌ Failed
 🔍 Under Investigation 
+
+## Theory Review Findings (2023-12-16)
+
+### Connection Form Issues
+1. **Torsion and Metric Compatibility**
+   - Current implementation doesn't fully ensure torsion-free property
+   - Metric compatibility needs proper derivatives
+   - Need to implement proper Levi-Civita formula
+
+2. **Symmetry Properties**
+   - Matrix-symmetry correspondence needs improvement
+   - Mixed vector skew-symmetry not fully preserved
+   - Vertical component preservation incomplete
+
+3. **Numerical Stability**
+   - Connection coefficients need better computation
+   - Proper metric derivatives required
+   - Local frame adaptation needed
+
+### Parallel Transport Issues
+1. **Integration Scheme**
+   - Current RK4 implementation needs adaptive step sizing
+   - Error tolerance checks missing
+   - Boundary transitions not properly handled
+
+2. **Structure Preservation**
+   - Fiber metric not fully preserved
+   - Holonomy computation needs improvement
+   - Path independence for contractible loops failing
+
+### Next Steps
+1. **Connection Form**
+   - Implement proper Levi-Civita connection
+   - Add metric derivative computation
+   - Ensure skew-symmetry preservation
+
+2. **Transport Integration**
+   - Add adaptive step sizing
+   - Implement error tolerance checks
+   - Improve boundary handling
+
+3. **Testing Strategy**
+   - Add more granular component tests
+   - Implement metric preservation checks
+   - Add holonomy validation

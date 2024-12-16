@@ -157,7 +157,7 @@ class TestFiberBundleProtocol:
 
     @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
     def test_connection_form(self, bundle, request, test_config):
-        """Test that connection form satisfies protocol requirements."""
+        """Test that connection form satisfies protocol requirements and theoretical principles."""
         bundle = request.getfixturevalue(bundle)
         dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
         batch_size = test_config["geometric_tests"]["batch_size"]
@@ -180,19 +180,8 @@ class TestFiberBundleProtocol:
             assert connection.shape[-1] == bundle.fiber_dim, \
                 "Connection form should map to fiber dimension"
         
-        # 2. Linearity property
-        scalars = torch.randn(batch_size, 1, dtype=dtype)
-        scaled_connection = bundle.connection_form(scalars * tangent_vectors)
-        linear_connection = scalars * bundle.connection_form(tangent_vectors)
-        
-        # Extract components for comparison if needed
-        scaled_components = self._get_vertical_components(scaled_connection)
-        linear_components = self._get_vertical_components(linear_connection)
-        
-        assert torch.allclose(scaled_components, linear_components, rtol=1e-5), \
-            "Connection form should be linear"
-        
-        # 3. Vertical projection property
+        # 2. Matrix-symmetry correspondence principle
+        # Test that vertical vectors are preserved exactly
         vertical_vectors = torch.zeros_like(tangent_vectors)
         vertical_vectors[..., bundle.base_dim:] = torch.randn(
             batch_size, bundle.fiber_dim, dtype=dtype
@@ -206,9 +195,62 @@ class TestFiberBundleProtocol:
             vertical_components,
             vertical_vectors[..., bundle.base_dim:],
             rtol=1e-5
-        ), "Connection should act as identity on vertical vectors"
+        ), "Matrix-symmetry correspondence: Connection should preserve vertical vectors exactly"
         
-        # 4. Compatibility with structure group
+        # 3. Natural structure preservation principle
+        # Test that mixed vectors preserve structure
+        mixed_vectors = torch.randn_like(tangent_vectors)
+        mixed_connection = bundle.connection_form(mixed_vectors)
+        
+        # The connection should be skew-symmetric for mixed vectors
+        if isinstance(bundle, PatternFiberBundle):
+            mixed_skew = mixed_connection + mixed_connection.transpose(-2, -1)
+            assert torch.allclose(
+                mixed_skew,
+                torch.zeros_like(mixed_skew),
+                rtol=1e-5
+            ), "Natural structure preservation: Connection should be skew-symmetric"
+        
+        # 4. Levi-Civita connection principle
+        # Test metric compatibility
+        # Create proper metric tensor for validation
+        metric = torch.eye(bundle.total_dim, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
+        
+        if isinstance(bundle, PatternFiberBundle):
+            # Compute Christoffel symbols
+            # Γ^k_{ij} = (1/2)g^{kl}(∂_ig_{jl} + ∂_jg_{il} - ∂_lg_{ij})
+            connection_matrices = []
+            for i in range(bundle.base_dim):
+                matrix = bundle.connection[i]
+                # Project onto Lie algebra using Levi-Civita formula
+                skew_matrix = 0.5 * (matrix - matrix.transpose(-2, -1))
+                connection_matrices.append(skew_matrix)
+            
+            connection_matrices = torch.stack(connection_matrices, dim=0)
+            
+            # Test that connection satisfies Levi-Civita properties
+            for i in range(bundle.base_dim):
+                for j in range(bundle.base_dim):
+                    # Verify symmetry in lower indices
+                    assert torch.allclose(
+                        connection_matrices[i, j],
+                        connection_matrices[j, i],
+                        rtol=1e-5
+                    ), f"Levi-Civita principle: Connection should be symmetric in indices {i}, {j}"
+        
+        # 5. Linearity property
+        scalars = torch.randn(batch_size, 1, dtype=dtype)
+        scaled_connection = bundle.connection_form(scalars * tangent_vectors)
+        linear_connection = scalars * bundle.connection_form(tangent_vectors)
+        
+        # Extract components for comparison
+        scaled_components = self._get_vertical_components(scaled_connection)
+        linear_components = self._get_vertical_components(linear_connection)
+        
+        assert torch.allclose(scaled_components, linear_components, rtol=1e-5), \
+            "Connection form should be linear"
+        
+        # 6. Compatibility with structure group
         if hasattr(bundle, "structure_group") and bundle.structure_group is not None:
             # Test structure group compatibility
             group_element = torch.eye(bundle.fiber_dim, dtype=dtype)
@@ -228,17 +270,11 @@ class TestFiberBundleProtocol:
                 rtol=1e-5
             ), "Connection should be compatible with structure group"
         
-        # 5. Validate connection using ConnectionValidator
+        # 7. Validate connection using ConnectionValidator
         validator = ConnectionValidator(bundle.total_dim)
-        
-        # Create proper metric tensor for validation
-        metric = torch.eye(bundle.total_dim, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
         
         # For base implementation, convert to matrix form for validation
         if not isinstance(bundle, PatternFiberBundle):
-            # Debug shapes
-            print(f"Initial connection shape: {connection.shape}")
-            
             # Ensure proper shape: (batch_size, fiber_dim, fiber_dim)
             if len(connection.shape) == 1:
                 # Single vector -> add batch and convert to matrix
@@ -248,20 +284,14 @@ class TestFiberBundleProtocol:
                 # Batch of vectors -> convert to matrices
                 connection = connection.unsqueeze(-1)  # Shape: (batch, fiber_dim, 1)
                 connection = connection.expand(-1, -1, connection.shape[1])  # Shape: (batch, fiber_dim, fiber_dim)
-                
-            print(f"After reshaping: {connection.shape}")
             
             # Convert to diagonal matrices
             connection = torch.diag_embed(connection.diagonal(dim1=-2, dim2=-1))
-            print(f"After diag_embed: {connection.shape}")
             
             # Make skew-symmetric to ensure metric compatibility
             connection = 0.5 * (connection - connection.transpose(-2, -1))
-            print(f"Final connection shape: {connection.shape}")
         else:
             # Ensure metric compatibility for pattern implementation
-            # The connection should already be a batch of matrices
-            print(f"Pattern connection shape: {connection.shape}")
             connection = 0.5 * (connection - connection.transpose(-2, -1))
         
         validation_result = validator.validate_connection(
@@ -271,18 +301,126 @@ class TestFiberBundleProtocol:
             f"Connection validation failed: {validation_result.message}"
 
     @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
-    def test_parallel_transport(self, bundle, request):
-        """Test that parallel transport satisfies protocol requirements."""
+    def test_parallel_transport(self, bundle, request, test_config):
+        """Test that parallel transport satisfies geometric requirements.
+        
+        This test verifies:
+        1. Preservation of fiber metric
+        2. Path independence for contractible loops
+        3. Consistency with connection form
+        4. Horizontal lift properties
+        5. Compatibility with structure group
+        """
         bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
         
-        # Create test path and section
-        t = torch.linspace(0, 2 * np.pi, 100)
-        path = torch.stack([torch.cos(t), torch.sin(t)], dim=1)
-        section = torch.randn(bundle.fiber_dim)
+        # Create test section and path
+        section = torch.randn(bundle.fiber_dim, dtype=dtype)
         
-        # Test transport
-        transported = bundle.parallel_transport(section, path)
-        assert transported.shape[1] == bundle.fiber_dim, "Should preserve fiber dimension"
+        # Create a circular path in the base space
+        t = torch.linspace(0, 2 * torch.pi, 100, dtype=dtype)
+        base_path = torch.stack([torch.cos(t), torch.sin(t)], dim=1)
+        
+        # Pad path with zeros to match base dimension if needed
+        if bundle.base_dim > 2:
+            padding = torch.zeros(100, bundle.base_dim - 2, dtype=dtype)
+            base_path = torch.cat([base_path, padding], dim=1)
+        
+        # Test 1: Preservation of fiber metric
+        transported = bundle.parallel_transport(section, base_path)
+        
+        # Check that the norm is preserved at each point
+        section_norm = torch.norm(section)
+        transported_norms = torch.norm(transported, dim=1)
+        assert torch.allclose(
+            transported_norms,
+            section_norm * torch.ones_like(transported_norms),
+            rtol=1e-4
+        ), "Parallel transport should preserve the fiber metric"
+        
+        # Test 2: Path independence for contractible loops
+        # Create a figure-8 path that should give trivial holonomy
+        t = torch.linspace(0, 4 * torch.pi, 200, dtype=dtype)
+        figure8_path = torch.stack([
+            torch.sin(t/2) * torch.cos(t),
+            torch.sin(t/2) * torch.sin(t)
+        ], dim=1)
+        
+        # Pad path if needed
+        if bundle.base_dim > 2:
+            padding = torch.zeros(200, bundle.base_dim - 2, dtype=dtype)
+            figure8_path = torch.cat([figure8_path, padding], dim=1)
+        
+        # Transport around figure-8
+        transported_loop = bundle.parallel_transport(section, figure8_path)
+        
+        # Start and end should match for contractible loop
+        assert torch.allclose(
+            transported_loop[0],
+            transported_loop[-1],
+            rtol=1e-4
+        ), "Parallel transport around contractible loop should return to start"
+        
+        # Test 3: Consistency with connection form
+        # Take small steps and compare with infinitesimal transport
+        for i in range(len(base_path) - 1):
+            # Get tangent vector between points
+            tangent = base_path[i+1] - base_path[i]
+            
+            # Compute connection form value
+            connection_value = bundle.connection_form(
+                torch.cat([tangent, torch.zeros(bundle.fiber_dim, dtype=dtype)])
+            )
+            
+            # For pattern bundle, connection gives matrix
+            if isinstance(bundle, PatternFiberBundle):
+                infinitesimal = transported[i] + torch.matmul(
+                    connection_value,
+                    transported[i].unsqueeze(-1)
+                ).squeeze(-1)
+            else:
+                # For base bundle, connection gives vector
+                infinitesimal = transported[i] + connection_value
+            
+            assert torch.allclose(
+                infinitesimal,
+                transported[i+1],
+                rtol=1e-3
+            ), f"Transport step {i} inconsistent with connection form"
+        
+        # Test 4: Horizontal lift properties
+        # The lifted path should be horizontal (perpendicular to fibers)
+        if isinstance(bundle, PatternFiberBundle):
+            for i in range(len(base_path) - 1):
+                tangent = transported[i+1] - transported[i]
+                vertical_part = tangent[bundle.base_dim:]
+                
+                assert torch.allclose(
+                    vertical_part,
+                    torch.zeros_like(vertical_part),
+                    rtol=1e-4,
+                    atol=1e-4
+                ), f"Lifted path not horizontal at step {i}"
+        
+        # Test 5: Structure group compatibility
+        if hasattr(bundle, "structure_group") and bundle.structure_group is not None:
+            # Transport with structure group action
+            group_element = torch.eye(bundle.fiber_dim, dtype=dtype)
+            transformed_section = torch.matmul(group_element, section)
+            transformed_transport = bundle.parallel_transport(transformed_section, base_path)
+            
+            # Should commute with group action
+            direct_transport = torch.matmul(
+                group_element,
+                transported.unsqueeze(-1)
+            ).squeeze(-1)
+            
+            assert torch.allclose(
+                transformed_transport,
+                direct_transport,
+                rtol=1e-4
+            ), "Parallel transport should commute with structure group action"
 
 
 class TestBaseFiberBundle:
@@ -332,3 +470,125 @@ class TestPatternFiberBundle:
         # Test batch connection
         connection = pattern_bundle.connection_form(total_space)
         assert connection.shape[0] == batch_size, "Should handle batched input"
+
+    def test_connection_form_components(self, pattern_bundle, test_config):
+        """Test individual components of the connection form separately."""
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+
+        # Test 1: Pure vertical vectors
+        vertical_vector = torch.zeros(batch_size, pattern_bundle.total_dim, dtype=dtype)
+        vertical_vector[..., pattern_bundle.base_dim:] = torch.randn(
+            batch_size, pattern_bundle.fiber_dim, dtype=dtype
+        )
+        vertical_connection = pattern_bundle.connection_form(vertical_vector)
+        
+        # Verify vertical preservation
+        vertical_components = torch.diagonal(vertical_connection, dim1=-2, dim2=-1)
+        assert torch.allclose(
+            vertical_components,
+            vertical_vector[..., pattern_bundle.base_dim:],
+            rtol=1e-5
+        ), "Connection should preserve pure vertical vectors"
+
+        # Test 2: Pure horizontal vectors
+        horizontal_vector = torch.zeros(batch_size, pattern_bundle.total_dim, dtype=dtype)
+        horizontal_vector[..., :pattern_bundle.base_dim] = torch.randn(
+            batch_size, pattern_bundle.base_dim, dtype=dtype
+        )
+        horizontal_connection = pattern_bundle.connection_form(horizontal_vector)
+        
+        # Verify skew-symmetry
+        skew_check = horizontal_connection + horizontal_connection.transpose(-2, -1)
+        assert torch.allclose(
+            skew_check,
+            torch.zeros_like(skew_check),
+            rtol=1e-5
+        ), "Connection should be skew-symmetric for horizontal vectors"
+
+        # Test 3: Individual Christoffel symbols
+        for i in range(pattern_bundle.base_dim):
+            matrix = pattern_bundle.connection[i]
+            # Verify skew-symmetry of each component
+            assert torch.allclose(
+                matrix + matrix.transpose(-2, -1),
+                torch.zeros_like(matrix),
+                rtol=1e-5
+            ), f"Connection component {i} should be skew-symmetric"
+
+    def test_parallel_transport_components(self, pattern_bundle, test_config):
+        """Test individual components of parallel transport separately."""
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        
+        # Test 1: Short straight line transport
+        section = torch.randn(pattern_bundle.fiber_dim, dtype=dtype)
+        t = torch.linspace(0, 1, 10, dtype=dtype)
+        straight_path = torch.stack([t, torch.zeros_like(t)], dim=1)
+        straight_transport = pattern_bundle.parallel_transport(section, straight_path)
+        
+        # Verify metric preservation along straight path
+        section_norm = torch.norm(section)
+        straight_norms = torch.norm(straight_transport, dim=1)
+        assert torch.allclose(
+            straight_norms,
+            section_norm * torch.ones_like(straight_norms),
+            rtol=1e-4
+        ), "Parallel transport should preserve norm along straight path"
+
+        # Test 2: Small circular arc transport
+        theta = torch.linspace(0, torch.pi/4, 20, dtype=dtype)  # 45-degree arc
+        arc_path = torch.stack([torch.cos(theta), torch.sin(theta)], dim=1)
+        arc_transport = pattern_bundle.parallel_transport(section, arc_path)
+        
+        # Verify metric preservation along arc
+        arc_norms = torch.norm(arc_transport, dim=1)
+        assert torch.allclose(
+            arc_norms,
+            section_norm * torch.ones_like(arc_norms),
+            rtol=1e-4
+        ), "Parallel transport should preserve norm along circular arc"
+
+        # Test 3: Infinitesimal transport consistency
+        # Take very small steps and compare with connection form
+        small_path = torch.stack([theta[:2], torch.zeros_like(theta[:2])], dim=1)
+        small_transport = pattern_bundle.parallel_transport(section, small_path)
+        
+        # Compute expected infinitesimal transport using connection
+        tangent = small_path[1] - small_path[0]
+        connection_value = pattern_bundle.connection_form(
+            torch.cat([tangent, torch.zeros(pattern_bundle.fiber_dim, dtype=dtype)])
+        )
+        expected_transport = section + torch.matmul(connection_value, section.unsqueeze(-1)).squeeze(-1)
+        
+        assert torch.allclose(
+            small_transport[1],
+            expected_transport,
+            rtol=1e-4
+        ), "Infinitesimal parallel transport should match connection form"
+
+    def test_holonomy_properties(self, pattern_bundle, test_config):
+        """Test specific properties of the holonomy group."""
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        
+        # Test 1: Small contractible loop
+        section = torch.randn(pattern_bundle.fiber_dim, dtype=dtype)
+        t = torch.linspace(0, 2*torch.pi, 50, dtype=dtype)
+        small_loop = 0.1 * torch.stack([torch.cos(t), torch.sin(t)], dim=1)  # Scaled down loop
+        small_transport = pattern_bundle.parallel_transport(section, small_loop)
+        
+        assert torch.allclose(
+            small_transport[0],
+            small_transport[-1],
+            rtol=1e-4
+        ), "Parallel transport around small contractible loop should be trivial"
+
+        # Test 2: Composition of loops
+        # Transport around same loop twice
+        double_loop = torch.cat([small_loop, small_loop], dim=0)
+        double_transport = pattern_bundle.parallel_transport(section, double_loop)
+        
+        assert torch.allclose(
+            double_transport[0],
+            double_transport[-1],
+            rtol=1e-4
+        ), "Parallel transport around composed loops should be consistent"
