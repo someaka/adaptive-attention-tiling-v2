@@ -68,8 +68,8 @@ def test_logarithm_map_properties():
     y = torch.tensor([1.5, 0.5, 0.0])
     v = log_map.forward(x, y)
     
-    # The Minkowski norm of v should equal the hyperbolic distance
-    v_norm = exp_map.minkowski_norm(v)
+    # Normalize to exact distance
+    v_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v, v)))  # Use proper Minkowski norm
     dist = torch.acosh(-exp_map.minkowski_inner(x, y))
     assert torch.allclose(v_norm, dist, atol=1e-6)
 

@@ -58,12 +58,12 @@ def test_exponential_map_properties():
     x = torch.tensor([1.2, 0.3, 0.4])
     x = exp_map.project_to_hyperboloid(x)
     v_zero = torch.zeros_like(x)
-    result = exp_map.forward(x, v_zero)
+    result = exp_map(x, v_zero)
     assert torch.allclose(result, x, atol=1e-6)
     
     # Property 2: exp_x(v) should preserve hyperboloid constraint
     v = torch.tensor([0.0, 0.3, 0.4])
-    result = exp_map.forward(x, v)
+    result = exp_map(x, v)
     inner = exp_map.minkowski_inner(result, result)
     assert torch.allclose(inner, torch.tensor(-1.0), atol=1e-6)
     

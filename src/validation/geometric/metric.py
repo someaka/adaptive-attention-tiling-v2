@@ -29,11 +29,14 @@ class MetricValidation:
 
 @dataclass
 class ConnectionValidation:
-    """Result of connection validation."""
-    compatible: bool
-    torsion_free: bool
-    symmetry: Tensor
-    consistency: float
+    """Result of connection form validation.
+    
+    Attributes:
+        is_valid: Whether the connection form is valid
+        message: Description of validation result
+    """
+    is_valid: bool
+    message: str
 
 @dataclass
 class CurvatureValidation:
@@ -1063,65 +1066,58 @@ class ConnectionValidator:
     def validate_connection(
         self, connection: Tensor, metric: Tensor
     ) -> ConnectionValidation:
-        """Validate connection properties."""
-        # Check metric compatibility
-        compatible = self._check_compatibility(connection, metric)
-
-        # Check torsion-free property
-        torsion_free = self._check_torsion(connection)
-
-        # Measure symmetries
-        symmetry = self._measure_symmetry(connection)
-
-        # Compute overall consistency
-        consistency = float(compatible and torsion_free)
-
-        return ConnectionValidation(
-            compatible=compatible,
-            torsion_free=torsion_free,
-            symmetry=symmetry,
-            consistency=consistency,
-        )
-
-    def _check_compatibility(
-        self, connection: Tensor, metric: Tensor
-    ) -> bool:
-        """Check metric compatibility of connection."""
-        # Compute covariant derivative of metric
-        # Shape: (batch_size, manifold_dim, manifold_dim, manifold_dim)
-        cov_deriv = torch.zeros(
-            metric.shape[0],  # batch_size
-            metric.shape[1],  # manifold_dim
-            metric.shape[2],  # manifold_dim
-            metric.shape[1],  # manifold_dim
-            device=metric.device
-        )
-
-        for k in range(self.manifold_dim):
-            # Extract the k-th slice of connection: (batch_size, manifold_dim, manifold_dim)
-            connection_k = connection[..., k, :, :]
-            # Update einsum to handle batch dimension (first dimension)
-            cov_deriv += torch.einsum("bij,bik->bijk", metric, connection_k)
-
-        return bool(torch.allclose(
-            cov_deriv, torch.zeros_like(cov_deriv), atol=self.tolerance
-        ))
-
-    def _check_torsion(self, connection: Tensor) -> bool:
-        """Check if connection is torsion-free."""
-        torsion = connection - connection.transpose(-2, -3)
-        return bool(torch.allclose(torsion, torch.zeros_like(torsion), atol=self.tolerance))
-
-    def _measure_symmetry(self, connection: Tensor) -> Tensor:
-        """Measure symmetry properties of connection."""
-        symmetry = torch.zeros(self.manifold_dim)
-
-        for i in range(self.manifold_dim):
-            symmetry[i] = torch.norm(
-                connection[..., i, :, :] - connection[..., i, :, :].transpose(-1, -2)
+        """Validate a connection form.
+        
+        For fiber bundles, we validate:
+        1. Metric compatibility with fiber metric
+        2. Skew-symmetry (for orthogonal structure group)
+        3. Proper shape and batch dimensions
+        
+        Args:
+            connection: Connection form tensor (batch_size, fiber_dim, fiber_dim)
+            metric: Full metric tensor (batch_size, total_dim, total_dim)
+            
+        Returns:
+            ConnectionValidation result
+        """
+        # Check basic shape requirements
+        if len(connection.shape) != 3:
+            return ConnectionValidation(
+                is_valid=False,
+                message="Connection form must be 3-dimensional (batch, fiber_dim, fiber_dim)"
             )
-
-        return symmetry
+            
+        fiber_dim = connection.shape[-1]
+        
+        # Extract fiber metric (last fiber_dim × fiber_dim block)
+        fiber_metric = metric[..., -fiber_dim:, -fiber_dim:]
+        
+        # For orthogonal structure group, check skew-symmetry
+        if not torch.allclose(
+            connection + connection.transpose(-2, -1),
+            torch.zeros_like(connection),
+            atol=self.tolerance
+        ):
+            return ConnectionValidation(
+                is_valid=False,
+                message="Connection form is not skew-symmetric"
+            )
+            
+        # Check metric compatibility: ω_a^b g_bc + ω_a^c g_bc = 0
+        term1 = torch.einsum('...ab,...bc->...ac', connection, fiber_metric)
+        term2 = torch.einsum('...ac,...bc->...ab', connection, fiber_metric)
+        total = term1 + term2
+        
+        if not torch.allclose(total, torch.zeros_like(total), atol=self.tolerance):
+            return ConnectionValidation(
+                is_valid=False,
+                message="Connection form is not compatible with fiber metric"
+            )
+            
+        return ConnectionValidation(
+            is_valid=True,
+            message="Connection form is compatible with fiber metric"
+        )
 
 
 class CurvatureValidator:
@@ -1241,7 +1237,7 @@ class GeometricMetricValidator:
         # Overall validation status
         is_valid = (
             metric_validation.is_positive_definite and
-            connection_validation.compatible and
+            connection_validation.is_valid and
             curvature_validation.bounds_satisfied
         )
 

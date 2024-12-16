@@ -135,27 +135,91 @@ pip install -r requirements.txt
 
 ### Project Structure
 
+The project is organized into source code (`src/`) and test (`tests/`) directories:
+
 ```
 src/
-├── core/               # Core implementation components
-│   ├── attention/     # Geometric attention mechanisms
-│   ├── quantum/       # Quantum state management
-│   ├── tiling/        # Tiling and pattern processing
-│   ├── flow/          # Geometric flow computation
-│   ├── crystal/       # Crystal structure implementation
-│   └── backends/      # Computation backends
-├── neural/            # Neural network architectures
-│   ├── attention/     # Neural attention components
-│   └── flow/          # Geometric flow implementation
-├── validation/        # Validation frameworks
-│   ├── geometric/     # Geometric validation
-│   ├── quantum/       # Quantum state validation
-│   └── patterns/      # Pattern stability validation
-├── metrics/           # Performance and validation metrics
-│   ├── quantum/       # Quantum geometric metrics
-│   └── performance/   # Performance tracking
-└── utils/            # Utility functions
+├── core/                  # Core implementation components
+│   ├── attention/        # Geometric attention mechanisms
+│   ├── backends/         # CPU and Vulkan backends
+│   │   ├── cpu/         # CPU-specific optimizations
+│   │   └── vulkan/      # Vulkan compute implementation
+│   ├── crystal/         # Crystal structure and scale theory
+│   ├── flow/            # Geometric flow computations
+│   ├── metrics/         # Core metrics and analysis
+│   ├── models/          # Base model implementations
+│   ├── patterns/        # Pattern theory implementation
+│   ├── performance/     # Performance optimization
+│   ├── quantum/         # Quantum state management
+│   ├── tiling/         # Tiling system implementation
+│   └── utils/          # Core utilities
+├── infrastructure/       # System infrastructure
+│   ├── base.py         # Base infrastructure classes
+│   ├── cpu_optimizer.py # CPU optimization
+│   └── memory_manager.py # Memory management
+├── metrics/             # Metrics and monitoring
+│   ├── attention/      # Attention-specific metrics
+│   ├── performance/    # Performance metrics
+│   └── tiling/        # Tiling metrics
+├── neural/             # Neural network components
+│   ├── attention/     # Neural attention patterns
+│   └── flow/         # Neural geometric flow
+├── utils/             # General utilities
+└── validation/        # Validation framework
+    ├── geometric/    # Geometric validation
+    ├── patterns/    # Pattern validation
+    └── quantum/     # Quantum state validation
+
+tests/
+├── core/             # Core component tests
+│   ├── attention/   # Attention mechanism tests
+│   └── tiling/     # Tiling system tests
+├── integration/     # Integration tests
+│   └── end_to_end/ # Full system tests
+├── performance/     # Performance benchmarks
+│   ├── benchmark/  # Benchmark framework
+│   ├── cpu/       # CPU performance tests
+│   └── vulkan/    # Vulkan performance tests
+├── test_core/      # Core functionality tests
+│   ├── test_crystal/   # Crystal structure tests
+│   ├── test_patterns/  # Pattern theory tests
+│   └── test_quantum/   # Quantum system tests
+├── test_neural/    # Neural component tests
+│   ├── test_attention/ # Attention tests
+│   └── test_flow/     # Flow computation tests
+└── test_validation/   # Validation framework tests
 ```
+
+Key test categories:
+1. **Unit Tests**: Individual component testing
+   - Pattern space operations
+   - Quantum state management
+   - Geometric computations
+   - Memory management
+
+2. **Integration Tests**: Component interaction testing
+   - Cross-validation
+   - End-to-end workflows
+   - System integration
+
+3. **Performance Tests**: System performance validation
+   - CPU optimization
+   - Vulkan compute
+   - Memory efficiency
+   - Scaling characteristics
+
+4. **Validation Tests**: Framework validation
+   - Geometric validation
+   - Pattern stability
+   - Quantum state validation
+   - Flow characteristics
+
+Test dependencies are managed to ensure proper execution order:
+1. Core tests (patterns, quantum, crystal)
+2. Neural component tests (attention, flow)
+3. Validation framework tests
+4. Infrastructure tests
+5. Integration tests
 
 ## Documentation
 

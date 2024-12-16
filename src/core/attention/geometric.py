@@ -200,6 +200,21 @@ class HyperbolicExponential(nn.Module):
         space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
         return -time_component + space_component
         
+    def minkowski_norm(self, v: torch.Tensor) -> torch.Tensor:
+        """Compute Minkowski norm of a vector.
+        
+        For a vector v in Minkowski space, the norm is defined as:
+        ‖v‖_M = √|⟨v,v⟩_M|
+        where ⟨·,·⟩_M is the Minkowski inner product.
+        
+        Args:
+            v: Input vector or batch of vectors
+            
+        Returns:
+            Minkowski norm of the vector(s)
+        """
+        return torch.sqrt(torch.abs(self.minkowski_inner(v, v)))
+        
     def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
         """Project points onto the hyperboloid with numerical stability."""
         # Scale by curvature

@@ -1,34 +1,28 @@
 """
-Fiber Bundle Implementation.
+Base Fiber Bundle Implementation.
 
-This module implements fiber bundles for pattern spaces.
+This module provides the core mathematical implementation of fiber bundles,
+implementing the FiberBundle protocol defined in core.tiling.patterns.fiber_bundle.
 """
 
-from typing import List, Protocol, Optional, TypeVar, Callable, Tuple
+from typing import List, Optional, Tuple
 import torch
 from torch import Tensor
-import torch.nn.functional as F
 
-T = TypeVar('T', bound=Tensor)
+from ..tiling.patterns.fiber_bundle import (
+    FiberBundle,
+    LocalChart,
+    FiberChart,
+)
 
-class BundleMap(Protocol):
-    """Protocol for bundle maps."""
-    def __call__(self, x: Tensor) -> Tensor: ...
 
-class LocalTrivialization(Protocol):
-    """Protocol for local trivialization maps."""
-    def __call__(self, point: Tensor) -> tuple[Tensor, Tensor]: ...
-
-class TransitionFunction(Protocol):
-    """Protocol for transition functions between charts."""
-    def __call__(self, x: Tensor) -> Tensor: ...
-
-class BundleSection(Protocol):
-    """Protocol for bundle sections."""
-    def __call__(self, x: Tensor) -> Tensor: ...
-
-class FiberBundle:
-    """Implementation of a fiber bundle with connection."""
+class BaseFiberBundle(FiberBundle[Tensor]):
+    """Core mathematical implementation of fiber bundles.
+    
+    This class provides the foundational mathematical implementation of
+    the FiberBundle protocol, focusing on the geometric operations
+    without pattern-specific features.
+    """
 
     def __init__(
         self,
@@ -52,21 +46,26 @@ class FiberBundle:
         self.metric = torch.eye(self.total_dim)
 
         # Initialize connection form
-        self.connection = torch.zeros(self.total_dim, fiber_dim)
+        # Shape: (base_dim, fiber_dim, fiber_dim)
+        self.connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim)
 
-    def bundle_projection(self, x: Tensor) -> Tensor:
-        """Project from total space to base manifold.
+    def bundle_projection(self, total_space: Tensor) -> Tensor:
+        """Implementation of FiberBundle.bundle_projection.
+        
+        Projects from total space to base manifold.
         
         Args:
-            x: Point in total space
+            total_space: Point in total space
             
         Returns:
             Projection onto base manifold
         """
-        return x[..., :self.base_dim]
+        return total_space[..., :self.base_dim]
 
-    def local_trivialization(self, point: Tensor) -> Tuple[Tensor, Tensor]:
-        """Compute local trivialization at a point.
+    def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
+        """Implementation of FiberBundle.local_trivialization.
+        
+        Compute local trivialization at a point.
         
         Args:
             point: Point in total space
@@ -74,9 +73,98 @@ class FiberBundle:
         Returns:
             Tuple of (local_chart, fiber_chart)
         """
-        local_chart = self.bundle_projection(point)
-        fiber_chart = point[..., self.base_dim:]
+        base_coords = self.bundle_projection(point)
+        fiber_coords = point[..., self.base_dim:]
+        
+        local_chart = LocalChart(
+            coordinates=base_coords,
+            dimension=self.base_dim,
+            transition_maps={}
+        )
+        
+        fiber_chart = FiberChart(
+            fiber_coordinates=fiber_coords,
+            structure_group=self.structure_group or "SO3",
+            transition_functions={}
+        )
+        
         return local_chart, fiber_chart
+
+    def transition_functions(self, chart1: LocalChart[Tensor], chart2: LocalChart[Tensor]) -> Tensor:
+        """Implementation of FiberBundle.transition_functions.
+        
+        Compute transition between charts.
+        
+        Args:
+            chart1: First local chart
+            chart2: Second local chart
+            
+        Returns:
+            Transition function between charts
+        """
+        diff = chart2.coordinates - chart1.coordinates  # Shape: (batch_size, base_dim)
+        
+        # Reshape for proper broadcasting
+        diff = diff.unsqueeze(-1)  # Shape: (batch_size, base_dim, 1)
+        connection = self.connection.unsqueeze(0)  # Shape: (1, base_dim, fiber_dim, fiber_dim)
+        
+        # Compute transition matrix
+        transition = torch.einsum('...i,ijkl->...kl', diff.squeeze(-1), connection)
+        return torch.eye(self.fiber_dim) + transition
+
+    def connection_form(self, tangent_vector: Tensor) -> Tensor:
+        """Implementation of FiberBundle.connection_form.
+        
+        Compute connection form for parallel transport.
+        
+        Args:
+            tangent_vector: Tangent vector at a point
+            
+        Returns:
+            Connection form value
+        """
+        # Extract base and vertical components
+        base_components = tangent_vector[..., :self.base_dim]
+        vertical_components = tangent_vector[..., self.base_dim:]
+        
+        # For purely vertical vectors, return the vertical components directly
+        if torch.allclose(base_components, torch.zeros_like(base_components)):
+            return vertical_components
+            
+        # Otherwise compute full connection form
+        return torch.einsum('...i,ijk->...jk', base_components, self.connection)
+
+    def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
+        """Implementation of FiberBundle.parallel_transport.
+        
+        Parallel transport a section along a path.
+        
+        Args:
+            section: Section to transport (shape: (fiber_dim,))
+            path: Path along which to transport (shape: (num_points, base_dim))
+            
+        Returns:
+            Transported section (shape: (num_points, fiber_dim))
+        """
+        # Initialize result tensor
+        num_points = path.shape[0]
+        result = torch.zeros(num_points, self.fiber_dim)
+        result[0] = section  # Initial condition
+        
+        # Compute path tangent vectors
+        path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
+        
+        # Get connection form values along path
+        connection_values = self.connection_form(path_tangent)  # Shape: (num_points-1, fiber_dim, fiber_dim)
+        
+        # Parallel transport equation: ∇_γ̇s = 0
+        # Discretized as: s(t+dt) = s(t) + ω(γ̇)s(t)dt
+        for t in range(num_points - 1):
+            # Transport step
+            step = torch.matmul(connection_values[t], result[t].unsqueeze(-1)).squeeze(-1)
+            result[t + 1] = result[t] + step
+            
+        return result
 
     def compute_holonomy_group(self, holonomies: List[Tensor]) -> Tensor:
         """Compute the holonomy group from a list of holonomies.
@@ -87,7 +175,6 @@ class FiberBundle:
         Returns:
             Tensor representing the holonomy group elements
         """
-        # Convert list of holonomies to group elements
         return torch.stack(holonomies)
 
     def compute_holonomy_algebra(self, holonomies: List[Tensor]) -> Tensor:
@@ -100,46 +187,9 @@ class FiberBundle:
             Tensor representing the Lie algebra elements
         """
         holonomy_group = self.compute_holonomy_group(holonomies)
-        # Use matrix exponential/logarithm via eigendecomposition for stability
         eigenvalues, eigenvectors = torch.linalg.eigh(holonomy_group)
         log_eigenvalues = torch.log(torch.clamp(eigenvalues, min=1e-7))
         return torch.matmul(
             torch.matmul(eigenvectors, torch.diag_embed(log_eigenvalues)),
             eigenvectors.transpose(-2, -1)
         )
-
-    def get_projection(self) -> BundleMap:
-        """Get the bundle projection map."""
-        return self.bundle_projection
-
-    def get_local_trivialization(self, chart: Tensor) -> LocalTrivialization:
-        """Get local trivialization map for given chart."""
-        return self.local_trivialization
-
-    def get_transition_function(self, chart1: Tensor, chart2: Tensor) -> TransitionFunction:
-        """Get transition function between charts."""
-        def transition(x: Tensor) -> Tensor:
-            return x  # Placeholder implementation
-        return transition
-
-    def get_local_section(self) -> BundleSection:
-        """Get a local section of the bundle."""
-        def section(x: Tensor) -> Tensor:
-            return torch.randn(self.fiber_dim)  # Placeholder implementation
-        return section
-
-    def is_section(self, section: BundleSection) -> bool:
-        """Check if map is a valid section."""
-        return True  # Placeholder implementation
-
-    def is_smooth_section(self, section: BundleSection) -> bool:
-        """Check if section is smooth."""
-        return True  # Placeholder implementation
-
-    def is_fiber_preserving(self, map_func: BundleMap) -> bool:
-        """Check if a map preserves fibers."""
-        return True  # Placeholder implementation
-
-    def is_smooth_transition(self, transition: TransitionFunction) -> bool:
-        """Check if transition function is smooth."""
-        return True  # Placeholder implementation
