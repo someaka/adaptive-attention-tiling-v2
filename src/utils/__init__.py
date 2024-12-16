@@ -1,3 +1,3 @@
-"""Utility functions for the adaptive attention tiling system."""
+"""Utility modules for the project."""
 
 __all__ = [] 

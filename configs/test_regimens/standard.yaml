@@ -1,0 +1,27 @@
+# Test configuration for standard hardware (workstations with decent resources)
+hardware_profile:
+  name: "standard"
+  description: "Configuration for workstations with decent resources"
+  target_hardware:
+    ram_gb: 32
+    gpu: "dedicated"
+
+geometric_tests:
+  dimensions: 32
+  num_heads: 8
+  batch_size: 16
+  dtype: "float64"  # Using double precision for accuracy
+  
+hyperbolic_tests:
+  vector_scales: [0.001, 0.01, 0.1]
+  test_norms: [0.001, 0.01, 0.1]
+  precision: "float64"
+
+euclidean_tests:
+  dimensions: 32
+  test_batch_size: 16
+
+parallel_transport:
+  dimensions: 32
+  methods: ["schild", "pole"]
+  test_cases: 10 

@@ -1,0 +1,27 @@
+# Test configuration for server hardware (high-performance servers)
+hardware_profile:
+  name: "server"
+  description: "Configuration for high-performance servers"
+  target_hardware:
+    ram_gb: 128
+    gpu: "high_end"
+
+geometric_tests:
+  dimensions: 64
+  num_heads: 16
+  batch_size: 32
+  dtype: "float64"
+  
+hyperbolic_tests:
+  vector_scales: [0.0001, 0.001, 0.01, 0.1, 1.0]
+  test_norms: [0.0001, 0.001, 0.01, 0.1, 1.0]
+  precision: "float64"
+
+euclidean_tests:
+  dimensions: 64
+  test_batch_size: 32
+
+parallel_transport:
+  dimensions: 64
+  methods: ["schild", "pole"]
+  test_cases: 100  # Extensive testing 

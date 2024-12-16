@@ -1,9 +1,9 @@
 """Vulkan resource management."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union, Any, cast as type_cast, Type, TypeVar, Protocol
+from typing import Dict, List, Optional, Union, Any, cast as type_cast, Type, TypeVar, Protocol, TypeGuard
 
-from ctypes import c_void_p, cast, POINTER, Structure, c_uint32, c_uint64, _CData, _CArgObject, byref
+from ctypes import c_void_p, cast, POINTER, Structure, c_uint32, c_uint64, byref, _Pointer
 
 import vulkan as vk
 
@@ -31,8 +31,9 @@ def _from_handle(handle: VkHandle) -> c_void_p:
     return c_void_p(handle)
 
 
-# Type variable for structure types
-T = TypeVar('T', bound=Structure)
+def _is_ctype_pointer(obj: Any) -> TypeGuard[Union[c_void_p, _Pointer]]:
+    """Check if object is a valid ctypes pointer."""
+    return isinstance(obj, c_void_p) or (hasattr(type(obj), '_type_') and issubclass(type(obj), _Pointer))
 
 
 class VkMemoryRequirements(Structure):
@@ -82,19 +83,20 @@ class ImageResource:
     extent: Any  # VkExtent3D structure
 
 
-def _cast_to_struct(obj: Any, struct_type: Type[Structure]) -> POINTER(Structure):
-    """Safely cast a CData object to a structure pointer.
+def _cast_to_struct(obj: Any, struct_type: Type[VkMemoryRequirements]) -> POINTER(VkMemoryRequirements):
+    """Safely cast a pointer to a structure pointer.
     
     Args:
-        obj: CData object to cast
+        obj: Object to cast (must be a ctypes pointer or void_p)
         struct_type: Target structure type
         
     Returns:
         Cast pointer to structure
     """
-    # First cast to void pointer to ensure compatibility
+    if not _is_ctype_pointer(obj):
+        raise TypeError(f"Expected ctypes pointer, got {type(obj)}")
+    
     void_ptr = cast(obj, c_void_p)
-    # Then cast to target structure pointer
     return cast(void_ptr, POINTER(struct_type))
 
 

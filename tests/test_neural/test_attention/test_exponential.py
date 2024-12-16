@@ -67,13 +67,51 @@ def test_exponential_map_properties():
     inner = exp_map.minkowski_inner(result, result)
     assert torch.allclose(inner, torch.tensor(-1.0), atol=1e-6)
     
-    # Property 3: Scaling property for small vectors
+    # Property 3: Scaling property for geodesics
     x = torch.tensor([1.5, 0.5, 0.0])
-    v = torch.tensor([0.0, 0.1, 0.1])
-    result1 = exp_map.forward(x, v)
-    result2 = exp_map.forward(x, 2 * v)
+    x = exp_map.project_to_hyperboloid(x)
+    print(f"\nInitial point x: {x}")
+    print(f"x on hyperboloid: {exp_map.minkowski_inner(x, x)}")
     
-    # The geodesic distance should scale approximately for small vectors
-    dist1 = torch.sqrt(-exp_map.minkowski_inner(x, result1))
-    dist2 = torch.sqrt(-exp_map.minkowski_inner(x, result2))
-    assert torch.abs(dist2 - 2 * dist1) < 0.1  # Approximate due to curvature
+    # Create a small tangent vector for better numerical stability
+    v = torch.tensor([0.0, 0.01, 0.01])  # Use smaller vector
+    v = exp_map.project_to_tangent(x, v)
+    print(f"Projected v: {v}")
+    print(f"v in tangent space: {exp_map.minkowski_inner(x, v)}")
+    
+    # Scale the vector
+    v1 = v  # Original vector
+    v2 = 2 * v  # Double the vector
+    
+    print(f"\nv1 norm: {exp_map.minkowski_norm(v1)}")
+    print(f"v2 norm: {exp_map.minkowski_norm(v2)}")
+    
+    # Compute exponential maps
+    result1 = exp_map.forward(x, v1)
+    result2 = exp_map.forward(x, v2)
+    print(f"\nresult1: {result1}")
+    print(f"result2: {result2}")
+    
+    # The geodesic distance should scale exactly
+    # d(x, exp_x(2v)) = 2 * d(x, exp_x(v))
+    # where d(x,y) = arccosh(-⟨x,y⟩)
+    inner1 = -exp_map.minkowski_inner(x, result1)
+    inner2 = -exp_map.minkowski_inner(x, result2)
+    print(f"\ninner1: {inner1}")
+    print(f"inner2: {inner2}")
+    
+    dist1 = torch.acosh(inner1)
+    dist2 = torch.acosh(inner2)
+    print(f"dist1: {dist1}")
+    print(f"dist2: {dist2}")
+    print(f"2*dist1: {2*dist1}")
+    print(f"diff: {torch.abs(dist2 - 2*dist1)}")
+    
+    # The scaling should be exact up to numerical precision
+    assert torch.abs(dist2 - 2 * dist1) < 1e-5
+    
+    # Additional property: Distance should equal vector norm
+    v1_norm = exp_map.minkowski_norm(v1)
+    v2_norm = exp_map.minkowski_norm(v2)
+    assert torch.allclose(dist1, v1_norm, atol=1e-5)
+    assert torch.allclose(dist2, v2_norm, atol=1e-5)

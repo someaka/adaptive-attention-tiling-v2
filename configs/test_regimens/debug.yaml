@@ -1,0 +1,27 @@
+# Test configuration for debugging (absolute minimal settings)
+hardware_profile:
+  name: "debug"
+  description: "Minimal configuration for debugging"
+  target_hardware:
+    ram_gb: 4
+    gpu: "none"
+
+geometric_tests:
+  dimensions: 2     # Absolute minimal dimension
+  num_heads: 1      # Single head
+  batch_size: 1     # Single item batch
+  dtype: "float32"  # Lower precision
+  
+hyperbolic_tests:
+  vector_scales: [0.01]  # Single scale
+  test_norms: [0.01]    # Single norm
+  precision: "float32"   # Lower precision for all ops
+
+euclidean_tests:
+  dimensions: 2
+  test_batch_size: 1
+
+parallel_transport:
+  dimensions: 2
+  methods: ["schild"]  # Single method
+  test_cases: 1        # Single test case

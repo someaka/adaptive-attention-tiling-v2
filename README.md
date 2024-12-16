@@ -291,3 +291,24 @@ This project builds on research in:
 - Neural attention mechanisms
 - Motivic quantum theory
 - Geometric deep learning
+
+## Test Configuration
+
+The test suite supports different hardware profiles through YAML configuration files. These profiles allow running tests with parameters optimized for different environments:
+
+- `tiny`: For laptops and machines with limited resources (default)
+- `standard`: For workstations with decent computational resources
+- `server`: For high-performance servers
+
+To run tests with a specific profile:
+
+```bash
+# Default (tiny profile)
+pytest tests/
+
+# With specific profile
+PYTEST_PROFILE=standard pytest tests/
+PYTEST_PROFILE=server pytest tests/
+```
+
+The configurations are stored in `configs/test_regimens/` and can be customized for your specific hardware setup.
