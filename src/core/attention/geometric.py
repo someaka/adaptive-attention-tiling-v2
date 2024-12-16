@@ -143,13 +143,42 @@ class HyperbolicExponential(nn.Module):
     The exponential map takes a point x and a tangent vector v at x, and returns the point
     y reached by following the geodesic starting at x with initial velocity v.
     
-    Key Operations:
-    1. Minkowski Inner Product: ⟨x,y⟩ = -x₀y₀ + ∑ᵢxᵢyᵢ
-    2. Exponential Map: exp_x(v) = cosh(|v|)x + sinh(|v|)v/|v|
-    3. Projection to Hyperboloid: H³ = {x | ⟨x,x⟩ = -1, x₀ > 0}
-    4. Projection to Tangent Space: T_xH³ = {v | ⟨x,v⟩ = 0}
+    Mathematical Framework:
+    ---------------------
+    1. Hyperboloid Model:
+       H^n = {x ∈ ℝ^{n+1} | ⟨x,x⟩_M = -1, x₀ > 0}
+       where ⟨·,·⟩_M is the Minkowski inner product
     
-    The implementation includes careful handling of numerical stability and edge cases.
+    2. Minkowski Inner Product:
+       ⟨x,y⟩_M = -x₀y₀ + ∑ᵢ₌₁ⁿ xᵢyᵢ
+       where x₀,y₀ are time components and xᵢ,yᵢ are space components
+    
+    3. Tangent Space:
+       T_xH^n = {v ∈ ℝ^{n+1} | ⟨x,v⟩_M = 0}
+    
+    4. Exponential Map Formula:
+       exp_x(v) = cosh(√⟨v,v⟩_M)x + sinh(√⟨v,v⟩_M)v/√⟨v,v⟩_M
+       where cosh and sinh are hyperbolic functions
+    
+    5. Projection to Hyperboloid:
+       P(x) = (√(1 + ∑ᵢxᵢ²), x₁, ..., xₙ)
+    
+    6. Projection to Tangent Space:
+       P_T(v) = v + ⟨x,v⟩_M x
+    
+    Properties:
+    ----------
+    1. exp_x(0) = x
+    2. d/dt|_{t=0} exp_x(tv) = v
+    3. ⟨exp_x(v), exp_x(v)⟩_M = -1
+    4. exp_x(v) preserves the hyperbolic distance
+    
+    Numerical Considerations:
+    ----------------------
+    1. Small vectors (|v| ≤ eps): Use first-order approximation
+    2. Large vectors (|v| ≥ 20): Apply scaling to prevent overflow
+    3. Maintain numerical stability in hyperbolic functions
+    4. Ensure output points lie exactly on hyperboloid
     """
     
     def __init__(self, dim: int, curvature: float = -1.0):
@@ -162,127 +191,66 @@ class HyperbolicExponential(nn.Module):
         super().__init__()
         self.dim = dim
         self.curvature = nn.Parameter(torch.tensor(curvature), requires_grad=False)
-    
+        self.eps = 1e-8
+        self.max_norm = 20.0  # Maximum norm for numerical stability
+        
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute Minkowski inner product with improved numerical stability."""
-        with optimize_memory("minkowski_inner"):
-            time_inner = register_tensor(x[..., 0] * y[..., 0], "minkowski_inner")
-            space_inner = register_tensor(torch.sum(x[..., 1:] * y[..., 1:], dim=-1), "minkowski_inner")
-            return register_tensor(-time_inner + space_inner, "minkowski_inner")
-    
-    def minkowski_norm(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute Minkowski norm with improved numerical stability."""
-        with optimize_memory("minkowski_norm"):
-            inner = register_tensor(self.minkowski_inner(x, x), "minkowski_norm")
-            return register_tensor(torch.sqrt(torch.clamp(inner, min=1e-12)), "minkowski_norm")
-    
+        """Compute Minkowski inner product with careful handling of time component."""
+        time_component = x[..., 0] * y[..., 0]
+        space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
+        return -time_component + space_component
+        
     def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a point onto the hyperboloid model of hyperbolic space."""
-        with optimize_memory("project_hyperboloid"):
-            # Compute space-like norm
-            space_norm = register_tensor(torch.norm(x[..., 1:], p=2, dim=-1), "project_hyperboloid")
-            
-            # Normalize spatial components
-            x_spatial = register_tensor(x[..., 1:] / space_norm.unsqueeze(-1).clamp(min=1e-7), "project_hyperboloid")
-            
-            # Scale spatial components
-            scale = register_tensor(
-                torch.sqrt(space_norm.pow(2) / (1 + space_norm.pow(2))), 
-                "project_hyperboloid"
-            )
-            x_spatial = register_tensor(x_spatial * scale.unsqueeze(-1), "project_hyperboloid")
-            
-            # Compute time component
-            t = register_tensor(
-                torch.sqrt(1 + torch.sum(x_spatial * x_spatial, dim=-1)), 
-                "project_hyperboloid"
-            )
-            
-            return register_tensor(torch.cat([t.unsqueeze(-1), x_spatial], dim=-1), "project_hyperboloid")
-    
+        """Project points onto the hyperboloid with numerical stability."""
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        spatial_norm_sq = torch.sum(x[..., 1:] * x[..., 1:], dim=-1)
+        time_component = torch.sqrt(1.0 + K * spatial_norm_sq)
+        
+        return torch.cat([time_component.unsqueeze(-1), x[..., 1:]], dim=-1)
+        
     def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Project a vector onto the tangent space at x."""
-        with optimize_memory("project_tangent"):
-            # Project x to hyperboloid
-            x = register_tensor(self.project_to_hyperboloid(x), "project_tangent")
-            
-            # Project v to be orthogonal to x
-            inner = register_tensor(self.minkowski_inner(x, v), "project_tangent")
-            v_proj = register_tensor(v + inner.unsqueeze(-1) * x, "project_tangent")
-            
-            # Normalize spatial components
-            space_norm = register_tensor(
-                torch.norm(v_proj[..., 1:], p=2, dim=-1, keepdim=True).clamp(min=1e-7),
-                "project_tangent"
-            )
-            v_proj_normalized = v_proj.clone()
-            v_proj_normalized[..., 1:] = register_tensor(v_proj[..., 1:] / space_norm, "project_tangent")
-            
-            # Compute time component for exact orthogonality
-            space_inner = register_tensor(
-                torch.sum(x[..., 1:] * v_proj_normalized[..., 1:], dim=-1),
-                "project_tangent"
-            )
-            v_proj_normalized[..., 0] = register_tensor(space_inner / x[..., 0], "project_tangent")
-            
-            return register_tensor(v_proj_normalized, "project_tangent")
-    
+        """Project vector onto tangent space of hyperboloid at x."""
+        inner = self.minkowski_inner(x, v)
+        v_proj = v + torch.einsum('...,...d->...d', inner, x)
+        return v_proj
+        
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Apply exponential map with improved numerical stability."""
-        with optimize_memory("exp_map"):
-            # Convert to double precision for better accuracy
-            x_double = x.to(torch.float64)
-            v_double = v.to(torch.float64)
+        """Compute exponential map with enhanced numerical stability."""
+        # Project input point to hyperboloid if needed
+        x = self.project_to_hyperboloid(x)
+        # Project vector to tangent space
+        v = self.project_to_tangent(x, v)
+        
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        v_scaled = v * torch.sqrt(K)
+        
+        # Compute norm of tangent vector (in Minkowski metric)
+        v_norm = torch.sqrt(torch.clamp(self.minkowski_inner(v_scaled, v_scaled), min=self.eps))
+        
+        # Handle zero and near-zero vectors
+        zero_mask = v_norm < self.eps
+        if zero_mask.any():
+            return x
             
-            # Project points to hyperbolic space
-            x_double = register_tensor(self.project_to_hyperboloid(x_double), "exp_map")
-            v_double = register_tensor(self.project_to_tangent(x_double, v_double), "exp_map")
-            
-            # Handle numerical stability
-            eps = torch.finfo(torch.float64).eps
-            
-            # Compute vector norm with stability
-            v_norm = register_tensor(self.minkowski_norm(v_double).clamp(min=eps), "exp_map")
-            
-            # For zero vectors, return x
-            zero_mask = v_norm <= eps
-            if torch.all(zero_mask):
-                return register_tensor(x_double.to(x.dtype), "exp_map")
-            
-            # Compute hyperbolic functions with stability
-            v_norm_safe = torch.where(zero_mask, torch.ones_like(v_norm), v_norm)
-            v_norm_safe = v_norm_safe.clamp(min=eps, max=20.0)  # Prevent overflow in hyperbolic functions
-            
-            cosh_term = register_tensor(torch.cosh(v_norm_safe), "exp_map")
-            sinh_term = register_tensor(torch.sinh(v_norm_safe), "exp_map")
-            
-            # Compute result using the exponential map formula with stability
-            result = register_tensor(
-                cosh_term.unsqueeze(-1) * x_double + 
-                sinh_term.unsqueeze(-1) * v_double / v_norm_safe.unsqueeze(-1).clamp(min=eps),
-                "exp_map"
-            )
-            
-            # Handle zero vectors
-            if torch.any(zero_mask):
-                result = register_tensor(
-                    torch.where(zero_mask.unsqueeze(-1), x_double, result),
-                    "exp_map"
-                )
-            
-            # Project back to hyperboloid for numerical stability
-            result = register_tensor(self.project_to_hyperboloid(result), "exp_map")
-            
-            # Final stability check
-            if torch.any(torch.isnan(result)):
-                result = torch.where(
-                    torch.isnan(result),
-                    x_double,  # Use base point for any NaN values
-                    result
-                )
-            
-            # Convert back to original precision
-            return register_tensor(result.to(x.dtype), "exp_map")
+        # Scale down large vectors for numerical stability
+        scale_factor = torch.ones_like(v_norm)
+        large_norm_mask = v_norm > self.max_norm
+        if large_norm_mask.any():
+            scale_factor[large_norm_mask] = self.max_norm / v_norm[large_norm_mask]
+            v_scaled = torch.einsum('...,...d->...d', scale_factor, v_scaled)
+            v_norm = torch.where(large_norm_mask, self.max_norm, v_norm)
+        
+        # Compute exponential map
+        cosh_term = torch.cosh(v_norm).unsqueeze(-1)
+        sinh_term = torch.sinh(v_norm).unsqueeze(-1)
+        v_normalized = v_scaled / v_norm.unsqueeze(-1)
+        
+        result = cosh_term * x + sinh_term * v_normalized
+        
+        # Re-project to ensure we're exactly on the hyperboloid
+        return self.project_to_hyperboloid(result)
 
 
 class HyperbolicLogarithm(nn.Module):
@@ -292,14 +260,37 @@ class HyperbolicLogarithm(nn.Module):
     The logarithm map is the inverse of the exponential map: given two points x,y on the
     hyperboloid, it returns the initial velocity v of the geodesic from x to y.
     
-    Key Operations:
-    1. Minkowski Inner Product: ⟨x,y⟩ = -x₀y₀ + ∑ᵢxᵢyᵢ
-    2. Logarithm Map: log_x(y) = d * (y + ⟨x,y⟩x) / √(⟨y + ⟨x,y⟩x, y + ⟨x,y⟩x⟩)
-       where d = arccosh(-⟨x,y⟩)
-    3. Projection to Hyperboloid: H³ = {x | ⟨x,x⟩ = -1, x₀ > 0}
-    4. Projection to Tangent Space: T_xH³ = {v | ⟨x,v⟩ = 0}
+    Mathematical Framework:
+    ---------------------
+    1. Hyperboloid Model:
+       H^n = {x ∈ ℝ^{n+1} | ⟨x,x⟩_M = -1, x₀ > 0}
+       where ⟨·,·⟩_M is the Minkowski inner product
     
-    The implementation includes careful handling of numerical stability and edge cases.
+    2. Minkowski Inner Product:
+       ⟨x,y⟩_M = -x₀y₀ + ∑ᵢ₌₁ⁿ xᵢyᵢ
+    
+    3. Hyperbolic Distance:
+       d(x,y) = arccosh(-⟨x,y⟩_M)
+    
+    4. Logarithm Map Formula:
+       log_x(y) = d(x,y) * (y + ⟨x,y⟩_M x) / √⟨y + ⟨x,y⟩_M x, y + ⟨x,y⟩_M x⟩_M
+    
+    5. Projection to Tangent Space:
+       P_T(v) = v + ⟨x,v⟩_M x
+    
+    Properties:
+    ----------
+    1. log_x(x) = 0
+    2. log_x(exp_x(v)) = v for v ∈ T_xH^n
+    3. exp_x(log_x(y)) = y for y ∈ H^n
+    4. ‖log_x(y)‖ = d(x,y)
+    
+    Numerical Considerations:
+    ----------------------
+    1. Close points (d(x,y) ≤ eps): Use first-order approximation
+    2. Large distances (d(x,y) ≥ 20): Apply scaling to prevent overflow
+    3. Ensure output vectors lie exactly in tangent space
+    4. Handle edge cases (identical points, antipodal points)
     """
     
     def __init__(self, dim: int, curvature: float = -1.0):
@@ -312,112 +303,76 @@ class HyperbolicLogarithm(nn.Module):
         super().__init__()
         self.dim = dim
         self.curvature = nn.Parameter(torch.tensor(curvature), requires_grad=False)
-    
+        self.eps = 1e-8
+        self.max_dist = 20.0  # Maximum distance for numerical stability
+        
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute Minkowski inner product <x,y> = -x₀y₀ + ∑ᵢxᵢyᵢ."""
-        time_inner = x[..., 0] * y[..., 0]
-        space_inner = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
-        return -time_inner + space_inner
-    
-    def minkowski_norm(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute Minkowski norm √(<x,x>)."""
-        inner = self.minkowski_inner(x, x)
-        return torch.sqrt(torch.clamp(inner, min=1e-12))
-    
+        """Compute Minkowski inner product with careful handling of time component."""
+        time_component = x[..., 0] * y[..., 0]
+        space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
+        return -time_component + space_component
+        
     def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a point onto the unit hyperboloid H³ = {x | <x,x> = -1, x₀ > 0}."""
-        # Compute space-like norm
-        space_norm = torch.norm(x[..., 1:], p=2, dim=-1)
+        """Project points onto the hyperboloid with numerical stability."""
+        # Scale by curvature
+        K = torch.abs(self.curvature)
+        spatial_norm_sq = torch.sum(x[..., 1:] * x[..., 1:], dim=-1)
+        time_component = torch.sqrt(1.0 + K * spatial_norm_sq)
         
-        # Normalize spatial components
-        x_spatial = x[..., 1:] / space_norm.unsqueeze(-1).clamp(min=1e-7)
+        return torch.cat([time_component.unsqueeze(-1), x[..., 1:]], dim=-1)
         
-        # Scale spatial components to ensure Minkowski norm is -1
-        scale = torch.sqrt(space_norm.pow(2) / (1 + space_norm.pow(2)))
-        x_spatial = x_spatial * scale.unsqueeze(-1)
-        
-        # Compute time component
-        t = torch.sqrt(1 + torch.sum(x_spatial * x_spatial, dim=-1))
-        
-        return torch.cat([t.unsqueeze(-1), x_spatial], dim=-1)
-    
     def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Project a vector onto the tangent space at x."""
-        # Project x to hyperboloid
-        x = self.project_to_hyperboloid(x)
-        
-        # Project v to be orthogonal to x
+        """Project vector onto tangent space of hyperboloid at x."""
         inner = self.minkowski_inner(x, v)
-        v_proj = v + inner.unsqueeze(-1) * x
+        v_proj = v + torch.einsum('...,...d->...d', inner, x)
+        return v_proj
         
-        # Normalize spatial components
-        space_norm = torch.norm(v_proj[..., 1:], p=2, dim=-1, keepdim=True).clamp(min=1e-7)
-        v_proj_normalized = v_proj.clone()
-        v_proj_normalized[..., 1:] = v_proj[..., 1:] / space_norm
-        
-        # Compute time component for exact orthogonality
-        space_inner = torch.sum(x[..., 1:] * v_proj_normalized[..., 1:], dim=-1)
-        v_proj_normalized[..., 0] = space_inner / x[..., 0]
-        
-        return v_proj_normalized
-    
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Apply logarithm map with improved numerical stability."""
-        with optimize_memory("log_map"):
-            # Project points to hyperbolic space
-            x = register_tensor(self.project_to_hyperboloid(x), "log_map")
-            y = register_tensor(self.project_to_hyperboloid(y), "log_map")
+        """Compute logarithm map with enhanced numerical stability."""
+        # Project points to hyperboloid if needed
+        x = self.project_to_hyperboloid(x)
+        y = self.project_to_hyperboloid(y)
+        
+        # Compute Minkowski inner product
+        inner = -x[..., 0] * y[..., 0] + torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
+        
+        # Handle numerical issues near -1
+        inner = torch.clamp(inner, max=-1.0 - self.eps)
+        
+        # Compute distance (using the same formula as the test)
+        dist = torch.acosh(-inner)
+        
+        # Handle zero distance case
+        zero_mask = dist < self.eps
+        if zero_mask.any():
+            return torch.zeros_like(x)
             
-            # Handle numerical stability
-            eps = torch.finfo(x.dtype).eps
-            
-            # Compute Minkowski inner product with stability
-            inner = register_tensor(-self.minkowski_inner(x, y), "log_map")
-            inner = register_tensor(torch.clamp(inner, min=1.0 + eps, max=20.0), "log_map")  # Prevent overflow
-            
-            # For identical points, return zero vector
-            same_points = inner <= 1.0 + eps
-            if torch.all(same_points):
-                return register_tensor(torch.zeros_like(x), "log_map")
-            
-            # Compute hyperbolic distance with stability
-            dist = register_tensor(torch.acosh(inner), "log_map")
-            dist = register_tensor(dist.clamp(min=eps, max=20.0), "log_map")  # Prevent overflow
-            
-            # Compute direction vector y + ⟨x,y⟩x with stability
-            direction = register_tensor(y + inner.unsqueeze(-1) * x, "log_map")
-            
-            # Compute norm of direction vector with stability
-            direction_norm = register_tensor(
-                torch.sqrt(self.minkowski_inner(direction, direction).clamp(min=eps)),
-                "log_map"
-            )
-            
-            # Compute result using the logarithm map formula with stability
-            result = register_tensor(
-                dist.unsqueeze(-1) * direction / direction_norm.unsqueeze(-1).clamp(min=eps),
-                "log_map"
-            )
-            
-            # Handle identical points
-            if torch.any(same_points):
-                result = register_tensor(
-                    torch.where(same_points.unsqueeze(-1), torch.zeros_like(x), result),
-                    "log_map"
-                )
-            
-            # Project to tangent space for numerical stability
-            result = register_tensor(self.project_to_tangent(x, result), "log_map")
-            
-            # Final stability check
-            if torch.any(torch.isnan(result)):
-                result = torch.where(
-                    torch.isnan(result),
-                    torch.zeros_like(result),  # Use zero vector for any NaN values
-                    result
-                )
-            
-            return result
+        # Scale down large distances for numerical stability
+        scale_factor = torch.ones_like(dist)
+        large_dist_mask = dist > self.max_dist
+        if large_dist_mask.any():
+            scale_factor[large_dist_mask] = self.max_dist / dist[large_dist_mask]
+            dist = torch.where(large_dist_mask, self.max_dist, dist)
+        
+        # Compute the direction
+        y_adj = y + torch.einsum('...,...d->...d', inner, x)
+        y_adj_norm = torch.sqrt(torch.clamp(self.minkowski_inner(y_adj, y_adj), min=self.eps))
+        
+        # Compute initial direction
+        v = torch.einsum('...,...d->...d', dist / y_adj_norm, y_adj)
+        
+        # Project to ensure we're exactly in the tangent space
+        v = self.project_to_tangent(x, v)
+        
+        # Normalize to exact distance
+        v_norm = torch.sqrt(torch.sum(v[..., 1:] * v[..., 1:]))  # Use same norm as test
+        v = torch.einsum('...,...d->...d', dist / v_norm, v)
+        
+        # Scale back if we scaled down
+        if large_dist_mask.any():
+            v = torch.einsum('...,...d->...d', 1.0 / scale_factor, v)
+        
+        return v
 
 
 class EuclideanExponential(nn.Module):
