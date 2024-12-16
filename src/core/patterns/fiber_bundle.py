@@ -115,29 +115,38 @@ class BaseFiberBundle(FiberBundle[Tensor]):
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Implementation of FiberBundle.connection_form.
         
-        Compute connection form for parallel transport.
-        
         Args:
             tangent_vector: Tangent vector at a point
             
         Returns:
             Connection form value
         """
+        # Handle batch dimension if present
+        has_batch = len(tangent_vector.shape) > 1
+        if not has_batch:
+            tangent_vector = tangent_vector.unsqueeze(0)
+            
         # Extract base and vertical components
         base_components = tangent_vector[..., :self.base_dim]
         vertical_components = tangent_vector[..., self.base_dim:]
         
-        # For purely vertical vectors, return the vertical components directly
+        # For purely vertical vectors, return vertical components directly
         if torch.allclose(base_components, torch.zeros_like(base_components)):
-            return vertical_components
+            return vertical_components if has_batch else vertical_components.squeeze(0)
             
-        # Otherwise compute full connection form
-        return torch.einsum('...i,ijk->...jk', base_components, self.connection)
+        # For horizontal vectors, compute connection form
+        result = torch.zeros_like(vertical_components)
+        
+        # Contract connection with base components
+        # Shape: (batch_size, fiber_dim)
+        result = torch.einsum('...i,ijk->...k', base_components, self.connection)
+            
+        return result if has_batch else result.squeeze(0)
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Implementation of FiberBundle.parallel_transport.
         
-        Parallel transport a section along a path.
+        Parallel transport a section along a path using adaptive RK4 integration.
         
         Args:
             section: Section to transport (shape: (fiber_dim,))
@@ -148,23 +157,71 @@ class BaseFiberBundle(FiberBundle[Tensor]):
         """
         # Initialize result tensor
         num_points = path.shape[0]
-        result = torch.zeros(num_points, self.fiber_dim)
+        result = torch.zeros(num_points, self.fiber_dim, device=path.device, dtype=path.dtype)
         result[0] = section  # Initial condition
         
-        # Compute path tangent vectors
+        # Compute path tangent vectors and normalize
         path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
+        path_lengths = torch.norm(path_tangent, dim=-1, keepdim=True)
+        path_tangent = path_tangent / (path_lengths + 1e-7)
         
-        # Get connection form values along path
-        connection_values = self.connection_form(path_tangent)  # Shape: (num_points-1, fiber_dim, fiber_dim)
+        # Adaptive RK4 integration
+        t = 0.0
+        dt = 1.0 / (num_points - 1)
+        current_point = 0
         
-        # Parallel transport equation: ∇_γ̇s = 0
-        # Discretized as: s(t+dt) = s(t) + ω(γ̇)s(t)dt
-        for t in range(num_points - 1):
-            # Transport step
-            step = torch.matmul(connection_values[t], result[t].unsqueeze(-1)).squeeze(-1)
-            result[t + 1] = result[t] + step
+        while current_point < num_points - 1:
+            # Current state
+            current = result[current_point]
             
+            # Try RK4 step
+            k1 = self._transport_step(current, path_tangent[current_point])
+            k2 = self._transport_step(current + 0.5*dt*k1, path_tangent[current_point])
+            k3 = self._transport_step(current + 0.5*dt*k2, path_tangent[current_point])
+            k4 = self._transport_step(current + dt*k3, path_tangent[current_point])
+            
+            # Compute two estimates
+            next_point = current + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+            half_point = current + (dt/12) * (k1 + 2*k2 + 2*k3 + k4)
+            
+            # Estimate error
+            error = torch.norm(next_point - half_point)
+            
+            # Adjust step size based on error
+            if error < 1e-6:
+                # Accept step
+                result[current_point + 1] = next_point
+                # Normalize to ensure metric preservation
+                result[current_point + 1] *= torch.norm(section) / torch.norm(result[current_point + 1])
+                current_point += 1
+                t += dt
+            else:
+                # Reduce step size and try again
+                dt *= 0.5
+                if dt < 1e-10:  # Prevent infinite loops
+                    raise RuntimeError("Step size too small in parallel transport")
+        
         return result
+        
+    def _transport_step(self, section: Tensor, tangent: Tensor) -> Tensor:
+        """Compute single transport step.
+        
+        Args:
+            section: Current section value
+            tangent: Path tangent vector
+            
+        Returns:
+            Change in section
+        """
+        # Extend tangent vector with zeros in fiber direction
+        full_tangent = torch.zeros(self.total_dim, device=tangent.device, dtype=tangent.dtype)
+        full_tangent[:self.base_dim] = tangent
+        
+        # Get connection form value
+        connection = self.connection_form(full_tangent)
+        
+        # Compute transport step
+        return -torch.matmul(connection, section.unsqueeze(-1)).squeeze(-1)
 
     def compute_holonomy_group(self, holonomies: List[Tensor]) -> Tensor:
         """Compute the holonomy group from a list of holonomies.

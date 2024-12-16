@@ -1,17 +1,21 @@
-"""Tests for model-specific geometric validation with improved type safety."""
-
-from __future__ import annotations
-
-import logging
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable, cast
+"""Tests for geometric model validation."""
 
 import pytest
 import torch
-from torch import Tensor, nn
+from torch import Tensor
+from torch import nn
+from typing import Optional, Protocol, runtime_checkable, cast
+
+from src.core.patterns import (
+    BaseRiemannianStructure,
+    RiemannianFramework,
+    PatternRiemannianStructure,
+    MetricTensor,
+    ChristoffelSymbols,
+    CurvatureTensor,
+)
 
 from src.core.models.base import LayerGeometry, ModelGeometry
-from src.core.patterns.riemannian import PatternRiemannianStructure, RiemannianFramework
 from src.validation.geometric.model import ModelGeometricValidator, ValidationResult
 
 
@@ -24,9 +28,12 @@ Scores = Tensor  # Shape: (batch_size, batch_size)
 class MockLayer(LayerGeometry):
     """Mock layer with Riemannian structure."""
     
-    def __init__(self, manifold_dim: int = 16) -> None:
-        super().__init__(manifold_dim)
-        self.riemannian_framework = PatternRiemannianStructure(manifold_dim)
+    def __init__(self, manifold_dim: int = 16, pattern_dim: Optional[int] = None) -> None:
+        super().__init__(manifold_dim, pattern_dim)
+        self.riemannian_framework = PatternRiemannianStructure(
+            manifold_dim=manifold_dim,
+            pattern_dim=pattern_dim if pattern_dim is not None else manifold_dim
+        )
         
         # Initialize with small metric factors for bounded energy
         with torch.no_grad():

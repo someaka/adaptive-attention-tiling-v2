@@ -27,6 +27,14 @@ from src.core.tiling.geometric_flow import GeometricFlow
 from src.core.patterns.riemannian import RiemannianFramework, PatternRiemannianStructure
 from src.core.quantum.types import QuantumState
 from src.core.patterns.dynamics import PatternDynamics
+from src.core.patterns import (
+    BaseRiemannianStructure,
+    RiemannianFramework,
+    PatternRiemannianStructure,
+    MetricTensor,
+    ChristoffelSymbols,
+    CurvatureTensor,
+)
 
 
 class TestValidationFramework:
@@ -58,7 +66,7 @@ class TestValidationFramework:
     @pytest.fixture
     def mock_layer(self, manifold_dim: int) -> LayerGeometry:
         """Create mock layer geometry."""
-        return LayerGeometry(manifold_dim=manifold_dim)
+        return LayerGeometry(manifold_dim=manifold_dim, pattern_dim=manifold_dim)
 
     @pytest.fixture
     def model_geometry(self, manifold_dim: int, mock_layer: LayerGeometry) -> ModelGeometry:
@@ -108,7 +116,10 @@ class TestValidationFramework:
     @pytest.fixture
     def riemannian_framework(self, manifold_dim: int) -> RiemannianFramework:
         """Create Riemannian framework for testing."""
-        return PatternRiemannianStructure(manifold_dim=manifold_dim)
+        return PatternRiemannianStructure(
+            manifold_dim=manifold_dim,
+            pattern_dim=manifold_dim
+        )
 
     @pytest.fixture
     def pattern_validator(self, model_geometry: ModelGeometry) -> StabilityValidator:
@@ -270,7 +281,8 @@ class TestValidationFramework:
         """Test integrated validation workflow."""
         # Create test data
         points = torch.randn(batch_size, manifold_dim)
-        metric = riemannian_framework.compute_metric(points)
+        metric_tensor = riemannian_framework.compute_metric(points)
+        metric = metric_tensor.values  # Extract raw tensor values
 
         # Run validation
         result = validation_framework.validate_all(
@@ -447,7 +459,8 @@ class TestValidationFramework:
         """Test full validation pipeline."""
         # Create test data
         points = torch.randn(batch_size, manifold_dim)
-        metric = riemannian_framework.compute_metric(points)
+        metric_tensor = riemannian_framework.compute_metric(points)
+        metric = metric_tensor.values  # Extract raw tensor values
 
         # Run validation
         result = validation_framework.validate_all(

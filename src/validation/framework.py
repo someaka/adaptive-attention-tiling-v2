@@ -436,8 +436,14 @@ class ValidationFramework:
         if metric is not None or riemannian is not None:
             if riemannian is None and metric is not None:
                 # Create basic Riemannian framework from metric
-                riemannian = PatternRiemannianStructure(manifold_dim=metric.shape[-1])
-                riemannian.metric_factors = nn.Parameter(metric)
+                manifold_dim = metric.shape[-1]
+                riemannian = PatternRiemannianStructure(
+                    manifold_dim=manifold_dim,
+                    pattern_dim=manifold_dim  # Using manifold_dim as pattern_dim for basic case
+                )
+                # Initialize metric factors from input metric
+                with torch.no_grad():
+                    riemannian.metric_factors.copy_(metric.reshape(manifold_dim, -1))
             geometric_result = self.validate_geometry(model, data, riemannian)
             messages.append(geometric_result.message)
             

@@ -15,6 +15,10 @@ import pytest
 import torch
 import yaml
 import os
+import hypothesis
+from hypothesis import given, strategies as st
+import hypothesis.extra.numpy as hnp
+import logging
 
 from src.core.patterns.fiber_bundle import BaseFiberBundle
 from src.core.tiling.patterns.fiber_bundle import (
@@ -172,7 +176,7 @@ class TestFiberBundleProtocol:
         # Test connection form properties
         connection = bundle.connection_form(tangent_vectors)
         
-        # 1. Shape requirements
+        # 1. Shape and basic requirements
         if isinstance(bundle, PatternFiberBundle):
             assert connection.shape[-2:] == (bundle.fiber_dim, bundle.fiber_dim), \
                 "Connection form should map to fiber_dim × fiber_dim matrices"
@@ -180,79 +184,76 @@ class TestFiberBundleProtocol:
             assert connection.shape[-1] == bundle.fiber_dim, \
                 "Connection form should map to fiber dimension"
         
-        # 2. Matrix-symmetry correspondence principle
-        # Test that vertical vectors are preserved exactly
+        # 2. Pattern structure preservation
+        if isinstance(bundle, PatternFiberBundle):
+            # Test that connection preserves pattern structure
+            pattern_metric = bundle.metric[bundle.base_dim:, bundle.base_dim:]
+            metric_compat = torch.matmul(connection, pattern_metric) + \
+                           torch.matmul(pattern_metric, connection.transpose(-2, -1))
+            assert torch.allclose(
+                metric_compat,
+                torch.zeros_like(metric_compat),
+                rtol=1e-5
+            ), "Connection should preserve pattern metric structure"
+        
+        # 3. Torsion-free property
+        if isinstance(bundle, PatternFiberBundle):
+            # Create two test vectors
+            X = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+            Y = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+            
+            # Compute covariant derivatives
+            nabla_X_Y = bundle.connection_form(X) @ Y[..., bundle.base_dim:].unsqueeze(-1)
+            nabla_Y_X = bundle.connection_form(Y) @ X[..., bundle.base_dim:].unsqueeze(-1)
+            
+            # Compute Lie bracket [X,Y]
+            bracket = nabla_X_Y - nabla_Y_X
+            
+            # Torsion tensor should vanish
+            torsion = bracket - bundle.connection_form(
+                torch.cat([
+                    torch.zeros_like(X[..., :bundle.base_dim]),  # Zero out cross product for 2D base
+                    torch.zeros_like(X[..., bundle.base_dim:])
+                ], dim=-1)
+            )
+            assert torch.allclose(
+                torsion,
+                torch.zeros_like(torsion),
+                rtol=1e-5
+            ), "Connection should be torsion-free"
+        
+        # 4. Vertical vector preservation
         vertical_vectors = torch.zeros_like(tangent_vectors)
         vertical_vectors[..., bundle.base_dim:] = torch.randn(
             batch_size, bundle.fiber_dim, dtype=dtype
         )
         vertical_connection = bundle.connection_form(vertical_vectors)
         
-        # Extract vertical components for comparison
-        vertical_components = self._get_vertical_components(vertical_connection)
-        
+        if isinstance(bundle, PatternFiberBundle):
+            vertical_output = torch.diagonal(vertical_connection, dim1=-2, dim2=-1)
+        else:
+            vertical_output = vertical_connection
+            
         assert torch.allclose(
-            vertical_components,
+            vertical_output,
             vertical_vectors[..., bundle.base_dim:],
             rtol=1e-5
-        ), "Matrix-symmetry correspondence: Connection should preserve vertical vectors exactly"
-        
-        # 3. Natural structure preservation principle
-        # Test that mixed vectors preserve structure
-        mixed_vectors = torch.randn_like(tangent_vectors)
-        mixed_connection = bundle.connection_form(mixed_vectors)
-        
-        # The connection should be skew-symmetric for mixed vectors
-        if isinstance(bundle, PatternFiberBundle):
-            mixed_skew = mixed_connection + mixed_connection.transpose(-2, -1)
-            assert torch.allclose(
-                mixed_skew,
-                torch.zeros_like(mixed_skew),
-                rtol=1e-5
-            ), "Natural structure preservation: Connection should be skew-symmetric"
-        
-        # 4. Levi-Civita connection principle
-        # Test metric compatibility
-        # Create proper metric tensor for validation
-        metric = torch.eye(bundle.total_dim, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
-        
-        if isinstance(bundle, PatternFiberBundle):
-            # Compute Christoffel symbols
-            # Γ^k_{ij} = (1/2)g^{kl}(∂_ig_{jl} + ∂_jg_{il} - ∂_lg_{ij})
-            connection_matrices = []
-            for i in range(bundle.base_dim):
-                matrix = bundle.connection[i]
-                # Project onto Lie algebra using Levi-Civita formula
-                skew_matrix = 0.5 * (matrix - matrix.transpose(-2, -1))
-                connection_matrices.append(skew_matrix)
-            
-            connection_matrices = torch.stack(connection_matrices, dim=0)
-            
-            # Test that connection satisfies Levi-Civita properties
-            for i in range(bundle.base_dim):
-                for j in range(bundle.base_dim):
-                    # Verify symmetry in lower indices
-                    assert torch.allclose(
-                        connection_matrices[i, j],
-                        connection_matrices[j, i],
-                        rtol=1e-5
-                    ), f"Levi-Civita principle: Connection should be symmetric in indices {i}, {j}"
+        ), "Connection should preserve vertical vectors exactly"
         
         # 5. Linearity property
         scalars = torch.randn(batch_size, 1, dtype=dtype)
         scaled_connection = bundle.connection_form(scalars * tangent_vectors)
         linear_connection = scalars * bundle.connection_form(tangent_vectors)
         
-        # Extract components for comparison
-        scaled_components = self._get_vertical_components(scaled_connection)
-        linear_components = self._get_vertical_components(linear_connection)
+        assert torch.allclose(
+            scaled_connection,
+            linear_connection,
+            rtol=1e-5
+        ), "Connection form should be linear"
         
-        assert torch.allclose(scaled_components, linear_components, rtol=1e-5), \
-            "Connection form should be linear"
-        
-        # 6. Compatibility with structure group
-        if hasattr(bundle, "structure_group") and bundle.structure_group is not None:
-            # Test structure group compatibility
+        # 6. Structure group compatibility
+        if isinstance(bundle, PatternFiberBundle):
+            # Test compatibility with structure group action
             group_element = torch.eye(bundle.fiber_dim, dtype=dtype)
             transformed_connection = torch.einsum(
                 "...ij,...jk->...ik",
@@ -260,45 +261,11 @@ class TestFiberBundleProtocol:
                 group_element
             )
             
-            # Extract components for comparison
-            transformed_components = self._get_vertical_components(transformed_connection)
-            connection_components = self._get_vertical_components(connection)
-            
             assert torch.allclose(
-                transformed_components,
-                connection_components,
+                transformed_connection,
+                connection,
                 rtol=1e-5
             ), "Connection should be compatible with structure group"
-        
-        # 7. Validate connection using ConnectionValidator
-        validator = ConnectionValidator(bundle.total_dim)
-        
-        # For base implementation, convert to matrix form for validation
-        if not isinstance(bundle, PatternFiberBundle):
-            # Ensure proper shape: (batch_size, fiber_dim, fiber_dim)
-            if len(connection.shape) == 1:
-                # Single vector -> add batch and convert to matrix
-                connection = connection.unsqueeze(0).unsqueeze(-1)  # Shape: (1, fiber_dim, 1)
-                connection = connection.expand(-1, -1, connection.shape[1])  # Shape: (1, fiber_dim, fiber_dim)
-            elif len(connection.shape) == 2:
-                # Batch of vectors -> convert to matrices
-                connection = connection.unsqueeze(-1)  # Shape: (batch, fiber_dim, 1)
-                connection = connection.expand(-1, -1, connection.shape[1])  # Shape: (batch, fiber_dim, fiber_dim)
-            
-            # Convert to diagonal matrices
-            connection = torch.diag_embed(connection.diagonal(dim1=-2, dim2=-1))
-            
-            # Make skew-symmetric to ensure metric compatibility
-            connection = 0.5 * (connection - connection.transpose(-2, -1))
-        else:
-            # Ensure metric compatibility for pattern implementation
-            connection = 0.5 * (connection - connection.transpose(-2, -1))
-        
-        validation_result = validator.validate_connection(
-            connection, metric
-        )
-        assert validation_result.is_valid, \
-            f"Connection validation failed: {validation_result.message}"
 
     @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
     def test_parallel_transport(self, bundle, request, test_config):
@@ -592,3 +559,605 @@ class TestPatternFiberBundle:
             double_transport[-1],
             rtol=1e-4
         ), "Parallel transport around composed loops should be consistent"
+
+    class TestConnectionFormProperties:
+        """Tests specifically for connection form properties."""
+
+        def test_base_direction_independence(self, pattern_bundle):
+            """Test that connection matrices are properly independent for each base direction.
+            
+            This verifies that each base direction has its own unique connection matrix,
+            while still maintaining required symmetries.
+            """
+            # Create random tangent vectors in different base directions
+            base_dim = pattern_bundle.base_dim
+            fiber_dim = pattern_bundle.fiber_dim
+            
+            # Test each base direction independently
+            for i in range(base_dim):
+                # Create tangent vector only in i-th base direction
+                tangent = torch.zeros(base_dim + fiber_dim)
+                tangent[i] = 1.0
+                
+                # Get connection form
+                connection = pattern_bundle.connection_form(tangent)
+                
+                # Verify it's skew-symmetric in fiber indices
+                assert torch.allclose(
+                    connection + connection.transpose(-2, -1),
+                    torch.zeros_like(connection),
+                    rtol=1e-5
+                ), f"Connection in direction {i} should be skew-symmetric"
+                
+                # Verify it has proper shape
+                assert connection.shape == (fiber_dim, fiber_dim), \
+                    f"Connection in direction {i} has wrong shape"
+
+        def test_levi_civita_symmetry(self, pattern_bundle):
+            """Test that connection satisfies Levi-Civita symmetry conditions.
+            
+            This verifies that the connection is symmetric in its base indices
+            while maintaining skew-symmetry in fiber indices.
+            """
+            base_dim = pattern_bundle.base_dim
+            fiber_dim = pattern_bundle.fiber_dim
+            
+            # Create tangent vectors in pairs of base directions
+            for i in range(base_dim):
+                for j in range(i + 1, base_dim):
+                    # Create tangent vector in i-th direction
+                    tangent_i = torch.zeros(base_dim + fiber_dim)
+                    tangent_i[i] = 1.0
+                    
+                    # Create tangent vector in j-th direction
+                    tangent_j = torch.zeros(base_dim + fiber_dim)
+                    tangent_j[j] = 1.0
+                    
+                    # Get connection forms
+                    connection_i = pattern_bundle.connection_form(tangent_i)
+                    connection_j = pattern_bundle.connection_form(tangent_j)
+                    
+                    # Verify symmetry between directions
+                    assert torch.allclose(
+                        connection_i,
+                        connection_j,
+                        rtol=1e-5
+                    ), f"Connection should be symmetric between directions {i} and {j}"
+
+        def test_fiber_skew_symmetry_preservation(self, pattern_bundle):
+            """Test that connection preserves skew-symmetry in fiber indices.
+            
+            This verifies that the connection maintains skew-symmetry in fiber indices
+            for any combination of base directions.
+            """
+            base_dim = pattern_bundle.base_dim
+            fiber_dim = pattern_bundle.fiber_dim
+            
+            # Test random combinations of base directions
+            num_tests = 10
+            for _ in range(num_tests):
+                # Create random tangent vector in base directions
+                tangent = torch.randn(base_dim + fiber_dim)
+                tangent[base_dim:] = 0  # Zero out fiber components
+                
+                # Get connection form
+                connection = pattern_bundle.connection_form(tangent)
+                
+                # Verify skew-symmetry
+                skew_diff = connection + connection.transpose(-2, -1)
+                assert torch.allclose(
+                    skew_diff,
+                    torch.zeros_like(skew_diff),
+                    rtol=1e-5
+                ), "Connection should maintain skew-symmetry for any base direction combination"
+                
+                # Verify fiber metric compatibility
+                # Convert Parameter to Tensor for indexing
+                metric_tensor = torch.Tensor(pattern_bundle.metric)  # Cast to Tensor
+                fiber_metric = metric_tensor[base_dim:, base_dim:]  # Now we can index
+                
+                metric_compat = torch.matmul(connection, fiber_metric) + \
+                              torch.matmul(fiber_metric, connection.transpose(-2, -1))
+                assert torch.allclose(
+                    metric_compat,
+                    torch.zeros_like(metric_compat),
+                    rtol=1e-5
+                ), "Connection should be compatible with fiber metric"
+
+    def test_connection_vertical_preservation(self, bundle, request, test_config):
+        """Test that connection form preserves vertical vectors exactly."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        # Create purely vertical vectors
+        total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        vertical_vectors = torch.zeros_like(total_points)
+        vertical_vectors[..., bundle.base_dim:] = torch.randn(
+            batch_size, bundle.fiber_dim, dtype=dtype
+        )
+        
+        # Apply connection form
+        connection = bundle.connection_form(vertical_vectors)
+        
+        # Extract vertical components
+        if isinstance(bundle, PatternFiberBundle):
+            vertical_output = torch.diagonal(connection, dim1=-2, dim2=-1)
+        else:
+            vertical_output = connection
+            
+        # Verify preservation
+        assert torch.allclose(
+            vertical_output,
+            vertical_vectors[..., bundle.base_dim:],
+            rtol=1e-5
+        ), "Connection should preserve vertical vectors exactly"
+
+    def test_connection_horizontal_projection(self, bundle, request, test_config):
+        """Test that connection form correctly projects horizontal vectors."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        # Create purely horizontal vectors
+        total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        horizontal_vectors = torch.zeros_like(total_points)
+        horizontal_vectors[..., :bundle.base_dim] = torch.randn(
+            batch_size, bundle.base_dim, dtype=dtype
+        )
+        
+        # Apply connection form
+        connection = bundle.connection_form(horizontal_vectors)
+        
+        # For horizontal vectors, connection should give skew-symmetric output
+        if isinstance(bundle, PatternFiberBundle):
+            # Check skew-symmetry
+            skew_check = connection + connection.transpose(-2, -1)
+            assert torch.allclose(
+                skew_check,
+                torch.zeros_like(skew_check),
+                rtol=1e-5
+            ), "Connection should be skew-symmetric on horizontal vectors"
+        else:
+            # For base implementation, horizontal projection should be small
+            assert torch.all(torch.abs(connection) < 1e-5), \
+                "Connection should give small output for horizontal vectors"
+
+    def test_connection_levi_civita_compatibility(self, bundle, request, test_config):
+        """Test that connection form satisfies Levi-Civita compatibility conditions."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        if not isinstance(bundle, PatternFiberBundle):
+            pytest.skip("Levi-Civita test only applicable to pattern implementation")
+            
+        # Create test vectors
+        total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        vector_1 = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        vector_2 = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        
+        # Get connection outputs
+        conn_1 = bundle.connection_form(vector_1)
+        conn_2 = bundle.connection_form(vector_2)
+        
+        # Test metric compatibility
+        # [X,Y] = ∇_X Y - ∇_Y X should be satisfied
+        bracket = conn_1 @ vector_2[..., bundle.base_dim:].unsqueeze(-1) - \
+                 conn_2 @ vector_1[..., bundle.base_dim:].unsqueeze(-1)
+                 
+        # The bracket should be skew-symmetric
+        bracket_skew = bracket + bracket.transpose(-2, -1)
+        assert torch.allclose(
+            bracket_skew,
+            torch.zeros_like(bracket_skew),
+            rtol=1e-5
+        ), "Lie bracket should be skew-symmetric"
+
+
+class TestConnectionFormHypothesis:
+    """Property-based tests for connection form using hypothesis."""
+
+    @given(
+        st.integers(min_value=2, max_value=5),  # base_dim
+        st.integers(min_value=2, max_value=5),  # fiber_dim
+        st.integers(min_value=1, max_value=5),  # batch_size
+    )
+    def test_vertical_preservation_property(self, base_dim, fiber_dim, batch_size):
+        """Test that purely vertical vectors are preserved exactly."""
+        bundle = PatternFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
+        
+        # Create purely vertical vectors
+        vertical = torch.zeros(batch_size, bundle.total_dim)
+        vertical[..., base_dim:] = torch.randn(batch_size, fiber_dim)
+        
+        # Get connection form
+        connection = bundle.connection_form(vertical)
+        
+        # Extract vertical components
+        vertical_output = torch.diagonal(connection, dim1=-2, dim2=-1)
+        
+        # Verify preservation
+        assert torch.allclose(
+            vertical_output,
+            vertical[..., base_dim:],
+            rtol=1e-5
+        ), "Connection should preserve vertical vectors exactly"
+
+    @given(
+        st.integers(min_value=2, max_value=5),  # base_dim
+        st.integers(min_value=2, max_value=5),  # fiber_dim
+        st.integers(min_value=1, max_value=5),  # batch_size
+    )
+    def test_horizontal_skew_symmetry_property(self, base_dim, fiber_dim, batch_size):
+        """Test that horizontal vectors produce skew-symmetric output."""
+        bundle = PatternFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
+        
+        # Create purely horizontal vectors
+        horizontal = torch.zeros(batch_size, bundle.total_dim)
+        horizontal[..., :base_dim] = torch.randn(batch_size, base_dim)
+        
+        # Get connection form
+        connection = bundle.connection_form(horizontal)
+        
+        # Verify skew-symmetry
+        skew_check = connection + connection.transpose(-2, -1)
+        assert torch.allclose(
+            skew_check,
+            torch.zeros_like(skew_check),
+            rtol=1e-5
+        ), "Connection should be skew-symmetric for horizontal vectors"
+
+    @given(
+        st.integers(min_value=2, max_value=5),  # base_dim
+        st.integers(min_value=2, max_value=5),  # fiber_dim
+        st.integers(min_value=1, max_value=5),  # batch_size
+    )
+    def test_linearity_property(self, base_dim, fiber_dim, batch_size):
+        """Test that connection form is linear."""
+        bundle = PatternFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
+        
+        # Create two random vectors
+        v1 = torch.randn(batch_size, bundle.total_dim)
+        v2 = torch.randn(batch_size, bundle.total_dim)
+        scalar = torch.randn(1).item()
+        
+        # Test linearity in scaling
+        connection_scaled = bundle.connection_form(scalar * v1)
+        connection_v1 = scalar * bundle.connection_form(v1)
+        assert torch.allclose(
+            connection_scaled,
+            connection_v1,
+            rtol=1e-5
+        ), "Connection should be linear under scaling"
+        
+        # Test linearity in addition
+        connection_sum = bundle.connection_form(v1 + v2)
+        connection_separate = bundle.connection_form(v1) + bundle.connection_form(v2)
+        assert torch.allclose(
+            connection_sum,
+            connection_separate,
+            rtol=1e-5
+        ), "Connection should be linear under addition"
+
+    @given(
+        st.integers(min_value=2, max_value=5),  # base_dim
+        st.integers(min_value=2, max_value=5),  # fiber_dim
+        st.integers(min_value=1, max_value=5),  # batch_size
+    )
+    def test_levi_civita_symmetry_property(self, base_dim, fiber_dim, batch_size):
+        """Test Levi-Civita symmetry in base indices."""
+        bundle = PatternFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
+        
+        # Create test vectors in different base directions
+        for i in range(base_dim):
+            for j in range(i + 1, base_dim):
+                # Create vectors in i-th and j-th directions
+                v_i = torch.zeros(batch_size, bundle.total_dim)
+                v_i[..., i] = 1.0
+                
+                v_j = torch.zeros(batch_size, bundle.total_dim)
+                v_j[..., j] = 1.0
+                
+                # Get connection forms
+                conn_i = bundle.connection_form(v_i)
+                conn_j = bundle.connection_form(v_j)
+                
+                # Project onto Lie algebra
+                conn_i = 0.5 * (conn_i - conn_i.transpose(-2, -1))
+                conn_j = 0.5 * (conn_j - conn_j.transpose(-2, -1))
+                
+                # Verify symmetry in base indices
+                assert torch.allclose(
+                    conn_i[..., :fiber_dim, :fiber_dim],
+                    conn_j[..., :fiber_dim, :fiber_dim],
+                    rtol=1e-5
+                ), f"Connection should be symmetric in base indices {i}, {j}"
+
+    @given(
+        st.integers(min_value=2, max_value=5),  # base_dim
+        st.integers(min_value=2, max_value=5),  # fiber_dim
+        st.integers(min_value=1, max_value=5),  # batch_size
+    )
+    def test_metric_compatibility_property(self, base_dim, fiber_dim, batch_size):
+        """Test compatibility with fiber metric."""
+        bundle = PatternFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
+        
+        # Create random vector
+        v = torch.randn(batch_size, bundle.total_dim)
+        
+        # Get connection form
+        connection = bundle.connection_form(v)
+        
+        # Get fiber metric - only for PatternFiberBundle
+        if isinstance(bundle, PatternFiberBundle):
+            # Convert Parameter to Tensor for indexing
+            metric_tensor = torch.Tensor(bundle.metric)  # Cast to Tensor
+            fiber_metric = metric_tensor[base_dim:, base_dim:]  # Now we can index
+            
+            # Test metric compatibility: ω_a^b g_bc + ω_a^c g_bc = 0
+            metric_compat = torch.matmul(connection, fiber_metric) + \
+                           torch.matmul(fiber_metric, connection.transpose(-2, -1))
+                           
+            assert torch.allclose(
+                metric_compat,
+                torch.zeros_like(metric_compat),
+                rtol=1e-5
+            ), "Connection should be compatible with fiber metric"
+
+
+class TestConnectionFormValidation:
+    """Validation and logging infrastructure for connection form testing."""
+
+    @pytest.fixture(autouse=True)
+    def setup_logging(self):
+        """Set up logging for connection form tests."""
+        # Ensure logs directory exists
+        import os
+        os.makedirs('logs', exist_ok=True)
+        
+        # Configure logging
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            filename='logs/connection_form_debug.log',
+            filemode='w'  # Overwrite file each time
+        )
+        self.logger = logging.getLogger('connection_form_tests')
+
+    def _log_connection_properties(self, bundle, tangent_vector, connection):
+        """Log key properties of connection form computation.
+        
+        Args:
+            bundle: The fiber bundle instance
+            tangent_vector: Input tangent vector
+            connection: Output connection form
+        """
+        self.logger.debug("\n=== Connection Form Properties ===")
+        self.logger.debug(f"Bundle type: {type(bundle).__name__}")
+        self.logger.debug(f"Input shape: {tangent_vector.shape}")
+        self.logger.debug(f"Output shape: {connection.shape}")
+        
+        # Basic properties
+        if isinstance(bundle, PatternFiberBundle):
+            skew_error = torch.norm(connection + connection.transpose(-2, -1))
+            self.logger.debug(f"Skew-symmetry error: {skew_error:.6f}")
+            
+            # Vertical preservation
+            vertical_part = tangent_vector[..., bundle.base_dim:]
+            if len(connection.shape) >= 2:
+                vertical_output = torch.diagonal(connection, dim1=-2, dim2=-1)
+            else:
+                vertical_output = connection
+            vertical_error = torch.norm(vertical_output - vertical_part)
+            self.logger.debug(f"Vertical preservation error: {vertical_error:.6f}")
+            
+            # Metric compatibility
+            metric = bundle.metric[bundle.base_dim:, bundle.base_dim:]
+            metric_error = self._validate_metric_compatibility(connection, metric)
+            self.logger.debug(f"Metric compatibility error: {metric_error:.6f}")
+
+    def _validate_metric_compatibility(self, connection: torch.Tensor, metric: torch.Tensor) -> torch.Tensor:
+        """Check metric compatibility condition.
+        
+        Args:
+            connection: Connection form output
+            metric: Fiber metric tensor
+            
+        Returns:
+            Error norm for metric compatibility
+        """
+        metric_compat = torch.matmul(connection, metric) + \
+                       torch.matmul(metric, connection.transpose(-2, -1))
+        return torch.norm(metric_compat)
+
+    def _validate_torsion_free(self, bundle, connection: torch.Tensor, 
+                             X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+        """Check torsion-free condition.
+        
+        Args:
+            bundle: The fiber bundle instance
+            connection: Connection form output
+            X, Y: Tangent vectors
+            
+        Returns:
+            Error norm for torsion-free condition
+        """
+        # Compute covariant derivatives
+        nabla_X_Y = connection @ Y[..., bundle.base_dim:].unsqueeze(-1)
+        nabla_Y_X = connection @ X[..., bundle.base_dim:].unsqueeze(-1)
+        
+        # Compute Lie bracket [X,Y]
+        bracket = nabla_X_Y - nabla_Y_X
+        
+        # For base dimensions other than 3, we compute the Lie bracket directly
+        # [X,Y] = X∂Y - Y∂X in coordinates
+        X_base = X[..., :bundle.base_dim]
+        Y_base = Y[..., :bundle.base_dim]
+        
+        if bundle.base_dim == 3:
+            # For 3D base, we can use cross product
+            lie_bracket = torch.linalg.cross(X_base, Y_base, dim=-1)
+        else:
+            # For other dimensions, compute coordinate by coordinate
+            lie_bracket = torch.zeros_like(X_base)
+            for i in range(bundle.base_dim):
+                lie_bracket[..., i] = (
+                    X_base[..., i].unsqueeze(-1) * Y_base - 
+                    Y_base[..., i].unsqueeze(-1) * X_base
+                ).sum(dim=-1)
+        
+        # Pad lie_bracket to match fiber dimension if needed
+        if bundle.base_dim < bundle.fiber_dim:
+            padding = torch.zeros(
+                *lie_bracket.shape[:-1], 
+                bundle.fiber_dim - bundle.base_dim,
+                device=lie_bracket.device,
+                dtype=lie_bracket.dtype
+            )
+            lie_bracket = torch.cat([lie_bracket, padding], dim=-1)
+        
+        # Compute torsion tensor
+        torsion = bracket - connection @ lie_bracket.unsqueeze(-1)
+        
+        return torch.norm(torsion)
+
+    def _validate_structure_group(self, bundle, connection: torch.Tensor) -> torch.Tensor:
+        """Check structure group compatibility.
+        
+        Args:
+            bundle: The fiber bundle instance
+            connection: Connection form output
+            
+        Returns:
+            Error norm for structure group compatibility
+        """
+        if not isinstance(bundle, PatternFiberBundle):
+            return torch.tensor(0.0)
+            
+        group_element = torch.eye(bundle.fiber_dim, device=connection.device)
+        transformed = torch.einsum('...ij,...jk->...ik', connection, group_element)
+        return torch.norm(transformed - connection)
+
+    @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
+    def test_connection_form_validation(self, bundle, request, test_config):
+        """Comprehensive validation test for connection form properties."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        # Create test vectors
+        total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        X = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        Y = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        
+        # Compute connection form
+        connection = bundle.connection_form(X)
+        
+        # Log properties
+        self._log_connection_properties(bundle, X, connection)
+        
+        # Validate properties
+        if isinstance(bundle, PatternFiberBundle):
+            # 1. Metric compatibility
+            metric = bundle.metric[bundle.base_dim:, bundle.base_dim:]
+            metric_error = self._validate_metric_compatibility(connection, metric)
+            assert metric_error < 5e-5, f"Metric compatibility error: {metric_error:.6f}"
+            
+            # 2. Torsion-free condition
+            torsion_error = self._validate_torsion_free(bundle, connection, X, Y)
+            assert torsion_error < 5e-5, f"Torsion-free error: {torsion_error:.6f}"
+            
+            # 3. Structure group compatibility
+            group_error = self._validate_structure_group(bundle, connection)
+            assert group_error < 5e-5, f"Structure group error: {group_error:.6f}"
+
+
+class TestGeometricComponents:
+    """Test suite for geometric components of fiber bundles."""
+
+    def test_metric_derivatives(self, pattern_bundle, test_config):
+        """Test computation of metric derivatives.
+        
+        Verifies:
+        1. Shape correctness
+        2. Symmetry properties
+        3. Consistency with finite differences
+        """
+        # Get test dimensions
+        base_dim = pattern_bundle.base_dim
+        fiber_dim = pattern_bundle.fiber_dim
+        total_dim = base_dim + fiber_dim
+        
+        # Create test point
+        point = torch.randn(total_dim, requires_grad=True)
+        
+        # Get metric at point - ensure it's computed at the point
+        metric = pattern_bundle.compute_metric(point.unsqueeze(0)).values[0]
+        
+        print("\nInitial metric:")
+        print(metric)
+        
+        # Compute derivatives using autograd
+        metric_derivs = []
+        for i in range(total_dim):
+            for j in range(total_dim):
+                deriv = torch.autograd.grad(
+                    metric[i, j],
+                    point,
+                    create_graph=True,
+                    retain_graph=True
+                )[0]
+                metric_derivs.append(deriv)
+        metric_derivs = torch.stack(metric_derivs).reshape(total_dim, total_dim, total_dim)
+        
+        # Verify shape
+        assert metric_derivs.shape == (total_dim, total_dim, total_dim), \
+            "Metric derivatives should have shape (total_dim, total_dim, total_dim)"
+            
+        # Verify symmetry in last two indices (metric symmetry)
+        for i in range(total_dim):
+            print(f"\nDerivatives for i={i}:")
+            print("Original:")
+            print(metric_derivs[i])
+            print("Transposed:")
+            print(metric_derivs[i].transpose(-2, -1))
+            print("Difference:")
+            print(metric_derivs[i] - metric_derivs[i].transpose(-2, -1))
+            
+            assert torch.allclose(
+                metric_derivs[i],
+                metric_derivs[i].transpose(-2, -1),
+                rtol=1e-5
+            ), f"Metric derivatives should be symmetric in last two indices for i={i}"
+            
+        # Verify consistency with finite differences
+        eps = 1e-6
+        for i in range(total_dim):
+            point_plus = point.clone()
+            point_plus[i] += eps
+            point_minus = point.clone()
+            point_minus[i] -= eps
+            
+            # Compute metric at offset points
+            metric_plus = pattern_bundle.compute_metric(point_plus.unsqueeze(0)).values[0]
+            metric_minus = pattern_bundle.compute_metric(point_minus.unsqueeze(0)).values[0]
+            
+            # Finite difference approximation
+            fd_deriv = (metric_plus - metric_minus) / (2 * eps)
+            
+            print(f"\nFinite difference for i={i}:")
+            print(fd_deriv)
+            print("Autograd derivative:")
+            print(metric_derivs[i])
+            print("Difference:")
+            print(fd_deriv - metric_derivs[i])
+            
+            # Compare with autograd result for each component
+            for j in range(total_dim):
+                for k in range(total_dim):
+                    assert torch.allclose(
+                        metric_derivs[i, j, k],
+                        fd_deriv[j, k],
+                        rtol=1e-4
+                    ), f"Autograd and finite difference derivatives should match for indices ({i},{j},{k})"

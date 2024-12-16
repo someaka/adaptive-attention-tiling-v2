@@ -1216,22 +1216,22 @@ class GeometricMetricValidator:
             - curvature_validation: CurvatureValidation results
             - is_valid: Overall validation status
         """
-        # Compute geometric quantities
-        metric = framework.compute_metric(points)
-        connection = framework.compute_christoffel(points)
-        riemann = framework.compute_riemann(points)
+        # Get geometric tensors
+        metric_tensor = framework.get_metric_tensor(points)
+        christoffel_values = framework.get_christoffel_values(points)
+        riemann_tensor = framework.get_riemann_tensor(points)
 
         # Validate metric properties
-        metric_validation = self.metric_validator.validate_metric(metric)
+        metric_validation = self.metric_validator.validate_metric(metric_tensor)
 
         # Validate connection properties
         connection_validation = self.connection_validator.validate_connection(
-            connection, metric
+            christoffel_values, metric_tensor
         )
 
         # Validate curvature properties
         curvature_validation = self.curvature_validator.validate_curvature(
-            riemann, metric
+            riemann_tensor, metric_tensor
         )
 
         # Overall validation status
@@ -1262,5 +1262,5 @@ class GeometricMetricValidator:
         Returns:
             True if metric is geodesically complete
         """
-        metric = framework.compute_metric(points)
-        return self.metric_validator.check_completeness(metric)
+        metric_tensor = framework.get_metric_tensor(points)
+        return self.metric_validator.check_completeness(metric_tensor)

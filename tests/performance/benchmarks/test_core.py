@@ -16,6 +16,14 @@ from src.core.benchmarks import BenchmarkMetrics
 from src.core.flow import FlowComputation
 from src.core.patterns import PatternEvolution
 from src.core.patterns.riemannian import PatternRiemannianStructure
+from src.core.patterns import (
+    BaseRiemannianStructure,
+    RiemannianFramework,
+    PatternRiemannianStructure,
+    MetricTensor,
+    ChristoffelSymbols,
+    CurvatureTensor,
+)
 
 
 class TestCoreOperations:
@@ -26,7 +34,10 @@ class TestCoreOperations:
         self.batch_sizes = [1, 8, 16, 32]
         self.iterations = 10
         self.metrics = BenchmarkMetrics()
-        self.riemannian_framework = PatternRiemannianStructure(manifold_dim=64)
+        self.riemannian_framework = PatternRiemannianStructure(
+            manifold_dim=64,
+            pattern_dim=64  # Setting pattern_dim equal to manifold_dim for testing
+        )
 
     def test_attention_computation(self):
         """Benchmark attention computation performance."""

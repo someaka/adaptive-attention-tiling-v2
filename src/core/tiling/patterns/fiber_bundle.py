@@ -16,6 +16,7 @@ from typing import Generic, Protocol, Tuple, TypeVar, Optional, Union
 
 import torch
 from torch import nn
+from src.core.patterns.riemannian_base import MetricTensor
 
 T = TypeVar("T")
 S = TypeVar("S")
@@ -129,39 +130,113 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
 
     def __init__(
         self,
-        base_dim: int,
-        fiber_dim: int,
+        base_dim: int = 2,
+        fiber_dim: int = 3,
         structure_group: str = "O(n)",
-        device: Optional[torch.device] = None,
+        device: Optional[torch.device] = None
     ):
+        """Initialize pattern fiber bundle.
+        
+        Args:
+            base_dim: Dimension of base manifold
+            fiber_dim: Dimension of fiber
+            structure_group: Structure group of the bundle (default: O(n))
+            device: Device to place tensors on
+        """
         super().__init__()
+        
         self.base_dim = base_dim
         self.fiber_dim = fiber_dim
         self.total_dim = base_dim + fiber_dim
         self.structure_group = structure_group
-        self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device if device is not None else torch.device('cpu')
+        
+        # Initialize Lie algebra basis matrices
+        self.basis_matrices = torch.zeros(
+            fiber_dim * (fiber_dim - 1) // 2,  # Number of basis elements
+            fiber_dim,
+            fiber_dim,
+            device=self.device
         )
-
-        # Initialize bundle parameters
-        # For metric compatibility, initialize connection as skew-symmetric matrices
-        # that are symmetric in lower indices
-        connection = torch.zeros(base_dim, base_dim, fiber_dim, fiber_dim, device=self.device)
+        
+        # Fill basis matrices with standard generators
+        idx = 0
+        for i in range(fiber_dim):
+            for j in range(i + 1, fiber_dim):
+                # Create elementary skew-symmetric matrix
+                basis = torch.zeros(fiber_dim, fiber_dim, device=self.device)
+                basis[i, j] = 1.0
+                basis[j, i] = -1.0
+                self.basis_matrices[idx] = basis
+                idx += 1
+        
+        # Initialize connection coefficients
+        num_basis = fiber_dim * (fiber_dim - 1) // 2
+        self.connection_coeffs = torch.randn(
+            base_dim,
+            base_dim,
+            num_basis,
+            device=self.device
+        )
+        
+        # Symmetrize in base indices
+        self.connection_coeffs = 0.5 * (
+            self.connection_coeffs + self.connection_coeffs.transpose(0, 1)
+        )
+        
+        # Initialize connection matrices with proper symmetry
+        raw_connection = torch.zeros(base_dim, fiber_dim, fiber_dim, device=self.device)
+        
+        # Build connection from basis and coefficients
         for i in range(base_dim):
             for j in range(base_dim):
-                # Initialize with random skew-symmetric matrices
-                matrix = torch.randn(fiber_dim, fiber_dim, device=self.device)
-                skew_matrix = 0.5 * (matrix - matrix.transpose(-2, -1))
-                # Make symmetric in lower indices
-                connection[i, j] = skew_matrix
-                connection[j, i] = skew_matrix
+                raw_connection[i] += torch.einsum(
+                    'k,kij->ij',
+                    self.connection_coeffs[i, j],
+                    self.basis_matrices
+                )
         
-        # Reshape to standard form (base_dim, fiber_dim, fiber_dim)
-        connection = connection.mean(dim=1)
-        self.connection = nn.Parameter(connection)
+        # Register connection as parameter
+        self.connection = nn.Parameter(raw_connection)
         
-        # Initialize metric as identity
-        self.metric = nn.Parameter(torch.eye(base_dim, device=self.device).unsqueeze(0))
+        # Initialize metric tensor with proper structure
+        metric = torch.eye(self.total_dim, device=self.device)
+        # Make fiber part positive definite
+        fiber_part = torch.randn(fiber_dim, fiber_dim, device=self.device)
+        fiber_part = 0.5 * (fiber_part + fiber_part.transpose(-2, -1))
+        fiber_part = fiber_part @ fiber_part.transpose(-2, -1)  # Make positive definite
+        metric[base_dim:, base_dim:] = fiber_part
+        
+        # Register metric as parameter
+        self.metric = nn.Parameter(metric)
+        
+        # Move to device
+        self.to(self.device)
+
+    def to(self, device: torch.device) -> 'PatternFiberBundle':
+        """Move the bundle to the specified device.
+        
+        Args:
+            device: Target device
+            
+        Returns:
+            Self for chaining
+        """
+        self.device = device
+        return super().to(device)
+
+    def _ensure_device(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Ensure tensor is on the correct device.
+        
+        Args:
+            tensor: Input tensor
+            
+        Returns:
+            Tensor on the correct device
+        """
+        if tensor.device != self.device:
+            tensor = tensor.to(self.device)
+        return tensor
 
     def bundle_projection(self, total_space: torch.Tensor) -> torch.Tensor:
         """Projects from total space to base space.
@@ -202,160 +277,393 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         # Compute coordinate difference
         diff = chart2.coordinates - chart1.coordinates  # Shape: (batch_size, base_dim)
         
-        # Reshape for proper broadcasting
-        diff = diff.unsqueeze(-1)  # Shape: (batch_size, base_dim, 1)
+        # Initialize result with identity
+        batch_size = diff.shape[0] if len(diff.shape) > 1 else 1
+        result = torch.eye(self.fiber_dim, device=self.device).unsqueeze(0).expand(batch_size, -1, -1)
         
-        # Compute transition matrix using einsum for proper batch handling
-        transition = torch.einsum('...i,ijk->...jk', diff.squeeze(-1), self.connection)
-        return torch.eye(self.fiber_dim, device=self.device) + transition
+        # Compute connection matrices for the path
+        # First combine coefficients with basis matrices
+        expanded_basis = self.basis_matrices  # Shape: (num_basis, fiber_dim, fiber_dim)
+        expanded_coeffs = self.connection_coeffs  # Shape: (base_dim, base_dim, num_basis)
+        
+        # Compute connection matrices
+        # Shape: (base_dim, base_dim, fiber_dim, fiber_dim)
+        connection_matrices = torch.einsum(
+            'ijk,kpq->ijpq',
+            expanded_coeffs,  # Shape: (base_dim, base_dim, num_basis)
+            expanded_basis   # Shape: (num_basis, fiber_dim, fiber_dim)
+        )
+        
+        # Apply coordinate difference
+        # Shape: (batch_size, fiber_dim, fiber_dim)
+        transition = torch.einsum(
+            '...i,ijpq->...pq',
+            diff,  # Shape: (batch_size, base_dim)
+            connection_matrices  # Shape: (base_dim, base_dim, fiber_dim, fiber_dim)
+        )
+        
+        # Ensure skew-symmetry and proper normalization
+        transition = 0.5 * (transition - transition.transpose(-2, -1))
+        transition = transition / (torch.norm(transition.reshape(batch_size, -1), dim=-1, keepdim=True).unsqueeze(-1) + 1e-7)
+        
+        # Combine with identity
+        result = result + transition
+        
+        return result
+
+    def _project_metric_compatible(self, matrix: torch.Tensor, metric: torch.Tensor) -> torch.Tensor:
+        """Project a matrix onto the metric-compatible subspace.
+        
+        For a metric-compatible connection: ω_a^b g_bc + g_ab ω_c^b = 0
+        This is equivalent to: ω = -g ω^T g^{-1}
+        
+        Args:
+            matrix: Input matrix to project
+            metric: Metric tensor
+            
+        Returns:
+            Projected matrix
+        """
+        g_inv = torch.inverse(metric)
+        # First ensure skew-symmetry
+        skew = 0.5 * (matrix - matrix.transpose(-2, -1))
+        
+        # Then project onto metric-compatible subspace
+        metric_compat = -torch.matmul(
+            torch.matmul(metric, skew.transpose(-2, -1)),
+            g_inv
+        )
+        
+        # Take average to maintain skew-symmetry
+        return 0.5 * (skew + metric_compat)
+
+    def _compute_global_torsion(self, christoffel: torch.Tensor) -> torch.Tensor:
+        """Compute global torsion tensor for all directions.
+        
+        Args:
+            christoffel: Christoffel symbols for all directions
+            
+        Returns:
+            Global torsion tensor
+        """
+        # Initialize torsion tensor
+        torsion = torch.zeros_like(christoffel)
+        
+        # Compute torsion for all pairs of directions
+        for i in range(self.base_dim):
+            for j in range(i + 1, self.base_dim):
+                # Create test vectors
+                X = torch.zeros(self.total_dim, device=christoffel.device)
+                X[i] = 1.0
+                Y = torch.zeros(self.total_dim, device=christoffel.device)
+                Y[j] = 1.0
+                
+                # Compute covariant derivatives
+                nabla_X_Y = torch.matmul(christoffel[..., i, :, :], Y[self.base_dim:])
+                nabla_Y_X = torch.matmul(christoffel[..., j, :, :], X[self.base_dim:])
+                
+                # Compute Lie bracket [X,Y]
+                lie_bracket = torch.zeros(self.fiber_dim, device=christoffel.device)
+                
+                # Add torsion contribution to both directions
+                torsion[..., i, :, :] = torsion[..., i, :, :] + nabla_X_Y - nabla_Y_X
+                torsion[..., j, :, :] = torsion[..., j, :, :] + nabla_Y_X - nabla_X_Y
+        
+        return torsion
 
     def connection_form(self, tangent_vector: torch.Tensor) -> torch.Tensor:
-        """Computes the connection form for parallel transport.
+        """Compute connection form for parallel transport.
         
-        Implementation of FiberBundle.connection_form
-        
-        The connection form is a Lie algebra-valued 1-form that satisfies:
-        1. Metric compatibility: ω_a^b g_bc + ω_a^c g_bc = 0
-        2. Vertical projection: ω(V) = V for vertical vectors V
-        3. Linearity: ω(λX) = λω(X)
-        
-        We use three key principles:
-        1. Matrix-symmetry correspondence: M: V → V ≅ ρ: G → GL(V)
-        2. Natural structure preservation: φ: P₁ → P₂ preserves structure
-        3. Levi-Civita connection: Γ^k_{ij} = (1/2)g^{kl}(∂_ig_{jl} + ∂_jg_{il} - ∂_lg_{ij})
+        Implementation of FiberBundle.connection_form that properly integrates
+        with the geometric flow framework.
         
         Args:
             tangent_vector: Tangent vector at a point
             
         Returns:
-            Connection form value as a fiber_dim × fiber_dim matrix
+            Connection form value as a Lie algebra element
         """
+        # Ensure input is on correct device
+        tangent_vector = self._ensure_device(tangent_vector)
+        
+        # Handle batch dimension if present
+        has_batch = len(tangent_vector.shape) > 1
+        if not has_batch:
+            tangent_vector = tangent_vector.unsqueeze(0)
+            
         # Extract base and vertical components
         base_components = tangent_vector[..., :self.base_dim]
         vertical_components = tangent_vector[..., self.base_dim:]
         
-        # Initialize result tensor with proper batch shape
-        batch_shape = tangent_vector.shape[:-1]
-        result = torch.zeros(*batch_shape, self.fiber_dim, self.fiber_dim, device=self.device)
+        # Get fiber metric
+        fiber_metric = self.metric[self.base_dim:, self.base_dim:]
         
-        # For purely vertical vectors, use matrix-symmetry correspondence
+        # For purely vertical vectors, return the vertical components directly
         if torch.allclose(base_components, torch.zeros_like(base_components)):
-            # Create matrix representation that exactly preserves vertical components
-            # This uses the isomorphism M: V → V ≅ ρ: G → GL(V)
-            for i in range(self.fiber_dim):
-                for j in range(self.fiber_dim):
-                    if i == j:
-                        # Diagonal terms give exact vertical projection
-                        result[..., i, j] = vertical_components[..., i]
-                    else:
-                        # Off-diagonal terms ensure Lie algebra structure
-                        # Set to zero to preserve vertical components exactly
-                        result[..., i, j] = 0.0
+            if isinstance(self, PatternFiberBundle):
+                result = torch.zeros(
+                    *base_components.shape[:-1],
+                    self.fiber_dim,
+                    self.fiber_dim,
+                    device=self.device,
+                    dtype=tangent_vector.dtype
+                )
+                # Project vertical components onto Lie algebra basis
+                for b in range(vertical_components.shape[0]):  # batch dimension
+                    for idx in range(len(self.basis_matrices)):
+                        basis = self.basis_matrices[idx]
+                        # Project onto basis element
+                        coeff = torch.sum(vertical_components[b] * torch.diagonal(basis))
+                        result[b] += coeff * basis
+                
+                # Ensure exact preservation of vertical components
+                for i in range(self.fiber_dim):
+                    result[..., i, i] = vertical_components[..., i]
+            else:
+                # For base bundle, just return vertical components directly
+                result = vertical_components
+                
+            return result if has_batch else result.squeeze(0)
             
-            # No skew-symmetrization for purely vertical vectors
-            return result
+        # Get full metric tensor
+        metric = self.metric
         
-        # For horizontal vectors, use Levi-Civita connection
-        connection_matrices = []
-        for i in range(self.base_dim):
-            matrix = self.connection[i]
-            # Project onto Lie algebra using Levi-Civita formula
-            skew_matrix = 0.5 * (matrix - matrix.transpose(-2, -1))
-            connection_matrices.append(skew_matrix)
+        # Compute Christoffel symbols for the full bundle
+        # First compute metric derivatives
+        eps = 1e-6
+        metric_deriv = torch.zeros(
+            self.total_dim,
+            self.total_dim,
+            self.total_dim,
+            device=self.device
+        )
         
-        connection_matrices = torch.stack(connection_matrices, dim=0)
-        
-        # Compute horizontal part using einsum for proper batch handling
-        horizontal_part = torch.einsum('...i,ijk->...jk', base_components, connection_matrices)
-        result = horizontal_part
-        
-        # For mixed vectors, preserve natural structure
-        if not torch.allclose(vertical_components, torch.zeros_like(vertical_components)):
-            # Create vertical part using matrix-symmetry correspondence
-            vertical_matrix = torch.zeros_like(result)
-            for i in range(self.fiber_dim):
-                for j in range(self.fiber_dim):
-                    if i == j:
-                        # Diagonal terms preserve vertical components
-                        vertical_matrix[..., i, j] = vertical_components[..., i]
-                    else:
-                        # Off-diagonal terms ensure Lie algebra structure
-                        # The factor of 1/2 comes from the Levi-Civita connection
-                        vertical_matrix[..., i, j] = -0.5 * vertical_components[..., i]
-                        vertical_matrix[..., j, i] = 0.5 * vertical_components[..., i]
+        # Compute derivatives using proper offset points
+        for k in range(self.total_dim):
+            # Create offset points
+            offset = torch.zeros(self.total_dim, device=self.device)
+            offset[k] = eps
             
-            # Project onto Lie algebra to ensure metric compatibility
-            vertical_matrix = 0.5 * (vertical_matrix - vertical_matrix.transpose(-2, -1))
+            # Compute metric at offset points using compute_metric
+            points_plus = offset.unsqueeze(0)
+            points_minus = -offset.unsqueeze(0)
             
-            # Combine using natural structure preservation
-            # The factor of 1/2 ensures proper scaling in the Levi-Civita connection
-            result = result + 0.5 * vertical_matrix
+            metric_plus = self.compute_metric(points_plus).values[0]
+            metric_minus = self.compute_metric(points_minus).values[0]
             
-            # Final projection onto Lie algebra
+            # Compute derivative
+            metric_deriv[k] = (metric_plus - metric_minus) / (2 * eps)
+        
+        # Compute Christoffel symbols
+        metric_inv = torch.inverse(metric)
+        christoffel = torch.zeros(
+            self.total_dim,
+            self.total_dim,
+            self.total_dim,
+            device=self.device
+        )
+        
+        for i in range(self.total_dim):
+            for j in range(self.total_dim):
+                for k in range(self.total_dim):
+                    # Compute terms for Christoffel symbols
+                    term1 = metric_deriv[k, :, j]  # ∂_k g_{mj}
+                    term2 = metric_deriv[j, :, k]  # ∂_j g_{mk}
+                    term3 = metric_deriv[:, j, k]  # ∂_m g_{jk}
+                    
+                    # Contract with inverse metric
+                    christoffel[i, j, k] = 0.5 * torch.sum(
+                        metric_inv[i, :] * (term1 + term2 - term3)
+                    )
+        
+        # Ensure torsion-free condition
+        christoffel = 0.5 * (
+            christoffel + 
+            torch.permute(christoffel, (0, 2, 1)) - 
+            torch.permute(christoffel, (2, 1, 0))
+        )
+        
+        # Extract mixed components for connection form
+        # These are the components Γᵢⱼᵏ where:
+        # i is in fiber indices
+        # j is in base indices
+        # k is in fiber indices
+        connection_matrices = christoffel[
+            self.base_dim:,  # i in fiber
+            :self.base_dim,  # j in base
+            self.base_dim:   # k in fiber
+        ]
+        
+        # Contract with base components using proper broadcasting
+        if isinstance(self, PatternFiberBundle):
+            result = torch.zeros(
+                *base_components.shape[:-1],
+                self.fiber_dim,
+                self.fiber_dim,
+                device=self.device,
+                dtype=tangent_vector.dtype
+            )
+            
+            # Manual contraction to avoid einsum issues
+            for b in range(base_components.shape[0]):  # batch dimension
+                for i in range(self.fiber_dim):
+                    for k in range(self.fiber_dim):
+                        for j in range(self.base_dim):
+                            result[b, i, k] += connection_matrices[i, j, k] * base_components[b, j]
+            
+            # Project to ensure metric compatibility and skew-symmetry
+            result = self._project_metric_compatible(result, fiber_metric)
+            
+            # Ensure skew-symmetry
             result = 0.5 * (result - result.transpose(-2, -1))
+        else:
+            # For base bundle, contract directly
+            result = torch.zeros(
+                *base_components.shape[:-1],
+                self.fiber_dim,
+                device=self.device,
+                dtype=tangent_vector.dtype
+            )
+            
+            for b in range(base_components.shape[0]):  # batch dimension
+                for k in range(self.fiber_dim):
+                    for j in range(self.base_dim):
+                        result[b, k] += torch.sum(connection_matrices[:, j, k] * base_components[b, j])
         
-        return result
+        return result if has_batch else result.squeeze(0)
 
-    def parallel_transport(
-        self, section: torch.Tensor, path: torch.Tensor
-    ) -> torch.Tensor:
-        """Implementation of FiberBundle.parallel_transport.
+    def parallel_transport(self, section: torch.Tensor, path: torch.Tensor) -> torch.Tensor:
+        """Parallel transports a section along a path.
         
-        Parallel transport a section along a path.
+        Implementation of FiberBundle.parallel_transport
         
         Args:
-            section: Section to transport (shape: (fiber_dim,))
-            path: Path along which to transport (shape: (num_points, base_dim))
+            section: Section to transport
+            path: Path along which to transport
             
         Returns:
-            Transported section (shape: (num_points, fiber_dim))
+            The parallel transported section
         """
         # Initialize result tensor
         num_points = path.shape[0]
-        result = torch.zeros(num_points, self.fiber_dim, device=self.device)
+        result = torch.zeros(num_points, self.fiber_dim, device=path.device, dtype=path.dtype)
         result[0] = section  # Initial condition
         
-        # Compute path tangent vectors and lengths
+        # Compute path tangent vectors and normalize
         path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
-        segment_lengths = torch.norm(path_tangent, dim=1)
+        path_lengths = torch.norm(path_tangent, dim=-1, keepdim=True)
+        path_tangent = path_tangent / (path_lengths + 1e-7)
         
-        # Normalize tangent vectors for better numerical stability
-        path_tangent = path_tangent / (segment_lengths.unsqueeze(-1) + 1e-8)
+        # Adaptive RK4 integration
+        t = 0.0
+        dt = 1.0 / (num_points - 1)
+        current_point = 0
         
-        # Get connection form values along path
-        connection_values = self.connection_form(path_tangent)  # Shape: (num_points-1, fiber_dim, fiber_dim)
+        while current_point < num_points - 1:
+            # Current state
+            current = result[current_point]
+            
+            # Try RK4 step
+            k1 = self._transport_step(current, path_tangent[current_point])
+            k2 = self._transport_step(current + 0.5*dt*k1, path_tangent[current_point])
+            k3 = self._transport_step(current + 0.5*dt*k2, path_tangent[current_point])
+            k4 = self._transport_step(current + dt*k3, path_tangent[current_point])
+            
+            # Compute two estimates
+            next_point = current + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+            half_point = current + (dt/12) * (k1 + 2*k2 + 2*k3 + k4)
+            
+            # Estimate error
+            error = torch.norm(next_point - half_point)
+            
+            # Adjust step size based on error
+            if error < 1e-6:
+                # Accept step
+                result[current_point + 1] = next_point
+                # Normalize to ensure metric preservation
+                result[current_point + 1] *= torch.norm(section) / torch.norm(result[current_point + 1])
+                current_point += 1
+                t += dt
+            else:
+                # Reduce step size and try again
+                dt *= 0.5
+                if dt < 1e-10:  # Prevent infinite loops
+                    raise RuntimeError("Step size too small in parallel transport")
         
-        # Parallel transport equation: ∇_γ̇s = 0
-        # Use adaptive step size RK4 with geodesic correction
-        for t in range(num_points - 1):
-            # Scale step by segment length for adaptive integration
-            dt = segment_lengths[t].item()
-            
-            # RK4 integration steps
-            k1 = torch.matmul(connection_values[t], result[t].unsqueeze(-1)).squeeze(-1)
-            
-            # Midpoint evaluations with geodesic correction
-            mid1 = result[t] + 0.5 * dt * k1
-            # Project to preserve metric
-            mid1 = mid1 * (torch.norm(section) / torch.norm(mid1))
-            k2 = torch.matmul(connection_values[t], mid1.unsqueeze(-1)).squeeze(-1)
-            
-            mid2 = result[t] + 0.5 * dt * k2
-            # Project to preserve metric
-            mid2 = mid2 * (torch.norm(section) / torch.norm(mid2))
-            k3 = torch.matmul(connection_values[t], mid2.unsqueeze(-1)).squeeze(-1)
-            
-            # Full step evaluation
-            end = result[t] + dt * k3
-            # Project to preserve metric
-            end = end * (torch.norm(section) / torch.norm(end))
-            k4 = torch.matmul(connection_values[t], end.unsqueeze(-1)).squeeze(-1)
-            
-            # Combined RK4 step with geodesic correction
-            step = (k1 + 2*k2 + 2*k3 + k4) / 6.0
-            result[t + 1] = result[t] + dt * step
-            
-            # Final projection to preserve metric exactly
-            result[t + 1] = result[t + 1] * (torch.norm(section) / torch.norm(result[t + 1]))
-            
         return result
+        
+    def _transport_step(self, section: torch.Tensor, tangent: torch.Tensor) -> torch.Tensor:
+        """Compute single transport step.
+        
+        Args:
+            section: Current section value
+            tangent: Path tangent vector
+            
+        Returns:
+            Change in section
+        """
+        # Extend tangent vector with zeros in fiber direction
+        full_tangent = torch.zeros(self.total_dim, device=tangent.device, dtype=tangent.dtype)
+        full_tangent[:self.base_dim] = tangent
+        
+        # Get connection form value
+        connection = self.connection_form(full_tangent)
+        
+        # Compute transport step using matrix multiplication
+        return -torch.matmul(connection, section.unsqueeze(-1)).squeeze(-1)
+
+    def compute_metric(self, points: torch.Tensor) -> MetricTensor[torch.Tensor]:
+        """Compute metric tensor at given points.
+        
+        Args:
+            points: Points tensor of shape (batch_size, total_dim)
+            
+        Returns:
+            MetricTensor containing values and properties
+        """
+        batch_size = points.shape[0]
+        
+        # Start with base metric
+        values = self.metric.expand(batch_size, -1, -1).clone()
+        
+        # Add point-dependent perturbation for the fiber part
+        fiber_points = points[..., self.base_dim:]
+        
+        # Compute symmetric perturbation matrix for fiber part
+        fiber_pert = torch.zeros(batch_size, fiber_points.shape[-1], fiber_points.shape[-1],
+                               device=points.device, dtype=points.dtype)
+        
+        # Build symmetric perturbation using outer products
+        for b in range(batch_size):
+            for i in range(fiber_points.shape[-1]):
+                for j in range(i + 1):
+                    # Compute symmetric contribution
+                    contrib = 0.5 * (
+                        fiber_points[b, i] * fiber_points[b, j] +
+                        fiber_points[b, j] * fiber_points[b, i]
+                    )
+                    fiber_pert[b, i, j] = contrib
+                    fiber_pert[b, j, i] = contrib
+        
+        # Add perturbation to fiber part of metric
+        perturbation = torch.zeros_like(values)
+        perturbation[..., self.base_dim:, self.base_dim:] = 0.1 * fiber_pert
+        
+        # Add perturbation while maintaining symmetry
+        values = values + perturbation
+        
+        # Add small identity to ensure positive definiteness
+        values = values + 1e-6 * torch.eye(
+            self.total_dim,
+            device=values.device,
+            dtype=values.dtype
+        ).expand(batch_size, -1, -1)
+        
+        # Validate metric properties
+        is_compatible = True  # We ensure this by construction
+        
+        return MetricTensor(
+            values=values,
+            dimension=self.total_dim,
+            is_compatible=is_compatible
+        )

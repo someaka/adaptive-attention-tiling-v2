@@ -16,14 +16,16 @@ from ..patterns.riemannian import PatternRiemannianStructure
 class LayerGeometry(nn.Module):
     """Base class for layer geometry."""
 
-    def __init__(self, manifold_dim: int):
+    def __init__(self, manifold_dim: int, pattern_dim: Optional[int] = None):
         """Initialize layer geometry.
         
         Args:
             manifold_dim: Dimension of the layer manifold
+            pattern_dim: Dimension of the pattern space (defaults to manifold_dim if not specified)
         """
         super().__init__()
         self.manifold_dim = manifold_dim
+        self.pattern_dim = pattern_dim if pattern_dim is not None else manifold_dim
         self.metric_tensor = nn.Parameter(torch.eye(manifold_dim))
         self.connection_coeffs = nn.Parameter(
             torch.zeros(manifold_dim, manifold_dim, manifold_dim)
@@ -63,7 +65,8 @@ class LayerGeometry(nn.Module):
             PatternRiemannianStructure instance
         """
         framework = PatternRiemannianStructure(
-            manifold_dim=self.manifold_dim
+            manifold_dim=self.manifold_dim,
+            pattern_dim=self.pattern_dim
         )
         
         # Set metric and connection from layer parameters

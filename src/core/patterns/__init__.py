@@ -2,20 +2,32 @@
 
 from .fiber_bundle import FiberBundle
 from .riemannian import (
-    ChristoffelSymbols,
-    CurvatureTensor,
+    BaseRiemannianStructure,
     RiemannianFramework,
     PatternRiemannianStructure,
+)
+from .riemannian_base import (
+    ChristoffelSymbols,
+    CurvatureTensor,
+    MetricTensor,
+    RiemannianStructure,
+    RiemannianValidator,
+    ValidationMixin,
 )
 from .evolution import PatternEvolution
 from .dynamics import PatternDynamics
 
 __all__ = [
+    "BaseRiemannianStructure",
     "ChristoffelSymbols",
-    "CurvatureTensor", 
+    "CurvatureTensor",
     "FiberBundle",
-    "RiemannianFramework",
-    "PatternRiemannianStructure",
-    "PatternEvolution",
+    "MetricTensor",
     "PatternDynamics",
+    "PatternEvolution",
+    "PatternRiemannianStructure",
+    "RiemannianFramework",
+    "RiemannianStructure",
+    "RiemannianValidator",
+    "ValidationMixin",
 ]
