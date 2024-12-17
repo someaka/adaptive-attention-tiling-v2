@@ -44,7 +44,11 @@ class MotivicMetricTensor(MetricTensor[Tensor]):
     ):
         super().__init__(values=values, dimension=dimension, is_compatible=is_compatible)
         self.height_structure = height_structure
+        # Compute height data with proper shape handling
         self.height_data = self.height_structure.compute_height(values)
+        # Ensure height data has proper batch dimension
+        if self.height_data.dim() == 0:
+            self.height_data = self.height_data.unsqueeze(0)
         
     def with_height(self, new_values: Tensor) -> 'MotivicMetricTensor':
         """Create new instance with updated values but preserved height structure."""

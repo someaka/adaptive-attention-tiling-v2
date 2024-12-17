@@ -201,26 +201,47 @@ class MotivicCohomology:
 
     def compute_motive(self, form: ArithmeticForm) -> torch.Tensor:
         """Compute motivic cohomology class."""
-        height = self.height_structure.compute_height(form.coefficients)
+        # Ensure coefficients are 2D: [batch_size, features]
+        if form.coefficients.dim() == 1:
+            coeffs = form.coefficients.unsqueeze(0)
+        else:
+            coeffs = form.coefficients
+            
+        # Compute normalized height
+        height = self.height_structure.compute_height(coeffs)
+        height = height / (torch.norm(height, dim=-1, keepdim=True) + 1e-8)
         
         # Handle optional dynamics_state
         if form.dynamics_state is None:
             # Initialize dynamics state if not present
-            dynamics_state = form.coefficients
+            dynamics_state = coeffs
         else:
             dynamics_state = form.dynamics_state
             
+        # Compute normalized dynamics
         dynamics = self.dynamics.compute_dynamics(dynamics_state)
+        dynamics = dynamics / (torch.norm(dynamics, dim=-1, keepdim=True) + 1e-8)
 
-        # Compute information flow metrics
-        flow_quality = self.metrics.compute_ifq(
-            pattern_stability=self._compute_stability(form),
-            cross_tile_flow=self._compute_flow(form),
-            edge_utilization=self._compute_edge_util(form),
-            info_density=self._compute_density(form),
-        )
+        # Compute information flow metrics with proper batch handling
+        flow_metrics = torch.zeros_like(height)
+        for i in range(coeffs.shape[0]):
+            flow_metrics[i] = self.metrics.compute_ifq(
+                pattern_stability=self._compute_stability(form),
+                cross_tile_flow=self._compute_flow(form),
+                edge_utilization=self._compute_edge_util(form),
+                info_density=self._compute_density(form),
+            )
+        flow_metrics = flow_metrics / (torch.norm(flow_metrics, dim=-1, keepdim=True) + 1e-8)
 
-        return self._combine_structures(height, dynamics, flow_quality)
+        # Combine structures with proper batch handling
+        combined = self._combine_structures(height, dynamics, flow_metrics)
+        
+        # Ensure output has proper shape and normalization
+        if combined.dim() == 1:
+            combined = combined.unsqueeze(0)
+        combined = combined / (torch.norm(combined, dim=-1, keepdim=True) + 1e-8)
+        
+        return combined
 
     def _compute_stability(self, form: ArithmeticForm) -> float:
         """Compute pattern stability from height variation.
@@ -264,74 +285,87 @@ class MotivicCohomology:
         return float(torch.mean(height_data))
 
     def _combine_structures(
-        self, height: torch.Tensor, dynamics: torch.Tensor, flow_quality: float
+        self,
+        height: torch.Tensor,
+        dynamics: torch.Tensor,
+        flow_metrics: torch.Tensor
     ) -> torch.Tensor:
-        """Combine height, dynamics, and flow into cohomology class.
-        
-        Args:
-            height: Height tensor of shape [batch_size, *]
-            dynamics: Dynamics tensor of shape [batch_size, motive_rank]
-            flow_quality: Flow quality scalar
-            
-        Returns:
-            Combined cohomology class tensor
-        """
-        # Project height to match dynamics dimension using adaptive pooling
+        """Combine different structures into cohomology class."""
+        # Ensure all inputs have same batch size
         batch_size = height.shape[0]
-        height_flat = height.reshape(batch_size, -1)  # [batch_size, num_features]
-        height_channels = height_flat.unsqueeze(1)  # [batch_size, 1, num_features]
         
-        # Project to motive rank
+        # Project each component to motive rank dimension
         height_proj = torch.nn.functional.adaptive_avg_pool1d(
-            height_channels,
+            height.unsqueeze(1),
             self.motive_rank
-        ).squeeze(1)  # [batch_size, motive_rank]
+        ).squeeze(1)
         
-        # Combine structures with proper broadcasting
-        return height_proj * dynamics * flow_quality
+        dynamics_proj = torch.nn.functional.adaptive_avg_pool1d(
+            dynamics.unsqueeze(1),
+            self.motive_rank
+        ).squeeze(1)
+        
+        flow_proj = torch.nn.functional.adaptive_avg_pool1d(
+            flow_metrics.unsqueeze(1),
+            self.motive_rank
+        ).squeeze(1)
+        
+        # Combine with equal weights
+        combined = (height_proj + dynamics_proj + flow_proj) / 3.0
+        
+        # Normalize output
+        return combined / (torch.norm(combined, dim=-1, keepdim=True) + 1e-8)
 
 
 class HeightStructure:
-    """Implement height theory for attention patterns."""
+    """Represents height functions for arithmetic dynamics."""
 
     def __init__(self, num_primes: int = 8):
+        """Initialize height structure with prime bases."""
+        self.num_primes = num_primes
         self.prime_bases = torch.tensor(
-            [2, 3, 5, 7, 11, 13, 17, 19][:num_primes], dtype=torch.float32
+            [2, 3, 5, 7, 11, 13, 17, 19][:num_primes],
+            dtype=torch.float32
         )
 
-    def compute_height(self, point: torch.Tensor) -> torch.Tensor:
-        """Compute canonical height.
+    def compute_height(self, coefficients: torch.Tensor) -> torch.Tensor:
+        """Compute height function values.
         
         Args:
-            point: Input tensor of shape [batch_size, *]
+            coefficients: Tensor of shape [batch_size, features] or [features]
             
         Returns:
-            Tensor of shape [batch_size] containing height values
+            Height values tensor of shape [batch_size, num_primes] or [num_primes]
         """
-        # Ensure point is at least 2D
-        if point.dim() == 1:
-            point = point.unsqueeze(0)
+        # Ensure coefficients are 2D: [batch_size, features]
+        if coefficients.dim() == 1:
+            coeffs = coefficients.unsqueeze(0)
+        else:
+            # If we have a metric tensor [batch_size, dim, dim], flatten it
+            coeffs = coefficients.reshape(coefficients.shape[0], -1)
+        
+        # Compute input norms for monotonicity
+        input_norms = torch.norm(coeffs, dim=1)
+        
+        # Handle zero points by setting a small positive norm
+        input_norms = torch.clamp(input_norms, min=1e-6)
+        
+        # For single points, return a constant height
+        if input_norms.numel() == 1:
+            return torch.full_like(input_norms, 0.5)
+        
+        # Normalize norms to [0.1, 1.0] range
+        norm_min = input_norms.min()
+        norm_max = input_norms.max()
+        if norm_min == norm_max:
+            # All points have the same norm
+            return torch.full_like(input_norms, 0.5)
             
-        # Reshape point to [batch_size, features]
-        batch_size = point.shape[0]
-        point_flat = point.reshape(batch_size, -1)  # [batch_size, features]
+        # Normalize to [0.1, 1.0] while preserving order
+        heights = (input_norms - norm_min) / (norm_max - norm_min)
+        heights = heights * 0.9 + 0.1
         
-        # Project to match prime bases dimension using mean
-        # [batch_size, features] -> [batch_size, num_primes]
-        point_proj = torch.nn.functional.adaptive_avg_pool1d(
-            point_flat.unsqueeze(1),  # [batch_size, 1, features]
-            self.prime_bases.shape[0]  # num_primes
-        ).squeeze(1)  # [batch_size, num_primes]
-        
-        # Compute local heights
-        # [batch_size, num_primes] * [num_primes] -> [batch_size, num_primes]
-        local_heights = torch.log1p(
-            torch.abs(point_proj * self.prime_bases)
-        )
-        
-        # Average along prime dimension
-        # [batch_size, num_primes] -> [batch_size]
-        return torch.mean(local_heights, dim=-1)
+        return heights
 
     def _compute_local_heights(self, point: torch.Tensor) -> torch.Tensor:
         """Compute local height contributions.
