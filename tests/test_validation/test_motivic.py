@@ -116,26 +116,27 @@ class MockMotivicRiemannianStructure(MotivicRiemannianStructure):
         # Compute heights directly from point norms
         norms = point_norms.squeeze()
         
-        # Sort norms to ensure proper ordering
-        sorted_norms, indices = torch.sort(norms)
-        sorted_heights = torch.zeros_like(sorted_norms)
+        # Normalize norms to [0, 1] range for consistent spacing
+        norm_min = norms.min()
+        norm_max = norms.max()
+        if norm_min == norm_max:
+            metric.height_data = torch.full_like(norms, 0.5)
+            return metric
+            
+        # Scale norms to [0, 1] while preserving order
+        normalized_norms = (norms - norm_min) / (norm_max - norm_min)
         
-        # Create strictly increasing sequence from 0.1 to 0.9
-        # Use exponential growth to ensure strict monotonicity
-        positions = torch.arange(len(sorted_norms), dtype=torch.float32, device=points.device)
-        base = 1.5  # Growth factor > 1 ensures strict increase
-        exponents = -base * positions / (len(sorted_norms) - 1)
-        sorted_heights = 0.1 + 0.8 * (1 - torch.exp(exponents))
+        # Use exponential function to ensure strict monotonicity
+        base = 2.0  # Growth factor > 1 ensures strict increase
+        heights = 0.1 + 0.8 * (1 - torch.exp(-base * normalized_norms))
         
-        # Ensure strict monotonicity with minimum gap
-        for i in range(1, len(sorted_heights)):
-            min_gap = 0.05  # Minimum gap between consecutive heights
-            min_height = sorted_heights[i-1] + min_gap
-            sorted_heights[i] = torch.max(sorted_heights[i], min_height)
+        # Ensure minimum gap between consecutive heights
+        min_gap = 0.05
+        for i in range(1, len(heights)):
+            min_height = heights[i-1] + min_gap
+            heights[i] = torch.max(heights[i], min_height)
         
-        # Map back to original order
-        _, inverse_indices = torch.sort(indices)
-        metric.height_data = sorted_heights[inverse_indices]
+        metric.height_data = heights
         
         return metric
     
