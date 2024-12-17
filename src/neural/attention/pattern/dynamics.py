@@ -15,10 +15,11 @@ from .models import (
 from .diffusion import DiffusionSystem
 from .reaction import ReactionSystem
 from .stability import StabilityAnalyzer
+from .quantum import QuantumState, QuantumGeometricTensor
 
 
 class PatternDynamics:
-    """Complete pattern dynamics system."""
+    """Complete pattern dynamics system with quantum integration."""
 
     def __init__(
         self,
@@ -27,7 +28,8 @@ class PatternDynamics:
         boundary: str = 'periodic',
         dt: float = 0.01,
         num_modes: int = 8,
-        hidden_dim: int = 64
+        hidden_dim: int = 64,
+        quantum_enabled: bool = False
     ):
         """Initialize pattern dynamics system.
         
@@ -38,6 +40,7 @@ class PatternDynamics:
             dt (float, optional): Time step. Defaults to 0.01.
             num_modes (int, optional): Number of stability modes. Defaults to 8.
             hidden_dim (int, optional): Hidden layer dimension. Defaults to 64.
+            quantum_enabled (bool, optional): Enable quantum features. Defaults to False.
         """
         self.size = grid_size
         self.dim = space_dim
@@ -45,11 +48,42 @@ class PatternDynamics:
         self.boundary = boundary
         self.num_modes = num_modes
         self.hidden_dim = hidden_dim
+        self.quantum_enabled = quantum_enabled
         
         # Initialize subsystems
         self.diffusion = DiffusionSystem(self.size)
         self.reaction = ReactionSystem(self.size)
         self.stability = StabilityAnalyzer(self)
+        
+        if quantum_enabled:
+            # Initialize quantum components
+            self.quantum_tensor = QuantumGeometricTensor(dim=space_dim)
+            
+    def _to_quantum_state(self, state: torch.Tensor) -> QuantumState:
+        """Convert classical state to quantum state.
+        
+        Args:
+            state: Classical state tensor
+            
+        Returns:
+            Quantum state
+        """
+        # Extract amplitude and phase
+        amplitude = torch.abs(state)
+        phase = torch.angle(state.to(torch.complex64))
+        
+        return QuantumState(amplitude, phase)
+        
+    def _from_quantum_state(self, quantum_state: QuantumState) -> torch.Tensor:
+        """Convert quantum state to classical state.
+        
+        Args:
+            quantum_state: Quantum state
+            
+        Returns:
+            Classical state tensor
+        """
+        return quantum_state.state_vector.real
 
     def compute_next_state(self, state: torch.Tensor) -> torch.Tensor:
         """Perform one step of pattern dynamics.
@@ -60,12 +94,28 @@ class PatternDynamics:
         Returns:
             torch.Tensor: Next state
         """
-        # Apply reaction and diffusion
-        reaction = self.reaction.reaction_term(state)
-        diffusion = self.diffusion.apply_diffusion(state, diffusion_coefficient=0.1, dt=self.dt)
-        
-        # Combine using timestep
-        next_state = state + self.dt * (reaction + diffusion)
+        if self.quantum_enabled:
+            # Convert to quantum state
+            quantum_state = self._to_quantum_state(state)
+            
+            # Compute quantum geometric tensor
+            Q = self.quantum_tensor.compute_tensor(quantum_state)
+            
+            # Decompose into metric and Berry curvature
+            g, B = self.quantum_tensor.decompose(Q)
+            
+            # Apply quantum evolution
+            # TODO: Implement proper Hamiltonian
+            H = torch.eye(self.dim, dtype=torch.complex64)
+            evolved = quantum_state.evolve(H, self.dt)
+            
+            # Convert back to classical state
+            next_state = self._from_quantum_state(evolved)
+        else:
+            # Classical evolution
+            reaction = self.reaction.reaction_term(state)
+            diffusion = self.diffusion.apply_diffusion(state, diffusion_coefficient=0.1, dt=self.dt)
+            next_state = state + self.dt * (reaction + diffusion)
         
         return next_state
 
@@ -1060,3 +1110,102 @@ class PatternDynamics:
     def __call__(self, states: torch.Tensor, return_patterns: bool = False) -> dict[str, torch.Tensor]:
         """Make the class callable."""
         return self.forward(states, return_patterns)
+
+    def compute_quantum_potential(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute quantum potential for pattern state.
+        
+        Args:
+            state: Pattern state tensor
+            
+        Returns:
+            Quantum potential tensor
+        """
+        if not self.quantum_enabled:
+            raise RuntimeError("Quantum features not enabled")
+            
+        # Convert to quantum state
+        quantum_state = self._to_quantum_state(state)
+        
+        # Compute quantum geometric tensor
+        Q = self.quantum_tensor.compute_tensor(quantum_state)
+        
+        # Extract metric
+        g, _ = self.quantum_tensor.decompose(Q)
+        
+        # Compute quantum potential (simplified version)
+        # TODO: Implement full quantum potential
+        psi = quantum_state.state_vector
+        laplacian = torch.zeros_like(psi)
+        for i in range(self.dim):
+            for j in range(self.dim):
+                laplacian += g[i,j] * torch.gradient(torch.gradient(psi, dim=i)[0], dim=j)[0]
+                
+        V_quantum = -0.5 * laplacian / (psi + 1e-6)
+        
+        return V_quantum.real
+
+    def compute_berry_phase(self, state: torch.Tensor, path: torch.Tensor) -> float:
+        """Compute Berry phase for a closed path in parameter space.
+        
+        Args:
+            state: Initial state tensor
+            path: Parameter space path tensor [num_points, dim]
+            
+        Returns:
+            Berry phase (in radians)
+        """
+        if not self.quantum_enabled:
+            raise RuntimeError("Quantum features not enabled")
+            
+        # Convert to quantum state
+        quantum_state = self._to_quantum_state(state)
+        
+        # Initialize phase
+        berry_phase = 0.0
+        
+        # Parallel transport around path
+        for i in range(path.shape[0] - 1):
+            # Get current and next points
+            p1 = path[i]
+            p2 = path[i + 1]
+            
+            # Compute quantum geometric tensor at current point
+            Q = self.quantum_tensor.compute_tensor(quantum_state)
+            
+            # Extract Berry curvature
+            _, B = self.quantum_tensor.decompose(Q)
+            
+            # Compute contribution to Berry phase
+            dp = p2 - p1
+            berry_phase += torch.sum(B @ dp)
+            
+            # Evolve state to next point
+            # TODO: Implement proper parallel transport
+            quantum_state = self._parallel_transport(quantum_state, p1, p2)
+            
+        return float(berry_phase)
+
+    def _parallel_transport(
+        self,
+        state: QuantumState,
+        p1: torch.Tensor,
+        p2: torch.Tensor
+    ) -> QuantumState:
+        """Parallel transport quantum state between points.
+        
+        Args:
+            state: Quantum state
+            p1: Starting point
+            p2: End point
+            
+        Returns:
+            Transported quantum state
+        """
+        # TODO: Implement proper parallel transport
+        # For now just do simple evolution
+        dp = p2 - p1
+        phase = torch.sum(dp)
+        return QuantumState(
+            state.amplitude,
+            state.phase + phase
+        )
