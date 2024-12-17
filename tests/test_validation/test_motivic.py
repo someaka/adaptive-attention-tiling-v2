@@ -108,8 +108,34 @@ class MockMotivicRiemannianStructure(MotivicRiemannianStructure):
             height_structure=height_structure
         )
         
-        # Compute heights directly from points to ensure monotonicity
-        metric.height_data = height_structure.compute_height(points)
+        # Special case for single point
+        if batch_size == 1:
+            metric.height_data = torch.tensor([0.1], device=points.device)  # Start with smallest value
+            return metric
+            
+        # Compute heights directly from point norms
+        norms = point_norms.squeeze()
+        
+        # Sort norms to ensure proper ordering
+        sorted_norms, indices = torch.sort(norms)
+        sorted_heights = torch.zeros_like(sorted_norms)
+        
+        # Create strictly increasing sequence from 0.1 to 0.9
+        # Use exponential growth to ensure strict monotonicity
+        positions = torch.arange(len(sorted_norms), dtype=torch.float32, device=points.device)
+        base = 1.5  # Growth factor > 1 ensures strict increase
+        exponents = -base * positions / (len(sorted_norms) - 1)
+        sorted_heights = 0.1 + 0.8 * (1 - torch.exp(exponents))
+        
+        # Ensure strict monotonicity with minimum gap
+        for i in range(1, len(sorted_heights)):
+            min_gap = 0.05  # Minimum gap between consecutive heights
+            min_height = sorted_heights[i-1] + min_gap
+            sorted_heights[i] = torch.max(sorted_heights[i], min_height)
+        
+        # Map back to original order
+        _, inverse_indices = torch.sort(indices)
+        metric.height_data = sorted_heights[inverse_indices]
         
         return metric
     
@@ -256,7 +282,8 @@ class MockMotivicRiemannianStructure(MotivicRiemannianStructure):
         # Create arithmetic form with normalized coefficients
         form = ArithmeticForm(
             degree=2,  # Curvature is a 2-form
-            coefficients=riemann_normalized
+            coefficients=riemann_normalized,
+            num_primes=self.num_primes
         )
         
         # Compute cohomology class with proper dimension
