@@ -406,12 +406,12 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         ricci = torch.einsum('...ijkj->...ik', riemann)
         
         # Compute scalar curvature
-        scalar = torch.einsum('...ii', ricci)
+        scalar_curvatures = torch.einsum('...ii', ricci)
         
         return CurvatureTensor(
             riemann=riemann,
             ricci=ricci,
-            scalar=scalar
+            scalar_curvatures=scalar_curvatures
         )
         
     def geodesic_flow(

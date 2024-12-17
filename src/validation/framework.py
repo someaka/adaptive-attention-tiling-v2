@@ -22,6 +22,12 @@ from ..core.patterns.riemannian import RiemannianFramework, PatternRiemannianStr
 from ..core.tiling.geometric_flow import GeometricFlow
 from ..core.quantum.types import QuantumState
 from .patterns.formation import PatternFormationValidator
+from .geometric.motivic import (
+    MotivicValidator,
+    MotivicRiemannianValidator,
+    MotivicValidation,
+    HeightValidation
+)
 
 T = TypeVar('T')
 
@@ -54,6 +60,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
     flow_result: Optional[TilingFlowValidationResult] = None
     quantum_result: Optional[QuantumStateValidationResult] = None
     pattern_result: Optional[ValidationResult] = None
+    motivic_result: Optional[MotivicValidation] = None
     
     def __init__(
         self,
@@ -64,6 +71,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
         flow_result: Optional[TilingFlowValidationResult] = None,
         quantum_result: Optional[QuantumStateValidationResult] = None,
         pattern_result: Optional[ValidationResult] = None,
+        motivic_result: Optional[MotivicValidation] = None,
         curvature_bounds: Optional[Tuple[float, float]] = None
     ):
         """Initialize framework validation result."""
@@ -72,6 +80,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
         self.flow_result = flow_result
         self.quantum_result = quantum_result
         self.pattern_result = pattern_result
+        self.motivic_result = motivic_result
         self.curvature_bounds = curvature_bounds
         
     def merge(self, other: ValidationResult) -> 'FrameworkValidationResult':
@@ -87,6 +96,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
         flow_result = self.flow_result
         quantum_result = self.quantum_result
         pattern_result = self.pattern_result
+        motivic_result = self.motivic_result
         
         if isinstance(other, FrameworkValidationResult):
             if other.geometric_result:
@@ -96,14 +106,12 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
                 )
             if other.flow_result:
                 if isinstance(other.flow_result, dict):
-                    # Handle dictionary of flow results by taking the first result
                     first_result = next(iter(other.flow_result.values()))
                     flow_result = (
                         flow_result.merge(first_result)
                         if flow_result else first_result
                     )
                 else:
-                    # Handle single flow result
                     flow_result = (
                         flow_result.merge(other.flow_result)
                         if flow_result else other.flow_result
@@ -118,6 +126,8 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
                     pattern_result.merge(other.pattern_result)
                     if pattern_result else other.pattern_result
                 )
+            if other.motivic_result:
+                motivic_result = other.motivic_result
                 
         return FrameworkValidationResult(
             is_valid=bool(self.is_valid and other.is_valid),
@@ -127,6 +137,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
             flow_result=flow_result,
             quantum_result=quantum_result,
             pattern_result=pattern_result,
+            motivic_result=motivic_result,
             curvature_bounds=self.curvature_bounds
         )
         
@@ -147,6 +158,14 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
             result["quantum"] = self.quantum_result.to_dict()
         if self.pattern_result:
             result["pattern"] = self.pattern_result.to_dict()
+        if self.motivic_result:
+            result["motivic"] = {
+                "is_valid": self.motivic_result.is_valid,
+                "height_valid": self.motivic_result.height_valid,
+                "dynamics_valid": self.motivic_result.dynamics_valid,
+                "cohomology_valid": self.motivic_result.cohomology_valid,
+                "message": self.motivic_result.message
+            }
             
         return result
         
@@ -174,6 +193,17 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
             if "quantum" in data else None
         )
         pattern_result = None  # TODO: Add pattern result deserialization
+        motivic_result = None  # TODO: Add motivic result deserialization
+        if "motivic" in data:
+            motivic_data = data["motivic"]
+            motivic_result = MotivicValidation(
+                is_valid=motivic_data["is_valid"],
+                height_valid=motivic_data["height_valid"],
+                dynamics_valid=motivic_data["dynamics_valid"],
+                cohomology_valid=motivic_data["cohomology_valid"],
+                message=motivic_data["message"],
+                data={}  # Initialize empty data dict
+            )
         
         return cls(
             is_valid=bool(data["is_valid"]),
@@ -183,6 +213,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
             flow_result=flow_result,
             quantum_result=quantum_result,
             pattern_result=pattern_result,
+            motivic_result=motivic_result,
             curvature_bounds=data.get("curvature_bounds")
         )
         
@@ -198,6 +229,8 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
             components.append(f"Quantum: {self.quantum_result}")
         if self.pattern_result:
             components.append(f"Pattern: {self.pattern_result}")
+        if self.motivic_result:
+            components.append(f"Motivic: {self.motivic_result.message}")
             
         component_info = f" [{', '.join(components)}]" if components else ""
         return f"FrameworkValidationResult(valid={self.is_valid}, message='{self.message}'{component_info})"

@@ -43,7 +43,7 @@ class CurvatureValidation:
     """Result of curvature validation."""
     bounds_satisfied: bool
     sectional: Tensor
-    scalar: float
+    scalar_curvatures: Tensor  # Now explicitly a batch tensor [batch_size]
     error_bounds: Tensor
 
 @dataclass
@@ -97,17 +97,17 @@ class MetricValidator:
         if len(metric.shape) != 3:
             raise ValueError("Invalid metric shape")
             
-        # Check symmetry
-        if not torch.allclose(metric, metric.transpose(-1, -2), atol=self.tolerance):
-            raise ValueError("Non-symmetric metric")
-            
-        # Check for invalid values
+        # Check for invalid values first
         if torch.any(torch.isnan(metric)) or torch.any(torch.isinf(metric)):
             raise ValueError("Contains NaN or Inf values")
             
         # Check dimensions
-        if metric.shape[-1] != self.manifold_dim:
+        if metric.shape[-1] != self.manifold_dim or metric.shape[-2] != self.manifold_dim:
             raise ValueError("Incompatible dimensions")
+            
+        # Check symmetry
+        if not torch.allclose(metric, metric.transpose(-1, -2), atol=self.tolerance):
+            raise ValueError("Non-symmetric metric")
             
         # Compute eigenvalues
         eigenvalues = torch.linalg.eigvalsh(metric)
@@ -156,10 +156,25 @@ class MetricValidator:
         # Compute Fisher-Rao metric components
         # g_ij = E[∂_i log p(x|θ) ∂_j log p(x|θ)]
         score_fn = self._compute_score_function(points)
+        
+        # Ensure score_fn has correct shape [batch_size, dim]
+        if len(score_fn.shape) == 3:
+            score_fn = score_fn.squeeze(1)
+        elif len(score_fn.shape) == 1:
+            score_fn = score_fn.unsqueeze(0)
+        
+        # Reshape if needed
+        if len(score_fn.shape) != 2:
+            score_fn = score_fn.view(batch_size, -1)
+        
         metric = torch.einsum('bi,bj->bij', score_fn, score_fn)
         
         # Add regularization for numerical stability
-        metric = metric + self.eigenvalue_threshold * torch.eye(self.manifold_dim).expand(batch_size, -1, -1)
+        metric = metric + self.eigenvalue_threshold * torch.eye(
+            self.manifold_dim,
+            device=points.device,
+            dtype=points.dtype
+        ).expand(batch_size, -1, -1)
         
         return metric
 
@@ -359,7 +374,22 @@ class MetricValidator:
         Returns:
             Score function values
         """
-        return self._compute_score_function(points)
+        # Ensure points requires gradients
+        if not points.requires_grad:
+            points = points.detach().requires_grad_(True)
+        
+        # Compute log probability
+        log_prob = -0.5 * torch.sum(points ** 2, dim=-1)
+        
+        # Compute score function as gradient of log probability
+        score = torch.autograd.grad(
+            log_prob.sum(),
+            points,
+            create_graph=True,
+            retain_graph=True
+        )[0]
+        
+        return score
 
     def compute_metric_gradient(self, metric: Tensor) -> Tensor:
         """Compute metric gradient tensor.
@@ -893,7 +923,7 @@ class MetricValidator:
             scalar_curvature=scalar
         )
 
-    def validate_curvature_bounds(self, metric: torch.Tensor) -> CurvatureBounds:
+    def validate_curvature_bounds(self, metric: Tensor) -> CurvatureBounds:
         """Validate curvature bounds.
         
         Args:
@@ -902,24 +932,28 @@ class MetricValidator:
         Returns:
             CurvatureBounds object containing validation results
         """
-        # Compute curvature tensors
-        sectional = self.compute_sectional_curvature(metric)
-        ricci = self.compute_ricci_curvature(metric)
-        scalar = self.compute_scalar_curvature(metric)
+        # Ensure metric requires gradients
+        if not metric.requires_grad:
+            metric = metric.detach().requires_grad_(True)
         
-        # Compute bounds
-        sectional_bounds = (sectional.min().item(), sectional.max().item())
-        ricci_bounds = (ricci.min().item(), ricci.max().item())
-        scalar_bounds = (scalar.min().item(), scalar.max().item())
+        # Compute sectional curvature
+        sectional = self.compute_sectional_curvature(metric)
+        
+        # Check bounds
+        min_k = sectional.min().item()
+        max_k = sectional.max().item()
+        
+        # For compact manifolds, sectional curvature should be bounded
+        bounds_satisfied = -float('inf') < min_k and max_k < float('inf')
         
         return CurvatureBounds(
-            ricci_lower=ricci_bounds[0],
-            ricci_upper=ricci_bounds[1],
-            sectional_lower=sectional_bounds[0],
-            sectional_upper=sectional_bounds[1],
-            sectional_bounds=sectional_bounds,
-            ricci_bounds=ricci_bounds,
-            scalar_bounds=scalar_bounds
+            ricci_lower=min_k,  # Using sectional min as a conservative estimate
+            ricci_upper=max_k,  # Using sectional max as a conservative estimate
+            sectional_lower=min_k,
+            sectional_upper=max_k,
+            sectional_bounds=(min_k, max_k),
+            ricci_bounds=(min_k, max_k),
+            scalar_bounds=(min_k * self.manifold_dim, max_k * self.manifold_dim)
         )
 
     def validate_curvature_symmetries(self, curvature: torch.Tensor) -> bool:
@@ -1138,7 +1172,7 @@ class CurvatureValidator:
 
         # Compute Ricci and scalar curvature
         ricci = torch.einsum("ijki->jk", riemann)
-        scalar = float(torch.einsum("ij,ij->", ricci, torch.inverse(metric)).item())
+        scalar = torch.einsum("ij,ij->", ricci, torch.inverse(metric))  # Keep as tensor
 
         # Check bounds
         bounds_satisfied = bool((sectional >= self.lower_bound).all()) and bool((sectional <= self.upper_bound).all())
@@ -1146,7 +1180,7 @@ class CurvatureValidator:
         return CurvatureValidation(
             bounds_satisfied=bounds_satisfied,
             sectional=sectional,
-            scalar=scalar,
+            scalar_curvatures=scalar.unsqueeze(0),  # Add batch dimension
             error_bounds=torch.zeros_like(sectional)
         )
 

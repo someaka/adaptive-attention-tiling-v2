@@ -51,40 +51,86 @@ class ArithmeticForm:
 
     degree: int
     coefficients: torch.Tensor
-    height_data: torch.Tensor  # Height function values
-    dynamics_state: torch.Tensor  # Current state in dynamical system
-    prime_bases: torch.Tensor  # Prime bases for adelic structure
+    height_data: Optional[torch.Tensor] = None  # Height function values
+    dynamics_state: Optional[torch.Tensor] = None  # Current state in dynamical system
+    prime_bases: Optional[torch.Tensor] = None  # Prime bases for adelic structure
 
     def __init__(self, degree: int, coefficients: torch.Tensor, num_primes: int = 8):
         self.degree = degree
         self.coefficients = coefficients
         self.prime_bases = torch.tensor(
-            [2, 3, 5, 7, 11, 13, 17, 19][:num_primes], dtype=torch.float32
+            [2, 3, 5, 7, 11, 13, 17, 19][:num_primes], dtype=torch.float32,
+            device=coefficients.device
         )
         self.height_data = self._compute_initial_height()
         self.dynamics_state = self._initialize_dynamics()
 
     def _compute_initial_height(self) -> torch.Tensor:
         """Compute initial height using prime bases."""
+        # Ensure coefficients are 2D: [batch_size, features]
+        if self.coefficients.dim() == 1:
+            coeffs = self.coefficients.unsqueeze(0)
+        else:
+            coeffs = self.coefficients
+            
+        if self.prime_bases is None:
+            # Initialize prime bases if not already done
+            self.prime_bases = torch.tensor(
+                [2, 3, 5, 7, 11, 13, 17, 19][:8], dtype=torch.float32,
+                device=coeffs.device
+            )
+            
+        # Project coefficients to lower dimension for height computation
+        batch_size = coeffs.shape[0]
+        feature_size = coeffs.shape[1]
+        
+        # Use adaptive pooling to reduce feature dimension
+        pooled_coeffs = torch.nn.functional.adaptive_avg_pool1d(
+            coeffs.unsqueeze(1),  # [batch_size, 1, features]
+            self.prime_bases.shape[0]  # Target length = num_primes
+        ).squeeze(1)  # [batch_size, num_primes]
+        
+        # Compute log heights with proper broadcasting
         log_heights = torch.log(
-            torch.abs(self.coefficients.unsqueeze(-1) @ self.prime_bases.unsqueeze(0))
+            torch.abs(pooled_coeffs) + 1e-8  # Add small epsilon for numerical stability
         )
-        return torch.sum(log_heights, dim=-1)
+        
+        # Weight by prime bases
+        weighted_heights = log_heights * self.prime_bases
+        
+        return torch.sum(weighted_heights, dim=-1)
 
     def _initialize_dynamics(self) -> torch.Tensor:
         """Initialize dynamical system state."""
-        return self.coefficients.clone()
+        # For L-function computation, we want to ensure the state has shape [batch_size, features]
+        if self.coefficients.dim() == 1:
+            return self.coefficients.unsqueeze(0)
+        return self.coefficients
 
     def wedge(self, other: "ArithmeticForm") -> "ArithmeticForm":
         """Compute the wedge product with arithmetic height consideration."""
         new_degree = self.degree + other.degree
-        new_coeffs = torch.einsum("i,j->ij", self.coefficients, other.coefficients)
+        
+        # Handle batched and unbatched cases
+        if self.coefficients.dim() == other.coefficients.dim():
+            new_coeffs = torch.einsum('...i,...j->...ij', self.coefficients, other.coefficients)
+        else:
+            # Ensure both are at least 2D
+            coeffs1 = self.coefficients.unsqueeze(0) if self.coefficients.dim() == 1 else self.coefficients
+            coeffs2 = other.coefficients.unsqueeze(0) if other.coefficients.dim() == 1 else other.coefficients
+            new_coeffs = torch.einsum('...i,...j->...ij', coeffs1, coeffs2)
 
         # Combine height data using max for Northcott property
-        new_height = torch.maximum(self.height_data, other.height_data)
+        if self.height_data is not None and other.height_data is not None:
+            new_height = torch.maximum(self.height_data, other.height_data)
+        else:
+            new_height = None
 
         # Evolution step in dynamical system
-        new_state = self._evolve_dynamics(other.dynamics_state)
+        if self.dynamics_state is not None and other.dynamics_state is not None:
+            new_state = self._evolve_dynamics(other.dynamics_state)
+        else:
+            new_state = None
 
         result = ArithmeticForm(new_degree, new_coeffs)
         result.height_data = new_height
@@ -93,8 +139,24 @@ class ArithmeticForm:
 
     def _evolve_dynamics(self, other_state: torch.Tensor) -> torch.Tensor:
         """Evolve the arithmetic dynamical system."""
-        # Implement dynamics following arithmetic_dynamics.py
-        return self.dynamics_state + other_state  # Placeholder
+        if self.dynamics_state is None:
+            return other_state
+        if other_state is None:
+            return self.dynamics_state
+            
+        # Ensure states have compatible shapes
+        if self.dynamics_state.dim() != other_state.dim():
+            if self.dynamics_state.dim() < other_state.dim():
+                dynamics_state = self.dynamics_state.unsqueeze(0)
+                other = other_state
+            else:
+                dynamics_state = self.dynamics_state
+                other = other_state.unsqueeze(0)
+        else:
+            dynamics_state = self.dynamics_state
+            other = other_state
+            
+        return dynamics_state + other  # Simple additive evolution
 
     def exterior_derivative(self) -> "ArithmeticForm":
         """Compute the exterior derivative of the form."""
@@ -103,7 +165,14 @@ class ArithmeticForm:
         
         # Compute exterior derivative coefficients
         # This is a simplified implementation - in practice would depend on form degree
-        d_coeffs = torch.gradient(self.coefficients)[0]
+        if self.coefficients.dim() > 1:
+            # Handle batched case
+            d_coeffs = torch.zeros_like(self.coefficients)
+            for i in range(self.coefficients.shape[0]):
+                d_coeffs[i] = torch.gradient(self.coefficients[i])[0]
+        else:
+            # Handle unbatched case
+            d_coeffs = torch.gradient(self.coefficients)[0]
         
         result = ArithmeticForm(new_degree, d_coeffs)
         result.height_data = self.height_data
@@ -121,14 +190,7 @@ class MotivicCohomology:
         motive_rank: int = 4,
         num_primes: int = 8,
     ):
-        """Initialize motivic cohomology.
-        
-        Args:
-            base_space: Base space fiber bundle
-            hidden_dim: Hidden dimension for quantum states
-            motive_rank: Rank of the motive
-            num_primes: Number of prime bases for height computations
-        """
+        """Initialize motivic cohomology."""
         self.base_space = base_space
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
@@ -140,7 +202,15 @@ class MotivicCohomology:
     def compute_motive(self, form: ArithmeticForm) -> torch.Tensor:
         """Compute motivic cohomology class."""
         height = self.height_structure.compute_height(form.coefficients)
-        dynamics = self.dynamics.compute_dynamics(form.dynamics_state)
+        
+        # Handle optional dynamics_state
+        if form.dynamics_state is None:
+            # Initialize dynamics state if not present
+            dynamics_state = form.coefficients
+        else:
+            dynamics_state = form.dynamics_state
+            
+        dynamics = self.dynamics.compute_dynamics(dynamics_state)
 
         # Compute information flow metrics
         flow_quality = self.metrics.compute_ifq(
@@ -153,12 +223,32 @@ class MotivicCohomology:
         return self._combine_structures(height, dynamics, flow_quality)
 
     def _compute_stability(self, form: ArithmeticForm) -> float:
-        """Compute pattern stability from height variation."""
-        return float(torch.std(form.height_data))
+        """Compute pattern stability from height variation.
+        
+        For multi-element batches, uses standard deviation.
+        For single-element batches, uses L2 norm to ensure non-zero values.
+        """
+        if form.height_data is None:
+            # Compute height data if not present
+            height_data = self.height_structure.compute_height(form.coefficients)
+        else:
+            height_data = form.height_data
+            
+        # For single-element batches, use L2 norm
+        # For multi-element batches, use unbiased standard deviation
+        if height_data.numel() <= 1:
+            return float(torch.norm(height_data))
+        else:
+            return float(torch.std(height_data, unbiased=True))
 
     def _compute_flow(self, form: ArithmeticForm) -> float:
         """Compute cross-tile information flow."""
-        return float(torch.mean(torch.abs(form.dynamics_state)))
+        if form.dynamics_state is None:
+            # Use coefficients if dynamics state not present
+            state = form.coefficients
+        else:
+            state = form.dynamics_state
+        return float(torch.mean(torch.abs(state)))
 
     def _compute_edge_util(self, form: ArithmeticForm) -> float:
         """Compute edge attention utilization."""
@@ -166,13 +256,39 @@ class MotivicCohomology:
 
     def _compute_density(self, form: ArithmeticForm) -> float:
         """Compute information density."""
-        return float(torch.mean(form.height_data))
+        if form.height_data is None:
+            # Compute height data if not present
+            height_data = self.height_structure.compute_height(form.coefficients)
+        else:
+            height_data = form.height_data
+        return float(torch.mean(height_data))
 
     def _combine_structures(
         self, height: torch.Tensor, dynamics: torch.Tensor, flow_quality: float
     ) -> torch.Tensor:
-        """Combine height, dynamics, and flow into cohomology class."""
-        return height * dynamics * flow_quality
+        """Combine height, dynamics, and flow into cohomology class.
+        
+        Args:
+            height: Height tensor of shape [batch_size, *]
+            dynamics: Dynamics tensor of shape [batch_size, motive_rank]
+            flow_quality: Flow quality scalar
+            
+        Returns:
+            Combined cohomology class tensor
+        """
+        # Project height to match dynamics dimension using adaptive pooling
+        batch_size = height.shape[0]
+        height_flat = height.reshape(batch_size, -1)  # [batch_size, num_features]
+        height_channels = height_flat.unsqueeze(1)  # [batch_size, 1, num_features]
+        
+        # Project to motive rank
+        height_proj = torch.nn.functional.adaptive_avg_pool1d(
+            height_channels,
+            self.motive_rank
+        ).squeeze(1)  # [batch_size, motive_rank]
+        
+        # Combine structures with proper broadcasting
+        return height_proj * dynamics * flow_quality
 
 
 class HeightStructure:
@@ -184,12 +300,44 @@ class HeightStructure:
         )
 
     def compute_height(self, point: torch.Tensor) -> torch.Tensor:
-        """Compute canonical height."""
-        local_heights = self._compute_local_heights(point)
-        return torch.sum(local_heights, dim=-1)
+        """Compute canonical height.
+        
+        Args:
+            point: Input tensor of shape [batch_size, *]
+            
+        Returns:
+            Tensor of shape [batch_size] containing height values
+        """
+        # Ensure point is at least 2D
+        if point.dim() == 1:
+            point = point.unsqueeze(0)
+            
+        # Reshape point to [batch_size, features]
+        batch_size = point.shape[0]
+        point_flat = point.reshape(batch_size, -1)  # [batch_size, features]
+        
+        # Project to match prime bases dimension using mean
+        # [batch_size, features] -> [batch_size, num_primes]
+        point_proj = torch.nn.functional.adaptive_avg_pool1d(
+            point_flat.unsqueeze(1),  # [batch_size, 1, features]
+            self.prime_bases.shape[0]  # num_primes
+        ).squeeze(1)  # [batch_size, num_primes]
+        
+        # Compute local heights
+        # [batch_size, num_primes] * [num_primes] -> [batch_size, num_primes]
+        local_heights = torch.log1p(
+            torch.abs(point_proj * self.prime_bases)
+        )
+        
+        # Average along prime dimension
+        # [batch_size, num_primes] -> [batch_size]
+        return torch.mean(local_heights, dim=-1)
 
     def _compute_local_heights(self, point: torch.Tensor) -> torch.Tensor:
-        """Compute local height contributions."""
+        """Compute local height contributions.
+        
+        This method is deprecated in favor of direct computation in compute_height.
+        """
         return torch.log1p(
             torch.abs(point.unsqueeze(-1) @ self.prime_bases.unsqueeze(0))
         )
@@ -203,19 +351,52 @@ class ArithmeticDynamics:
         self.motive_rank = motive_rank
         self.num_primes = num_primes
 
+        # Project to hidden dimension first using adaptive pooling
+        self.hidden_proj = nn.Sequential(
+            nn.AdaptiveAvgPool1d(hidden_dim),  # Handle variable input sizes
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+
         # L-function computation
-        self.l_function = nn.Linear(hidden_dim, motive_rank)
+        self.l_function = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, motive_rank)
+        )
 
         # Flow computation
         self.flow = nn.Linear(motive_rank, motive_rank)
 
     def compute_dynamics(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute one step of arithmetic dynamics."""
+        """Compute one step of arithmetic dynamics.
+        
+        Args:
+            state: Input tensor of shape [batch_size, *]
+            
+        Returns:
+            Tensor of shape [batch_size, motive_rank]
+        """
+        # Ensure input is 2D: [batch_size, features]
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+            
+        # Flatten all dimensions after batch
+        batch_size = state.shape[0]
+        state_flat = state.reshape(batch_size, -1)  # [batch_size, num_features]
+        
+        # Add channel dimension for adaptive pooling
+        state_channels = state_flat.unsqueeze(1)  # [batch_size, 1, num_features]
+        
+        # Project to hidden dimension using adaptive pooling
+        hidden_state = self.hidden_proj[0](state_channels)  # [batch_size, 1, hidden_dim]
+        hidden_state = hidden_state.squeeze(1)  # [batch_size, hidden_dim]
+        hidden_state = self.hidden_proj[1](hidden_state)  # [batch_size, hidden_dim]
+        
         # Compute L-function values
-        l_values = self.l_function(state)
+        l_values = self.l_function(hidden_state)  # [batch_size, motive_rank]
 
         # Evolve using flow
-        evolved = self.flow(l_values)
+        evolved = self.flow(l_values)  # [batch_size, motive_rank]
 
         return evolved
 

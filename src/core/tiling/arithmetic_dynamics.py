@@ -51,9 +51,11 @@ class ArithmeticDynamics(nn.Module):
         # Flow computation
         self.flow = nn.Linear(height_dim, height_dim)
 
-        # L-function computation
+        # L-function computation - adjusted for batched inputs
         self.l_function = nn.Sequential(
-            nn.Linear(height_dim, 8), nn.SiLU(), nn.Linear(8, 1)
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, motive_rank)
         )
 
         # Adelic projection
@@ -111,6 +113,32 @@ class ArithmeticDynamics(nn.Module):
         # Reshape back to (batch_size, seq_len)
         return combined_height.view(batch_size, seq_len)
 
+    def compute_dynamics(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute arithmetic dynamics.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            Dynamics state tensor of shape [batch_size, motive_rank]
+        """
+        # Ensure input is 2D: [batch_size, hidden_dim]
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+            
+        # Project through L-function network
+        dynamics = self.l_function(x)
+        
+        # Compute adelic projection
+        adelic = self.adelic_proj(x)
+        adelic = adelic.view(-1, self.num_primes, self.motive_rank)
+        
+        # Combine with coupling
+        coupled = torch.einsum('bpm,pm->bm', adelic, self.coupling)
+        
+        # Final dynamics state
+        return dynamics + coupled
+
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
     ) -> Tuple[torch.Tensor, Dict]:
@@ -127,12 +155,8 @@ class ArithmeticDynamics(nn.Module):
         batch_size, seq_len, _ = x.shape
 
         # Project to height space while maintaining batch and sequence dimensions
-        x_flat = x.reshape(
-            -1, self.hidden_dim
-        )  # Shape: (batch_size * seq_len, hidden_dim)
-        height_coords = self.height_map(
-            x_flat
-        )  # Shape: (batch_size * seq_len, height_dim)
+        x_flat = x.reshape(-1, self.hidden_dim)  # Shape: (batch_size * seq_len, hidden_dim)
+        height_coords = self.height_map(x_flat)  # Shape: (batch_size * seq_len, height_dim)
         height_coords = height_coords.view(batch_size, seq_len, self.height_dim)
 
         # Initialize trajectory storage
@@ -151,8 +175,9 @@ class ArithmeticDynamics(nn.Module):
             if return_trajectory:
                 trajectory.append(height_coords.clone())
 
-        # Compute L-function value
-        l_value = self.l_function(height_coords.reshape(-1, self.height_dim))
+        # Compute L-function value for the entire batch
+        l_value = self.l_function(x_flat)
+        l_value = l_value.view(batch_size, seq_len, -1)
 
         # Compute adelic projection
         adelic = self.adelic_proj(x_flat)
@@ -165,7 +190,7 @@ class ArithmeticDynamics(nn.Module):
         # Gather metrics
         metrics = {
             "height": self.compute_height(x).mean().item(),
-            "l_value": l_value.mean().item(),
+            "l_value": l_value.norm(dim=-1).mean().item(),
             "flow_magnitude": flow_field.norm(dim=-1).mean().item(),
             "adelic_norm": adelic.norm(dim=(-1, -2)).mean().item(),
         }

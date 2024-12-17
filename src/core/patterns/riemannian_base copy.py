@@ -57,11 +57,11 @@ class CurvatureTensor(Generic[T]):
     Attributes:
         riemann: Full Riemann curvature tensor
         ricci: Ricci curvature tensor
-        scalar_curvatures: Batch of scalar curvature values
+        scalar: Scalar curvature
     """
     riemann: T
     ricci: T
-    scalar_curvatures: T
+    scalar: Scalar
 
 @runtime_checkable
 class RiemannianStructure(Protocol[T]):
