@@ -207,10 +207,23 @@ class MotivicCohomology:
         else:
             coeffs = form.coefficients
             
+        # Check for zero input
+        if torch.all(coeffs == 0):
+            return torch.zeros(coeffs.shape[0], self.motive_rank, device=coeffs.device)
+            
+        # Get input scale for preservation
+        input_scale = torch.norm(coeffs, dim=1, keepdim=True)
+            
         # Compute normalized height
         height = self.height_structure.compute_height(coeffs)
-        height = height / (torch.norm(height, dim=-1, keepdim=True) + 1e-8)
-        
+        height_norm = torch.norm(height, dim=-1, keepdim=True)
+        # Only normalize if norm is non-zero
+        height = torch.where(
+            height_norm > 1e-8,
+            height / (height_norm + 1e-8),
+            torch.zeros_like(height)
+        )
+            
         # Handle optional dynamics_state
         if form.dynamics_state is None:
             # Initialize dynamics state if not present
@@ -220,7 +233,13 @@ class MotivicCohomology:
             
         # Compute normalized dynamics
         dynamics = self.dynamics.compute_dynamics(dynamics_state)
-        dynamics = dynamics / (torch.norm(dynamics, dim=-1, keepdim=True) + 1e-8)
+        dynamics_norm = torch.norm(dynamics, dim=-1, keepdim=True)
+        # Only normalize if norm is non-zero
+        dynamics = torch.where(
+            dynamics_norm > 1e-8,
+            dynamics / (dynamics_norm + 1e-8),
+            torch.zeros_like(dynamics)
+        )
 
         # Compute information flow metrics with proper batch handling
         flow_metrics = torch.zeros_like(height)
@@ -231,15 +250,29 @@ class MotivicCohomology:
                 edge_utilization=self._compute_edge_util(form),
                 info_density=self._compute_density(form),
             )
-        flow_metrics = flow_metrics / (torch.norm(flow_metrics, dim=-1, keepdim=True) + 1e-8)
+        flow_norm = torch.norm(flow_metrics, dim=-1, keepdim=True)
+        # Only normalize if norm is non-zero
+        flow_metrics = torch.where(
+            flow_norm > 1e-8,
+            flow_metrics / (flow_norm + 1e-8),
+            torch.zeros_like(flow_metrics)
+        )
 
         # Combine structures with proper batch handling
         combined = self._combine_structures(height, dynamics, flow_metrics)
         
-        # Ensure output has proper shape and normalization
+        # Ensure output has proper shape
         if combined.dim() == 1:
             combined = combined.unsqueeze(0)
-        combined = combined / (torch.norm(combined, dim=-1, keepdim=True) + 1e-8)
+            
+        # Normalize while preserving input scale
+        combined_norm = torch.norm(combined, dim=-1, keepdim=True)
+        # Only normalize if norm is non-zero, and scale by input magnitude
+        combined = torch.where(
+            combined_norm > 1e-8,
+            (combined / (combined_norm + 1e-8)) * input_scale,
+            torch.zeros_like(combined)
+        )
         
         return combined
 
