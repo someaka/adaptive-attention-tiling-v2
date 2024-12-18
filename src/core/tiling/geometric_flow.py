@@ -19,6 +19,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from .arithmetic_dynamics import ArithmeticDynamics
+from .patterns.fiber_bundle import (
+    FiberBundle,
+    LocalChart,
+    FiberChart
+)
+from ..tiling.patterns.fiber_bundle import PatternFiberBundle
 
 class RiemannianMetric(nn.Module):
     """Learnable Riemannian metric tensor implementing Fisher-Rao metric."""
@@ -436,23 +442,26 @@ class PatternFlow(GeometricFlow):
     """Pattern detection through geometric flow."""
 
     def __init__(self, input_dim: int, hidden_dim: int, manifold_dim: int):
-        """Initialize pattern flow.
-        
-        Args:
-            input_dim: Input dimension
-            hidden_dim: Hidden dimension
-            manifold_dim: Manifold dimension
-        """
+        """Initialize pattern flow."""
         super().__init__(
             hidden_dim=hidden_dim,
             manifold_dim=manifold_dim,
-            motive_rank=4,  # Default value for pattern detection
-            num_charts=1,  # Single chart for pattern flow
-            integration_steps=10,  # Default integration steps
-            dt=0.1,  # Default timestep
-            stability_threshold=1e-6  # Default stability threshold
+            motive_rank=4,
+            num_charts=1,
+            integration_steps=10,
+            dt=0.1,
+            stability_threshold=1e-6
         )
         self.input_dim = input_dim
+
+        # Initialize fiber bundle structure
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.fiber_bundle = PatternFiberBundle(
+            base_dim=manifold_dim,
+            fiber_dim=hidden_dim,
+            structure_group="O(n)",
+            device=device
+        )
 
         # Manifold projection layers
         self.manifold_proj = nn.Sequential(
@@ -496,88 +505,60 @@ class PatternFlow(GeometricFlow):
             nn.Linear(hidden_dim, manifold_dim * manifold_dim),
         )
 
-    def compute_metric(self, flow: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor from flow."""
-        batch_size = flow.shape[0]
-        
-        # Project flow to metric space
-        metric_components = self.metric_net(flow)
-        metric = metric_components.view(batch_size, self.manifold_dim, self.manifold_dim)
-        
-        # Ensure metric is symmetric and positive definite
-        metric = 0.5 * (metric + metric.transpose(-1, -2))
-        metric = metric + torch.eye(self.manifold_dim, device=flow.device) * 1e-6
-        
-        return metric
+    def get_local_chart(self, point: torch.Tensor) -> LocalChart[torch.Tensor]:
+        """Get local chart at a point."""
+        # Create transition maps for the chart
+        transition_maps = {}
+        for i in range(self.num_charts):
+            def transition_map(x: torch.Tensor, chart_idx: int = i) -> torch.Tensor:
+                return self.metric.transition(x, 0, chart_idx)
+            transition_maps[i] = transition_map
+            
+        return LocalChart(
+            coordinates=point,
+            dimension=self.manifold_dim,
+            transition_maps=transition_maps
+        )
 
-    def compute_ricci_tensor(self, metric: torch.Tensor, connection: torch.Tensor) -> torch.Tensor:
-        """Compute Ricci tensor from metric and connection."""
-        batch_size = metric.shape[0]
+    def get_fiber_chart(self, point: torch.Tensor) -> FiberChart[torch.Tensor, str]:
+        """Get fiber chart at a point.
         
-        # Flatten metric and connection for network input
-        metric_flat = metric.reshape(batch_size, -1)
-        connection_flat = connection.reshape(batch_size, -1)
-        combined = torch.cat([metric_flat, connection_flat], dim=-1)
+        Args:
+            point: Point tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Fiber chart at the point
+        """
+        # Get fiber coordinates through bundle projection
+        fiber_coords = self.fiber_bundle.bundle_projection(point)
         
-        # Compute Ricci tensor components
-        ricci_components = self.ricci_net(combined)
-        ricci = ricci_components.view(batch_size, self.manifold_dim, self.manifold_dim)
-        
-        # Ensure symmetry
-        ricci = 0.5 * (ricci + ricci.transpose(-1, -2))
-        
-        return ricci
+        return FiberChart(
+            fiber_coordinates=fiber_coords,
+            structure_group="O(n)",
+            transition_functions={}
+        )
 
-    def flow_step(
+    def compute_local_flow(
         self,
-        metric: torch.Tensor,
-        ricci: torch.Tensor,
-        timestep: float = 0.1
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Evolve metric using Ricci flow."""
-        # Evolve metric using Ricci flow equation
-        evolved_metric = metric - 2 * timestep * ricci
+        chart: LocalChart[torch.Tensor],
+        fiber: FiberChart[torch.Tensor, str]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute flow in local coordinates."""
+        # Get coordinates
+        coords = chart.coordinates
+        fiber_coords = fiber.fiber_coordinates
         
-        # Compute flow metrics
-        metrics = {
-            "flow_magnitude": torch.norm(ricci.reshape(metric.shape[0], -1), dim=1),
-            "metric_determinant": torch.linalg.det(evolved_metric),
-            "ricci_scalar": torch.diagonal(ricci, dim1=1, dim2=2).sum(dim=1),
-            "energy": torch.linalg.det(evolved_metric),
-            "singularity": torch.linalg.det(metric),
-            "normalized_flow": torch.linalg.det(evolved_metric)
-        }
+        # Compute flow in base manifold
+        base_flow = self.flow_net(coords)
         
-        return evolved_metric, metrics
+        # Get connection form using connection_form method
+        connection = self.fiber_bundle.connection_form(coords)
+        
+        # Transport fiber coordinates
+        transported = torch.matmul(connection, fiber_coords.unsqueeze(-1)).squeeze(-1)
+        
+        return base_flow, transported
 
-    def detect_singularities(
-        self,
-        flow: torch.Tensor,
-        threshold: float = 1e-6
-    ) -> Dict[str, Any]:
-        """Detect singularities in the flow."""
-        batch_size = flow.shape[0]
-        
-        # Compute flow derivatives
-        flow_grad = torch.gradient(flow, dim=-1)[0]
-        
-        # Check for singular points (where flow vanishes)
-        flow_norm = torch.norm(flow, dim=-1)
-        singular_points = flow_norm < threshold
-        
-        # Check for derivative singularities
-        grad_norm = torch.norm(flow_grad.reshape(batch_size, -1), dim=-1)
-        derivative_singularities = grad_norm > 1.0 / threshold
-        
-        # Collect singularity information
-        singularities = {
-            "singular_points": singular_points,
-            "derivative_singularities": derivative_singularities,
-            "flow_norm": flow_norm,
-            "grad_norm": grad_norm
-        }
-        
-        return singularities
     def forward(
         self, x: torch.Tensor, return_paths: bool = False
     ) -> Tuple[torch.Tensor, List[Dict]]:
@@ -595,7 +576,7 @@ class PatternFlow(GeometricFlow):
         batch_size, seq_len, _ = x.shape
 
         # Project to manifold
-        x_flat = x.reshape(-1, self.input_dim)
+        x_flat = x.view(-1, self.input_dim)
         manifold_coords = self.manifold_proj(x_flat)
         manifold_coords = manifold_coords.view(batch_size, seq_len, self.manifold_dim)
 
@@ -603,26 +584,45 @@ class PatternFlow(GeometricFlow):
         if return_paths:
             path = [manifold_coords.clone()]
 
-        # Compute flow
-        flow = self.flow_net(manifold_coords.reshape(-1, self.manifold_dim))
-        flow = flow.view(batch_size, seq_len, self.manifold_dim)
+        # Get local charts and compute flow
+        charts = []
+        fibers = []
+        flows = []
+        transports = []
 
-        # Update coordinates
+        for i in range(seq_len):
+            # Get local chart and fiber at current point
+            chart = self.get_local_chart(manifold_coords[:, i])
+            fiber = self.get_fiber_chart(manifold_coords[:, i])
+            
+            # Compute flow in local coordinates
+            flow, transport = self.compute_local_flow(chart, fiber)
+            
+            charts.append(chart)
+            fibers.append(fiber)
+            flows.append(flow)
+            transports.append(transport)
+
+        # Stack flows and transports
+        flow = torch.stack(flows, dim=1)  # [batch_size, seq_len, manifold_dim]
+        transport = torch.stack(transports, dim=1)  # [batch_size, seq_len, hidden_dim]
+
+        # Update coordinates using flow
         manifold_coords = manifold_coords + flow
 
         if return_paths:
             path.append(manifold_coords.clone())
 
         # Compute energy
-        energy = self.energy_net(manifold_coords.reshape(-1, self.manifold_dim))
+        energy = self.energy_net(manifold_coords.view(-1, self.manifold_dim))
         energy = energy.view(batch_size, seq_len)
 
         # Compute geodesic distance
-        geodesic_dist = torch.norm(flow.reshape(-1, self.manifold_dim), dim=-1)
+        geodesic_dist = torch.norm(flow.view(-1, self.manifold_dim), dim=-1)
         geodesic_dist = geodesic_dist.view(batch_size, seq_len)
 
-        # Project back to input space
-        output = self.output_proj(manifold_coords.reshape(-1, self.manifold_dim))
+        # Project back to input space using transported fiber coordinates
+        output = self.output_proj(manifold_coords.view(-1, self.manifold_dim))
         output = output.view(batch_size, seq_len, self.input_dim)
 
         # Gather metrics
@@ -630,11 +630,18 @@ class PatternFlow(GeometricFlow):
             {
                 "energy": energy.mean().item(),
                 "geodesic_distance": geodesic_dist.mean().item(),
+                "transport_magnitude": torch.norm(transport, dim=-1).mean().item(),
+                "fiber_correlation": F.cosine_similarity(
+                    transport.view(-1, self.hidden_dim),
+                    output.view(-1, self.input_dim),
+                    dim=-1
+                ).mean().item()
             }
         ]
 
         if return_paths:
             metrics[0]["flow_path"] = torch.stack(path, dim=1)
+            metrics[0]["transport_path"] = torch.stack(transports, dim=1)
 
         return output, metrics
 

@@ -635,22 +635,17 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         
         # Build symmetric perturbation using outer products
         for b in range(batch_size):
-            for i in range(fiber_points.shape[-1]):
-                for j in range(i + 1):
-                    # Compute symmetric contribution
-                    contrib = 0.5 * (
-                        fiber_points[b, i] * fiber_points[b, j] +
-                        fiber_points[b, j] * fiber_points[b, i]
-                    )
-                    fiber_pert[b, i, j] = contrib
-                    fiber_pert[b, j, i] = contrib
+            # Compute outer product
+            outer = torch.outer(fiber_points[b], fiber_points[b])
+            # Symmetrize
+            fiber_pert[b] = 0.5 * (outer + outer.t())
         
         # Add perturbation to fiber part of metric
         perturbation = torch.zeros_like(values)
         perturbation[..., self.base_dim:, self.base_dim:] = 0.1 * fiber_pert
         
         # Add perturbation while maintaining symmetry
-        values = values + perturbation
+        values = values + perturbation + perturbation.transpose(-2, -1)
         
         # Add small identity to ensure positive definiteness
         values = values + 1e-6 * torch.eye(

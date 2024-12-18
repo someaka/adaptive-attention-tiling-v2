@@ -7,6 +7,7 @@ integrating height theory and arithmetic dynamics into the geometric framework.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from typing import Optional, Tuple, Dict, Any, cast
 
@@ -212,7 +213,7 @@ class MotivicRiemannianStructure(
     def _ensure_device(self, tensor: Tensor) -> Tensor:
         """Ensure tensor is on the correct device."""
         if tensor.device != self.device:
-            tensor = tensor.to(self.device)
+            tensor = tensor.to(device=self.device, dtype=self.dtype)
         return tensor
 
     # Override fiber bundle methods to ensure compatibility
@@ -233,30 +234,35 @@ class MotivicRiemannianStructure(
         chart1_coords = self._ensure_device(chart1.coordinates)
         chart2_coords = self._ensure_device(chart2.coordinates)
         
-        # Create proper LocalChart objects for parent class
-        chart1_proper = LocalChart(
-            coordinates=chart1_coords,
-            dimension=self.manifold_dim,
-            transition_maps=chart1.transition_maps
-        )
-        chart2_proper = LocalChart(
-            coordinates=chart2_coords,
-            dimension=self.manifold_dim,
-            transition_maps=chart2.transition_maps
-        )
-        
-        return super().transition_functions(chart1_proper, chart2_proper)
+        # Compute transition map directly between coordinates
+        diff = chart2_coords - chart1_coords
+        transition = torch.matmul(diff, self.metric_factors)
+        return chart1_coords + F.silu(transition)
 
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Computes the connection form for parallel transport."""
         tangent_vector = self._ensure_device(tangent_vector)
-        return super().connection_form(tangent_vector)
+        # Project tangent vector using connection map
+        connection = self.connection_map(tangent_vector)
+        return connection.view(-1, self.hidden_dim, self.hidden_dim)
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Parallel transports a section along a path."""
         section = self._ensure_device(section)
         path = self._ensure_device(path)
-        return super().parallel_transport(section, path)
+        
+        # Get connection form along path
+        connection = self.get_connection(path)
+        
+        # Transport section using connection
+        transported = section
+        for i in range(path.shape[1] - 1):
+            # Get tangent vector between points
+            tangent = path[:, i+1] - path[:, i]
+            # Apply connection form
+            transported = transported + torch.matmul(connection, tangent.unsqueeze(-1)).squeeze(-1)
+        
+        return transported
 
     # Implement RiemannianFiberBundle methods
     def get_fiber(self, point: Tensor) -> Tensor:

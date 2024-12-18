@@ -52,15 +52,51 @@ class BaseFiberBundle(FiberBundle[Tensor]):
     def bundle_projection(self, total_space: Tensor) -> Tensor:
         """Implementation of FiberBundle.bundle_projection.
         
-        Projects from total space to base manifold.
+        Projects from total space to base manifold. This is the fundamental
+        operation that connects the total space E to the base manifold M
+        through the projection π: E → M.
+        
+        Properties preserved:
+        1. Projection is surjective
+        2. Projection is smooth
+        3. Projection preserves local product structure
         
         Args:
-            total_space: Point in total space
+            total_space: Point in total space (shape: [..., total_dim])
             
         Returns:
-            Projection onto base manifold
+            Projection onto base manifold (shape: [..., base_dim])
+            
+        Raises:
+            ValueError: If input tensor has invalid shape
         """
-        return total_space[..., :self.base_dim]
+        # Validate input dimensions
+        if total_space.shape[-1] != self.total_dim:
+            raise ValueError(
+                f"Expected last dimension to be {self.total_dim}, "
+                f"got {total_space.shape[-1]}"
+            )
+            
+        # Handle arbitrary batch dimensions
+        batch_dims = total_space.shape[:-1]
+        
+        # Project to base manifold while preserving batch structure
+        base_point = total_space[..., :self.base_dim]
+        
+        # Validate projection properties
+        with torch.no_grad():
+            # 1. Check projection is idempotent
+            assert torch.allclose(
+                self.bundle_projection(base_point),
+                base_point,
+                rtol=1e-5
+            ), "Projection must be idempotent"
+            
+            # 2. Check fiber dimension is preserved
+            fiber_dim = total_space[..., self.base_dim:].shape[-1]
+            assert fiber_dim == self.fiber_dim, "Fiber dimension mismatch"
+        
+        return base_point
 
     def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
         """Implementation of FiberBundle.local_trivialization.

@@ -44,9 +44,11 @@ def fiber_dim():
 def base_bundle(test_config):
     """Create base implementation instance."""
     dim = test_config["geometric_tests"]["dimensions"]
+    fiber_dim = 3  # Standard SO(3) fiber dimension
+    total_dim = dim + fiber_dim
     return BaseFiberBundle(
         base_dim=dim,
-        fiber_dim=3,
+        fiber_dim=fiber_dim,
         structure_group="SO3"
     )
 
@@ -55,9 +57,11 @@ def base_bundle(test_config):
 def pattern_bundle(test_config):
     """Create pattern implementation instance."""
     dim = test_config["geometric_tests"]["dimensions"]
+    fiber_dim = 3  # Standard SO(3) fiber dimension
+    total_dim = dim + fiber_dim
     return PatternFiberBundle(
         base_dim=dim,
-        fiber_dim=3,
+        fiber_dim=fiber_dim,
         structure_group="O(n)",
         device=torch.device("cpu")
     )

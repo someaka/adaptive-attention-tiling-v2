@@ -453,6 +453,22 @@ class ValidationFramework:
         self.pattern_validator = pattern_validator
         self.device = device
         
+    def _convert_tensor(self, tensor: Tensor, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> Tensor:
+        """Convert tensor to specified device and dtype."""
+        if device is not None and dtype is not None:
+            return tensor.to(device=device, dtype=dtype)
+        elif device is not None:
+            return tensor.to(device=device)
+        elif dtype is not None:
+            return tensor.to(dtype=dtype)
+        return tensor
+
+    def _validate_tensor(self, tensor: Tensor, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> Tensor:
+        """Validate and convert tensor."""
+        if not isinstance(tensor, Tensor):
+            raise TypeError(f"Expected tensor, got {type(tensor)}")
+        return self._convert_tensor(tensor, device, dtype)
+
     def validate_all(
         self,
         model: Optional[nn.Module],
