@@ -8,8 +8,18 @@ from typing import Protocol, TypeVar, Tuple, List, Optional, Dict, Any, Callable
 import torch
 from dataclasses import dataclass
 from enum import Enum
+from .geometric import GeometricFlow  # Import from new location
+from ..quantum.crystal import BlochFunction, BravaisLattice
 
 T = TypeVar('T', bound=torch.Tensor)
+
+@dataclass
+class RGFlow:
+    """Renormalization group flow data."""
+    beta_function: Callable[[torch.Tensor], torch.Tensor]
+    fixed_points: List[torch.Tensor]
+    stability: List[torch.Tensor]  # Stability matrices at fixed points
+    flow_lines: List[torch.Tensor]  # Trajectories in coupling space
 
 @dataclass
 class EntanglementMetrics:
@@ -74,6 +84,10 @@ class IQuantumState(Protocol[T]):
     
     def from_bloch_vector(self, vector: T) -> IQuantumState[T]:
         """Create quantum state from Bloch vector representation."""
+        ...
+    
+    def to_bloch_function(self, lattice: BravaisLattice) -> BlochFunction:
+        """Convert state to Bloch function representation."""
         ...
     
     def compute_expectation(self, observable: T) -> float:
@@ -708,13 +722,6 @@ class HilbertSpace(Protocol[T]):
     def inner_product(self, state1: T, state2: T) -> complex: ...
     def tensor_product(self, other: HilbertSpace[T]) -> HilbertSpace[T]: ...
 
-class GeometricFlow(Protocol[T]):
-    """Protocol for geometric flow operations."""
-    def compute_flow(self, metric: T, time: float) -> T: ...
-    def evolve_state(self, state: T, time: float) -> T: ...
-    def compute_stability(self, state: T) -> Dict[str, float]: ...
-
-# Add new base protocols
 class QuantumOperation(Protocol[T]):
     """Protocol for general quantum operations."""
     @property

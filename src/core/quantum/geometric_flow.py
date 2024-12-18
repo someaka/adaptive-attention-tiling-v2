@@ -37,14 +37,14 @@ class RicciFlow:
 
         # Ricci curvature computation
         self.ricci_network = nn.Sequential(
-            nn.Linear(hilbert_space.dim, hilbert_space.dim * 2),
+            nn.Linear(hilbert_space.dimension, hilbert_space.dimension * 2),
             nn.ReLU(),
-            nn.Linear(hilbert_space.dim * 2, hilbert_space.dim**2),
+            nn.Linear(hilbert_space.dimension * 2, hilbert_space.dimension**2),
         )
 
         # Metric evolution
         self.metric_evolution = nn.Parameter(
-            torch.eye(hilbert_space.dim, dtype=torch.complex64)
+            torch.eye(hilbert_space.dimension, dtype=torch.complex64)
         )
 
     def compute_ricci_curvature(self, state: QuantumState) -> torch.Tensor:
@@ -60,7 +60,7 @@ class RicciFlow:
 
         # Compute Ricci tensor
         ricci = self.ricci_network(state.amplitudes)
-        ricci = ricci.view(self.hilbert_space.dim, self.hilbert_space.dim)
+        ricci = ricci.view(self.hilbert_space.dimension, self.hilbert_space.dimension)
 
         return ricci
 
@@ -94,9 +94,9 @@ class MeanCurvatureFlow:
 
         # Mean curvature computation
         self.curvature_network = nn.Sequential(
-            nn.Linear(hilbert_space.dim, hilbert_space.dim * 2),
+            nn.Linear(hilbert_space.dimension, hilbert_space.dimension * 2),
             nn.Tanh(),
-            nn.Linear(hilbert_space.dim * 2, hilbert_space.dim),
+            nn.Linear(hilbert_space.dimension * 2, hilbert_space.dimension),
         )
 
     def compute_mean_curvature(self, state: QuantumState) -> torch.Tensor:
@@ -113,7 +113,7 @@ class MeanCurvatureFlow:
         # If we have a lattice, project back to crystal structure
         if self.lattice is not None:
             bloch = BlochFunction(self.lattice, self.hilbert_space)
-            k_point = torch.zeros(self.lattice.dim)  # Gamma point
+            k_point = torch.zeros(self.lattice.dimension)  # Gamma point
             new_amplitudes = bloch.compute_bloch_function(
                 k_point, new_amplitudes
             ).amplitudes
@@ -133,7 +133,7 @@ class BerryTransport:
 
         # Connection computation
         self.berry_connection = nn.Parameter(
-            torch.zeros(hilbert_space.dim, dtype=torch.complex64)
+            torch.zeros(hilbert_space.dimension, dtype=torch.complex64)
         )
 
     def compute_berry_phase(self, path: List[QuantumState]) -> torch.Tensor:

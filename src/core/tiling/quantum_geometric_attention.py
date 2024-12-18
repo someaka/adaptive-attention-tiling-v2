@@ -14,6 +14,7 @@ through the lens of quantum geometry and arithmetic dynamics.
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union, Any, cast
+from typing_extensions import Literal
 
 import torch
 import torch.nn.functional as F
@@ -25,30 +26,35 @@ from ..attention.geometric import (
     EuclideanExponential,
     EuclideanLogarithm,
     ParallelTransport,
+    GeometricStructures,
 )
 from .arithmetic_dynamics import ArithmeticPattern
 from .geometric_flow import PatternFlow
 from .quantum_attention_tile import QuantumMotivicTile
 
 
-@dataclass
-class GeometricStructures:
-    """Geometric structures for attention."""
-    
-    dim: int
-    manifold_type: str
-    curvature: float
-    parallel_transport_method: str
-
-    def __post_init__(self):
-        """Initialize geometric operations."""
-        if self.manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(self.dim, self.curvature)
-            self.log_map = HyperbolicLogarithm(self.dim, self.curvature)
-        else:
-            self.exp_map = EuclideanExponential(self.dim)
-            self.log_map = EuclideanLogarithm(self.dim)
-        self.transport = ParallelTransport(self.dim)
+# DEPRECATED: Original GeometricStructures implementation kept for reference.
+# This implementation has been replaced by the more complete version from geometric.py
+# which includes better parameter management and more geometric features.
+#
+# @dataclass
+# class GeometricStructures:
+#     """Geometric structures for attention."""
+#     
+#     dim: int
+#     manifold_type: str
+#     curvature: float
+#     parallel_transport_method: str
+#
+#     def __post_init__(self):
+#         """Initialize geometric operations."""
+#         if self.manifold_type == "hyperbolic":
+#             self.exp_map = HyperbolicExponential(self.dim, self.curvature)
+#             self.log_map = HyperbolicLogarithm(self.dim, self.curvature)
+#         else:
+#             self.exp_map = EuclideanExponential(self.dim)
+#             self.log_map = EuclideanLogarithm(self.dim)
+#         self.transport = ParallelTransport(self.dim)
 
 
 class PatternDynamics:
@@ -148,7 +154,7 @@ class QuantumGeometricAttention(nn.Module):
         manifold_dim: int = 8,
         num_layers: int = 3,
         tile_size: int = 16,
-        manifold_type: str = "hyperbolic",
+        manifold_type: Literal["hyperbolic", "euclidean"] = "hyperbolic",
         curvature: float = -1.0,
     ):
         super().__init__()
@@ -182,19 +188,16 @@ class QuantumGeometricAttention(nn.Module):
             hidden_dim=hidden_dim
         )
 
-        # Geometric structures
-        if manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(hidden_dim, curvature)
-            self.log_map = HyperbolicLogarithm(hidden_dim, curvature)
-        else:
-            self.exp_map = EuclideanExponential(hidden_dim)
-            self.log_map = EuclideanLogarithm(hidden_dim)
-
-        # Parallel transport
-        self.transport = ParallelTransport(hidden_dim)
+        # Initialize geometric structures
+        self.geometric = GeometricStructures(
+            dim=hidden_dim,
+            num_heads=num_heads,
+            manifold_type=manifold_type,
+            curvature=curvature,
+            parallel_transport_method="schild"  # Default method
+        )
 
         # Projections
-        self.metric = nn.Parameter(torch.eye(hidden_dim))
         self.pattern_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
@@ -276,17 +279,15 @@ class QuantumGeometricAttention(nn.Module):
         attention_output = torch.matmul(attention_weights, x)
         return attention_output
 
-    def _compute_geometric_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute geometric features using tensor operations."""
-        # Use proper tensor operations
-        features = F.linear(x, self.metric)
-        return features
-
     def _apply_parallel_transport(self, x: torch.Tensor) -> torch.Tensor:
         """Apply parallel transport using tensor operations."""
-        # Use transport module properly
-        transported = self.transport(x)
-        return transported
+        # Use geometric structures transport
+        return self.geometric.transport(x, x, x)  # Same point transport as default
+
+    def _compute_geometric_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute geometric features using tensor operations."""
+        # Use geometric structures metric
+        return F.linear(x, self.geometric.metric)
 
     def _compute_quantum_features(self, x: torch.Tensor) -> torch.Tensor:
         """Compute quantum features using tensor operations."""
@@ -403,25 +404,12 @@ class QuantumGeometricAttention(nn.Module):
         # Extract geometric state
         g_state = state.geometric_state
         
-        # Compute Jacobian
-        g_state.requires_grad_(True)
-        tangent_vectors = torch.eye(self.hidden_dim).to(g_state.device)
-        
-        # Use flow module's forward method
-        def flow_fn(x):
-            return self.flow(x)
-        
-        jacobian = torch.autograd.functional.jvp(
-            flow_fn,
+        # Use geometric structures for metric computation
+        return self.geometric.compute_sectional_curvature(
             g_state,
-            tangent_vectors,
-            create_graph=True
-        )[1]
-        
-        # Compute metric tensor
-        metric = torch.einsum("...i,...j->...ij", jacobian, jacobian)
-        
-        return metric
+            torch.eye(self.hidden_dim).to(g_state.device),
+            torch.eye(self.hidden_dim).to(g_state.device)
+        )
 
     def prepare_code_state(self, x: torch.Tensor) -> torch.Tensor:
         """Prepare quantum code state for attention.
@@ -438,8 +426,12 @@ class QuantumGeometricAttention(nn.Module):
         # Apply quantum encoding through forward pass
         code_state = self.attention(code_proj)
         
-        # Add geometric structure through forward pass
-        code_state = self.flow(code_state)
+        # Add geometric structure through geometric module
+        code_state = self.geometric.process_points(
+            code_state, 
+            code_state,
+            return_diagnostics=False
+        )["distance"]
         
         return code_state
 
@@ -535,7 +527,7 @@ class QuantumGeometricTransformer(nn.Module):
         hidden_dim: int,
         num_heads: int = 8,
         tile_size: int = 64,
-        manifold_type: str = "hyperbolic",
+        manifold_type: Literal["hyperbolic", "euclidean"] = "hyperbolic",
         curvature: float = -1.0,
     ):
         super().__init__()

@@ -26,18 +26,18 @@ class Path:
     weight: torch.Tensor  # Path weight (exp(iS/ħ))
 
 
-class ActionFunctional:
-    """Compute action functional for quantum paths."""
+class QuantumAction:
+    """Implementation of quantum action functional."""
 
     def __init__(self, hilbert_space: HilbertSpace, potential_rank: int = 4):
         self.hilbert_space = hilbert_space
 
-        # Kinetic and potential terms
-        self.kinetic = nn.Parameter(torch.eye(hilbert_space.dim, dtype=torch.complex64))
+        # Kinetic term
+        self.kinetic = nn.Parameter(torch.eye(hilbert_space.dimension, dtype=torch.complex64))
 
-        # Learnable potential
+        # Potential term
         self.potential = nn.Sequential(
-            nn.Linear(hilbert_space.dim, potential_rank),
+            nn.Linear(hilbert_space.dimension, potential_rank),
             nn.Tanh(),
             nn.Linear(potential_rank, 1),
         )
@@ -92,17 +92,17 @@ class ActionFunctional:
 class PathSampler:
     """Sample and evaluate quantum paths."""
 
-    def __init__(self, action: ActionFunctional, num_paths: int = 1000):
+    def __init__(self, action: QuantumAction, num_paths: int = 1000):
         self.action = action
         self.num_paths = num_paths
 
         # Path generation network
         self.path_generator = nn.Sequential(
-            nn.Linear(self.action.hilbert_space.dim * 2 + 1, 128),
+            nn.Linear(self.action.hilbert_space.dimension * 2 + 1, 128),
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(128, self.action.hilbert_space.dim),
+            nn.Linear(128, self.action.hilbert_space.dimension),
         )
 
     def sample_paths(
@@ -184,7 +184,7 @@ class Propagator:
 class StationaryPhase:
     """Stationary phase approximation for path integrals."""
 
-    def __init__(self, action: ActionFunctional):
+    def __init__(self, action: QuantumAction):
         self.action = action
 
     def find_classical_path(
@@ -212,3 +212,18 @@ class StationaryPhase:
         correction = torch.sqrt(det) * torch.exp(-order * action)
 
         return correction
+
+
+class PathIntegralSolver:
+    """Implementation of path integral solver."""
+
+    def __init__(self, action: QuantumAction):
+        self.action = action
+
+        # Path optimization network
+        self.path_network = nn.Sequential(
+            nn.Linear(self.action.hilbert_space.dimension * 2 + 1, 128),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, self.action.hilbert_space.dimension),
+        )

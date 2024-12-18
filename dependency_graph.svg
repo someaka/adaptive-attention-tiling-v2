@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="1024" height="800" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <style type="text/css">
+            .node { fill: lightgray; stroke: black; }
+            .edge { stroke: black; fill: none; }
+            .cluster { stroke: black; }
+            text { font-family: Arial; font-size: 14px; }
+        </style>
+    </defs>
+    
+    <!-- Core Common -->
+    <g transform="translate(0, 20)">
+        <rect x="10" y="10" width="200" height="80" fill="lightgrey" class="cluster"/>
+        <text x="110" y="30">Core Common</text>
+        <g class="node">
+            <rect x="20" y="40" width="180" height="30"/>
+            <text x="110" y="60">common/enums.py</text>
+        </g>
+    </g>
+
+    <!-- Core Quantum -->
+    <g transform="translate(220, 20)">
+        <rect x="10" y="10" width="200" height="200" fill="lightblue" class="cluster"/>
+        <text x="110" y="30">Core Quantum</text>
+        <g class="node">
+            <rect x="20" y="40" width="180" height="30"/>
+            <text x="110" y="60">quantum/types.py</text>
+        </g>
+        <g class="node">
+            <rect x="20" y="80" width="180" height="30"/>
+            <text x="110" y="100">quantum/state_space.py</text>
+        </g>
+    </g>
+
+    <!-- Core Interfaces -->
+    <g transform="translate(440, 20)">
+        <rect x="10" y="10" width="200" height="200" fill="lightgreen" class="cluster"/>
+        <text x="110" y="30">Core Interfaces</text>
+        <g class="node">
+            <rect x="20" y="40" width="180" height="30"/>
+            <text x="110" y="60">interfaces/quantum.py</text>
+        </g>
+        <g class="node">
+            <rect x="20" y="80" width="180" height="30"/>
+            <text x="110" y="100">interfaces/geometric.py</text>
+        </g>
+    </g>
+
+    <!-- Core Patterns -->
+    <g transform="translate(660, 20)">
+        <rect x="10" y="10" width="200" height="400" fill="pink" class="cluster"/>
+        <text x="110" y="30">Core Patterns</text>
+        <g class="node">
+            <rect x="20" y="40" width="180" height="30"/>
+            <text x="110" y="60">patterns/riemannian_base.py</text>
+        </g>
+        <g class="node">
+            <rect x="20" y="80" width="180" height="30"/>
+            <text x="110" y="100">patterns/fiber_bundle.py</text>
+        </g>
+        <g class="node">
+            <rect x="20" y="120" width="180" height="30"/>
+            <text x="110" y="140">patterns/dynamics.py</text>
+</g>
+</g>
+
+    <!-- Dependencies -->
+    <g class="edge">
+        <!-- Common to Interface dependencies -->
+        <path d="M200,55 L440,55" class="edge"/>
+        <path d="M200,95 L440,95" class="edge"/>
+        
+        <!-- Quantum to Interface dependencies -->
+        <path d="M420,55 L440,55" class="edge"/>
+        <path d="M420,95 L440,95" class="edge"/>
+        
+        <!-- Interface to Pattern dependencies -->
+        <path d="M640,55 L660,55" class="edge"/>
+        <path d="M640,95 L660,95" class="edge"/>
+    </g>
+</svg> 

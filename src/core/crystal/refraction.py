@@ -16,6 +16,7 @@ from torch import nn
 
 from ..quantum.crystal import BlochFunction, BravaisLattice, BrillouinZone
 from ..quantum.state_space import HilbertSpace
+from ..interfaces.crystal import IBandStructure
 
 
 @dataclass
@@ -36,6 +37,31 @@ class BandStructure:
     states: List[BlochFunction]  # Corresponding eigenstates
     k_points: torch.Tensor  # k-points along path
     labels: List[str]  # Labels for high-symmetry points
+
+    def __init__(self, energies: torch.Tensor, states: List[BlochFunction], k_points: torch.Tensor, labels: List[str]):
+        self.energies = energies
+        self.states = states
+        self.k_points = k_points
+        self.labels = labels
+
+    @classmethod
+    def from_interface(cls, interface: IBandStructure) -> 'BandStructure':
+        """Create from interface instance."""
+        return cls(
+            energies=interface.energies,
+            states=interface.states,
+            k_points=interface.k_points,
+            labels=interface.labels
+        )
+
+    def to_interface(self) -> IBandStructure:
+        """Convert to interface instance."""
+        return IBandStructure(
+            energies=self.energies,
+            states=self.states,
+            k_points=self.k_points,
+            labels=self.labels
+        )
 
 
 class SymmetryDetector:
@@ -185,7 +211,7 @@ class BandStructureAnalyzer:
             nn.Linear(num_bands * 2, num_bands),
         )
 
-    def compute_band_structure(self, k_path: torch.Tensor) -> BandStructure:
+    def compute_band_structure(self, k_path: torch.Tensor) -> IBandStructure:
         """Compute band structure along k-path."""
         # Compute energies
         energies = self.band_computer(k_path)
@@ -198,14 +224,16 @@ class BandStructureAnalyzer:
             )
             states.append(bloch)
 
-        return BandStructure(
+        band_structure = BandStructure(
             energies=energies,
             states=states,
             k_points=k_path,
             labels=self._get_path_labels(k_path),
         )
+        
+        return band_structure.to_interface()
 
-    def analyze_phonons(self, band_structure: BandStructure) -> torch.Tensor:
+    def analyze_phonons(self, band_structure: IBandStructure) -> torch.Tensor:
         """Analyze phonon modes from band structure."""
         return self.phonon_analyzer(band_structure.energies)
 
@@ -233,7 +261,7 @@ class RefractionSystem:
 
     def analyze_pattern(
         self, pattern: torch.Tensor
-    ) -> Tuple[BravaisLattice, List[SymmetryOperation], BandStructure]:
+    ) -> Tuple[BravaisLattice, List[SymmetryOperation], IBandStructure]:
         """Complete analysis of crystal pattern."""
         # Detect lattice
         lattice = self.lattice_detector.detect_lattice(pattern)

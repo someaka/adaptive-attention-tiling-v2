@@ -23,18 +23,26 @@ from src.validation.quantum.state import (
 class HilbertSpace:
     """Quantum Hilbert space implementation."""
     
-    def __init__(self, dim: int):
+    def __init__(self, dimension: int):
         """Initialize Hilbert space.
         
         Args:
-            dim: Dimension of Hilbert space
+            dimension: Dimension of Hilbert space
         """
-        self.dim = dim
+        self._dimension = dimension
         
-        # Initialize quantum space components
-        self.basis_states = self._initialize_basis()
-        self.hamiltonian = nn.Parameter(torch.eye(dim, dtype=torch.complex128))
-        self.observables = self._initialize_observables()
+    @property
+    def dimension(self) -> int:
+        """Get dimension of Hilbert space."""
+        return self._dimension
+        
+    def inner_product(self, state1: torch.Tensor, state2: torch.Tensor) -> complex:
+        """Compute inner product between states."""
+        return torch.sum(torch.conj(state1) * state2).item()
+        
+    def tensor_product(self, other: 'HilbertSpace') -> 'HilbertSpace':
+        """Compute tensor product of Hilbert spaces."""
+        return HilbertSpace(dimension=self.dimension * other.dimension)
 
     def _initialize_basis(self) -> List[str]:
         """Initialize computational basis states.
@@ -42,7 +50,7 @@ class HilbertSpace:
         Returns:
             List of basis state labels
         """
-        return [f"|{i}⟩" for i in range(self.dim)]
+        return [f"|{i}⟩" for i in range(self.dimension)]
 
     def _initialize_observables(self) -> Dict[str, torch.Tensor]:
         """Initialize standard observables.
@@ -81,16 +89,16 @@ class HilbertSpace:
                 amplitudes = torch.complex(amplitudes.to(torch.float64), torch.zeros_like(amplitudes, dtype=torch.float64))
 
         # Handle different input dimensions
-        if amplitudes.shape[-1] == self.dim * 2:
+        if amplitudes.shape[-1] == self.dimension * 2:
             # Convert real and imaginary parts to complex
-            real_part = amplitudes[..., :self.dim].to(torch.float64)
-            imag_part = amplitudes[..., self.dim:].to(torch.float64)
+            real_part = amplitudes[..., :self.dimension].to(torch.float64)
+            imag_part = amplitudes[..., self.dimension:].to(torch.float64)
             amplitudes = torch.complex(real_part, imag_part)
-        elif amplitudes.shape[-1] == 2 and self.dim == 4:
+        elif amplitudes.shape[-1] == 2 and self.dimension == 4:
             # Special case: Convert 2-qubit product state to 4-dim state
             amplitudes = torch.kron(amplitudes[:1], amplitudes[1:])
-        elif amplitudes.shape[-1] != self.dim:
-            raise ValueError(f"Amplitudes must have dimension {self.dim} or {self.dim * 2}")
+        elif amplitudes.shape[-1] != self.dimension:
+            raise ValueError(f"Amplitudes must have dimension {self.dimension} or {self.dimension * 2}")
             
         # Normalize state
         norm = torch.sqrt(torch.sum(torch.abs(amplitudes)**2, dim=-1, keepdim=True))
@@ -188,9 +196,9 @@ class HilbertSpace:
         observable = observable.to(torch.complex128)
         
         # Handle dimension mismatch for single-qubit observables
-        if observable.shape[0] < self.dim:
+        if observable.shape[0] < self.dimension:
             # Expand observable to full Hilbert space dimension
-            n_qubits = int(torch.log2(torch.tensor(self.dim)))
+            n_qubits = int(torch.log2(torch.tensor(self.dimension)))
             target_qubit = 0  # Default to first qubit
             expanded_obs = torch.eye(2, dtype=torch.complex128)
             for i in range(n_qubits):
@@ -198,7 +206,7 @@ class HilbertSpace:
                     expanded_obs = torch.kron(expanded_obs, observable)
                 else:
                     expanded_obs = torch.kron(expanded_obs, torch.eye(2, dtype=torch.complex128))
-            observable = expanded_obs[:self.dim, :self.dim]  # Truncate to match dimension
+            observable = expanded_obs[:self.dimension, :self.dimension]  # Truncate to match dimension
             
         # Reshape state if needed
         if len(state_vector.shape) == 1:
@@ -279,7 +287,7 @@ class HilbertSpace:
         v2_aligned = v2 * torch.exp(-1j * phase)
         
         # Compute parallel transport operator
-        P = torch.eye(self.dim, dtype=torch.complex128) - torch.outer(v2_aligned, v2_aligned.conj())
+        P = torch.eye(self.dimension, dtype=torch.complex128) - torch.outer(v2_aligned, v2_aligned.conj())
         
         # Transport the tangent vector
         transported = torch.matmul(P, tangent)
@@ -303,7 +311,7 @@ class HilbertSpace:
         # Initialize state vector with proper shape and type
         state_vector = initial_state.amplitudes.to(torch.complex128)
         if len(state_vector.shape) == 0 or (len(state_vector.shape) == 1 and state_vector.shape[0] == 1):
-            state_vector = torch.zeros(self.dim, dtype=torch.complex128)
+            state_vector = torch.zeros(self.dimension, dtype=torch.complex128)
             state_vector[0] = 1.0
             
         # Normalize initial state
@@ -324,8 +332,8 @@ class HilbertSpace:
             H = hamiltonian_fn(t.item())
             
             # Pad Hamiltonian if needed
-            if H.shape[0] < self.dim:
-                H_padded = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
+            if H.shape[0] < self.dimension:
+                H_padded = torch.zeros((self.dimension, self.dimension), dtype=torch.complex128)
                 H_padded[:H.shape[0], :H.shape[1]] = H
                 H = H_padded
             
@@ -381,11 +389,11 @@ class HilbertSpace:
             state_vector = state_vector.unsqueeze(0)
             
         # Apply channel
-        output_dm = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
+        output_dm = torch.zeros((self.dimension, self.dimension), dtype=torch.complex128)
         for K in kraus_ops:
             # Pad operator if needed
-            if K.shape[0] < self.dim:
-                K_padded = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
+            if K.shape[0] < self.dimension:
+                K_padded = torch.zeros((self.dimension, self.dimension), dtype=torch.complex128)
                 K_padded[:K.shape[0], :K.shape[1]] = K
                 K = K_padded
                 
@@ -413,10 +421,10 @@ class HilbertSpace:
     def reconstruct_state(self, measurements: Dict[str, torch.Tensor]) -> QuantumState:
         """Reconstruct quantum state from tomographic measurements."""
         # Initialize density matrix
-        rho = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
+        rho = torch.zeros((self.dimension, self.dimension), dtype=torch.complex128)
         
         # Add contribution from identity
-        rho += torch.eye(self.dim, dtype=torch.complex128) / self.dim
+        rho += torch.eye(self.dimension, dtype=torch.complex128) / self.dimension
         
         # Define Pauli matrices
         pauli_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
@@ -424,7 +432,7 @@ class HilbertSpace:
         pauli_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
         
         # Process each qubit pair
-        n_qubits = int(np.log2(self.dim))
+        n_qubits = int(np.log2(self.dimension))
         for i in range(0, n_qubits, 2):
             # Extract measurements for this qubit pair
             x_val = measurements.get('X', torch.zeros(1, dtype=torch.complex128))[i//2]
@@ -467,8 +475,8 @@ class HilbertSpace:
         
         return QuantumState(
             amplitudes=state_vector,
-            basis_labels=[f"|{i}⟩" for i in range(self.dim)],
-            phase=torch.zeros(self.dim, dtype=torch.complex128)
+            basis_labels=[f"|{i}⟩" for i in range(self.dimension)],
+            phase=torch.zeros(self.dimension, dtype=torch.complex128)
         )
 
     def evolve_with_decoherence(self, state: QuantumState, T1: float, T2: float, times: torch.Tensor) -> List[QuantumState]:
@@ -491,8 +499,8 @@ class HilbertSpace:
             state_vector = state_vector.unsqueeze(0)
             
         # Pad state vector if needed
-        if state_vector.shape[1] < self.dim:
-            padded = torch.zeros((state_vector.shape[0], self.dim), dtype=torch.complex128)
+        if state_vector.shape[1] < self.dimension:
+            padded = torch.zeros((state_vector.shape[0], self.dimension), dtype=torch.complex128)
             padded[:, :state_vector.shape[1]] = state_vector
             state_vector = padded
         
@@ -503,7 +511,7 @@ class HilbertSpace:
             
             # Apply amplitude damping and phase damping
             evolved = state_vector.clone()
-            for i in range(1, self.dim):  # Apply to all excited states
+            for i in range(1, self.dimension):  # Apply to all excited states
                 evolved[:, i] *= torch.sqrt(1 - gamma1)
                 evolved[:, i] *= torch.exp(-gamma2)
             
@@ -610,7 +618,7 @@ class HilbertSpace:
         projector = torch.matmul(state_vector.conj().transpose(-2,-1), state_vector)
         
         # Tangent space is orthogonal complement
-        tangent = torch.eye(self.dim, dtype=torch.complex128) - projector
+        tangent = torch.eye(self.dimension, dtype=torch.complex128) - projector
         
         return tangent
 
@@ -660,9 +668,9 @@ class HilbertSpace:
             rho = state.to(torch.complex128)
             
         # Compute partial transpose
-        d = int(np.sqrt(self.dim))  # Local dimension
+        d = int(np.sqrt(self.dimension))  # Local dimension
         rho_reshaped = rho.reshape(d, d, d, d)
-        rho_pt = rho_reshaped.permute(0, 3, 2, 1).reshape(self.dim, self.dim)
+        rho_pt = rho_reshaped.permute(0, 3, 2, 1).reshape(self.dimension, self.dimension)
         
         # Compute minimum eigenvalue of partial transpose
         eigenvals = torch.linalg.eigvalsh(rho_pt).real

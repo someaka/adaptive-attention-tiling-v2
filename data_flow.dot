@@ -1,0 +1,111 @@
+digraph DataFlow {
+    // Graph settings
+    rankdir=TB;
+    compound=true;
+    node [shape=box, style=filled, fillcolor=lightgray];
+    
+    // Input/Output nodes
+    input [label="Input Data\n(batch_size, seq_len, hidden_dim)", fillcolor=lightblue];
+    output [label="Output\n(Processed Features)", fillcolor=lightblue];
+    
+    // State Preparation
+    subgraph cluster_state_prep {
+        label="State Preparation";
+        style=filled;
+        color=lightblue;
+        node [style=filled,color=white];
+        
+        quantum_state [label="Quantum State\nPreparation"];
+        geometric_state [label="Geometric State\nPreparation"];
+        pattern_state [label="Pattern State\nPreparation"];
+    }
+    
+    // Feature Processing
+    subgraph cluster_features {
+        label="Feature Processing";
+        style=filled;
+        color=lightgreen;
+        node [style=filled,color=white];
+        
+        quantum_features [label="Quantum Features"];
+        geometric_features [label="Geometric Features"];
+        pattern_features [label="Pattern Features"];
+        
+        quantum_features -> geometric_features [label="Fisher\nMetric"];
+        geometric_features -> pattern_features [label="Pattern\nTransport"];
+    }
+    
+    // Pattern Evolution
+    subgraph cluster_evolution {
+        label="Pattern Evolution";
+        style=filled;
+        color=pink;
+        node [style=filled,color=white];
+        
+        arithmetic_patterns [label="Arithmetic\nPatterns"];
+        flow_patterns [label="Flow\nPatterns"];
+        evolved_patterns [label="Evolved\nPatterns"];
+        
+        arithmetic_patterns -> flow_patterns [label="Flow\nDynamics"];
+        flow_patterns -> evolved_patterns [label="Pattern\nEvolution"];
+    }
+    
+    // Attention Mechanism
+    subgraph cluster_attention {
+        label="Attention Processing";
+        style=filled;
+        color=yellow;
+        node [style=filled,color=white];
+        
+        attention_state [label="Attention\nState"];
+        attention_scores [label="Attention\nScores"];
+        attention_output [label="Attention\nOutput"];
+        
+        attention_state -> attention_scores [label="Score\nComputation"];
+        attention_scores -> attention_output [label="Output\nAggregation"];
+    }
+    
+    // Metrics
+    subgraph cluster_metrics {
+        label="Metrics";
+        style=filled;
+        color=orange;
+        node [style=filled,color=white];
+        
+        entropy [label="Entropy\nMetrics"];
+        complexity [label="Complexity\nMetrics"];
+        stability [label="Stability\nMetrics"];
+        performance [label="Performance\nMetrics"];
+    }
+    
+    // Main data flow
+    input -> quantum_state [label="State\nPrep"];
+    input -> geometric_state [label="Geometric\nPrep"];
+    input -> pattern_state [label="Pattern\nPrep"];
+    
+    // State to Features
+    quantum_state -> quantum_features [label="Feature\nExtraction"];
+    geometric_state -> geometric_features [label="Geometric\nFeatures"];
+    pattern_state -> pattern_features [label="Pattern\nFeatures"];
+    
+    // Features to Patterns
+    quantum_features -> arithmetic_patterns [label="Quantum\nPatterns"];
+    geometric_features -> flow_patterns [label="Flow\nPatterns"];
+    pattern_features -> evolved_patterns [label="Evolution"];
+    
+    // Patterns to Attention
+    arithmetic_patterns -> attention_state [label="Pattern\nState"];
+    flow_patterns -> attention_state [label="Flow\nState"];
+    evolved_patterns -> attention_state [label="Evolution\nState"];
+    
+    // Attention to Output
+    attention_output -> entropy [label="Entropy\nCalc"];
+    attention_output -> complexity [label="Complexity\nCalc"];
+    attention_output -> stability [label="Stability\nCalc"];
+    attention_output -> performance [label="Performance\nCalc"];
+    
+    attention_output -> output [label="Final\nOutput"];
+    
+    // Edge styling
+    edge [fontsize=10, fontcolor=darkblue];
+} 

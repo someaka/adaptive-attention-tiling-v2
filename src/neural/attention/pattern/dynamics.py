@@ -1,6 +1,6 @@
 """Main pattern dynamics implementation."""
 
-from typing import Optional, Union, Tuple, List, Callable
+from typing import Optional, Tuple, Sequence, Literal, List, Callable, Any, Union, Protocol, TypeVar, Generic, Dict, cast
 import torch
 import numpy as np
 
@@ -15,11 +15,42 @@ from .models import (
 from .diffusion import DiffusionSystem
 from .reaction import ReactionSystem
 from .stability import StabilityAnalyzer
-from .quantum import QuantumState, QuantumGeometricTensor
+from .quantum import QuantumState, QuantumGeometricTensor, IQuantumState, PatternState, EntanglementMetrics
+from ....core.patterns.dynamics import PatternDynamics as IPatternDynamics
+from ....core.interfaces.quantum import EvolutionType
+from ....core.interfaces.geometric import GeometricFlow
 
+# Default to CPU device
+DEFAULT_DEVICE = torch.device('cpu')
 
-class PatternDynamics:
-    """Complete pattern dynamics system with quantum integration."""
+T = TypeVar('T', bound=torch.Tensor)
+
+class ConcreteGeometricFlow(GeometricFlow[torch.Tensor]):
+    """Concrete implementation of geometric flow."""
+    
+    def __init__(self, vector_field: torch.Tensor, metric: torch.Tensor):
+        self._vector_field = vector_field
+        self._metric = metric
+        
+    def compute_flow(self, metric: torch.Tensor, time: float) -> torch.Tensor:
+        return self._vector_field
+        
+    def evolve_state(self, state: torch.Tensor, time: float) -> torch.Tensor:
+        return state + time * self._vector_field
+        
+    def compute_stability(self, state: torch.Tensor) -> Dict[str, float]:
+        return {"stability": float(torch.norm(self._vector_field))}
+        
+    @property
+    def vector_field(self) -> torch.Tensor:
+        return self._vector_field
+        
+    @property
+    def metric_tensor(self) -> torch.Tensor:
+        return self._metric
+
+class PatternDynamics(IPatternDynamics[torch.Tensor]):
+    """Complete pattern dynamics system with quantum integration and attention features."""
 
     def __init__(
         self,
@@ -29,19 +60,13 @@ class PatternDynamics:
         dt: float = 0.01,
         num_modes: int = 8,
         hidden_dim: int = 64,
-        quantum_enabled: bool = False
+        quantum_enabled: bool = False,
+        manifold_type: Literal["hyperbolic", "euclidean"] = "hyperbolic",
+        device: Optional[torch.device] = None,
+        max_concentration: float = 1.0,  # Added from compatibility layer
+        min_concentration: float = 0.0   # Added from compatibility layer
     ):
-        """Initialize pattern dynamics system.
-        
-        Args:
-            grid_size (int, optional): Size of grid. Defaults to 32.
-            space_dim (int, optional): Spatial dimensions. Defaults to 2.
-            boundary (str, optional): Boundary conditions. Defaults to 'periodic'.
-            dt (float, optional): Time step. Defaults to 0.01.
-            num_modes (int, optional): Number of stability modes. Defaults to 8.
-            hidden_dim (int, optional): Hidden layer dimension. Defaults to 64.
-            quantum_enabled (bool, optional): Enable quantum features. Defaults to False.
-        """
+        """Initialize pattern dynamics system."""
         self.size = grid_size
         self.dim = space_dim
         self.dt = dt
@@ -49,6 +74,10 @@ class PatternDynamics:
         self.num_modes = num_modes
         self.hidden_dim = hidden_dim
         self.quantum_enabled = quantum_enabled
+        self.manifold_type: Literal["hyperbolic", "euclidean"] = manifold_type
+        self.device = device or DEFAULT_DEVICE
+        self.max_concentration = max_concentration  # Added from compatibility layer
+        self.min_concentration = min_concentration  # Added from compatibility layer
         
         # Initialize subsystems
         self.diffusion = DiffusionSystem(self.size)
@@ -57,8 +86,278 @@ class PatternDynamics:
         
         if quantum_enabled:
             # Initialize quantum components
-            self.quantum_tensor = QuantumGeometricTensor(dim=space_dim)
+            self.quantum_tensor = QuantumGeometricTensor(dim=space_dim).to(self.device)
+
+    @property
+    def space_dim(self) -> int:
+        """Get spatial dimensions."""
+        return self.dim
+
+    def evolve(
+        self,
+        state: torch.Tensor,
+        time: float,
+        evolution_type: EvolutionType = EvolutionType.GEOMETRIC
+    ) -> torch.Tensor:
+        """Evolve pattern state forward in time."""
+        steps = int(time / self.dt)
+        current = state.clone()
+        
+        for _ in range(steps):
+            if evolution_type == EvolutionType.GEOMETRIC:
+                flow = self.compute_flow(current)
+                current = flow.evolve_state(current, self.dt)
+            else:  # Quantum evolution
+                if not self.quantum_enabled:
+                    raise RuntimeError("Quantum evolution requires quantum_enabled=True")
+                quantum_state = self.to_quantum_state(current)
+                # Cast to QuantumState since we know our implementation returns this type
+                concrete_state = cast(QuantumState, quantum_state)
+                evolved = self._apply_quantum_dynamics(
+                    current,
+                    *self.quantum_tensor.decompose(
+                        self.quantum_tensor.compute_tensor(concrete_state)
+                    )
+                )
+                current = evolved
+                
+        return current
+
+    def compute_flow(
+        self,
+        state: torch.Tensor
+    ) -> GeometricFlow[torch.Tensor]:
+        """Compute geometric flow field at current state."""
+        # Compute diffusion and reaction contributions
+        diffusion = self.diffusion.apply_diffusion(
+            state,
+            diffusion_coefficient=0.1,
+            dt=self.dt
+        )
+        reaction = self.reaction.reaction_term(state)
+        
+        # Combined flow field
+        flow = diffusion + reaction
+        
+        # Compute metric tensor (identity for Euclidean, hyperbolic for hyperbolic)
+        if self.manifold_type == "hyperbolic":
+            # Simple hyperbolic metric for demonstration
+            metric = torch.eye(self.space_dim, device=self.device) * (1.0 / (1.0 - torch.sum(state**2, dim=-1, keepdim=True)).clamp(min=1e-6))
+        else:
+            metric = torch.eye(self.space_dim, device=self.device)
             
+        return ConcreteGeometricFlow(
+            vector_field=flow,
+            metric=metric
+        )
+
+    def compute_energy(
+        self,
+        state: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """Compute energy components."""
+        # Kinetic energy from spatial gradients
+        gradients = torch.gradient(state)
+        kinetic = 0.5 * sum(torch.sum(g**2) for g in gradients)
+        
+        # Potential energy from reaction term
+        potential = torch.sum(self.reaction.reaction_term(state)**2)
+        
+        # Quantum contribution if enabled
+        quantum = torch.tensor(0.0, device=self.device)
+        if self.quantum_enabled:
+            quantum_state = self.to_quantum_state(state)
+            # Cast to QuantumState since we know our implementation returns this type
+            concrete_state = cast(QuantumState, quantum_state)
+            Q = self.quantum_tensor.compute_tensor(concrete_state)
+            quantum = torch.tensor(torch.trace(Q).real, device=self.device)
+            
+        # Convert all components to tensors
+        kinetic = torch.tensor(kinetic, device=self.device)
+        potential = torch.tensor(potential, device=self.device)
+        total = kinetic + potential + quantum
+            
+        return {
+            "kinetic": kinetic,
+            "potential": potential,
+            "quantum": quantum,
+            "total": total
+        }
+
+    def compute_conserved_quantities(
+        self,
+        state: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """Compute conserved quantities."""
+        # Total mass/charge
+        total_mass = torch.sum(state)
+        
+        # Angular momentum (for 2D/3D)
+        angular_momentum = torch.tensor(0.0, device=self.device)
+        if self.space_dim >= 2:
+            x = torch.linspace(-1, 1, self.size, device=self.device)
+            y = torch.linspace(-1, 1, self.size, device=self.device)
+            X, Y = torch.meshgrid(x, y, indexing='ij')
+            gradients = torch.gradient(state)
+            angular_momentum = X * gradients[1] - Y * gradients[0]
+            angular_momentum = torch.sum(angular_momentum)
+            
+        # Geometric invariants
+        if self.manifold_type == "hyperbolic":
+            # Hyperbolic length
+            hyperbolic_length = torch.sum(
+                torch.sqrt(1 + torch.sum(state**2, dim=-1))
+            )
+        else:
+            hyperbolic_length = torch.tensor(0.0, device=self.device)
+            
+        return {
+            "mass": total_mass,
+            "angular_momentum": angular_momentum,
+            "geometric_invariant": hyperbolic_length
+        }
+
+    def to_quantum_state(self, state: torch.Tensor) -> IQuantumState[torch.Tensor]:
+        """Convert pattern state to quantum state representation."""
+        if not self.quantum_enabled:
+            raise RuntimeError("Quantum features not enabled")
+        return self._to_quantum_state(state)
+
+    def to_pattern_state(self, state: torch.Tensor) -> PatternState[torch.Tensor]:
+        """Convert to pattern-compatible state representation."""
+        return PatternState(
+            state=state,
+            manifold_type=self.manifold_type,
+            space_dim=self.space_dim
+        )
+
+    def compute_pattern_stability(
+        self,
+        state: torch.Tensor
+    ) -> Dict[str, float]:
+        """Compute stability metrics for pattern formation."""
+        # Analyze stability
+        stability_info = self.analyze_stability(state)
+        
+        # Compute Lyapunov spectrum
+        lyapunov = self.compute_lyapunov_spectrum(state)
+        
+        # Get growth rates
+        growth_rates = stability_info.growth_rates
+        
+        return {
+            "max_growth_rate": float(torch.max(growth_rates)),
+            "min_growth_rate": float(torch.min(growth_rates)),
+            "spectral_gap": float(torch.max(growth_rates) - torch.min(growth_rates)),
+            "largest_lyapunov": float(torch.max(lyapunov)),
+            "is_stable": float(stability_info.stable)
+        }
+
+    def compute_entanglement_metrics(
+        self,
+        state: torch.Tensor,
+        partition: Optional[Tuple[Sequence[int], Sequence[int]]] = None
+    ) -> EntanglementMetrics:
+        """Compute entanglement metrics for the state."""
+        if not self.quantum_enabled:
+            raise RuntimeError("Quantum features not enabled")
+            
+        # Convert to quantum state
+        quantum_state = self.to_quantum_state(state)
+        
+        # Compute density matrix
+        rho = quantum_state.to_density_matrix()
+        
+        # Compute von Neumann entropy
+        entropy = -torch.trace(rho @ torch.log(rho + 1e-10)).real
+        
+        # Compute concurrence for 2-qubit case
+        concurrence = None
+        if rho.shape[0] == 4:  # 2-qubit case
+            sigma_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex64, device=self.device)
+            rho_tilde = torch.kron(sigma_y, sigma_y) @ rho.conj() @ torch.kron(sigma_y, sigma_y)
+            R = torch.matrix_power(rho @ rho_tilde, 1)
+            eigenvals = torch.linalg.eigvals(R).real
+            eigenvals_sorted = torch.sort(eigenvals, descending=True)[0]
+            max_eval = float(eigenvals_sorted[0])
+            other_evals_sum = float(torch.sum(eigenvals_sorted[1:]))
+            concurrence = max(0.0, max_eval - other_evals_sum)
+            
+        # Compute negativity
+        if partition is None:
+            # Default to bipartition in middle
+            n = rho.shape[0]
+            mid = n // 2
+            partition = (list(range(mid)), list(range(mid, n)))
+        
+        # Partial transpose
+        rho_pt = self._partial_transpose(rho, partition)
+        negativity = float((torch.linalg.eigvals(rho_pt).abs().sum() - 1) / 2)
+        
+        # Compute witness value
+        witness_value = float(torch.trace(rho @ rho).real)
+        
+        # Compute purity
+        purity = float(torch.trace(rho @ rho).real)
+        
+        return EntanglementMetrics(
+            entropy=float(entropy),
+            concurrence=concurrence,
+            negativity=negativity,
+            witness_value=witness_value,
+            purity=purity
+        )
+
+    def parallel_transport(
+        self,
+        state: torch.Tensor,
+        connection: torch.Tensor,
+        path: torch.Tensor
+    ) -> torch.Tensor:
+        """Parallel transport state along path using connection."""
+        # Initialize transported state
+        transported = state.clone()
+        
+        # Transport along path segments
+        for i in range(path.shape[0] - 1):
+            # Get segment
+            p1 = path[i]
+            p2 = path[i + 1]
+            dp = p2 - p1
+            
+            # Compute connection coefficients
+            gamma = torch.einsum('ijk,k->ij', connection, dp)
+            
+            # Update state using parallel transport equation
+            transported = transported - torch.einsum('ij,j->i', gamma, transported)
+            
+        return transported
+
+    def _partial_transpose(
+        self,
+        rho: torch.Tensor,
+        partition: Tuple[Sequence[int], Sequence[int]]
+    ) -> torch.Tensor:
+        """Compute partial transpose of density matrix.
+        
+        Args:
+            rho: Density matrix
+            partition: Bipartition specifying subsystems
+            
+        Returns:
+            Partially transposed density matrix
+        """
+        n = int(torch.sqrt(torch.tensor(rho.shape[0])))
+        rho_reshaped = rho.reshape(n, n, n, n)
+        
+        # Transpose indices corresponding to second subsystem
+        rho_pt = rho_reshaped.clone()
+        for i in partition[1]:
+            for j in partition[1]:
+                rho_pt[:, i, :, j] = rho_reshaped[:, j, :, i]
+                
+        return rho_pt.reshape(n*n, n*n)
+
     def _to_quantum_state(self, state: torch.Tensor) -> QuantumState:
         """Convert classical state to quantum state.
         
@@ -70,7 +369,7 @@ class PatternDynamics:
         """
         # Extract amplitude and phase
         amplitude = torch.abs(state)
-        phase = torch.angle(state.to(torch.complex64))
+        phase = torch.angle(state.to(dtype=torch.complex64, device=self.device))
         
         return QuantumState(amplitude, phase)
         
@@ -85,15 +384,11 @@ class PatternDynamics:
         """
         return quantum_state.state_vector.real
 
-    def compute_next_state(self, state: torch.Tensor) -> torch.Tensor:
-        """Perform one step of pattern dynamics.
-        
-        Args:
-            state (torch.Tensor): Current state
-            
-        Returns:
-            torch.Tensor: Next state
-        """
+    def compute_next_state(self, state: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Perform one step of pattern dynamics."""
+        if state is None:
+            state = self.state
+
         if self.quantum_enabled:
             # Convert to quantum state
             quantum_state = self._to_quantum_state(state)
@@ -104,50 +399,79 @@ class PatternDynamics:
             # Decompose into metric and Berry curvature
             g, B = self.quantum_tensor.decompose(Q)
             
-            # Apply quantum evolution
-            # TODO: Implement proper Hamiltonian
-            H = torch.eye(self.dim, dtype=torch.complex64)
-            evolved = quantum_state.evolve(H, self.dt)
-            
-            # Convert back to classical state
-            next_state = self._from_quantum_state(evolved)
+            # Apply quantum dynamics
+            next_state = self._apply_quantum_dynamics(state, g, B)
         else:
-            # Classical evolution
+            # Apply classical dynamics
+            diffusion = self.diffusion.apply_diffusion(
+                state,
+                diffusion_coefficient=0.1,  # Default diffusion coefficient
+                dt=self.dt
+            )
             reaction = self.reaction.reaction_term(state)
-            diffusion = self.diffusion.apply_diffusion(state, diffusion_coefficient=0.1, dt=self.dt)
-            next_state = state + self.dt * (reaction + diffusion)
-        
+            next_state = state + self.dt * (diffusion + reaction)
+            
+        self.state = next_state
         return next_state
+
+    def _apply_quantum_dynamics(
+        self,
+        state: torch.Tensor,
+        metric: torch.Tensor,
+        berry_curvature: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply quantum dynamics using geometric tensor components.
+        
+        Args:
+            state: Current state
+            metric: Quantum metric tensor
+            berry_curvature: Berry curvature
+            
+        Returns:
+            Updated state
+        """
+        # Compute geometric force
+        force = torch.einsum('ij,j->i', metric, state)
+        
+        # Add Berry phase contribution
+        berry_force = torch.einsum('ij,j->i', berry_curvature, state)
+        
+        # Update state with geometric and Berry forces
+        return state + self.dt * (force + berry_force)
 
     def evolve_pattern(
         self,
         pattern: torch.Tensor,
         diffusion_coefficient: float = 0.1,
-        reaction_term: Optional[Callable] = None,
+        reaction_term: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         steps: int = 100
     ) -> List[torch.Tensor]:
         """Evolve pattern forward in time.
         
         Args:
-            pattern: Initial pattern
-            diffusion_coefficient: Diffusion coefficient
-            reaction_term: Optional custom reaction term
-            steps: Number of timesteps
+            pattern: Initial pattern tensor
+            diffusion_coefficient: Coefficient controlling diffusion rate
+            reaction_term: Optional custom reaction function taking and returning a tensor
+            steps: Number of evolution timesteps
             
         Returns:
-            List of evolved patterns
+            List of evolved pattern tensors over time
         """
-        trajectory = []
-        current = pattern
+        trajectory: List[torch.Tensor] = []
+        current = pattern.to(device=self.device)
         
         for _ in range(steps):
-            trajectory.append(current)
+            trajectory.append(current.clone())
             # Apply reaction and diffusion with optional custom reaction term
             if reaction_term is not None:
                 reaction = reaction_term(current)
             else:
                 reaction = self.reaction.reaction_term(current)
-            diffusion = self.diffusion.apply_diffusion(current, diffusion_coefficient=diffusion_coefficient, dt=self.dt)
+            diffusion = self.diffusion.apply_diffusion(
+                current, 
+                diffusion_coefficient=diffusion_coefficient,
+                dt=self.dt
+            )
             current = current + self.dt * (reaction + diffusion)
             
         return trajectory
@@ -156,132 +480,90 @@ class PatternDynamics:
         """Compute Jacobian matrix of dynamics.
         
         Args:
-            state: Current state
+            state: Current state tensor
             
         Returns:
-            Jacobian matrix
+            Jacobian matrix as tensor
         """
-        return self.compute_stability_matrix(state, epsilon=1e-6, chunk_size=10)
+        # Get state dimensions
+        state_size = state.numel()
+        jacobian = torch.zeros((state_size, state_size), device=self.device)
         
+        # Compute finite difference approximation
+        epsilon = 1e-6
+        for i in range(state_size):
+            perturbed = state.clone().flatten()
+            perturbed[i] += epsilon
+            perturbed = perturbed.reshape(state.shape)
+            
+            # Compute perturbed dynamics
+            f_perturbed = self.compute_next_state(perturbed)
+            f_original = self.compute_next_state(state)
+            
+            # Finite difference
+            jacobian[:, i] = (f_perturbed - f_original).flatten() / epsilon
+            
+        return jacobian
+
     def compute_stability_matrix(
         self,
         state: torch.Tensor,
         epsilon: float = 1e-6,
-        chunk_size: int = 500
+        chunk_size: int = 10
     ) -> torch.Tensor:
-        """Compute stability matrix for current state.
+        """Compute stability matrix using chunked computation.
         
         Args:
             state: Current state tensor
-            epsilon: Small perturbation for numerical derivatives
-            chunk_size: Size of chunks to process at once
+            epsilon: Small perturbation for finite differences
+            chunk_size: Number of columns to compute at once
             
         Returns:
-            Stability matrix
+            Stability matrix as tensor
         """
-        # Get state shape and ensure proper dimensions
-        if len(state.shape) == 4:  # [batch, channels, height, width]
-            batch_size = state.shape[0]
-            n = state.shape[1] * state.shape[2] * state.shape[3]
-            state = state.view(batch_size, n)
-        else:  # [channels, height, width]
-            batch_size = 1
-            n = state.numel()
-            state = state.view(1, n)
+        # Get state dimensions
+        state_size = state.numel()
+        stability = torch.zeros((state_size, state_size), device=self.device)
         
-        # Initialize Jacobian efficiently
-        J = torch.zeros((n, n), dtype=state.dtype, device=state.device)
-        
-        # Use vectorized operations for efficiency
-        for i in range(0, n, chunk_size):  # Process in chunks for memory efficiency
-            end_idx = min(i + chunk_size, n)
-            curr_chunk_size = end_idx - i
+        # Compute in chunks for memory efficiency
+        for start_idx in range(0, state_size, chunk_size):
+            end_idx = min(start_idx + chunk_size, state_size)
+            chunk_cols = end_idx - start_idx
             
-            # Create perturbations for this chunk
-            perturb = torch.zeros((curr_chunk_size, n), dtype=state.dtype, device=state.device)
-            perturb[range(curr_chunk_size), range(i, end_idx)] = epsilon
+            # Create perturbation matrix for this chunk
+            perturbations = torch.eye(chunk_cols, device=self.device) * epsilon
             
-            # Forward differences (vectorized)
-            states_plus = (state + perturb).view(-1, self.dim, self.size, self.size)
-            forward = self.compute_next_state(states_plus).view(curr_chunk_size, n)
+            # Broadcast state for parallel computation
+            states = state.flatten().repeat(chunk_cols, 1)
+            states[:, start_idx:end_idx] += perturbations
             
-            # Backward differences (vectorized)
-            states_minus = (state - perturb).view(-1, self.dim, self.size, self.size)
-            backward = self.compute_next_state(states_minus).view(curr_chunk_size, n)
+            # Reshape states back to original shape
+            states = states.reshape(-1, *state.shape)
             
-            # Central differences
-            J[i:end_idx] = (forward - backward) / (2 * epsilon)
-        
-        return J
+            # Compute perturbed dynamics
+            f_perturbed = torch.stack([
+                self.compute_next_state(s) for s in states
+            ])
+            f_original = self.compute_next_state(state)
+            
+            # Finite difference for this chunk
+            stability[:, start_idx:end_idx] = (
+                (f_perturbed - f_original) / epsilon
+            ).reshape(chunk_cols, -1).t()
+            
+        return stability
 
     def compute_eigenvalues(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute eigenvalues of linearized dynamics.
+        """Compute eigenvalues of the stability matrix.
         
         Args:
-            state (torch.Tensor): State to compute eigenvalues at
+            state: Current state tensor
             
         Returns:
-            torch.Tensor: Eigenvalues
+            Tensor of eigenvalues
         """
-        # Compute Jacobian efficiently
-        jacobian = self.compute_jacobian(state)
-        
-        # Use a more efficient eigenvalue computation method
-        try:
-            # Try using eigvals first with GPU if available
-            if torch.cuda.is_available():
-                jacobian = jacobian.cuda()
-                eigenvalues = torch.linalg.eigvals(jacobian)
-                eigenvalues = eigenvalues.cpu()
-            else:
-                # Use numpy for CPU computation which is generally faster
-                eigenvalues = torch.from_numpy(
-                    np.linalg.eigvals(jacobian.numpy())
-                ).to(torch.complex64)
-        except Exception:
-            # Fallback to a more stable but slower method
-            eigenvalues, _ = torch.linalg.eig(jacobian)
-            
-        return eigenvalues
-
-    def compute_energy(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute energy of pattern state.
-        
-        Args:
-            state (torch.Tensor): Pattern state
-            
-        Returns:
-            torch.Tensor: Energy value
-        """
-        # Ensure proper dimensions
-        if len(state.shape) == 4:  # [batch, channels, height, width]
-            state = state.view(state.shape[0], -1)
-        else:  # [channels, height, width]
-            state = state.view(1, -1)
-        
-        # Compute kinetic energy efficiently
-        kinetic = 0.5 * torch.sum(state * state, dim=1)
-        
-        # Compute field terms
-        reaction = self.reaction.reaction_term(state.view(-1, self.dim, self.size, self.size))
-        diffusion = self.diffusion.apply_diffusion(
-            state.view(-1, self.dim, self.size, self.size),
-            diffusion_coefficient=0.1,
-            dt=self.dt
-        )
-        
-        # Reshape fields
-        reaction = reaction.view(state.shape)
-        diffusion = diffusion.view(state.shape)
-        
-        # Compute potential energy efficiently
-        potential = -0.5 * torch.sum(state * (reaction + diffusion), dim=1)
-        
-        # Return total energy (averaged over batch if needed)
-        total_energy = kinetic + potential
-        if total_energy.shape[0] > 1:
-            return total_energy.mean()
-        return total_energy[0]
+        stability = self.compute_stability_matrix(state)
+        return torch.linalg.eigvals(stability)
 
     def is_stable(self, state: torch.Tensor, threshold: float = 0.1) -> bool:
         """Check if a state is stable.
@@ -1072,7 +1354,7 @@ class PatternDynamics:
         # Normalize to preserve total intensity
         return transformed / transformed.sum(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
 
-    def forward(self, states: torch.Tensor, return_patterns: bool = False) -> dict[str, torch.Tensor]:
+    def forward(self, states: torch.Tensor, return_patterns: bool = False) -> Dict[str, torch.Tensor]:
         """Forward pass through pattern dynamics.
         
         Args:
@@ -1092,22 +1374,26 @@ class PatternDynamics:
         routing_scores = torch.softmax(patterns[-1].mean(dim=-1), dim=-1)
         
         # Prepare results
-        results = {
+        results: Dict[str, torch.Tensor] = {
             "routing_scores": routing_scores
         }
         
         if return_patterns:
-            results.update({
-                "patterns": torch.stack(patterns),
-                "pattern_scores": torch.softmax(
-                    torch.stack([self.compute_energy(p) for p in patterns]), 
-                    dim=0
-                )
-            })
+            # Compute energy for each pattern and extract just the total energy
+            pattern_energies = [self.compute_energy(p)["total"] for p in patterns]
+            pattern_energy_tensor = torch.stack(pattern_energies)
+            
+            # Stack patterns and compute scores
+            stacked_patterns = torch.stack(patterns)
+            pattern_scores = torch.softmax(pattern_energy_tensor, dim=0)
+            
+            # Update results with pattern information
+            results["patterns"] = stacked_patterns
+            results["pattern_scores"] = pattern_scores
             
         return results
 
-    def __call__(self, states: torch.Tensor, return_patterns: bool = False) -> dict[str, torch.Tensor]:
+    def __call__(self, states: torch.Tensor, return_patterns: bool = False) -> Dict[str, torch.Tensor]:
         """Make the class callable."""
         return self.forward(states, return_patterns)
 
@@ -1209,3 +1495,114 @@ class PatternDynamics:
             state.amplitude,
             state.phase + phase
         )
+
+    def analyze_stability(self, state: torch.Tensor) -> StabilityInfo:
+        """Analyze stability of current state."""
+        # Compute eigenvalues and eigenvectors
+        stability_matrix = self.compute_stability_matrix(state)
+        eigenvals, eigenvecs = torch.linalg.eig(stability_matrix)
+        
+        # Compute growth rates
+        growth_rates = torch.real(eigenvals)
+        
+        # Determine stability
+        is_stable = bool(torch.all(growth_rates < 0))
+        
+        return StabilityInfo(
+            eigenvalues=eigenvals,
+            eigenvectors=eigenvecs,
+            growth_rates=growth_rates,
+            stable=is_stable
+        )
+
+    def compute_phase_space_trajectory(
+        self,
+        initial_state: torch.Tensor,
+        steps: int = 100
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """Compute trajectory in phase space.
+        
+        Args:
+            initial_state: Initial state tensor
+            steps: Number of timesteps
+            
+        Returns:
+            Tuple of (positions, momenta) as lists of tensors
+        """
+        positions: List[torch.Tensor] = []
+        momenta: List[torch.Tensor] = []
+        
+        current = initial_state.to(device=self.device)
+        
+        for _ in range(steps):
+            # Store current position
+            positions.append(current.clone())
+            
+            # Compute momentum (time derivative)
+            next_state = self.compute_next_state(current)
+            momentum = (next_state - current) / self.dt
+            momenta.append(momentum)
+            
+            # Update state
+            current = next_state
+            
+        return positions, momenta
+
+    def reaction_term(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute reaction term for pattern dynamics with attention-specific features."""
+        # First clamp state to valid range to avoid instabilities
+        state = torch.clamp(state, self.min_concentration, self.max_concentration)
+        
+        # Compute mass-conserving reaction term
+        # Use a bistable reaction term that respects bounds
+        mid = (self.max_concentration + self.min_concentration) / 2
+        scale = (self.max_concentration - self.min_concentration) / 2
+        
+        # Normalize state to [-1, 1] range
+        x = (state - mid) / scale
+        
+        # Compute reaction using cubic term
+        reaction = x * (1 - x**2)
+        
+        # Scale back to original range
+        reaction = reaction * scale
+        
+        # Calculate mean to ensure mass conservation
+        mean_reaction = reaction.mean(dim=(-2, -1), keepdim=True)
+        
+        # Subtract mean to make reaction term mass-conserving
+        reaction = reaction - mean_reaction
+        
+        # Ensure bounds are respected
+        max_reaction = self.max_concentration - state
+        min_reaction = self.min_concentration - state
+        reaction = torch.minimum(reaction, max_reaction)
+        reaction = torch.maximum(reaction, min_reaction)
+        
+        return reaction
+
+    def generate_target_pattern(
+        self,
+        batch_size: int,
+        grid_size: int,
+        num_channels: int
+    ) -> torch.Tensor:
+        """Generate target pattern for attention control.
+        
+        Args:
+            batch_size: Batch size
+            grid_size: Grid size
+            num_channels: Number of channels
+            
+        Returns:
+            Target pattern tensor
+        """
+        target = torch.zeros((batch_size, num_channels, grid_size, grid_size), device=self.device)
+        center = grid_size // 2
+        radius = grid_size // 4
+        for i in range(grid_size):
+            for j in range(grid_size):
+                dist = ((i - center)**2 + (j - center)**2)**0.5
+                if dist < radius:
+                    target[:, :, i, j] = 1.0
+        return target

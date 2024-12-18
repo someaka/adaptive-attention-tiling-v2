@@ -1,0 +1,102 @@
+digraph DataFlow {
+    // Graph settings
+    rankdir=TB;
+    compound=true;
+    node [shape=box, style=filled, fillcolor=lightgray];
+    
+    // Input/Output nodes
+    input [label="Input Data\n(batch_size, seq_len, hidden_dim)", fillcolor=lightblue];
+    output [label="Output\n(Processed Features)", fillcolor=lightblue];
+    
+    // Quantum-Geometric Processing subgraph
+    subgraph cluster_quantum_geometric {
+        label="Quantum-Geometric Processing";
+        style=filled;
+        color=lightblue;
+        node [style=filled,color=white];
+        
+        quantum_state [label="Quantum State\nPreparation"];
+        geometric_state [label="Geometric State\nPreparation"];
+        quantum_features [label="Quantum Features\nComputation"];
+        geometric_features [label="Geometric Features\nComputation"];
+        parallel_transport [label="Parallel\nTransport"];
+        
+        // Internal dependencies
+        quantum_state -> geometric_state [label="Fisher-Rao\nMetric"];
+        geometric_state -> quantum_features [label="Quantum\nCurvature"];
+        quantum_features -> geometric_features [label="Quantum\nTransport"];
+        geometric_features -> parallel_transport [label="Wasserstein\nMetrics"];
+    }
+    
+    // Pattern Processing subgraph
+    subgraph cluster_pattern {
+        label="Pattern Processing";
+        style=filled;
+        color=pink;
+        node [style=filled,color=white];
+        
+        pattern_detection [label="Pattern\nDetection"];
+        arithmetic_patterns [label="Arithmetic\nPatterns"];
+        flow_patterns [label="Flow\nPatterns"];
+        
+        // Internal dependencies
+        pattern_detection -> arithmetic_patterns;
+        arithmetic_patterns -> flow_patterns;
+    }
+    
+    // Attention Processing subgraph
+    subgraph cluster_attention {
+        label="Attention Mechanism";
+        style=filled;
+        color=lightyellow;
+        node [style=filled,color=white];
+        
+        attention_state [label="Attention State\nPreparation"];
+        attention_scores [label="Attention\nScores"];
+        attention_output [label="Attention\nOutput"];
+        
+        // Internal dependencies
+        attention_state -> attention_scores;
+        attention_scores -> attention_output;
+    }
+    
+    // Metrics subgraph
+    subgraph cluster_metrics {
+        label="Metrics Computation";
+        style=filled;
+        color=lightgray;
+        node [style=filled,color=white];
+        
+        entropy [label="Entropy"];
+        complexity [label="Complexity"];
+        stability [label="Stability"];
+        sparsity [label="Sparsity"];
+    }
+    
+    // Main data flow
+    input -> quantum_state;
+    input -> pattern_detection;
+    
+    // Quantum-Geometric to Pattern dependencies
+    quantum_features -> pattern_detection [label="Quantum\nPatterns"];
+    geometric_features -> pattern_detection [label="Geometric\nStructures"];
+    parallel_transport -> flow_patterns [label="Transport\nPatterns"];
+    
+    // Pattern to Attention dependencies
+    flow_patterns -> attention_state;
+    arithmetic_patterns -> attention_state;
+    
+    // Quantum-Geometric to Attention dependencies
+    quantum_features -> attention_state [label="Quantum\nState"];
+    parallel_transport -> attention_state [label="Geometric\nFlow"];
+    
+    // Output flows
+    attention_output -> entropy;
+    attention_output -> complexity;
+    attention_output -> stability;
+    attention_output -> sparsity;
+    attention_output -> output;
+    
+    // Edge styling
+    edge [fontsize=10, fontcolor=darkblue];
+} 

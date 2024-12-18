@@ -1,0 +1,142 @@
+digraph FileDependencies {
+    // Graph settings
+    rankdir=TB;
+    compound=true;
+    node [shape=box, style=filled, fillcolor=lightgray];
+    
+    // Common Layer
+    subgraph cluster_common {
+        label="Core Common";
+        style=filled;
+        color=lightgrey;
+        
+        enums [label="common/enums.py"];
+        constants [label="common/constants.py"];
+    }
+    
+    // Quantum Layer
+    subgraph cluster_quantum {
+        label="Core Quantum";
+        style=filled;
+        color=lightblue;
+        
+        types [label="quantum/types.py"];
+        state_space [label="quantum/state_space.py"];
+        geometric_flow [label="quantum/geometric_flow.py"];
+        crystal [label="quantum/crystal.py"];
+        quantum_dynamics [label="quantum/quantum_dynamics.py"];
+        path_integral [label="quantum/path_integral.py"];
+    }
+    
+    // Interfaces Layer
+    subgraph cluster_interfaces {
+        label="Core Interfaces";
+        style=filled;
+        color=lightgreen;
+        
+        quantum_interface [label="interfaces/quantum.py"];
+        geometric_interface [label="interfaces/geometric.py"];
+        crystal_interface [label="interfaces/crystal.py"];
+        attention_interface [label="interfaces/attention.py"];
+        backend_interface [label="interfaces/backend.py"];
+    }
+    
+    // Patterns Layer
+    subgraph cluster_patterns {
+        label="Core Patterns";
+        style=filled;
+        color=pink;
+        
+        riemannian_base [label="patterns/riemannian_base.py"];
+        fiber_bundle [label="patterns/fiber_bundle.py"];
+        base_dynamics [label="patterns/base_dynamics.py"];
+        dynamics [label="patterns/dynamics.py"];
+        evolution [label="patterns/evolution.py"];
+        formation [label="patterns/formation.py"];
+        motivic_riemannian [label="patterns/motivic_riemannian.py"];
+        riemannian [label="patterns/riemannian.py"];
+        symplectic [label="patterns/symplectic.py"];
+    }
+    
+    // Neural Layer
+    subgraph cluster_neural {
+        label="Neural Implementation";
+        style=filled;
+        color=yellow;
+        
+        neural_models [label="neural/attention/pattern/models.py"];
+        neural_dynamics [label="neural/attention/pattern/neural_dynamics.py"];
+        pattern_quantum [label="neural/attention/pattern/quantum.py"];
+        pattern_dynamics [label="neural/attention/pattern_dynamics.py"];
+        geometric_flow_neural [label="neural/flow/geometric_flow.py"];
+        hamiltonian [label="neural/flow/hamiltonian.py"];
+    }
+    
+    // Validation Layer
+    subgraph cluster_validation {
+        label="Validation";
+        style=filled;
+        color=orange;
+        
+        validation_base [label="validation/base.py"];
+        validation_framework [label="validation/framework.py"];
+        flow_stability [label="validation/flow/stability.py"];
+        geometric_model [label="validation/geometric/model.py"];
+        geometric_flow_validation [label="validation/geometric/flow.py"];
+        quantum_state [label="validation/quantum/state.py"];
+    }
+    
+    // Core Dependencies
+    types -> state_space;
+    state_space -> geometric_flow;
+    state_space -> crystal;
+    geometric_flow -> crystal;
+    state_space -> quantum_dynamics;
+    geometric_flow -> quantum_dynamics;
+    state_space -> path_integral;
+    
+    // Interface Dependencies
+    types -> quantum_interface;
+    state_space -> quantum_interface;
+    quantum_interface -> geometric_interface;
+    geometric_flow -> geometric_interface;
+    quantum_interface -> crystal_interface;
+    geometric_interface -> crystal_interface;
+    crystal -> crystal_interface;
+    enums -> backend_interface;
+    backend_interface -> attention_interface;
+    
+    // Pattern Dependencies
+    geometric_flow -> riemannian_base;
+    riemannian_base -> fiber_bundle;
+    geometric_interface -> base_dynamics;
+    riemannian_base -> base_dynamics;
+    base_dynamics -> dynamics;
+    dynamics -> evolution;
+    formation -> evolution;
+    fiber_bundle -> evolution;
+    riemannian_base -> motivic_riemannian;
+    fiber_bundle -> motivic_riemannian;
+    riemannian_base -> riemannian;
+    riemannian_base -> symplectic;
+    
+    // Neural Dependencies
+    base_dynamics -> neural_models;
+    neural_models -> neural_dynamics;
+    neural_dynamics -> pattern_quantum;
+    quantum_interface -> pattern_quantum;
+    neural_dynamics -> pattern_dynamics;
+    geometric_flow -> geometric_flow_neural;
+    state_space -> hamiltonian;
+    
+    // Validation Dependencies
+    enums -> validation_base;
+    validation_base -> validation_framework;
+    validation_base -> flow_stability;
+    validation_base -> geometric_model;
+    geometric_model -> geometric_flow_validation;
+    validation_base -> quantum_state;
+    
+    // Edge styling
+    edge [fontsize=10, fontcolor=darkblue];
+} 

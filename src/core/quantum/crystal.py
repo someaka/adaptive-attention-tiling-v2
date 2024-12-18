@@ -29,8 +29,8 @@ class LatticeVector:
 class BravaisLattice:
     """Implementation of Bravais lattice structure."""
 
-    def __init__(self, dim: int, lattice_type: str = "cubic"):
-        self.dim = dim
+    def __init__(self, dimension: int, lattice_type: str = "cubic"):
+        self.dimension = dimension
         self.lattice_type = lattice_type
 
         # Initialize lattice vectors
@@ -43,8 +43,8 @@ class BravaisLattice:
     def _initialize_direct_lattice(self) -> torch.Tensor:
         """Initialize direct lattice vectors."""
         if self.lattice_type == "cubic":
-            return torch.eye(self.dim)
-        if self.lattice_type == "hexagonal" and self.dim == 2:
+            return torch.eye(self.dimension)
+        if self.lattice_type == "hexagonal" and self.dimension == 2:
             return torch.tensor([[1.0, 0.0], [0.5, np.sqrt(3) / 2]])
         raise ValueError(f"Unsupported lattice type: {self.lattice_type}")
 
@@ -54,14 +54,14 @@ class BravaisLattice:
 
     def _initialize_symmetries(self) -> List[torch.Tensor]:
         """Initialize symmetry operations."""
-        symmetries = [torch.eye(self.dim)]  # Identity
+        symmetries = [torch.eye(self.dimension)]  # Identity
 
         if self.lattice_type == "cubic":
             # Add rotations and reflections
-            for i in range(self.dim):
-                for j in range(self.dim):
+            for i in range(self.dimension):
+                for j in range(self.dimension):
                     if i != j:
-                        rotation = torch.eye(self.dim)
+                        rotation = torch.eye(self.dimension)
                         rotation[i, i] = 0
                         rotation[j, j] = 0
                         rotation[i, j] = 1
@@ -87,7 +87,7 @@ class BrillouinZone:
     def _initialize_band_hamiltonian(self) -> nn.Module:
         """Initialize band structure Hamiltonian."""
         return nn.Sequential(
-            nn.Linear(self.lattice.dim, self.num_bands * 2),
+            nn.Linear(self.lattice.dimension, self.num_bands * 2),
             nn.ReLU(),
             nn.Linear(self.num_bands * 2, self.num_bands),
         )
@@ -96,12 +96,12 @@ class BrillouinZone:
         """Get high symmetry points in k-space."""
         if self.lattice.lattice_type == "cubic":
             return {
-                "Γ": torch.zeros(self.lattice.dim),
-                "X": torch.tensor([np.pi, 0, 0])[: self.lattice.dim],
-                "M": torch.tensor([np.pi, np.pi, 0])[: self.lattice.dim],
-                "R": torch.tensor([np.pi, np.pi, np.pi])[: self.lattice.dim],
+                "Γ": torch.zeros(self.lattice.dimension),
+                "X": torch.tensor([np.pi, 0, 0])[: self.lattice.dimension],
+                "M": torch.tensor([np.pi, np.pi, 0])[: self.lattice.dimension],
+                "R": torch.tensor([np.pi, np.pi, np.pi])[: self.lattice.dimension],
             }
-        if self.lattice.lattice_type == "hexagonal" and self.lattice.dim == 2:
+        if self.lattice.lattice_type == "hexagonal" and self.lattice.dimension == 2:
             return {
                 "Γ": torch.zeros(2),
                 "K": torch.tensor([2 * np.pi / 3, 2 * np.pi / 3]),
@@ -115,17 +115,17 @@ class BrillouinZone:
 
 
 class BlochFunction:
-    """Implementation of Bloch functions for the crystal."""
+    """Implementation of Bloch functions for crystal analysis."""
 
     def __init__(self, lattice: BravaisLattice, hilbert_space: HilbertSpace):
         self.lattice = lattice
         self.hilbert_space = hilbert_space
 
-        # Bloch function parameters
-        self.cell_function = nn.Sequential(
-            nn.Linear(lattice.dim, hilbert_space.dim),
+        # Bloch function computation
+        self.bloch_network = nn.Sequential(
+            nn.Linear(lattice.dimension, hilbert_space.dimension),
             nn.ReLU(),
-            nn.Linear(hilbert_space.dim, hilbert_space.dim),
+            nn.Linear(hilbert_space.dimension, hilbert_space.dimension),
         )
 
     def compute_bloch_function(
@@ -133,7 +133,7 @@ class BlochFunction:
     ) -> QuantumState:
         """Compute Bloch function at given k-point and position."""
         # Cell-periodic part
-        u_k = self.cell_function(position)
+        u_k = self.bloch_network(position)
 
         # Plane wave part
         phase = torch.exp(1j * torch.sum(k_point * position))
@@ -172,10 +172,10 @@ class CrystalSymmetry:
     def _generate_space_group(self) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """Generate space group operations (rotation + translation)."""
         space_group = []
-        translations = torch.eye(self.lattice.dim)
+        translations = torch.eye(self.lattice.dimension)
 
         for rotation in self.point_group:
-            for t in [torch.zeros(self.lattice.dim), translations]:
+            for t in [torch.zeros(self.lattice.dimension), translations]:
                 space_group.append((rotation, t))
 
         return space_group
