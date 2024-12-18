@@ -215,13 +215,13 @@ class QuantumGeometricAttention(nn.Module):
             - Pattern tensor of shape (batch_size, seq_len, hidden_dim)
             - Combined metrics dictionary
         """
-        # Apply arithmetic pattern detection
-        arithmetic_out = self.arithmetic(x)
-        arithmetic_metrics = {"arithmetic": arithmetic_out.detach()}
+        # Apply arithmetic pattern detection - handle tuple return
+        arithmetic_out, arithmetic_layer_metrics = self.arithmetic(x)
+        arithmetic_metrics = {"arithmetic": arithmetic_layer_metrics}
 
-        # Apply geometric flow
-        flow_out = self.flow(arithmetic_out)
-        flow_metrics = {"flow": flow_out.detach()}
+        # Apply geometric flow - handle tuple return
+        flow_out, flow_layer_metrics = self.flow(arithmetic_out)
+        flow_metrics = {"flow": flow_layer_metrics}
 
         # Project to pattern space
         patterns = self.pattern_proj(flow_out)
