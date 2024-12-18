@@ -629,23 +629,25 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         # Add point-dependent perturbation for the fiber part
         fiber_points = points[..., self.base_dim:]
         
-        # Compute symmetric perturbation matrix for fiber part
-        fiber_pert = torch.zeros(batch_size, fiber_points.shape[-1], fiber_points.shape[-1],
+        # Compute symmetric perturbation matrix for fiber part using a symmetric quadratic form
+        fiber_pert = torch.zeros(batch_size, self.fiber_dim, self.fiber_dim,
                                device=points.device, dtype=points.dtype)
         
-        # Build symmetric perturbation using outer products
         for b in range(batch_size):
-            # Compute outer product
-            outer = torch.outer(fiber_points[b], fiber_points[b])
-            # Symmetrize
-            fiber_pert[b] = 0.5 * (outer + outer.t())
+            # Create symmetric quadratic form using explicit symmetrization
+            for i in range(self.fiber_dim):
+                for j in range(i + 1):  # Only compute lower triangle
+                    # Symmetric quadratic term with explicit symmetrization
+                    term = 0.1 * (
+                        0.25 * (fiber_points[b, i] + fiber_points[b, j])**2 +
+                        0.25 * (fiber_points[b, i]**2 + fiber_points[b, j]**2)
+                    )
+                    fiber_pert[b, i, j] = term
+                    if i != j:
+                        fiber_pert[b, j, i] = term  # Mirror to upper triangle
         
         # Add perturbation to fiber part of metric
-        perturbation = torch.zeros_like(values)
-        perturbation[..., self.base_dim:, self.base_dim:] = 0.1 * fiber_pert
-        
-        # Add perturbation while maintaining symmetry
-        values = values + perturbation + perturbation.transpose(-2, -1)
+        values[..., self.base_dim:, self.base_dim:] += fiber_pert
         
         # Add small identity to ensure positive definiteness
         values = values + 1e-6 * torch.eye(

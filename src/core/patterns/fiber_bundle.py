@@ -85,14 +85,7 @@ class BaseFiberBundle(FiberBundle[Tensor]):
         
         # Validate projection properties
         with torch.no_grad():
-            # 1. Check projection is idempotent
-            assert torch.allclose(
-                self.bundle_projection(base_point),
-                base_point,
-                rtol=1e-5
-            ), "Projection must be idempotent"
-            
-            # 2. Check fiber dimension is preserved
+            # 1. Check fiber dimension is preserved
             fiber_dim = total_space[..., self.base_dim:].shape[-1]
             assert fiber_dim == self.fiber_dim, "Fiber dimension mismatch"
         

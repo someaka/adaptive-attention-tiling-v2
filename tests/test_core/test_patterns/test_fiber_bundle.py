@@ -45,10 +45,10 @@ def test_config():
 @pytest.fixture
 def base_manifold(test_config):
     """Create a test base manifold."""
-    dim = test_config["geometric_tests"]["dimensions"]
+    base_dim = test_config["geometric_tests"]["dimensions"]
     batch_size = test_config["geometric_tests"]["batch_size"]
     dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
-    return torch.randn(batch_size, dim, dtype=dtype)
+    return torch.randn(batch_size, base_dim, dtype=dtype)  # Only use base dimensions
 
 
 @pytest.fixture
@@ -60,8 +60,9 @@ def fiber_dim():
 @pytest.fixture
 def base_bundle(test_config):
     """Create base implementation instance."""
-    dim = test_config["geometric_tests"]["dimensions"]
-    return BaseFiberBundle(base_dim=dim, fiber_dim=3)
+    base_dim = test_config["geometric_tests"]["dimensions"]
+    fiber_dim = 3  # Standard SO(3) fiber dimension
+    return BaseFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
 
 
 @pytest.fixture
@@ -120,9 +121,14 @@ class TestFiberBundleProtocol:
 
         # Test projection properties
         assert projected.shape[-1] == bundle.base_dim, "Projected shape should match base dimension"
+        
+        # Verify idempotency by checking that projecting the base point gives the same result
+        # First, pad the projected point with zeros in the fiber dimensions
+        padded_projected = torch.zeros_like(total_space)
+        padded_projected[..., :bundle.base_dim] = projected
         assert torch.allclose(
-            bundle.bundle_projection(bundle.bundle_projection(total_space)),
-            bundle.bundle_projection(total_space),
+            bundle.bundle_projection(padded_projected),
+            projected,
             rtol=1e-5,
         ), "Projection should be idempotent"
 
@@ -133,7 +139,7 @@ class TestFiberBundleProtocol:
         batch_size = test_config["geometric_tests"]["batch_size"]
         dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
         
-        # Create test points
+        # Create test points with correct total dimension
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
         
         # Test basic properties
@@ -150,7 +156,7 @@ class TestFiberBundleProtocol:
         """Test that transition functions satisfy protocol requirements."""
         bundle = request.getfixturevalue(bundle)
         
-        # Create test charts
+        # Create test charts with correct total dimension
         point1 = torch.randn(4, bundle.total_dim)
         point2 = torch.randn(4, bundle.total_dim)
         chart1, _ = bundle.local_trivialization(point1)
@@ -167,7 +173,7 @@ class TestFiberBundleProtocol:
         dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
         batch_size = test_config["geometric_tests"]["batch_size"]
         
-        # Create test points and vectors
+        # Create test points and vectors with correct total dimension
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
         tangent_vectors = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
         
@@ -389,6 +395,142 @@ class TestFiberBundleProtocol:
                 direct_transport,
                 rtol=1e-4
             ), "Parallel transport should commute with structure group action"
+
+    @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
+    def test_vertical_horizontal_separation(self, bundle, request, test_config):
+        """Test that the connection form properly separates vertical and horizontal components."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        # Create test vectors
+        total_vectors = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        
+        # Get connection form output
+        connection = bundle.connection_form(total_vectors)
+        
+        # Extract vertical components
+        vertical_components = self._get_vertical_components(connection)
+        
+        # Create purely vertical vectors
+        vertical_vectors = torch.zeros_like(total_vectors)
+        vertical_vectors[..., bundle.base_dim:] = total_vectors[..., bundle.base_dim:]
+        
+        # Verify that vertical vectors are preserved
+        vertical_connection = bundle.connection_form(vertical_vectors)
+        vertical_output = self._get_vertical_components(vertical_connection)
+        
+        assert torch.allclose(
+            vertical_output,
+            vertical_vectors[..., bundle.base_dim:],
+            rtol=1e-5
+        ), "Connection should preserve vertical vectors"
+        
+        # Create purely horizontal vectors
+        horizontal_vectors = torch.zeros_like(total_vectors)
+        horizontal_vectors[..., :bundle.base_dim] = total_vectors[..., :bundle.base_dim]
+        
+        # Verify that horizontal vectors give zero vertical component
+        horizontal_connection = bundle.connection_form(horizontal_vectors)
+        horizontal_output = self._get_vertical_components(horizontal_connection)
+        
+        assert torch.allclose(
+            horizontal_output,
+            torch.zeros_like(horizontal_output),
+            rtol=1e-5
+        ), "Horizontal vectors should have zero vertical component"
+
+    @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
+    def test_structure_group_respect(self, bundle, request, test_config):
+        """Test that the connection form respects the structure group action."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        # Create test points and vectors
+        total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        tangent_vectors = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        
+        # Create structure group element (SO(3) for our case)
+        theta = torch.randn(batch_size, dtype=dtype) * np.pi  # Random rotation angles
+        c, s = torch.cos(theta), torch.sin(theta)
+        g = torch.stack([
+            torch.stack([c, -s, torch.zeros_like(c)], dim=-1),
+            torch.stack([s, c, torch.zeros_like(c)], dim=-1),
+            torch.stack([torch.zeros_like(c), torch.zeros_like(c), torch.ones_like(c)], dim=-1)
+        ], dim=-2)
+        
+        # Apply structure group action
+        transformed_points = torch.clone(total_points)
+        transformed_points[..., bundle.base_dim:] = torch.matmul(
+            g, total_points[..., bundle.base_dim:].unsqueeze(-1)
+        ).squeeze(-1)
+        
+        transformed_vectors = torch.clone(tangent_vectors)
+        transformed_vectors[..., bundle.base_dim:] = torch.matmul(
+            g, tangent_vectors[..., bundle.base_dim:].unsqueeze(-1)
+        ).squeeze(-1)
+        
+        # Compare connection forms
+        original_connection = bundle.connection_form(tangent_vectors)
+        transformed_connection = bundle.connection_form(transformed_vectors)
+        
+        if isinstance(bundle, PatternFiberBundle):
+            # For matrix form, conjugate by g
+            expected_connection = torch.matmul(
+                torch.matmul(g, original_connection),
+                g.transpose(-2, -1)
+            )
+        else:
+            # For vector form, transform by g
+            expected_connection = torch.matmul(
+                g, original_connection.unsqueeze(-1)
+            ).squeeze(-1)
+            
+        assert torch.allclose(
+            transformed_connection,
+            expected_connection,
+            rtol=1e-5
+        ), "Connection should respect structure group action"
+
+    @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
+    def test_fiber_metric_preservation(self, bundle, request, test_config):
+        """Test that the connection form preserves the fiber metric."""
+        bundle = request.getfixturevalue(bundle)
+        dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+        batch_size = test_config["geometric_tests"]["batch_size"]
+        
+        # Create test points and vectors
+        total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        X = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
+        Y = torch.randn(batch_size, bundle.fiber_dim, dtype=dtype)
+        
+        # Get fiber metric (identity for SO(3))
+        fiber_metric = torch.eye(bundle.fiber_dim, dtype=dtype).expand(batch_size, -1, -1)
+        
+        # Compute connection form
+        connection = bundle.connection_form(X)
+        
+        if isinstance(bundle, PatternFiberBundle):
+            # For matrix form
+            metric_derivative = torch.matmul(connection, fiber_metric) + \
+                              torch.matmul(fiber_metric, connection.transpose(-2, -1))
+        else:
+            # For vector form, construct the matrix form first
+            connection_matrix = torch.zeros(
+                batch_size, bundle.fiber_dim, bundle.fiber_dim,
+                dtype=dtype
+            )
+            for i in range(bundle.fiber_dim):
+                connection_matrix[..., i, i] = connection[..., i]
+            metric_derivative = torch.matmul(connection_matrix, fiber_metric) + \
+                              torch.matmul(fiber_metric, connection_matrix.transpose(-2, -1))
+        
+        assert torch.allclose(
+            metric_derivative,
+            torch.zeros_like(metric_derivative),
+            rtol=1e-5
+        ), "Connection should preserve fiber metric"
 
 
 class TestBaseFiberBundle:
