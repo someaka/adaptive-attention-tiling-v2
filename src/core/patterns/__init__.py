@@ -1,6 +1,7 @@
-"""Pattern module for geometric pattern analysis."""
+"""Core pattern analysis functionality."""
 
-from .fiber_bundle import FiberBundle
+from .fiber_types import FiberBundle, LocalChart, FiberChart
+from .fiber_bundle import BaseFiberBundle
 from .riemannian import (
     BaseRiemannianStructure,
     RiemannianFramework,
@@ -18,16 +19,19 @@ from .evolution import PatternEvolution
 from .dynamics import PatternDynamics
 
 __all__ = [
-    "BaseRiemannianStructure",
-    "ChristoffelSymbols",
-    "CurvatureTensor",
-    "FiberBundle",
-    "MetricTensor",
-    "PatternDynamics",
-    "PatternEvolution",
-    "PatternRiemannianStructure",
-    "RiemannianFramework",
-    "RiemannianStructure",
-    "RiemannianValidator",
-    "ValidationMixin",
+    'FiberBundle',
+    'LocalChart',
+    'FiberChart',
+    'BaseFiberBundle',
+    'BaseRiemannianStructure',
+    'ChristoffelSymbols',
+    'CurvatureTensor',
+    'MetricTensor',
+    'PatternDynamics',
+    'PatternEvolution',
+    'PatternRiemannianStructure',
+    'RiemannianFramework',
+    'RiemannianStructure',
+    'RiemannianValidator',
+    'ValidationMixin',
 ]

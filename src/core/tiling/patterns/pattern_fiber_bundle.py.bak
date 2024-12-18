@@ -12,112 +12,33 @@ Key components:
 """
 
 from dataclasses import dataclass
-from typing import Generic, Protocol, Tuple, TypeVar, Optional, Union
-
+from typing import Generic, Protocol, Tuple, TypeVar, Optional, Union, Dict, Any
 import torch
-from torch import nn
-from src.core.patterns.riemannian_base import MetricTensor
+from torch import nn, Tensor
+import torch.nn.functional as F
+
+from src.core.patterns.riemannian_base import (
+    MetricTensor,
+    RiemannianStructure,
+    ChristoffelSymbols,
+    CurvatureTensor
+)
+from src.core.patterns.fiber_types import (
+    FiberBundle,
+    LocalChart,
+    FiberChart
+)
+from src.core.patterns.motivic_riemannian import (
+    MotivicRiemannianStructure,
+    MotivicMetricTensor
+)
+from src.core.tiling.patterns.cohomology import HeightStructure
+from src.core.tiling.geometric_flow import GeometricFlow
+from src.core.patterns.formation import PatternFormation
 
 T = TypeVar("T")
 S = TypeVar("S")
 StructureGroup = TypeVar("StructureGroup", torch.Tensor, str)
-
-
-@dataclass
-class LocalChart(Generic[T]):
-    """Local coordinate chart on the base manifold.
-    
-    Attributes:
-        coordinates: Local coordinates in the chart
-        dimension: Dimension of the chart
-        transition_maps: Dictionary of transitions to other charts
-    """
-    coordinates: T
-    dimension: int
-    transition_maps: dict
-
-
-@dataclass
-class FiberChart(Generic[T, StructureGroup]):
-    """Local trivialization of the fiber.
-    
-    Attributes:
-        fiber_coordinates: Coordinates in the fiber
-        structure_group: Group acting on the fiber
-        transition_functions: Dictionary of fiber transitions
-    """
-    fiber_coordinates: T
-    structure_group: StructureGroup
-    transition_functions: dict
-
-
-class FiberBundle(Protocol[T]):
-    """Protocol defining required operations for fiber bundles.
-    
-    This protocol specifies the minimal interface that any fiber bundle
-    implementation must provide. It captures the essential geometric
-    operations needed for pattern analysis.
-    
-    Type Parameters:
-        T: The type of the underlying space (usually torch.Tensor)
-    """
-
-    def bundle_projection(self, total_space: T) -> T:
-        """Projects from total space to base space.
-        
-        Args:
-            total_space: Point in the total space E
-            
-        Returns:
-            The projection π(p) in the base space M
-        """
-        ...
-
-    def local_trivialization(self, point: T) -> Tuple[LocalChart[T], FiberChart[T, str]]:
-        """Provides local product structure.
-        
-        Args:
-            point: Point p in the total space E
-            
-        Returns:
-            Tuple (φ₁(p), φ₂(p)) giving local coordinates in U×F
-        """
-        ...
-
-    def transition_functions(self, chart1: T, chart2: T) -> T:
-        """Computes transition between charts.
-        
-        Args:
-            chart1: First local chart
-            chart2: Second local chart
-            
-        Returns:
-            The transition function g₁₂ between charts
-        """
-        ...
-
-    def connection_form(self, tangent_vector: T) -> T:
-        """Computes the connection form for parallel transport.
-        
-        Args:
-            tangent_vector: Tangent vector X at a point
-            
-        Returns:
-            The connection form ω(X) valued in the Lie algebra
-        """
-        ...
-
-    def parallel_transport(self, section: T, path: T) -> T:
-        """Parallel transports a section along a path.
-        
-        Args:
-            section: Section to transport
-            path: Path along which to transport
-            
-        Returns:
-            The parallel transported section
-        """
-        ...
 
 
 class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
@@ -133,7 +54,8 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         base_dim: int = 2,
         fiber_dim: int = 3,
         structure_group: str = "O(n)",
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        num_primes: int = 8  # Added parameter for height structure
     ):
         """Initialize pattern fiber bundle.
         
@@ -142,6 +64,7 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
             fiber_dim: Dimension of fiber
             structure_group: Structure group of the bundle (default: O(n))
             device: Device to place tensors on
+            num_primes: Number of primes for height structure (default: 8)
         """
         super().__init__()
         
@@ -150,6 +73,20 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         self.total_dim = base_dim + fiber_dim
         self.structure_group = structure_group
         self.device = device if device is not None else torch.device('cpu')
+        
+        # Initialize height structure for motivic metric
+        self.height_structure = HeightStructure(num_primes)
+        
+        # Initialize geometric flow for Fisher-Rao metric
+        self.geometric_flow = GeometricFlow(
+            hidden_dim=fiber_dim,  # Hidden dimension for flow computations
+            manifold_dim=base_dim,  # Base manifold dimension for Fisher-Rao
+            motive_rank=4,         # Default rank for motivic structure
+            num_charts=1,          # Single chart for now
+            integration_steps=10,   # Default integration steps
+            dt=0.1,               # Default time step
+            stability_threshold=1e-6
+        )
         
         # Initialize Lie algebra basis matrices
         self.basis_matrices = torch.zeros(
@@ -612,24 +549,33 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         # Compute transport step using matrix multiplication
         return -torch.matmul(connection, section.unsqueeze(-1)).squeeze(-1)
 
-    def compute_metric(self, points: torch.Tensor) -> MetricTensor[torch.Tensor]:
+    def compute_metric(self, points: torch.Tensor) -> MotivicMetricTensor:
         """Compute metric tensor at given points.
         
         Args:
             points: Points tensor of shape (batch_size, total_dim)
             
         Returns:
-            MetricTensor containing values and properties
+            MotivicMetricTensor containing values, height structure, and properties
         """
         batch_size = points.shape[0]
         
         # Start with base metric
         values = self.metric.expand(batch_size, -1, -1).clone()
         
+        # Get base manifold points
+        base_points = points[..., :self.base_dim]
+        
+        # Compute Fisher-Rao metric using geometric flow
+        fisher = self.geometric_flow.metric.compute_fisher_metric(base_points)
+        
+        # Add Fisher-Rao metric to base part
+        values[..., :self.base_dim, :self.base_dim] += fisher
+        
         # Add point-dependent perturbation for the fiber part
         fiber_points = points[..., self.base_dim:]
         
-        # Compute symmetric perturbation matrix for fiber part using a symmetric quadratic form
+        # Compute symmetric perturbation matrix for fiber part
         fiber_pert = torch.zeros(batch_size, self.fiber_dim, self.fiber_dim,
                                device=points.device, dtype=points.dtype)
         
@@ -649,18 +595,26 @@ class PatternFiberBundle(nn.Module, FiberBundle[torch.Tensor]):
         # Add perturbation to fiber part of metric
         values[..., self.base_dim:, self.base_dim:] += fiber_pert
         
-        # Add small identity to ensure positive definiteness
-        values = values + 1e-6 * torch.eye(
+        # Ensure positive definiteness by adding a regularization term
+        # First symmetrize
+        values = 0.5 * (values + values.transpose(-2, -1))
+        
+        # Add regularization term
+        reg_term = 1e-3 * torch.eye(
             self.total_dim,
             device=values.device,
             dtype=values.dtype
         ).expand(batch_size, -1, -1)
         
-        # Validate metric properties
-        is_compatible = True  # We ensure this by construction
+        # Add larger regularization to fiber part
+        reg_term[..., self.base_dim:, self.base_dim:] *= 10.0
         
-        return MetricTensor(
+        values = values + reg_term
+        
+        # Create MotivicMetricTensor with height structure
+        return MotivicMetricTensor(
             values=values,
             dimension=self.total_dim,
-            is_compatible=is_compatible
+            height_structure=self.height_structure,
+            is_compatible=True  # We ensure this by construction
         )

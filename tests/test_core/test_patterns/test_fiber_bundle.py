@@ -21,7 +21,7 @@ import hypothesis.extra.numpy as hnp
 import logging
 
 from src.core.patterns.fiber_bundle import BaseFiberBundle
-from src.core.tiling.patterns.fiber_bundle import (
+from src.core.tiling.patterns.pattern_fiber_bundle import (
     FiberBundle,
     PatternFiberBundle,
     LocalChart,

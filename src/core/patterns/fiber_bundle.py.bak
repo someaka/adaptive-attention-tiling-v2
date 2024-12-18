@@ -16,6 +16,17 @@ from .fiber_types import (
     FiberChart,
 )
 from src.core.patterns.riemannian_base import MetricTensor
+from src.core.patterns.dynamics import PatternDynamics
+from src.core.patterns.evolution import PatternEvolution
+from src.core.patterns.symplectic import SymplecticStructure
+from src.core.tiling.patterns.cohomology import (
+    HeightStructure,
+    ArithmeticForm,
+    ArithmeticDynamics
+)
+from src.core.tiling.geometric_flow import GeometricFlow
+from src.core.patterns.formation import PatternFormation
+from src.core.patterns.riemannian import PatternRiemannianStructure
 
 
 class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
@@ -31,6 +42,13 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         base_dim: int,
         fiber_dim: int,
         structure_group: Optional[str] = None,
+        num_primes: int = 8,
+        motive_rank: int = 4,
+        integration_steps: int = 10,
+        dt: float = 0.1,
+        stability_threshold: float = 1e-6,
+        learning_rate: float = 0.01,
+        momentum: float = 0.9,
     ):
         """Initialize fiber bundle.
         
@@ -38,6 +56,13 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             base_dim: Dimension of base manifold
             fiber_dim: Dimension of fiber
             structure_group: Name of structure group (e.g. 'SO3', 'U1')
+            num_primes: Number of primes for height structure
+            motive_rank: Rank for motivic structure
+            integration_steps: Number of steps for geometric flow
+            dt: Time step for integration
+            stability_threshold: Threshold for stability detection
+            learning_rate: Learning rate for pattern evolution
+            momentum: Momentum coefficient for pattern evolution
         """
         super().__init__()  # Initialize nn.Module
         self.base_dim = base_dim
@@ -51,6 +76,49 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         # Initialize connection form
         # Shape: (base_dim, fiber_dim, fiber_dim)
         self.connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim)
+
+        # Initialize height structure for cohomology
+        self.height_structure = HeightStructure(num_primes)
+
+        # Initialize geometric flow for stability
+        self.geometric_flow = GeometricFlow(
+            hidden_dim=fiber_dim,
+            manifold_dim=base_dim,
+            motive_rank=motive_rank,
+            num_charts=1,  # Single chart for base implementation
+            integration_steps=integration_steps,
+            dt=dt,
+            stability_threshold=stability_threshold
+        )
+
+        # Initialize pattern formation dynamics
+        self.pattern_formation = PatternFormation(
+            dim=fiber_dim,
+            dt=dt,
+            diffusion_coeff=0.1,  # Default diffusion coefficient
+            reaction_coeff=1.0     # Default reaction coefficient
+        )
+
+        # Initialize pattern dynamics
+        self.pattern_dynamics = PatternDynamics(dt=dt)
+
+        # Initialize Riemannian framework for pattern evolution
+        self.riemannian_framework = PatternRiemannianStructure(
+            manifold_dim=self.total_dim,
+            pattern_dim=self.fiber_dim,  # Pattern dimension is the fiber dimension
+            device=None,  # Use default device
+            dtype=None    # Use default dtype
+        )
+
+        # Initialize pattern evolution with proper framework
+        self.pattern_evolution = PatternEvolution(
+            framework=self.riemannian_framework,
+            learning_rate=learning_rate,
+            momentum=momentum
+        )
+
+        # Initialize symplectic structure
+        self.symplectic = SymplecticStructure(dim=fiber_dim)
 
     def bundle_projection(self, total_space: Tensor) -> Tensor:
         """Implementation of FiberBundle.bundle_projection.
@@ -97,12 +165,13 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
     def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
         """Implementation of FiberBundle.local_trivialization.
         
-        Compute local trivialization at a point.
+        Compute local trivialization at a point, integrating pattern dynamics
+        and symplectic structure.
         
         Properties preserved:
-        1. Local product structure
-        2. Smooth transition functions
-        3. Structure group action
+        1. Pattern evolution in fiber coordinates
+        2. Symplectic structure of pattern space
+        3. Geometric flow stability
         
         Args:
             point: Point in total space
@@ -113,21 +182,35 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         # Get base coordinates through projection
         base_coords = self.bundle_projection(point)
         
-        # Get fiber coordinates
+        # Get fiber coordinates with pattern dynamics
         fiber_coords = point[..., self.base_dim:]
         
-        # Create local chart
+        # Compute symplectic form at current point
+        symplectic_form = self.symplectic.compute_form(fiber_coords)
+        
+        # Create transition maps dictionary with geometric flow
+        transition_maps = {
+            'geometric_flow': self.geometric_flow,
+            'symplectic_form': symplectic_form,
+            'pattern_dynamics': self.pattern_dynamics
+        }
+        
+        # Create local chart with enhanced structure
         local_chart = LocalChart(
             coordinates=base_coords,
             dimension=self.base_dim,
-            transition_maps={}
+            transition_maps=transition_maps
         )
         
-        # Create fiber chart
+        # Create fiber chart with pattern-specific features
         fiber_chart = FiberChart(
             fiber_coordinates=fiber_coords,
             structure_group=self.structure_group or "SO3",
-            transition_functions={}
+            transition_functions={
+                'evolution': self.pattern_evolution,
+                'dynamics': self.pattern_dynamics,
+                'symplectic': symplectic_form
+            }
         )
         
         return local_chart, fiber_chart
@@ -307,12 +390,41 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         # Start with base metric
         values = self.metric.expand(batch_size, -1, -1).clone()
         
-        # Add regularization term to ensure positive definiteness
+        # Add point-dependent perturbation for the fiber part
+        fiber_points = points[..., self.base_dim:]
+        
+        # Compute symmetric perturbation matrix for fiber part using a symmetric quadratic form
+        fiber_pert = torch.zeros(batch_size, self.fiber_dim, self.fiber_dim,
+                               device=points.device, dtype=points.dtype)
+        
+        for b in range(batch_size):
+            # Create symmetric quadratic form using outer product
+            outer_prod = torch.outer(fiber_points[b], fiber_points[b])
+            # Symmetrize the outer product
+            sym_outer = 0.5 * (outer_prod + outer_prod.t())
+            
+            # Add symmetric quadratic terms
+            fiber_pert[b] = 0.1 * sym_outer + 0.05 * torch.diag(fiber_points[b]**2)
+            
+            # Add regularization to ensure positive definiteness
+            fiber_pert[b] += 0.01 * torch.eye(self.fiber_dim, device=points.device, dtype=points.dtype)
+        
+        # Add perturbation to fiber part of metric
+        values[..., self.base_dim:, self.base_dim:] += fiber_pert
+        
+        # Ensure positive definiteness by adding a regularization term
+        # First symmetrize
+        values = 0.5 * (values + values.transpose(-2, -1))
+        
+        # Add regularization term
         reg_term = 1e-3 * torch.eye(
             self.total_dim,
             device=values.device,
             dtype=values.dtype
         ).expand(batch_size, -1, -1)
+        
+        # Add larger regularization to fiber part
+        reg_term[..., self.base_dim:, self.base_dim:] *= 10.0
         
         values = values + reg_term
         
@@ -324,3 +436,51 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             dimension=self.total_dim,
             is_compatible=is_compatible
         )
+
+    def compute_stability(self, point: Tensor) -> Dict[str, Any]:
+        """Compute stability metrics at a point.
+        
+        Args:
+            point: Point in total space
+            
+        Returns:
+            Dictionary containing stability metrics
+        """
+        # Get local coordinates
+        local_chart, fiber_chart = self.local_trivialization(point)
+        
+        # Compute geometric stability using flow
+        flow_metrics = self.geometric_flow.metric.compute_fisher_metric(local_chart.coordinates)
+        
+        # Compute pattern stability
+        pattern_metrics = self.pattern_formation.compute_stability(fiber_chart.fiber_coordinates)
+        
+        # Compute height-based stability
+        height_metrics = self.height_structure.compute_height(point)
+        
+        return {
+            "geometric_stability": flow_metrics,
+            "pattern_stability": pattern_metrics,
+            "height_stability": height_metrics
+        }
+
+    def compute_cohomology(self, point: Tensor) -> Tensor:
+        """Compute cohomology class at a point.
+        
+        Args:
+            point: Point in total space
+            
+        Returns:
+            Cohomology class tensor
+        """
+        # Create arithmetic form from point
+        form = ArithmeticForm(
+            degree=2,  # Use degree 2 for bundle cohomology
+            coefficients=point
+        )
+        
+        # Compute height data
+        height_data = self.height_structure.compute_height(point)
+        form.height_data = height_data
+        
+        return form.coefficients

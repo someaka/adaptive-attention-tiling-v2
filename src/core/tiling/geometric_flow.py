@@ -19,12 +19,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from .arithmetic_dynamics import ArithmeticDynamics
-from .patterns.fiber_bundle import (
+from .patterns.pattern_fiber_bundle import (
     FiberBundle,
     LocalChart,
     FiberChart
 )
-from ..tiling.patterns.fiber_bundle import PatternFiberBundle
+from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
 
 class RiemannianMetric(nn.Module):
     """Learnable Riemannian metric tensor implementing Fisher-Rao metric."""

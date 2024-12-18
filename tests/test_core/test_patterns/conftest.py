@@ -11,7 +11,7 @@ import torch
 import yaml
 
 from src.core.patterns.fiber_bundle import BaseFiberBundle
-from src.core.tiling.patterns.fiber_bundle import PatternFiberBundle
+from src.core.tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
 
 
 @pytest.fixture
