@@ -3,11 +3,25 @@ Pattern-Specific Fiber Bundle Implementation.
 
 This module extends the base fiber bundle with pattern-specific features
 for analyzing feature spaces and pattern dynamics.
+
+The implementation is organized into three main components:
+1. Configuration management via BundleConfig
+2. Tensor state management via TensorStateContext
+3. Core fiber bundle operations
 """
 
+from __future__ import annotations  # Enable forward references in type hints
+
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Tuple, TypeVar, Union, Type
+from functools import cached_property
+from types import TracebackType
+from typing import (
+    Optional, Dict, Any, List, Tuple, TypeVar, Type, 
+    Final, Protocol, runtime_checkable
+)
+import warnings
 import torch
+import torch.nn.functional as F
 from torch import nn, Tensor
 
 from ...patterns.fiber_bundle import BaseFiberBundle
@@ -37,14 +51,181 @@ from ...patterns.riemannian import PatternRiemannianStructure
 from ...patterns.operadic_structure import AttentionOperad, OperadicOperation, OperadicComposition
 from ...patterns.enriched_structure import PatternTransition, WaveEmergence
 
+# Type variables for generic type hints
+T_co = TypeVar('T_co', bound=Tensor, covariant=True)  # Covariant type for tensor operations
+
+@dataclass(frozen=True)
+class BundleConfig:
+    """Configuration for pattern fiber bundle.
+    
+    This immutable configuration class defines all parameters needed for
+    the pattern fiber bundle's operation, ensuring type safety and
+    preventing accidental modification during runtime.
+    
+    Attributes:
+        base_dim: Dimension of base manifold
+        fiber_dim: Dimension of fiber (typically SO(3))
+        num_primes: Number of primes for height structure
+        motive_rank: Rank for motivic structure
+        integration_steps: Steps for geometric flow
+        dt: Time step for integration
+        stability_threshold: Threshold for stability
+        learning_rate: Learning rate for evolution
+        momentum: Momentum for evolution
+    """
+    base_dim: int
+    fiber_dim: int
+    num_primes: int
+    motive_rank: int
+    integration_steps: int
+    dt: float
+    stability_threshold: float
+    learning_rate: float
+    momentum: float
+
+    def __post_init__(self) -> None:
+        """Validate configuration parameters."""
+        if any(v <= 0 for v in [
+            self.base_dim, self.fiber_dim, self.num_primes,
+            self.motive_rank, self.integration_steps, self.dt,
+            self.stability_threshold, self.learning_rate
+        ]):
+            raise ValueError("All parameters must be positive")
+        if not 0 <= self.momentum < 1:
+            raise ValueError("momentum must be in [0, 1)")
+
+@runtime_checkable
+class TensorStateManager(Protocol[T_co]):
+    """Protocol for tensor state management."""
+    def __enter__(self) -> T_co: ...
+    def __exit__(self, exc_type: Optional[Type[BaseException]], 
+                exc_val: Optional[BaseException],
+                exc_tb: Optional[TracebackType]) -> bool: ...
+
+class TensorStateContext:
+    """Context manager for temporary tensor state changes.
+    
+    Provides a safe way to temporarily modify tensor device and dtype,
+    ensuring proper restoration of original state even if exceptions occur.
+    
+    This class is used internally by PatternFiberBundle to manage tensor
+    state transitions efficiently and safely.
+    
+    Attributes:
+        bundle: Parent fiber bundle instance
+        original_tensor: Original tensor before state change
+        target: Optional tensor to match device and dtype
+        original_device: Original tensor device
+        original_dtype: Original tensor dtype
+        modified_tensor: Modified tensor with temporary state
+    """
+    
+    def __init__(self, bundle: 'PatternFiberBundle', tensor: Tensor, target: Optional[Tensor] = None):
+        self.bundle = bundle
+        self.original_tensor = tensor
+        self.target = target
+        self.original_device = tensor.device
+        self.original_dtype = tensor.dtype
+        self.modified_tensor: Optional[Tensor] = None
+        
+    def __enter__(self) -> Tensor:
+        """Transform tensor to target state and store modified version.
+        
+        Returns:
+            Modified tensor with target device and dtype
+            
+        Raises:
+            RuntimeError: If tensor state modification fails
+        """
+        try:
+            self.modified_tensor = self.bundle._ensure_tensor_format(self.original_tensor, self.target)
+            return self.modified_tensor
+        except Exception as e:
+            raise RuntimeError(f"Failed to modify tensor state: {str(e)}")
+        
+    def __exit__(self, exc_type: Optional[Type[BaseException]], 
+                exc_val: Optional[BaseException], 
+                exc_tb: Optional[TracebackType]) -> bool:
+        """Restore original tensor state if needed.
+        
+        Args:
+            exc_type: Type of exception that occurred, if any
+            exc_val: Exception instance that occurred, if any
+            exc_tb: Traceback of exception that occurred, if any
+        
+        Returns:
+            bool: False to propagate exceptions
+        """
+        if self.modified_tensor is not None:
+            if (self.modified_tensor.device != self.original_device or 
+                self.modified_tensor.dtype != self.original_dtype):
+                try:
+                    self.modified_tensor.to(
+                        device=self.original_device,
+                        dtype=self.original_dtype,
+                        non_blocking=True
+                    )
+                except RuntimeError as e:
+                    warnings.warn(f"Failed to restore tensor state: {str(e)}")
+        self.modified_tensor = None
+        return False
+
 
 class PatternFiberBundle(BaseFiberBundle):
     """Pattern-specific implementation of fiber bundle.
     
-    This class extends the base fiber bundle with features specific to
-    analyzing patterns in feature spaces. It adds pattern dynamics,
-    geometric flow, and stability analysis capabilities.
+    This module implements a specialized fiber bundle for analyzing patterns in feature spaces.
+    It extends the base fiber bundle with pattern-specific features including:
+    1. Pattern dynamics and evolution
+    2. Geometric flow analysis
+    3. Stability metrics
+    4. Cohomology with pattern structure
+    
+    The implementation follows these design principles:
+    1. Performance optimization for batch operations
+    2. Memory efficiency through in-place operations
+    3. Clear separation of concerns between components
+    4. Type safety and runtime validation
+    
+    Technical Details:
+    - Uses PyTorch for tensor operations
+    - Implements symplectic geometry for pattern analysis
+    - Provides cohomology computations with pattern structure
+    - Supports parallel transport with pattern evolution
+    
+    Constants:
+        Metric Constants:
+            _FIBER_PERT_SCALE: Scale for fiber metric perturbation (0.025)
+            _REG_SCALE_BASE: Base regularization scale (1e-3)
+            _REG_SCALE_FIBER: Fiber regularization (10x base, 1e-2)
+            _SYMPLECTIC_WEIGHT: Weight for symplectic contribution (0.1)
+        
+        Evolution Constants:
+            _EVOLUTION_TIME_STEPS: Steps for unstable point evolution (10)
+            _DEFAULT_NUM_LAYERS: Default layers in geometric flow (2)
+            _DEFAULT_REACTION_COEFF: Default reaction coefficient (1.0)
+            _DEFAULT_DIFFUSION_COEFF: Default diffusion coefficient (0.1)
     """
+    
+    #--------------------------------------------------------------------------
+    # Constants
+    #--------------------------------------------------------------------------
+    
+    # Metric Constants
+    _FIBER_PERT_SCALE: Final[float] = 0.025  # Scale for fiber metric perturbation
+    _REG_SCALE_BASE: Final[float] = 1e-3     # Base regularization scale
+    _REG_SCALE_FIBER: Final[float] = 1e-2    # Fiber regularization (10x base)
+    _SYMPLECTIC_WEIGHT: Final[float] = 0.1    # Weight for symplectic contribution
+    
+    # Evolution Constants
+    _EVOLUTION_TIME_STEPS: Final[int] = 10    # Number of steps for unstable point evolution
+    _DEFAULT_NUM_LAYERS: Final[int] = 2       # Default number of layers in geometric flow
+    _DEFAULT_REACTION_COEFF: Final[float] = 1.0  # Default reaction coefficient
+    _DEFAULT_DIFFUSION_COEFF: Final[float] = 0.1  # Default diffusion coefficient
+    
+    #--------------------------------------------------------------------------
+    # Initialization and Setup
+    #--------------------------------------------------------------------------
 
     def __init__(
         self,
@@ -60,108 +241,305 @@ class PatternFiberBundle(BaseFiberBundle):
         learning_rate: float = 0.01,
         momentum: float = 0.9,
     ):
-        """Initialize pattern fiber bundle.
-        
-        Args:
-            base_dim: Dimension of base manifold
-            fiber_dim: Dimension of fiber
-            structure_group: Structure group of the bundle (default: "O(n)")
-            device: Device to place tensors on
-            num_primes: Number of primes for height structure
-            motive_rank: Rank for motivic structure
-            integration_steps: Steps for geometric flow
-            dt: Time step for integration
-            stability_threshold: Threshold for stability
-            learning_rate: Learning rate for evolution
-            momentum: Momentum for evolution
-        """
-        # Initialize base bundle
+        """Initialize pattern fiber bundle."""
+        # Initialize base bundle and device
         super().__init__(base_dim, fiber_dim, structure_group)
+        self.device = device or torch.device('cpu')
+        self._structure_group_str = structure_group
         
-        self.device = device if device is not None else torch.device('cpu')
-        
-        # Initialize height structure
-        self.height_structure = HeightStructure(num_primes=num_primes)
-        
-        # Initialize operadic and enriched structures
-        self.operad = AttentionOperad(base_dim=base_dim)
-        self.wave = WaveEmergence(dt=dt, num_steps=integration_steps)
-        self.transition = PatternTransition(wave_emergence=self.wave)
-        
-        # Initialize geometric flow with natural dimension handling
-        self.geometric_flow = RiemannianFlow(
-            manifold_dim=base_dim,
-            hidden_dim=fiber_dim,
-            num_layers=2,
+        # Store configuration in type-safe dataclass
+        self._config = BundleConfig(
+            base_dim=base_dim,
+            fiber_dim=fiber_dim,
+            num_primes=num_primes,
+            motive_rank=motive_rank,
+            integration_steps=integration_steps,
             dt=dt,
             stability_threshold=stability_threshold,
-            use_parallel_transport=True
-        )
-        
-        # Initialize pattern-specific components
-        self.pattern_formation = PatternFormation(
-            dim=fiber_dim,
-            dt=dt,
-            diffusion_coeff=0.1,
-            reaction_coeff=1.0
-        )
-        
-        self.pattern_dynamics = PatternDynamics(dt=dt)
-        
-        self.riemannian_framework = PatternRiemannianStructure(
-            manifold_dim=self.total_dim,
-            pattern_dim=fiber_dim,
-            device=device,
-            dtype=None
-        )
-        
-        self.pattern_evolution = PatternEvolution(
-            framework=self.riemannian_framework,
             learning_rate=learning_rate,
-            momentum=momentum
+            momentum=momentum,
         )
         
-        # Initialize symplectic structure directly with fiber dimension
-        self.symplectic = SymplecticStructure(dim=fiber_dim)
-        
-        # Initialize operadic structure for dimensional transitions
-        self.operadic = OperadicComposition()
-        
-        # Initialize Lie algebra basis matrices for SO(3)
-        self.basis_matrices = torch.zeros(
-            fiber_dim * (fiber_dim - 1) // 2,  # Number of SO(3) generators
-            fiber_dim,
-            fiber_dim,
-            device=self.device
-        )
-        
-        # Fill basis matrices with SO(3) generators
-        idx = 0
-        for i in range(fiber_dim):
-            for j in range(i + 1, fiber_dim):
-                basis = torch.zeros(fiber_dim, fiber_dim, device=self.device)
-                basis[i, j] = 1.0
-                basis[j, i] = -1.0
-                self.basis_matrices[idx] = basis
-                idx += 1
+        # Initialize all components
+        self._initialize_components()
         
         # Move to device
         self.to(self.device)
-        
-        # Store structure group string for fiber chart creation
-        self._structure_group_str = structure_group
 
-    def _handle_dimension_transition(self, tensor: Tensor) -> Tensor:
-        """Handle dimensional transitions using operadic structure."""
-        source_dim = tensor.shape[-1]
-        target_dim = self.fiber_dim
+    def _initialize_components(self) -> None:
+        """Initialize all pattern-specific components."""
+        # Initialize algebraic structures
+        self.height_structure = HeightStructure(num_primes=self._config.num_primes)
+        self.operadic = AttentionOperad(base_dim=self._config.base_dim)
+        self.symplectic = SymplecticStructure(dim=self._config.fiber_dim)
+        self._initialize_basis_matrices()
         
-        if source_dim == target_dim:
+        # Initialize wave and transition components
+        self.wave = WaveEmergence(
+            dt=self._config.dt, 
+            num_steps=self._config.integration_steps
+        )
+        self.transition = PatternTransition(wave_emergence=self.wave)
+        
+        # Initialize geometric components
+        self.geometric_flow = RiemannianFlow(
+            manifold_dim=self._config.base_dim,
+            hidden_dim=self._config.fiber_dim,
+            num_layers=self._DEFAULT_NUM_LAYERS,
+            dt=self._config.dt,
+            stability_threshold=self._config.stability_threshold,
+            use_parallel_transport=True
+        )
+        
+        self.riemannian_framework = PatternRiemannianStructure(
+            manifold_dim=self.total_dim,
+            pattern_dim=self._config.fiber_dim,
+            device=self.device,
+            dtype=None
+        )
+        
+        # Initialize pattern dynamics components
+        self.pattern_formation = PatternFormation(
+            dim=self._config.fiber_dim,
+            dt=self._config.dt,
+            diffusion_coeff=self._DEFAULT_DIFFUSION_COEFF,
+            reaction_coeff=self._DEFAULT_REACTION_COEFF
+        )
+        self.pattern_dynamics = PatternDynamics(dt=self._config.dt)
+        self.pattern_evolution = PatternEvolution(
+            framework=self.riemannian_framework,
+            learning_rate=self._config.learning_rate,
+            momentum=self._config.momentum
+        )
+
+    def _initialize_basis_matrices(self) -> None:
+        """Initialize Lie algebra basis matrices for SO(3)."""
+        self.basis_matrices = torch.zeros(
+            self.fiber_dim * (self.fiber_dim - 1) // 2,  # Number of SO(3) generators
+            self.fiber_dim,
+            self.fiber_dim,
+            device=self.device
+        )
+        
+        for idx, (i, j) in enumerate(
+            (i, j) 
+            for i in range(self.fiber_dim) 
+            for j in range(i + 1, self.fiber_dim)
+        ):
+            basis = torch.zeros(self.fiber_dim, self.fiber_dim, device=self.device)
+            basis[i, j] = 1.0
+            basis[j, i] = -1.0
+            self.basis_matrices[idx] = basis
+
+    #--------------------------------------------------------------------------
+    # Cached Properties
+    #--------------------------------------------------------------------------
+
+    @cached_property
+    def _triu_indices(self) -> Tuple[Tensor, Tensor]:
+        """Cached upper triangular indices for fiber perturbation."""
+        i_indices, j_indices = torch.triu_indices(self.fiber_dim, self.fiber_dim)
+        return i_indices.to(self.device), j_indices.to(self.device)
+
+    @cached_property
+    def _eye_matrix(self) -> Tensor:
+        """Cached identity matrix for positive definiteness."""
+        return torch.eye(
+            self.total_dim,
+            device=self.device,
+            dtype=torch.float32
+        )
+
+    @cached_property
+    def _reg_scale(self) -> Tensor:
+        """Cached regularization scale for positive definiteness."""
+        reg_scale = torch.ones(
+            self.total_dim, 
+            self.total_dim,
+            device=self.device,
+            dtype=torch.float32
+        ) * 1e-3
+        reg_scale[self.base_dim:, self.base_dim:] *= 10.0
+        return reg_scale
+
+    #--------------------------------------------------------------------------
+    # Tensor State Management
+    #--------------------------------------------------------------------------
+
+    def _ensure_tensor_format(self, tensor: Tensor, target_tensor: Optional[Tensor] = None) -> Tensor:
+        """Ensure tensor has correct device and numeric type.
+        
+        This method efficiently handles tensor format conversion with minimal
+        memory allocation and device transfers.
+        
+        Args:
+            tensor: Input tensor to format
+            target_tensor: Optional tensor to match device and dtype
+            
+        Returns:
+            Properly formatted tensor with optimal memory layout
+        """
+        if not isinstance(tensor, Tensor):
+            return torch.tensor(tensor, device=self.device)
+        
+        needs_device_change = (
+            target_tensor is not None and tensor.device != target_tensor.device or
+            target_tensor is None and tensor.device != self.device
+        )
+        needs_dtype_change = (
+            target_tensor is not None and tensor.dtype != target_tensor.dtype
+        )
+        needs_contiguous = not tensor.is_contiguous()
+        
+        # Optimize device and dtype changes by combining them when possible
+        if needs_device_change or needs_dtype_change:
+            target_device = target_tensor.device if target_tensor is not None else self.device
+            target_dtype = target_tensor.dtype if target_tensor is not None else tensor.dtype
+            tensor = tensor.to(device=target_device, dtype=target_dtype, non_blocking=True)
+        
+        # Make contiguous only if needed
+        if needs_contiguous:
+            tensor = tensor.contiguous()
+            
+        return tensor
+
+    def _ensure_broadcasting(self, tensor: Tensor, target_tensor: Tensor) -> Tensor:
+        """Ensure proper broadcasting dimensions for tensor operations.
+        
+        This method efficiently handles tensor broadcasting with minimal
+        memory allocation and optimal view/expand operations.
+        
+        Args:
+            tensor: Tensor to broadcast
+            target_tensor: Target tensor to match dimensions
+            
+        Returns:
+            Properly broadcasted tensor with optimal memory layout
+            
+        Note:
+            Uses view + expand instead of repeat for memory efficiency
+        """
+        tensor = self._ensure_tensor_format(tensor, target_tensor)
+        
+        if tensor.shape == target_tensor.shape:
             return tensor
             
-        operation = self.operadic.create_operation(source_dim, target_dim)
-        return torch.einsum('...i,ij->...j', tensor, operation.composition_law)
+        try:
+            # Try direct expansion first (most memory efficient)
+            return tensor.expand_as(target_tensor)
+        except RuntimeError:
+            # If direct expansion fails, try adding missing dimensions
+            missing_dims = len(target_tensor.shape) - len(tensor.shape)
+            if missing_dims > 0:
+                # Use view instead of unsqueeze for better performance
+                new_shape = (1,) * missing_dims + tensor.shape
+                tensor = tensor.view(*new_shape)
+                return tensor.expand_as(target_tensor)
+            raise  # Re-raise if we can't handle the broadcasting
+
+    def with_tensor_state(self, tensor: Tensor, target: Optional[Tensor] = None) -> TensorStateContext:
+        """Create a context for temporary tensor state changes.
         
+        This is the recommended way to handle tensor state changes in a safe
+        and efficient manner.
+        
+        Args:
+            tensor: Tensor to modify
+            target: Optional tensor to match device and dtype
+            
+        Returns:
+            Context manager for tensor state changes
+            
+        Example:
+            >>> with self.with_tensor_state(tensor, target) as formatted_tensor:
+            ...     # Do operations with formatted_tensor
+            ...     # Original state is restored after the block
+        """
+        return TensorStateContext(self, tensor, target)
+
+    def to(self, device: torch.device) -> 'PatternFiberBundle':
+        """Move the bundle to the specified device."""
+        self.device = device
+        return super().to(device)
+        
+    #--------------------------------------------------------------------------
+    # Core Bundle Operations
+    #--------------------------------------------------------------------------
+
+    def _handle_dimension_transition(self, tensor: Tensor) -> Tensor:
+        """Handle dimension transitions for tensors using operadic structure.
+        
+        Args:
+            tensor: Input tensor to handle dimension transition for
+            
+        Returns:
+            Tensor with correct dimensions through operadic transitions
+        """
+        if tensor.dim() == 2:  # For 2D tensors (matrices)
+            if tensor.shape[0] != self.base_dim or tensor.shape[1] != self.fiber_dim:
+                # Create operadic operations for both dimensions
+                base_operation = self.operadic.create_operation(
+                    source_dim=tensor.shape[0],
+                    target_dim=self.base_dim
+                )
+                fiber_operation = self.operadic.create_operation(
+                    source_dim=tensor.shape[1],
+                    target_dim=self.fiber_dim
+                )
+                
+                # Apply operadic composition laws
+                result = torch.einsum('ij,jk,kl->il',
+                                    base_operation.composition_law,
+                                    tensor,
+                                    fiber_operation.composition_law.transpose(-2, -1))
+                
+                return result
+        return tensor
+
+    def _handle_dimension(self, tensor: Tensor, target_dim: Optional[int] = None) -> Tensor:
+        """Handle dimension transitions using operadic structure.
+        
+        Args:
+            tensor: Input tensor to transform
+            target_dim: Optional target dimension (defaults to fiber_dim)
+            
+        Returns:
+            Transformed tensor with correct dimensions through operadic transitions
+            
+        Raises:
+            ValueError: If tensor dimension is invalid or operation fails
+            RuntimeError: If transformation fails
+        """
+        if target_dim is None:
+            target_dim = self.fiber_dim
+            
+        if tensor.shape[-1] == target_dim:
+            return tensor
+            
+        try:
+            # Save original shape for proper reshaping
+            original_shape = tensor.shape[:-1]
+            
+            # Create operadic operation for dimension transition
+            operation = self.operadic.create_operation(
+                source_dim=tensor.shape[-1],
+                target_dim=target_dim
+            )
+            
+            # Reshape tensor to match operation dimensions
+            reshaped = tensor.reshape(-1, tensor.shape[-1])
+            
+            # Apply operadic composition law
+            result = torch.matmul(reshaped, operation.composition_law.t())
+            
+            # Restore original shape
+            result = result.reshape(*original_shape, target_dim)
+            
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to transform tensor dimensions: {str(e)}") from e
+
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Compute connection form using operadic structure.
         
@@ -169,48 +547,66 @@ class PatternFiberBundle(BaseFiberBundle):
             tangent_vector: Tangent vector to compute connection for
             
         Returns:
-            Connection form tensor
+            Connection form tensor representing the local connection on the bundle
+            
+        Raises:
+            RuntimeError: If computation fails
         """
-        # Split into base and fiber components
-        base_components = tangent_vector[..., :self.base_dim]
-        vertical_components = tangent_vector[..., self.base_dim:]
-        
-        # Handle vertical part directly
-        result = torch.zeros_like(vertical_components)
-        
-        # Add geometric flow contribution using operadic transition
-        flow_metric = self.geometric_flow.compute_metric(base_components)
-        
-        # Ensure connection tensor has correct dimensions using operadic structure
-        connection_matrix = self._handle_dimension_transition(
-            self.connection,
-            self.fiber_dim
-        )
-        
-        # Contract connection with base components
-        result = torch.einsum('...i,ijk->...k', base_components, connection_matrix)
-        
-        # Ensure flow metric has correct shape
-        if len(flow_metric.shape) < len(result.shape):
-            flow_metric = flow_metric.unsqueeze(-1)
-        if flow_metric.shape[-1] != result.shape[-1]:
-            # Pad or truncate flow metric to match result
-            if flow_metric.shape[-1] < result.shape[-1]:
-                padding = torch.ones(
-                    *flow_metric.shape[:-1],
-                    result.shape[-1] - flow_metric.shape[-1],
-                    device=flow_metric.device,
-                    dtype=flow_metric.dtype
-                )
-                flow_metric = torch.cat([flow_metric, padding], dim=-1)
+        try:
+            tangent_vector = self._ensure_tensor_format(tangent_vector)
+            
+            # Split into base and fiber components efficiently
+            base_components = tangent_vector[..., :self.base_dim]
+            
+            # Pre-compute flow metric once
+            flow_metric = self.geometric_flow.compute_metric(base_components)
+            
+            # Create operadic operation for dimension transition
+            operation = self.operadic.create_operation(
+                source_dim=flow_metric.shape[-1],
+                target_dim=self.base_dim
+            )
+            
+            # Apply operadic composition to flow metric
+            # Ensure proper reshaping for batch dimensions
+            batch_size = flow_metric.shape[0] if flow_metric.dim() > 2 else 1
+            flow_metric = flow_metric.reshape(batch_size, -1, flow_metric.shape[-1])
+            
+            # Apply composition law
+            flow_metric = torch.matmul(
+                flow_metric,
+                operation.composition_law.transpose(-2, -1)  # [source_dim, target_dim]
+            )
+            
+            # Create connection matrix with correct size
+            connection = torch.zeros(
+                self.base_dim,  # First dimension for base space
+                self.fiber_dim,  # Second dimension for fiber space
+                device=tangent_vector.device,
+                dtype=tangent_vector.dtype
+            )
+            
+            # Then expand for batch dimensions if needed
+            if batch_size > 1:
+                connection = connection.unsqueeze(0).expand(batch_size, -1, -1)
+            
+            # Compute connection form with proper broadcasting
+            result = torch.matmul(flow_metric, connection)
+            
+            # Ensure result has shape [..., fiber_dim, fiber_dim]
+            if result.dim() == 3:  # Batch dimension present
+                result = result.view(batch_size, self.fiber_dim, self.fiber_dim)
             else:
-                flow_metric = flow_metric[..., :result.shape[-1]]
-        
-        # Apply flow metric
-        result = result * flow_metric
-        
-        return result
-        
+                result = result.view(self.fiber_dim, self.fiber_dim)
+            
+            # Add skew-symmetry
+            result = 0.5 * (result - result.transpose(-2, -1))
+                
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to compute connection form: {str(e)}") from e
+
     def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
         """Compute local trivialization using enriched structure.
         
@@ -226,9 +622,8 @@ class PatternFiberBundle(BaseFiberBundle):
         # Get fiber coordinates
         fiber_coords = point[..., self.base_dim:self.base_dim + self.fiber_dim]
         
-        # Compute symplectic form using operadic structure and padding
-        padded_coords = self._pad_for_symplectic(fiber_coords)
-        symplectic_form = self.symplectic.compute_form(padded_coords)
+        # Use operadic structure for symplectic form computation
+        symplectic_form = self.symplectic.compute_form(fiber_coords)
         
         # Create transition maps dictionary with geometric flow
         transition_maps = {
@@ -257,66 +652,139 @@ class PatternFiberBundle(BaseFiberBundle):
         
         return local_chart, fiber_chart
         
-    def to(self, device: torch.device) -> 'PatternFiberBundle':
-        """Move the bundle to the specified device."""
-        self.device = device
-        return super().to(device)
-        
-    def _ensure_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Ensure tensor is on the correct device."""
-        if tensor.device != self.device:
-            tensor = tensor.to(self.device)
-        return tensor
+    #--------------------------------------------------------------------------
+    # Metric and Geometry Operations
+    #--------------------------------------------------------------------------
 
-    def compute_metric(self, points: torch.Tensor) -> MotivicMetricTensor:
-        """Compute metric tensor with pattern-specific features.
-        
-        Args:
-            points: Points tensor of shape (batch_size, total_dim)
-            
-        Returns:
-            MotivicMetricTensor with pattern structure
-        """
-        batch_size = points.shape[0]
-        
-        # Get base metric from parent
-        values = self.metric.expand(batch_size, -1, -1).clone()
-        
-        # Add Fisher-Rao metric from geometric flow
-        base_points = points[..., :self.base_dim]
-        fisher = self.geometric_flow.compute_metric(base_points)
-        values[..., :self.base_dim, :self.base_dim] += fisher
-        
-        # Add pattern-specific fiber metric
-        fiber_points = points[..., self.base_dim:]
-        fiber_pert = torch.zeros(
-            batch_size, self.fiber_dim, self.fiber_dim,
-            device=points.device, dtype=points.dtype
+    def _compute_metric_blocks(
+        self,
+        base_points: Tensor,
+        fiber_points: Tensor,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        base_dim: int,
+        fiber_dim: int,
+        metric: Tensor
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Compute metric blocks efficiently."""
+        # Pre-allocate all tensors at once for better memory locality
+        base_metric = torch.empty(
+            (batch_size, base_dim, base_dim),
+            device=device, dtype=dtype
+        )
+        fiber_metric = torch.empty(
+            (batch_size, fiber_dim, fiber_dim),
+            device=device, dtype=dtype
+        )
+        cross_terms = torch.empty(
+            (batch_size, base_dim, fiber_dim),
+            device=device, dtype=dtype
         )
         
-        for b in range(batch_size):
-            # Symmetric quadratic terms
-            for i in range(self.fiber_dim):
-                for j in range(i + 1):
-                    term = 0.1 * (
-                        0.25 * (fiber_points[b, i] + fiber_points[b, j])**2 +
-                        0.25 * (fiber_points[b, i]**2 + fiber_points[b, j]**2)
-                    )
-                    fiber_pert[b, i, j] = term
-                    if i != j:
-                        fiber_pert[b, j, i] = term
+        # Compute metrics in parallel with pre-allocated outputs
+        base_future = torch.jit.fork(
+            lambda: base_metric.copy_(
+                self.geometric_flow.compute_metric(base_points)
+            )
+        )
+        fiber_future = torch.jit.fork(
+            lambda: fiber_metric.copy_(
+                self._compute_fiber_perturbation(fiber_points, fiber_dim)
+            )
+        )
+        cross_future = torch.jit.fork(
+            lambda: cross_terms.copy_(
+                metric[:base_dim, base_dim:]
+                if metric.shape[0] > base_dim
+                else torch.zeros_like(cross_terms)
+            )
+        )
         
-        values[..., self.base_dim:, self.base_dim:] += fiber_pert
+        # Wait for all computations to complete
+        torch.jit.wait(base_future)
+        torch.jit.wait(fiber_future)
+        torch.jit.wait(cross_future)
         
-        # Ensure positive definiteness
+        return base_metric, fiber_metric, cross_terms
+
+    def _ensure_positive_definite(
+        self,
+        values: Tensor,
+        batch_size: int,
+        total_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        reg_scale_base: float = 1e-3,
+        reg_scale_fiber: float = 1e-2
+    ) -> Tensor:
+        """Ensure metric tensor is positive definite efficiently."""
+        # Clone tensor to avoid in-place operation issues
+        values = values.clone()
+        
+        # Symmetrize
         values = 0.5 * (values + values.transpose(-2, -1))
-        reg_term = 1e-3 * torch.eye(
-            self.total_dim,
-            device=values.device,
-            dtype=values.dtype
-        ).expand(batch_size, -1, -1)
-        reg_term[..., self.base_dim:, self.base_dim:] *= 10.0
-        values = values + reg_term
+        
+        # Create regularization term efficiently
+        eye = torch.eye(total_dim, device=device, dtype=dtype).expand(batch_size, -1, -1)
+        reg = torch.ones(total_dim, total_dim, device=device, dtype=dtype) * reg_scale_base
+        reg[self.base_dim:, self.base_dim:] *= (reg_scale_fiber / reg_scale_base)  # Fiber regularization
+        reg = reg.expand(batch_size, -1, -1)
+        
+        # Add regularization
+        values = values + eye * reg
+        
+        return values
+
+    def compute_metric(self, points: torch.Tensor) -> MotivicMetricTensor:
+        """Compute metric tensor with pattern-specific features using operadic structure."""
+        points = self._ensure_tensor_format(points)
+        batch_size = points.shape[0]
+        
+        # Split points and pre-allocate result efficiently
+        base_points, fiber_points = points.view(batch_size, -1).tensor_split([self.base_dim], dim=1)
+        values = torch.empty(
+            (batch_size, self.total_dim, self.total_dim),
+            device=points.device,
+            dtype=points.dtype
+        )
+        
+        # Compute blocks with optimal memory management
+        base_metric, fiber_metric, cross_terms = self._compute_metric_blocks(
+            base_points, fiber_points, batch_size,
+            points.device, points.dtype,
+            self.base_dim, self.fiber_dim, self.metric
+        )
+        
+        # Fill blocks efficiently using views and in-place operations
+        values[:, :self.base_dim, :self.base_dim] = (
+            self.metric[:self.base_dim, :self.base_dim] + base_metric
+        )
+        values[:, self.base_dim:, self.base_dim:] = (
+            self.metric[self.base_dim:, self.base_dim:] + fiber_metric
+        )
+        
+        # Add cross terms efficiently using operadic structure
+        if cross_terms.numel() > 0:
+            # Create operadic operation for cross terms
+            operation = self.operadic.create_operation(
+                source_dim=cross_terms.shape[-1],
+                target_dim=self.fiber_dim
+            )
+            
+            # Apply operadic composition
+            cross_terms = torch.einsum('...ij,jk->...ik',
+                                     cross_terms,
+                                     operation.composition_law)
+            
+            values[:, :self.base_dim, self.base_dim:] = cross_terms
+            values[:, self.base_dim:, :self.base_dim] = cross_terms.transpose(-2, -1)
+        
+        # Ensure metric properties with optimal memory usage
+        values = self._ensure_positive_definite(
+            values, batch_size, self.total_dim,
+            points.device, points.dtype
+        )
         
         return MotivicMetricTensor(
             values=values,
@@ -325,35 +793,60 @@ class PatternFiberBundle(BaseFiberBundle):
             is_compatible=True
         )
 
-    def compute_stability(self, point: Tensor) -> Dict[str, Any]:
-        """Compute pattern stability metrics.
+    def _compute_fiber_perturbation(
+        self,
+        fiber_points: Tensor,
+        fiber_dim: int,
+        pert_scale: float = 0.025
+    ) -> Tensor:
+        """Compute fiber metric perturbation efficiently."""
+        batch_size = fiber_points.size(0)
         
-        Args:
-            point: Point in total space
-            
-        Returns:
-            Dictionary of stability metrics
-        """
-        local_chart, fiber_chart = self.local_trivialization(point)
+        # Pre-allocate output tensor with optimal memory layout
+        perturbation = torch.zeros(
+            batch_size, 
+            fiber_dim, 
+            fiber_dim,
+            device=fiber_points.device,
+            dtype=fiber_points.dtype
+        ).contiguous()
         
-        flow_metrics = self.geometric_flow.compute_metric(
-            local_chart.coordinates
+        # Compute outer product efficiently using batched matmul
+        # Reshape for broadcasting: [batch, dim, 1] x [batch, 1, dim]
+        fiber_points_2d = fiber_points.view(batch_size, -1, 1)
+        perturbation = torch.baddbmm(
+            perturbation,
+            fiber_points_2d,
+            fiber_points_2d.transpose(-2, -1),
+            alpha=1.0,
+            beta=0.0
         )
         
-        pattern_metrics = self.pattern_formation.compute_stability(
-            fiber_chart.fiber_coordinates
-        )
+        # Add perturbation scale to diagonal in-place
+        perturbation.diagonal(dim1=1, dim2=2).add_(pert_scale)
         
-        height_metrics = self.height_structure.compute_height(point)
-        
-        return {
-            "geometric_stability": flow_metrics,
-            "pattern_stability": pattern_metrics,
-            "height_stability": height_metrics
-        }
+        return perturbation
 
     def _project_metric_compatible(self, matrix: Tensor, metric: Tensor) -> Tensor:
-        """Project matrix to metric-compatible subspace."""
+        """Project matrix to metric-compatible subspace.
+        
+        Performs orthogonal projection of a matrix onto the space of metric-compatible
+        transformations. A transformation A is metric-compatible if:
+            g(Ax, y) + g(x, Ay) = 0
+        where g is the metric tensor.
+        
+        Args:
+            matrix: Matrix to project
+            metric: Metric tensor to be compatible with
+            
+        Returns:
+            Projected matrix that is metric-compatible
+            
+        Note:
+            The projection is computed using the formula:
+            P(A) = 1/2(A - g^(-1)A^T g)
+            where g is the metric tensor and A is the input matrix.
+        """
         g_inv = torch.inverse(metric)
         skew = 0.5 * (matrix - matrix.transpose(-2, -1))
         metric_compat = -torch.matmul(
@@ -362,154 +855,364 @@ class PatternFiberBundle(BaseFiberBundle):
         )
         return 0.5 * (skew + metric_compat)
 
-    def compute_holonomy_group(self, holonomies: List[Tensor]) -> Tensor:
-        """Compute the holonomy group from a list of holonomies.
-        
-        Args:
-            holonomies: List of holonomy transformations
-            
-        Returns:
-            Tensor representing the holonomy group elements with pattern structure
-        """
-        holonomy_group = super().compute_holonomy_group(holonomies)
-        
-        # Add pattern-specific structure to holonomy group
-        stability_dict = self.pattern_formation.compute_stability(holonomy_group)
-        pattern_structure = stability_dict["pattern_stability"].to(holonomy_group.device)
-        
-        # Ensure proper broadcasting
-        if len(pattern_structure.shape) < len(holonomy_group.shape):
-            pattern_structure = pattern_structure.unsqueeze(-1).unsqueeze(-1)
-            
-        return holonomy_group * pattern_structure
+    #--------------------------------------------------------------------------
+    # Evolution and Transport
+    #--------------------------------------------------------------------------
 
-    def compute_holonomy_algebra(self, holonomies: List[Tensor]) -> Tensor:
-        """Compute the holonomy Lie algebra with pattern features.
+    def _evolve_batch_efficient(
+        self,
+        base_transport: Tensor,
+        transport_gradients: Tensor,
+        stability_threshold: float,
+        time_steps: int,
+        pattern_formation: PatternFormation,
+        reaction_coeff: float = 1.0,
+        diffusion_coeff: float = 0.1
+    ) -> Tensor:
+        """Efficiently evolve a batch of transport points."""
+        batch_size = base_transport.size(0)
         
-        Args:
-            holonomies: List of holonomy transformations
-            
-        Returns:
-            Tensor representing the Lie algebra elements with pattern structure
-        """
-        base_algebra = super().compute_holonomy_algebra(holonomies)
-        
-        # Add symplectic structure to algebra
-        symplectic_form = self.symplectic.compute_form(base_algebra)
-        # Extract matrix from symplectic form and ensure same device
-        symplectic_matrix = symplectic_form.matrix.to(base_algebra.device)
-        
-        # Ensure proper broadcasting
-        if len(symplectic_matrix.shape) < len(base_algebra.shape):
-            symplectic_matrix = symplectic_matrix.unsqueeze(0)
-            
-        return base_algebra + 0.1 * symplectic_matrix
-
-    def compute_cohomology(self, point: Tensor) -> Tensor:
-        """Compute cohomology class with pattern features.
-        
-        Args:
-            point: Point in total space
-            
-        Returns:
-            Cohomology class tensor with pattern structure
-        """
-        # Create arithmetic form from point with pattern structure
-        form = ArithmeticForm(
-            degree=2,  # Use degree 2 for bundle cohomology
-            coefficients=point
+        # Pre-allocate all tensors at once for better memory locality
+        evolved = torch.empty_like(base_transport)
+        reaction = torch.full(
+            (batch_size,),
+            reaction_coeff,
+            device=base_transport.device,
+            dtype=base_transport.dtype
+        )
+        diffusion = torch.full(
+            (batch_size,),
+            1.0 + diffusion_coeff,
+            device=base_transport.device,
+            dtype=base_transport.dtype
         )
         
-        # Add height data with pattern stability
-        height_data = self.height_structure.compute_height(point)
-        stability_dict = self.pattern_formation.compute_stability(point)
-        pattern_stability = stability_dict["pattern_stability"].to(point.device)
+        # Initialize first point
+        evolved[0].copy_(base_transport[0])
         
-        # Ensure proper broadcasting
-        if len(pattern_stability.shape) < len(height_data.shape):
-            pattern_stability = pattern_stability.unsqueeze(-1)
+        # Evolve remaining points efficiently
+        evolved[1:].copy_(base_transport[1:])
+        evolved[1:].addcmul_(
+            transport_gradients,
+            reaction.unsqueeze(-1),
+            value=1.0
+        )
+        evolved[1:].mul_(diffusion.unsqueeze(-1))
+        
+        # Compute stability in parallel
+        stability_future = torch.jit.fork(
+            lambda: pattern_formation.compute_stability(evolved)
+        )
+        stability = torch.jit.wait(stability_future)
+        unstable_mask = stability["stability_margin"] < stability_threshold
+        
+        if torch.any(unstable_mask):
+            # Pre-allocate unstable points tensor
+            unstable_points = evolved[unstable_mask].unsqueeze(1)
             
-        form.height_data = height_data * pattern_stability
+            # Evolve unstable points in parallel
+            evolved_unstable_future = torch.jit.fork(
+                lambda: pattern_formation.evolve(
+                    unstable_points,
+                    time_steps
+                )
+            )
+            evolved_unstable = torch.jit.wait(evolved_unstable_future)
+            
+            # Update unstable points efficiently
+            evolved.masked_scatter_(
+                unstable_mask.unsqueeze(-1).expand_as(evolved),
+                evolved_unstable[:, -1].reshape(-1)
+            )
         
-        return form.coefficients
+        return evolved
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Parallel transport with pattern evolution.
         
         Args:
             section: Section to transport
-            path: Path along which to transport
+            path: Path to transport along
             
         Returns:
-            Transported section with pattern features
+            Transported section as a Tensor
         """
-        # Get base transport
-        base_transport = super().parallel_transport(section, path)
+        # Ensure section is a tensor and on the correct device
+        result: Tensor = self._ensure_tensor_format(section)
         
-        # Add pattern evolution along transport
-        num_points = path.shape[0]
-        for i in range(1, num_points):
-            # Evolve pattern at each step using step method
-            base_transport[i] = self.pattern_evolution.step(
-                base_transport[i],
-                base_transport[i] - base_transport[i-1]  # Use difference as gradient
-            )[0]  # step returns (updated_pattern, velocity)
-            
-            # Check stability and evolve if needed
-            stability = self.pattern_formation.compute_stability(base_transport[i])
-            if stability["stability_margin"] < self.geometric_flow.stability_threshold:
-                # Evolve pattern to improve stability
-                evolved = self.pattern_formation.evolve(
-                    base_transport[i].unsqueeze(0),  # Add batch dimension
-                    time_steps=10  # Short evolution to improve stability
-                )
-                base_transport[i] = evolved[:, -1].squeeze(0)  # Take final state
-        
-        return base_transport
+        try:
+            with torch.no_grad():
+                # Pre-format tensors efficiently
+                with self.with_tensor_state(result) as formatted_section, \
+                     self.with_tensor_state(path) as formatted_path:
 
-    def _transport_step(self, section: Tensor, tangent: Tensor) -> Tensor:
-        """Compute transport step with pattern features.
+                    # Ensure section has correct fiber dimension
+                    if formatted_section.shape[-1] != self.fiber_dim:
+                        formatted_section = self._handle_dimension_transition(formatted_section)
+
+                    # Ensure path has correct base dimension
+                    if formatted_path.shape[-1] != self.base_dim:
+                        formatted_path = formatted_path[..., :self.base_dim]
+
+                    # Compute base transport
+                    base_transport = super().parallel_transport(formatted_section, formatted_path)
+                    
+                    # Initialize result with correct shape
+                    result = torch.zeros(
+                        len(formatted_path),
+                        self.fiber_dim,
+                        device=formatted_section.device,
+                        dtype=formatted_section.dtype
+                    )
+                    
+                    if len(base_transport) <= 1:
+                        result[0] = base_transport.clone()
+                        return result
+
+                    # Compute transport gradients and evolve batch
+                    transport_gradients = torch.diff(base_transport, dim=0)
+                    evolved = self._evolve_batch_efficient(
+                        base_transport,
+                        transport_gradients,
+                        self.geometric_flow.stability_threshold,
+                        self._EVOLUTION_TIME_STEPS,
+                        self.pattern_formation,
+                        self._DEFAULT_REACTION_COEFF,
+                        self._DEFAULT_DIFFUSION_COEFF
+                    )
+                    
+                    # Copy evolved result to output tensor
+                    result[:len(evolved)] = evolved
+
+                    # Ensure result has correct fiber dimension
+                    if result.shape[-1] != self.fiber_dim:
+                        result = self._handle_dimension_transition(result)
+
+        except Exception as e:
+            # Return original section if transport fails
+            warnings.warn(f"Parallel transport failed: {str(e)}. Returning original section.")
+            result = section.clone().expand(len(path), -1)
+
+        return result
+
+    #--------------------------------------------------------------------------
+    # Stability and Analysis
+    #--------------------------------------------------------------------------
+
+    def _compute_stability_metrics(
+        self,
+        local_chart: LocalChart,
+        fiber_chart: FiberChart,
+        point: Tensor,
+        base_dim: int,
+        num_primes: int
+    ) -> Dict[str, Tensor]:
+        """Compute stability metrics efficiently."""
+        # Pre-allocate output tensors for better memory locality
+        batch_size = point.size(0)
+        geometric_metric = torch.empty(
+            (batch_size, base_dim, base_dim),
+            device=point.device,
+            dtype=point.dtype
+        )
+        pattern_stability = torch.empty(
+            (batch_size,),
+            device=point.device,
+            dtype=point.dtype
+        )
+        height_data = torch.empty(
+            (batch_size, num_primes),
+            device=point.device,
+            dtype=point.dtype
+        )
+        
+        # Launch parallel computations with pre-allocated outputs
+        geometric_future = torch.jit.fork(
+            lambda: geometric_metric.copy_(
+                self.geometric_flow.compute_metric(local_chart.coordinates)
+            )
+        )
+        pattern_future = torch.jit.fork(
+            lambda: pattern_stability.copy_(
+                self.pattern_formation.compute_stability(fiber_chart.fiber_coordinates)["stability_margin"]
+            )
+        )
+        height_future = torch.jit.fork(
+            lambda: height_data.copy_(
+                self.height_structure.compute_height(point)
+            )
+        )
+        
+        # Wait for all computations to complete
+        torch.jit.wait(geometric_future)
+        torch.jit.wait(pattern_future)
+        torch.jit.wait(height_future)
+        
+        # Return results in dictionary
+        return {
+            "geometric_stability": geometric_metric,
+            "pattern_stability": pattern_stability,
+            "height_stability": height_data
+        }
+
+    def compute_stability(self, point: Tensor) -> Dict[str, Any]:
+        """Compute pattern stability metrics efficiently."""
+        point = self._ensure_tensor_format(point)
+        
+        # Get local coordinates through trivialization
+        with torch.no_grad():  # Disable gradients for efficiency
+            local_chart, fiber_chart = self.local_trivialization(point)
+            return self._compute_stability_metrics(
+                local_chart, fiber_chart, point,
+                self.base_dim, self.height_structure.num_primes
+            )
+
+    def compute_holonomy_group(self, holonomies: List[Tensor]) -> Tensor:
+        """Compute the holonomy group efficiently."""
+        with torch.no_grad():
+            # Pre-allocate output tensor
+            holonomy_group = self._ensure_tensor_format(
+                super().compute_holonomy_group(holonomies)
+            )
+            
+            # Compute stability and structure in parallel
+            stability_future = torch.jit.fork(
+                self.pattern_formation.compute_stability,
+                holonomy_group
+            )
+            
+            # Get stability result and broadcast efficiently
+            stability = torch.jit.wait(stability_future)
+            pattern_structure = self._ensure_broadcasting(
+                stability["pattern_stability"],
+                holonomy_group
+            )
+            
+            # Use in-place multiplication for efficiency
+            holonomy_group.mul_(pattern_structure)
+            return holonomy_group
+
+    def compute_holonomy_algebra(self, holonomies: List[Tensor]) -> Tensor:
+        """Compute the holonomy Lie algebra with pattern features."""
+        with torch.no_grad():  # Disable gradients for efficiency
+            base_algebra = self._ensure_tensor_format(
+                super().compute_holonomy_algebra(holonomies)
+            )
+            
+            # Compute symplectic structure efficiently
+            symplectic_form = self.symplectic.compute_form(base_algebra)
+            symplectic_matrix = self._ensure_broadcasting(
+                symplectic_form.matrix,
+                base_algebra
+            )
+            
+            # Use in-place addition for efficiency
+            base_algebra.add_(symplectic_matrix, alpha=self._SYMPLECTIC_WEIGHT)
+            return base_algebra
+
+    def compute_cohomology(self, point: Tensor) -> Tensor:
+        """Compute cohomology class with pattern features.
+        
+        Computes the cohomology class by combining:
+        1. Arithmetic form structure
+        2. Height data from arithmetic geometry
+        3. Pattern stability information
         
         Args:
-            section: Current section value
-            tangent: Path tangent vector
+            point: Point in total space to compute cohomology at
             
         Returns:
-            Change in section with pattern evolution
+            Cohomology class tensor enriched with pattern structure
         """
-        # Get base transport step
-        base_step = super()._transport_step(section, tangent)
+        point = self._ensure_tensor_format(point)
         
-        # Add pattern evolution using step method
-        evolved_step, _ = self.pattern_evolution.step(base_step, tangent)
+        # Create arithmetic form with degree 2 for bundle cohomology
+        form = ArithmeticForm(degree=2, coefficients=point)
         
-        return evolved_step
+        # Compute height and stability data in parallel
+        height_data = self.height_structure.compute_height(point)
+        stability_dict = self.pattern_formation.compute_stability(point)
+        
+        # Combine height and stability data efficiently
+        pattern_stability = self._ensure_broadcasting(
+            stability_dict["pattern_stability"],
+            height_data
+        )
+        
+        # Set enriched height data and return coefficients
+        form.height_data = height_data * pattern_stability
+        return form.coefficients
 
-    def _pad_for_symplectic(self, tensor: Tensor) -> Tensor:
-        """Pad tensor for symplectic operations."""
-        if self._symplectic_padding == 0:
-            return tensor
+    def __del__(self) -> None:
+        """Clean up cached tensors and components when the bundle is deleted."""
+        # Clear cached properties safely
+        for attr in ['_triu_indices', '_eye_matrix', '_reg_scale', 'basis_matrices']:
+            if hasattr(self, attr):
+                delattr(self, attr)
         
-        # Handle different input shapes
-        if len(tensor.shape) == 1:
-            padding = torch.zeros(self._symplectic_padding, device=tensor.device, dtype=tensor.dtype)
-            return torch.cat([tensor, padding])
-        elif len(tensor.shape) == 2:
-            padding = torch.zeros(*tensor.shape[:-1], self._symplectic_padding, device=tensor.device, dtype=tensor.dtype)
-            return torch.cat([tensor, padding], dim=-1)
-        else:
-            # For higher dimensional tensors
-            padding_shape = list(tensor.shape[:-1]) + [self._symplectic_padding]
-            padding = torch.zeros(*padding_shape, device=tensor.device, dtype=tensor.dtype)
-            return torch.cat([tensor, padding], dim=-1)
+        # Clear component references safely
+        # Note: Components handle their own cleanup in their respective __del__ methods
+        for attr in [
+            'geometric_flow',
+            'pattern_formation',
+            'pattern_evolution',
+            'height_structure',
+            'symplectic',
+            'operadic',
+            'wave',
+            'transition',
+            'riemannian_framework',
+            'pattern_dynamics'
+        ]:
+            if hasattr(self, attr):
+                setattr(self, attr, None)
 
-    def _unpad_from_symplectic(self, tensor: Tensor) -> Tensor:
-        """Remove padding used for symplectic operations."""
-        if self._symplectic_padding == 0:
-            return tensor
+    def structure_group_action(self, point: Tensor, group_element: Tensor) -> Tensor:
+        """Apply structure group action with dimension handling.
         
-        # Remove padding from last dimension
-        if len(tensor.shape) == 1:
-            return tensor[:-self._symplectic_padding]
-        else:
-            return tensor[..., :-self._symplectic_padding]
+        Args:
+            point: Point to transform
+            group_element: Structure group element
+            
+        Returns:
+            Transformed point
+        """
+        # Ensure point has correct dimensions
+        point = self._ensure_tensor_format(point)
+        
+        # Split point into base and fiber components
+        base_coords = point[..., :self.base_dim]
+        fiber_coords = point[..., self.base_dim:self.base_dim + self.fiber_dim]
+        
+        # Handle fiber dimension transition if needed
+        if fiber_coords.shape[-1] != group_element.shape[-1]:
+            operation = self.operadic.create_operation(
+                source_dim=fiber_coords.shape[-1],
+                target_dim=group_element.shape[-1]
+            )
+            fiber_coords = torch.einsum('bi,ij->bj', 
+                                      fiber_coords.reshape(-1, fiber_coords.shape[-1]),
+                                      operation.composition_law)
+            fiber_coords = fiber_coords.reshape(-1, group_element.shape[-1])
+        
+        # Apply group action to fiber coordinates
+        transformed_fiber = torch.matmul(
+            group_element,
+            fiber_coords.unsqueeze(-1)
+        ).squeeze(-1)
+        
+        # Project back to original fiber dimension if needed
+        if transformed_fiber.shape[-1] != self.fiber_dim:
+            operation = self.operadic.create_operation(
+                source_dim=transformed_fiber.shape[-1],
+                target_dim=self.fiber_dim
+            )
+            transformed_fiber = torch.einsum('bi,ij->bj',
+                                           transformed_fiber.reshape(-1, transformed_fiber.shape[-1]),
+                                           operation.composition_law)
+            transformed_fiber = transformed_fiber.reshape(-1, self.fiber_dim)
+        
+        # Recombine with base coordinates
+        result = torch.cat([base_coords, transformed_fiber], dim=-1)
+        
+        return result

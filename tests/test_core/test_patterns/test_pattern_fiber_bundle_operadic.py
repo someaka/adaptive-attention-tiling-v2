@@ -140,14 +140,18 @@ class TestPatternFiberBundleOperadic:
         # Verify symplectic properties
         # 1. Anti-symmetry
         assert torch.allclose(
-            symplectic_form,
-            -symplectic_form.transpose(-2, -1),
+            symplectic_form.matrix,
+            -symplectic_form.transpose().matrix,
             rtol=1e-5
         )
         
         # 2. Non-degeneracy
-        eigenvals = torch.linalg.eigvals(symplectic_form)
-        assert not torch.any(torch.abs(eigenvals) < 1e-5)
+        eigenvals = torch.linalg.eigvals(symplectic_form.matrix)
+        assert torch.all(torch.abs(eigenvals) > 1e-5)
+        
+        # 3. Verify dimension matches fiber dimension
+        assert symplectic_form.matrix.shape[0] == bundle.fiber_dim
+        assert symplectic_form.matrix.shape[1] == bundle.fiber_dim
     
     def test_structure_group_action(self, bundle, test_data):
         """Test structure group action with operadic structure."""

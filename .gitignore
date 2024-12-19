@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.hypothesis
 build/
 develop-eggs/
 dist/

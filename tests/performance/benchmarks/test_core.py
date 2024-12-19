@@ -10,10 +10,11 @@ This module provides comprehensive benchmarks for core operations including:
 import pytest
 import torch
 import time
+from typing import Tuple, cast
 
 from src.core.attention import AttentionCompute
 from src.core.benchmarks import BenchmarkMetrics
-from src.core.flow import FlowComputation
+from src.core.flow import PatternFormationFlow
 from src.core.patterns import PatternEvolution
 from src.core.patterns.riemannian import PatternRiemannianStructure
 from src.core.patterns import (
@@ -86,14 +87,19 @@ class TestCoreOperations:
             state = torch.randn(size, size)
 
             # Warm-up
-            _ = pattern.step(state, torch.randn_like(state))
+            result = pattern.step(state, torch.randn_like(state), return_metrics=False)
+            assert isinstance(result, tuple) and len(result) == 2
 
             # Benchmark evolution steps
             times = []
             stability = []
             for _step in range(self.iterations):
                 start_time = time.perf_counter()
-                new_state, velocity = pattern.step(state, torch.randn_like(state))
+                # Use type assertion to ensure we get a 2-tuple
+                step_result = cast(Tuple[torch.Tensor, torch.Tensor], 
+                    pattern.step(state, torch.randn_like(state), return_metrics=False)
+                )
+                new_state, velocity = step_result
                 end_time = time.perf_counter()
 
                 times.append((end_time - start_time) * 1000)  # Convert to ms
@@ -110,27 +116,33 @@ class TestCoreOperations:
 
     def test_flow_evolution(self):
         """Benchmark flow computation and evolution performance."""
-        flow = FlowComputation(dim=2)  # 2D flow
+        flow = PatternFormationFlow(
+            manifold_dim=2,  # 2D flow
+            hidden_dim=64,
+            diffusion_strength=0.1,
+            reaction_strength=1.0
+        )
 
         for size in self.sizes:
             # Initialize flow field
-            velocity = torch.randn(2, size, size)  # 2D velocity field
-            density = torch.randn(size, size)
+            points = torch.randn(size, 2)  # 2D points
+            metric = flow.compute_metric(points)
 
             # Warm-up
-            _ = flow.compute_gradient_flow(velocity, steps=100)
+            _ = flow.flow_step(metric, timestep=0.1)
 
             # Benchmark flow computation
             times = []
             accuracy = []
             for _ in range(self.iterations):
                 start_time = time.perf_counter()
-                result = flow.compute_gradient_flow(velocity, steps=100)
+                new_metric, metrics = flow.flow_step(metric, timestep=0.1)
                 end_time = time.perf_counter()
 
                 times.append((end_time - start_time) * 1000)  # Convert to ms
                 # Compute accuracy as convergence of flow
-                accuracy.append(torch.norm(result[-1] - result[0]).item())
+                accuracy.append(metrics.flow_magnitude)
+                metric = new_metric
 
             self.metrics.record_operation(
                 name="flow_evolution",

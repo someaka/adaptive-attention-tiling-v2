@@ -1,0 +1,402 @@
+"""Base Geometric Flow Implementation.
+
+This module provides the base implementation for geometric flows,
+handling common functionality shared across different implementations:
+1. Basic geometric operations (metric, connection, curvature)
+2. Flow step computation
+3. Singularity detection
+4. Metric normalization
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple, Union
+
+import torch
+from torch import nn, Tensor
+
+from .protocol import FlowMetrics, GeometricFlowProtocol, SingularityInfo
+
+class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
+    """Base implementation of geometric flow.
+    
+    This class provides common functionality for geometric flows while allowing
+    specialized implementations to override and extend as needed.
+    """
+    
+    def __init__(
+        self,
+        manifold_dim: int,
+        hidden_dim: int,
+        dt: float = 0.1,
+        stability_threshold: float = 1e-6,
+    ):
+        """Initialize base geometric flow.
+        
+        Args:
+            manifold_dim: Dimension of the base manifold
+            hidden_dim: Hidden dimension for computations
+            dt: Time step for flow integration
+            stability_threshold: Threshold for stability checks
+        """
+        super().__init__()
+        self.manifold_dim = manifold_dim
+        self.hidden_dim = hidden_dim
+        self.dt = dt
+        self.stability_threshold = stability_threshold
+        
+        # Basic metric computation
+        self.metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
+        )
+        
+        # Connection computation
+        self.connection_net = nn.Sequential(
+            nn.Linear(manifold_dim * 3, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim * manifold_dim)
+        )
+        
+        # Curvature computation
+        self.curvature_net = nn.Sequential(
+            nn.Linear(manifold_dim * 4, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
+        )
+
+    def compute_metric(
+        self,
+        points: Tensor,
+        connection: Optional[Tensor] = None
+    ) -> Tensor:
+        """Compute metric tensor at points.
+        
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            connection: Optional connection form
+            
+        Returns:
+            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Compute metric components
+        metric_flat = self.metric_net(points)
+        metric = metric_flat.view(batch_size, self.manifold_dim, self.manifold_dim)
+        
+        # Ensure symmetry and positive definiteness
+        metric = 0.5 * (metric + metric.transpose(-2, -1))
+        eye = torch.eye(self.manifold_dim, device=points.device).unsqueeze(0)
+        metric = metric + eye * self.stability_threshold
+        
+        return metric
+
+    def compute_connection(
+        self,
+        metric: Tensor,
+        points: Optional[Tensor] = None
+    ) -> Tensor:
+        """Compute connection coefficients.
+        
+        Args:
+            metric: Metric tensor
+            points: Optional points tensor
+            
+        Returns:
+            Connection coefficients tensor
+        """
+        batch_size = metric.shape[0]
+        
+        if points is None:
+            points = torch.zeros(batch_size, self.manifold_dim, device=metric.device)
+            
+        # Prepare input: [points, metric_i, metric_j, metric_k]
+        metric_flat = metric.reshape(batch_size, -1)
+        input_tensor = torch.cat([
+            points,
+            metric_flat,
+            metric_flat,
+            metric_flat
+        ], dim=-1)
+        
+        # Compute connection components
+        connection_flat = self.connection_net(input_tensor)
+        connection = connection_flat.view(
+            batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim
+        )
+        
+        return connection
+
+    def compute_curvature(
+        self,
+        metric: Tensor,
+        connection: Optional[Tensor] = None
+    ) -> Tensor:
+        """Compute curvature tensor.
+        
+        Args:
+            metric: Metric tensor
+            connection: Optional connection coefficients
+            
+        Returns:
+            Curvature tensor
+        """
+        batch_size = metric.shape[0]
+        
+        if connection is None:
+            connection = self.compute_connection(metric)
+            
+        # Prepare input: [connection_flat, metric_flat]
+        connection_flat = connection.reshape(batch_size, -1)
+        metric_flat = metric.reshape(batch_size, -1)
+        input_tensor = torch.cat([connection_flat, metric_flat], dim=-1)
+        
+        # Compute curvature components
+        curvature_flat = self.curvature_net(input_tensor)
+        curvature = curvature_flat.view(
+            batch_size, self.manifold_dim, self.manifold_dim
+        )
+        
+        # Ensure antisymmetry
+        curvature = 0.5 * (curvature - curvature.transpose(-2, -1))
+        
+        return curvature
+
+    def compute_ricci_tensor(
+        self,
+        metric: Tensor,
+        points: Optional[Tensor] = None,
+        connection: Optional[Tensor] = None
+    ) -> Tensor:
+        """Compute Ricci tensor.
+        
+        Args:
+            metric: Metric tensor
+            points: Optional points tensor
+            connection: Optional connection form
+            
+        Returns:
+            Ricci tensor
+        """
+        if connection is None:
+            connection = self.compute_connection(metric, points)
+            
+        # Compute curvature
+        curvature = self.compute_curvature(metric, connection)
+        
+        # Contract to get Ricci tensor
+        ricci = torch.einsum('...ij->...', curvature)
+        ricci = ricci.view(metric.shape[0], self.manifold_dim, self.manifold_dim)
+        
+        return ricci
+
+    def flow_step(
+        self,
+        metric: Tensor,
+        ricci: Optional[Tensor] = None,
+        timestep: float = 0.1
+    ) -> Tuple[Tensor, FlowMetrics]:
+        """Perform flow step with metrics.
+        
+        Args:
+            metric: Metric tensor
+            ricci: Optional pre-computed Ricci tensor
+            timestep: Time step size
+            
+        Returns:
+            Tuple of (evolved metric, flow metrics)
+        """
+        if ricci is None:
+            ricci = self.compute_ricci_tensor(metric)
+            
+        # Evolve metric: g(t+dt) = g(t) - 2*Ric(g(t))*dt
+        new_metric = metric - 2 * timestep * ricci
+        
+        # Compute flow metrics
+        metrics = FlowMetrics(
+            flow_magnitude=float(torch.norm(ricci).item()),
+            metric_determinant=float(torch.linalg.det(new_metric).mean().item()),
+            ricci_scalar=float(torch.diagonal(ricci, dim1=-2, dim2=-1).sum(-1).mean().item()),
+            energy=float(torch.linalg.det(new_metric).mean().item()),
+            singularity=float(torch.linalg.det(metric).mean().item()),
+            normalized_flow=float(torch.linalg.det(new_metric).mean().item())
+        )
+        
+        return new_metric, metrics
+
+    def detect_singularities(
+        self,
+        metric: Tensor,
+        points: Optional[Tensor] = None,
+        threshold: float = 1e-6
+    ) -> List[SingularityInfo[Tensor]]:
+        """Detect flow singularities.
+        
+        Args:
+            metric: Metric tensor
+            points: Optional points tensor
+            threshold: Detection threshold
+            
+        Returns:
+            List of detected singularities
+        """
+        batch_size = metric.shape[0]
+        
+        # Add small regularization for numerical stability
+        metric_reg = metric + torch.eye(
+            self.manifold_dim,
+            device=metric.device
+        ).unsqueeze(0) * 1e-8
+        
+        # Check metric determinant
+        det = torch.linalg.det(metric)
+        
+        # Compute condition number using SVD
+        try:
+            U, S, Vh = torch.linalg.svd(metric_reg)
+            cond = S.max(dim=1)[0] / (S.min(dim=1)[0] + 1e-8)
+        except:
+            # If SVD fails, metric is likely singular
+            cond = torch.ones(batch_size, device=metric.device) * float('inf')
+        
+        # Check eigenvalues
+        try:
+            eigenvals = torch.linalg.eigvals(metric_reg).real
+            min_eigenval = torch.min(eigenvals, dim=1)[0]
+        except:
+            # If eigendecomposition fails, assume singular
+            min_eigenval = torch.zeros(batch_size, device=metric.device)
+        
+        # Detect singularities
+        singularities = []
+        for i in range(batch_size):
+            if (abs(det[i]) < threshold or  # Near-zero determinant
+                cond[i] > 1.0/threshold or  # Poor conditioning
+                min_eigenval[i] < threshold):  # Near-zero eigenvalue
+                
+                info = SingularityInfo(
+                    index=i,
+                    determinant=float(det[i].item()),
+                    condition_number=float(cond[i].item()),
+                    min_eigenvalue=float(min_eigenval[i].item()),
+                    location=points[i] if points is not None else None,
+                    curvature=self.compute_curvature(metric[i:i+1])[0]
+                )
+                singularities.append(info)
+        
+        return singularities
+
+    def normalize_flow(
+        self,
+        flow: Tensor,
+        metric: Optional[Tensor] = None,
+        method: str = "ricci"
+    ) -> Tensor:
+        """Normalize flow vector field.
+        
+        Args:
+            flow: Flow vector field
+            metric: Optional metric tensor for normalization
+            method: Normalization method ("ricci", "volume", "energy")
+            
+        Returns:
+            Normalized flow vector field
+        """
+        if metric is not None and method == "ricci":
+            # Use metric for normalization
+            flow_norm = torch.sqrt(torch.einsum('...ij,...ij->...', flow, flow))
+            flow_norm = flow_norm.unsqueeze(-1).unsqueeze(-1)
+            normalized = flow / (flow_norm + 1e-8)
+            
+        elif method == "volume":
+            # Preserve volume
+            det = torch.linalg.det(flow.reshape(-1, self.manifold_dim, self.manifold_dim))
+            scale = det.abs().pow(1.0 / self.manifold_dim)
+            normalized = flow / (scale.view(-1, 1) + 1e-8)
+            
+        else:  # "energy"
+            # Normalize by energy
+            energy = torch.sum(flow * flow, dim=-1, keepdim=True)
+            normalized = flow / (torch.sqrt(energy) + 1e-8)
+        
+        return normalized
+
+    def parallel_transport(
+        self,
+        vector: Tensor,
+        start_point: Tensor,
+        end_point: Tensor,
+        connection: Optional[Tensor] = None
+    ) -> Tensor:
+        """Parallel transport vector along geodesic.
+        
+        Args:
+            vector: Vector to transport
+            start_point: Starting point
+            end_point: Ending point
+            connection: Optional connection coefficients
+            
+        Returns:
+            Transported vector
+        """
+        if connection is None:
+            metric = self.compute_metric(torch.stack([start_point, end_point]))
+            connection = self.compute_connection(metric)
+        
+        # Compute geodesic tangent
+        tangent = end_point - start_point
+        
+        # Transport equation: dV^i/dt = -Γ^i_{jk} V^j dx^k/dt
+        transport = -torch.einsum(
+            'ijk,j,k->i',
+            connection[0],
+            vector,
+            tangent
+        )
+        
+        return vector + transport
+
+    def compute_geodesic(
+        self,
+        start_point: Tensor,
+        end_point: Tensor,
+        num_steps: int = 10
+    ) -> Tensor:
+        """Compute geodesic between points.
+        
+        Args:
+            start_point: Starting point
+            end_point: Ending point
+            num_steps: Number of integration steps
+            
+        Returns:
+            Geodesic path as tensor
+        """
+        # Initialize path
+        path = [start_point]
+        current = start_point
+        
+        # Compute initial tangent vector
+        tangent = (end_point - start_point) / num_steps
+        
+        # Integrate geodesic equation
+        for _ in range(num_steps - 1):
+            # Get metric and connection at current point
+            metric = self.compute_metric(current.unsqueeze(0))
+            connection = self.compute_connection(metric)
+            
+            # Update tangent vector using geodesic equation
+            tangent = tangent - 0.5 * torch.einsum(
+                'ijk,j,k->i',
+                connection[0],
+                tangent,
+                tangent
+            ) * self.dt
+            
+            # Update position
+            current = current + tangent * self.dt
+            path.append(current)
+        
+        path.append(end_point)
+        return torch.stack(path) 
