@@ -84,7 +84,7 @@ class MotivicChristoffelSymbols(ChristoffelSymbols[Tensor]):
         # Project to hidden dimension space using adaptive pooling
         pooled_values = torch.nn.functional.adaptive_avg_pool1d(
             flattened_values.unsqueeze(1),  # [batch_size, 1, manifold_dim^3]
-            dynamics.hidden_dim  # Target length
+            output_size=dynamics.hidden_dim  # Target length
         ).squeeze(1)  # [batch_size, hidden_dim]
         
         # Compute dynamics

@@ -27,8 +27,10 @@ from ..attention.geometric import (
     ParallelTransport,
 )
 from .arithmetic_dynamics import ArithmeticPattern
-from .geometric_flow import PatternFlow
+from .geometric_flow import GeometricFlow
 from .quantum_attention_tile import QuantumMotivicTile
+from ..patterns.symplectic import SymplecticStructure
+from ..patterns.riemannian import PatternRiemannianStructure
 
 
 @dataclass
@@ -154,13 +156,36 @@ class QuantumGeometricAttention(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
         self.tile_size = tile_size
         self.manifold_type = manifold_type
         self.curvature = curvature
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         self.motive_rank = motive_rank
         self.manifold_dim = manifold_dim
         self.num_layers = num_layers
+        self.scale = self.head_dim ** -0.5
+
+        # QKV projection
+        self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3)
+        self.to_out = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Dropout(dropout)
+        )
+
+        # Initialize tiles for each attention head
+        self.tiles = nn.ModuleList([
+            QuantumMotivicTile(
+                size=tile_size,
+                hidden_dim=self.head_dim,  # Use head_dim instead of hidden_dim
+                num_heads=1,  # Each tile handles one head
+                dropout=dropout,
+                resolution=1.0,
+                cohomology_dim=manifold_dim,
+                motive_rank=motive_rank
+            )
+            for _ in range(num_heads)
+        ])
 
         # Initialize components
         self.attention = QuantumMotivicTile(
@@ -172,8 +197,7 @@ class QuantumGeometricAttention(nn.Module):
             cohomology_dim=manifold_dim,
             motive_rank=motive_rank
         )
-        self.flow = PatternFlow(
-            input_dim=hidden_dim,
+        self.flow = GeometricFlow(
             hidden_dim=hidden_dim,
             manifold_dim=manifold_dim
         )
@@ -231,26 +255,89 @@ class QuantumGeometricAttention(nn.Module):
         return patterns, combined_metrics
 
     def forward(
-        self, x: torch.Tensor, return_patterns: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Apply quantum geometric attention framework.
-
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_metrics: bool = False
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
+        """Apply quantum geometric attention.
+        
         Args:
             x: Input tensor of shape (batch_size, seq_len, hidden_dim)
-            return_patterns: Whether to return detected patterns
-
+            mask: Optional attention mask
+            return_metrics: Whether to return attention metrics
+            
         Returns:
-            - Output tensor of shape (batch_size, seq_len, hidden_dim)
-            - Optional pattern metrics if return_patterns is True
+            Tuple of (output tensor, optional metrics dictionary)
         """
-        patterns, pattern_metrics = self.detect_patterns(x)
-
-        # Process with proper tensor operations
-        output = self._process_attention(patterns)
+        batch_size, seq_len, _ = x.shape
         
-        if return_patterns:
-            return output, pattern_metrics
-        return output
+        # Project to Q, K, V
+        qkv = self.to_qkv(x)
+        qkv = qkv.chunk(3, dim=-1)
+        q, k, v = map(
+            lambda t: t.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2),
+            qkv
+        )
+        
+        # Initialize metrics
+        metrics: Dict[str, Any] = {} if return_metrics else {}
+        
+        # Apply geometric flow to queries and keys
+        q_flowed, q_metrics = self.flow(q.reshape(-1, self.head_dim))
+        k_flowed, k_metrics = self.flow(k.reshape(-1, self.head_dim))
+        
+        # Reshape back to attention dimensions
+        q_flowed = q_flowed.view(batch_size, self.num_heads, seq_len, self.head_dim)
+        k_flowed = k_flowed.view(batch_size, self.num_heads, seq_len, self.head_dim)
+        
+        if return_metrics:
+            metrics['q_flow'] = q_metrics
+            metrics['k_flow'] = k_metrics
+        
+        # Initialize attention scores
+        dots = torch.zeros(
+            batch_size,
+            self.num_heads,
+            seq_len,
+            seq_len,
+            device=x.device,
+            dtype=x.dtype
+        )
+        
+        # Process each head with its corresponding tile
+        for h, tile in enumerate(self.tiles):
+            # Extract head-specific tensors
+            q_h = q_flowed[:, h]  # Shape: (batch_size, seq_len, head_dim)
+            k_h = k_flowed[:, h]  # Shape: (batch_size, seq_len, head_dim)
+            v_h = v[:, h]        # Shape: (batch_size, seq_len, head_dim)
+            
+            # Process through tile
+            head_dots, tile_metrics = tile(q_h, k_h, v_h)  # Unpack tuple return
+            dots[:, h] = head_dots
+            
+            if return_metrics:
+                metrics[f'tile_{h}'] = tile_metrics
+        
+        # Apply attention mask if provided
+        if mask is not None:
+            dots = dots.masked_fill(mask[:, None, None, :] == 0, float('-inf'))
+        
+        # Compute attention weights
+        attn = F.softmax(dots * self.scale, dim=-1)
+        attn = self.dropout(attn)
+        
+        # Apply attention to values
+        out = torch.matmul(attn, v)
+        
+        # Reshape and project output
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
+        out = self.to_out(out)
+        
+        if return_metrics:
+            metrics['attention'] = attn.detach()
+        
+        return out, metrics if return_metrics else None
 
     def prepare_attention_state(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -290,8 +377,8 @@ class QuantumGeometricAttention(nn.Module):
 
     def _compute_quantum_features(self, x: torch.Tensor) -> torch.Tensor:
         """Compute quantum features using tensor operations."""
-        # Use attention module properly
-        features = self.attention(x)  # Use forward method directly
+        # Use attention module properly, ensuring we get just the tensor
+        features = self.attention(x, x, x, return_metrics=False)  # Pass x as q,k,v and disable metrics
         return features
 
     def compute_attention_patterns(
@@ -435,13 +522,13 @@ class QuantumGeometricAttention(nn.Module):
         # Project to quantum code space
         code_proj = self.pattern_proj(x)
         
-        # Apply quantum encoding through forward pass
-        code_state = self.attention(code_proj)
+        # Apply quantum encoding through forward pass (self-attention style)
+        attention_output = self.attention(code_proj, code_proj, code_proj, return_metrics=False)
         
         # Add geometric structure through forward pass
-        code_state = self.flow(code_state)
+        flow_output, _ = self.flow(attention_output)
         
-        return code_state
+        return flow_output
 
     def build_attention_complex(
         self,

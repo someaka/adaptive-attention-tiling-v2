@@ -58,24 +58,23 @@ def fiber_dim():
 
 
 @pytest.fixture
-def base_bundle(test_config):
+def base_bundle(test_config, fiber_dim):
     """Create base implementation instance."""
     base_dim = test_config["geometric_tests"]["dimensions"]
-    fiber_dim = 3  # Standard SO(3) fiber dimension
     return BaseFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim)
 
 
 @pytest.fixture
-def pattern_bundle(test_config):
+def pattern_bundle(test_config, fiber_dim):
     """Create pattern implementation instance."""
     dim = test_config["geometric_tests"]["dimensions"]
-    return PatternFiberBundle(base_dim=dim, fiber_dim=3)
+    return PatternFiberBundle(base_dim=dim, fiber_dim=fiber_dim)
 
 
 @pytest.fixture
 def structure_group():
     """Create a structure group for the bundle."""
-    return torch.eye(3)  # SO(3) structure group
+    return torch.eye(4)  # Match fiber dimension
 
 
 class TestFiberBundleProtocol:

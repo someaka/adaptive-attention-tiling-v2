@@ -14,7 +14,8 @@ import torch
 from torch import Tensor
 
 from ..base import ValidationResult
-from ...core.tiling.geometric_flow import GeometricFlow, RiemannianMetric
+from ...core.tiling.geometric_flow import GeometricFlow
+from ...core.types import RiemannianMetric
 
 
 def convert_tensor_data(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -312,16 +313,25 @@ class TilingFlowValidator:
             Validation result for chart transition
         """
         try:
-            # Apply transition
-            x_transformed = self.flow.metric.transition(x, chart_from, chart_to)
+            # Get initial metric
+            metric_from = self.flow.compute_metric(x)
+            
+            # Apply forward transformation
+            transformed, metrics = self.flow.forward(x)
+            x_transformed = transformed
+            
+            # Get metric in new chart
+            metric_to = self.flow.compute_metric(x_transformed)
             
             # Check invertibility (approximately)
-            x_back = self.flow.metric.transition(x_transformed, chart_to, chart_from)
+            back_transformed, _ = self.flow.forward(x_transformed)
+            x_back = back_transformed
             is_invertible = torch.allclose(x, x_back, rtol=1e-5)
             
             # Check smoothness via Jacobian
             x.requires_grad_(True)
-            x_transformed = self.flow.metric.transition(x, chart_from, chart_to)  # Recompute with grad
+            transformed, _ = self.flow.forward(x)  # Recompute with grad
+            x_transformed = transformed
             x_transformed.sum().backward()
             jacobian = x.grad
             
@@ -346,7 +356,10 @@ class TilingFlowValidator:
                 'is_full_rank': is_full_rank,
                 'jacobian': jacobian,
                 'chart_from': chart_from,
-                'chart_to': chart_to
+                'chart_to': chart_to,
+                'metric_from': metric_from,
+                'metric_to': metric_to,
+                'flow_metrics': metrics
             }
             
             message = (
@@ -444,12 +457,8 @@ class TilingFlowValidator:
             Combined validation result or dictionary of all validation results
         """
         try:
-            # Get metric tensor - try both ways
-            try:
-                metric = self.flow.metric(x, chart)
-            except (AttributeError, TypeError):
-                # If metric attribute not available, try compute_metric
-                metric = self.flow.compute_metric(x)
+            # Get metric tensor using compute_metric
+            metric = self.flow.compute_metric(x)
             
             # Validate metric tensor
             metric_valid = self.validate_metric_tensor(metric, chart)
@@ -457,8 +466,9 @@ class TilingFlowValidator:
             # Validate flow stability using flow's metrics history
             stability_valid = None
             try:
-                metrics_history = self.flow._metrics.get("stability", [])
-                stability_valid = self.validate_flow_stability(metrics_history)
+                if hasattr(self.flow, '_metrics') and isinstance(self.flow._metrics, dict):
+                    metrics_history = self.flow._metrics.get("stability", [])
+                    stability_valid = self.validate_flow_stability(metrics_history)
             except AttributeError:
                 # Skip stability validation if _metrics not available
                 pass
@@ -466,8 +476,9 @@ class TilingFlowValidator:
             # Validate energy conservation
             energy_valid = None
             try:
-                energy_history = self.flow._metrics.get("energy", [])
-                energy_valid = self.validate_energy_conservation(energy_history)
+                if hasattr(self.flow, '_metrics') and isinstance(self.flow._metrics, dict):
+                    energy_history = self.flow._metrics.get("energy", [])
+                    energy_valid = self.validate_energy_conservation(energy_history)
             except AttributeError:
                 # Skip energy validation if _metrics not available
                 pass

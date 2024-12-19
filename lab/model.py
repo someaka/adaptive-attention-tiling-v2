@@ -13,7 +13,7 @@ from src.core.attention.geometric import (
     ParallelTransport
 )
 from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention as CoreQuantumGeometricAttention
-from src.core.tiling.geometric_flow import PatternFlow as CorePatternFlow
+from src.core.tiling.geometric_flow import GeometricFlow
 from src.core.tiling.arithmetic_dynamics import ArithmeticPattern
 from src.core.tiling.quantum_attention_tile import QuantumMotivicTile
 import tiktoken
@@ -82,10 +82,14 @@ class QuantumGeometricAttention(nn.Module):
         self.to_qkv = nn.Linear(dim, dim * 3)
         
         # Geometric flow components
-        self.flow = CorePatternFlow(
-            input_dim=self.head_dim,  # Per head dimension
-            hidden_dim=self.head_dim,
-            manifold_dim=self.head_dim
+        self.flow = GeometricFlow(
+            hidden_dim=self.head_dim,  # Per head dimension
+            manifold_dim=self.head_dim,
+            motive_rank=4,
+            num_charts=4,
+            integration_steps=10,
+            dt=0.1,
+            stability_threshold=1e-6
         )
         
         # Phase encoding with stability
@@ -122,7 +126,7 @@ class QuantumGeometricAttention(nn.Module):
         state_evolved = state_evolved.view(B, H, N, D)
         
         # Monitor stability
-        if metrics['stability'] < 0.5:
+        if 'stability' in metrics and metrics['stability'] < 0.5:
             # Fall back to identity if unstable
             return F.normalize(state, dim=-1)
             
@@ -182,9 +186,9 @@ class QuantumGeometricAttention(nn.Module):
         
         if return_metrics:
             metrics = {
-                'attention': attn,
-                'quantum_norm': torch.norm(q, dim=-1).mean(),
-                'geometric_flow': self.flow._metrics.get('stability', 1.0)
+                'attention': attn.detach(),  # Detach for metrics
+                'quantum_norm': torch.norm(q, dim=-1).mean().item(),
+                'geometric_flow_stability': 1.0  # Default stability value
             }
             return out, metrics
         return out

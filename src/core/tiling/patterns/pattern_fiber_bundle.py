@@ -10,30 +10,32 @@ from typing import Optional, Dict, Any, List, Tuple, TypeVar, Union, Type
 import torch
 from torch import nn, Tensor
 
-from src.core.patterns.fiber_bundle import BaseFiberBundle
-from src.core.patterns.fiber_types import (
+from ...patterns.fiber_bundle import BaseFiberBundle
+from ...patterns.fiber_types import (
     FiberBundle,
     LocalChart,
     FiberChart,
     StructureGroup,
 )
-from src.core.patterns.riemannian_base import (
+from ...patterns.riemannian_base import (
     MetricTensor,
     RiemannianStructure,
     ChristoffelSymbols,
     CurvatureTensor
 )
-from src.core.patterns.motivic_riemannian import (
+from ...patterns.motivic_riemannian import (
     MotivicRiemannianStructure,
     MotivicMetricTensor
 )
-from src.core.tiling.patterns.cohomology import HeightStructure, ArithmeticForm
-from src.core.tiling.geometric_flow import GeometricFlow
-from src.core.patterns.formation import PatternFormation
-from src.core.patterns.dynamics import PatternDynamics
-from src.core.patterns.evolution import PatternEvolution
-from src.core.patterns.symplectic import SymplecticStructure
-from src.core.patterns.riemannian import PatternRiemannianStructure
+from ..patterns.cohomology import HeightStructure, ArithmeticForm
+from ...patterns.riemannian_flow import RiemannianFlow
+from ...patterns.formation import PatternFormation
+from ...patterns.dynamics import PatternDynamics
+from ...patterns.evolution import PatternEvolution
+from ...patterns.symplectic import SymplecticStructure
+from ...patterns.riemannian import PatternRiemannianStructure
+from ...patterns.operadic_structure import AttentionOperad, OperadicOperation
+from ...patterns.enriched_structure import PatternTransition, WaveEmergence
 
 
 class PatternFiberBundle(BaseFiberBundle):
@@ -47,16 +49,16 @@ class PatternFiberBundle(BaseFiberBundle):
     def __init__(
         self,
         base_dim: int = 2,
-        fiber_dim: int = 3,
-        structure_group: str = "O(n)",  # Simplified to just str since we handle conversion
+        fiber_dim: int = 3,  # SO(3) fiber dimension
+        structure_group: str = "O(n)",
         device: Optional[torch.device] = None,
-        num_primes: int = 8,  # Height structure parameter
-        motive_rank: int = 4,  # Motivic structure parameter
-        integration_steps: int = 10,  # Flow integration parameter
-        dt: float = 0.1,  # Time step for dynamics
-        stability_threshold: float = 1e-6,  # Stability detection threshold
-        learning_rate: float = 0.01,  # Pattern evolution parameter
-        momentum: float = 0.9,  # Pattern evolution parameter
+        num_primes: int = 8,
+        motive_rank: int = 4,
+        integration_steps: int = 10,
+        dt: float = 0.1,
+        stability_threshold: float = 1e-6,
+        learning_rate: float = 0.01,
+        momentum: float = 0.9,
     ):
         """Initialize pattern fiber bundle.
         
@@ -73,45 +75,28 @@ class PatternFiberBundle(BaseFiberBundle):
             learning_rate: Learning rate for evolution
             momentum: Momentum for evolution
         """
-        # Handle structure group
-        self._structure_group_str = str(structure_group)  # Convert to string if needed
-            
-        super().__init__(base_dim, fiber_dim, self._structure_group_str)
+        # Initialize base bundle
+        super().__init__(base_dim, fiber_dim, structure_group)
         
         self.device = device if device is not None else torch.device('cpu')
         
-        # Initialize height structure for motivic metric
-        self.height_structure = HeightStructure(num_primes)
+        # Initialize height structure
+        self.height_structure = HeightStructure(num_primes=num_primes)
         
-        # Initialize geometric flow for Fisher-Rao metric
-        self.geometric_flow = GeometricFlow(
-            hidden_dim=fiber_dim,
+        # Initialize operadic and enriched structures
+        self.operad = AttentionOperad(base_dim=base_dim)
+        self.wave = WaveEmergence(dt=dt, num_steps=integration_steps)
+        self.transition = PatternTransition(wave_emergence=self.wave)
+        
+        # Initialize geometric flow with natural dimension handling
+        self.geometric_flow = RiemannianFlow(
             manifold_dim=base_dim,
-            motive_rank=motive_rank,
-            num_charts=1,
-            integration_steps=integration_steps,
+            hidden_dim=fiber_dim,
+            num_layers=2,
             dt=dt,
-            stability_threshold=stability_threshold
+            stability_threshold=stability_threshold,
+            use_parallel_transport=True
         )
-        
-        # Initialize Lie algebra basis matrices
-        self.basis_matrices = torch.zeros(
-            fiber_dim * (fiber_dim - 1) // 2,  # Number of basis elements
-            fiber_dim,
-            fiber_dim,
-            device=self.device
-        )
-        
-        # Fill basis matrices with standard generators
-        idx = 0
-        for i in range(fiber_dim):
-            for j in range(i + 1, fiber_dim):
-                # Create elementary skew-symmetric matrix
-                basis = torch.zeros(fiber_dim, fiber_dim, device=self.device)
-                basis[i, j] = 1.0
-                basis[j, i] = -1.0
-                self.basis_matrices[idx] = basis
-                idx += 1
         
         # Initialize pattern-specific components
         self.pattern_formation = PatternFormation(
@@ -125,7 +110,7 @@ class PatternFiberBundle(BaseFiberBundle):
         
         self.riemannian_framework = PatternRiemannianStructure(
             manifold_dim=self.total_dim,
-            pattern_dim=self.fiber_dim,
+            pattern_dim=fiber_dim,
             device=device,
             dtype=None
         )
@@ -136,16 +121,160 @@ class PatternFiberBundle(BaseFiberBundle):
             momentum=momentum
         )
         
-        self.symplectic = SymplecticStructure(dim=fiber_dim)
+        # Initialize symplectic structure with padded dimension
+        padded_dim = (fiber_dim + 1) & ~1  # Round up to next even number
+        self.symplectic = SymplecticStructure(dim=padded_dim)
+        self._symplectic_padding = padded_dim - fiber_dim
+        
+        # Initialize Lie algebra basis matrices for SO(3)
+        self.basis_matrices = torch.zeros(
+            fiber_dim * (fiber_dim - 1) // 2,  # Number of SO(3) generators
+            fiber_dim,
+            fiber_dim,
+            device=self.device
+        )
+        
+        # Fill basis matrices with SO(3) generators
+        idx = 0
+        for i in range(fiber_dim):
+            for j in range(i + 1, fiber_dim):
+                basis = torch.zeros(fiber_dim, fiber_dim, device=self.device)
+                basis[i, j] = 1.0
+                basis[j, i] = -1.0
+                self.basis_matrices[idx] = basis
+                idx += 1
         
         # Move to device
         self.to(self.device)
+        
+        # Store structure group string for fiber chart creation
+        self._structure_group_str = structure_group
 
+    def _handle_dimension(self, tensor: Tensor, target_dim: int) -> Tensor:
+        """Handle dimensional transition using operadic structure.
+        
+        Args:
+            tensor: Input tensor
+            target_dim: Target dimension
+            
+        Returns:
+            Transformed tensor with target dimension
+        """
+        source_dim = tensor.shape[-1]
+        if source_dim == target_dim:
+            return tensor
+            
+        # Create operadic operation for transition
+        operation = self.operad.create_operation(source_dim, target_dim)
+        
+        # Create enriched morphism for transition
+        source_space = tensor
+        target_space = torch.zeros(*tensor.shape[:-1], target_dim, device=tensor.device)
+        morphism = self.transition.create_morphism(source_space, target_space)
+        
+        # Apply transition
+        return morphism.structure_map
+        
+    def connection_form(self, tangent_vector: Tensor) -> Tensor:
+        """Compute connection form using operadic structure.
+        
+        Args:
+            tangent_vector: Tangent vector to compute connection for
+            
+        Returns:
+            Connection form tensor
+        """
+        # Split into base and fiber components
+        base_components = tangent_vector[..., :self.base_dim]
+        vertical_components = tangent_vector[..., self.base_dim:]
+        
+        # Handle vertical part directly
+        result = torch.zeros_like(vertical_components)
+        
+        # Add geometric flow contribution using operadic transition
+        flow_metric = self.geometric_flow.compute_metric(base_components)
+        
+        # Ensure connection tensor has correct dimensions using operadic structure
+        connection_matrix = self._handle_dimension(
+            self.connection,
+            self.fiber_dim
+        )
+        
+        # Contract connection with base components
+        result = torch.einsum('...i,ijk->...k', base_components, connection_matrix)
+        
+        # Ensure flow metric has correct shape
+        if len(flow_metric.shape) < len(result.shape):
+            flow_metric = flow_metric.unsqueeze(-1)
+        if flow_metric.shape[-1] != result.shape[-1]:
+            # Pad or truncate flow metric to match result
+            if flow_metric.shape[-1] < result.shape[-1]:
+                padding = torch.ones(
+                    *flow_metric.shape[:-1],
+                    result.shape[-1] - flow_metric.shape[-1],
+                    device=flow_metric.device,
+                    dtype=flow_metric.dtype
+                )
+                flow_metric = torch.cat([flow_metric, padding], dim=-1)
+            else:
+                flow_metric = flow_metric[..., :result.shape[-1]]
+        
+        # Apply flow metric
+        result = result * flow_metric
+        
+        return result
+        
+    def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
+        """Compute local trivialization using enriched structure.
+        
+        Args:
+            point: Point in total space
+            
+        Returns:
+            Tuple of (local_chart, fiber_chart)
+        """
+        # Get base coordinates through projection
+        base_coords = self.bundle_projection(point)
+        
+        # Get fiber coordinates
+        fiber_coords = point[..., self.base_dim:self.base_dim + self.fiber_dim]
+        
+        # Compute symplectic form using operadic structure and padding
+        padded_coords = self._pad_for_symplectic(fiber_coords)
+        symplectic_form = self.symplectic.compute_form(padded_coords)
+        
+        # Create transition maps dictionary with geometric flow
+        transition_maps = {
+            'geometric_flow': self.geometric_flow,
+            'symplectic_form': symplectic_form,
+            'pattern_dynamics': self.pattern_dynamics
+        }
+        
+        # Create local chart with enhanced structure
+        local_chart = LocalChart(
+            coordinates=base_coords,
+            dimension=self.base_dim,
+            transition_maps=transition_maps
+        )
+        
+        # Create fiber chart with pattern-specific features
+        fiber_chart = FiberChart(
+            fiber_coordinates=fiber_coords,
+            structure_group=self._structure_group_str,
+            transition_functions={
+                'evolution': self.pattern_evolution,
+                'dynamics': self.pattern_dynamics,
+                'symplectic': symplectic_form
+            }
+        )
+        
+        return local_chart, fiber_chart
+        
     def to(self, device: torch.device) -> 'PatternFiberBundle':
         """Move the bundle to the specified device."""
         self.device = device
         return super().to(device)
-
+        
     def _ensure_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """Ensure tensor is on the correct device."""
         if tensor.device != self.device:
@@ -168,7 +297,7 @@ class PatternFiberBundle(BaseFiberBundle):
         
         # Add Fisher-Rao metric from geometric flow
         base_points = points[..., :self.base_dim]
-        fisher = self.geometric_flow.metric.compute_fisher_metric(base_points)
+        fisher = self.geometric_flow.compute_metric(base_points)
         values[..., :self.base_dim, :self.base_dim] += fisher
         
         # Add pattern-specific fiber metric
@@ -220,7 +349,7 @@ class PatternFiberBundle(BaseFiberBundle):
         """
         local_chart, fiber_chart = self.local_trivialization(point)
         
-        flow_metrics = self.geometric_flow.metric.compute_fisher_metric(
+        flow_metrics = self.geometric_flow.compute_metric(
             local_chart.coordinates
         )
         
@@ -317,47 +446,6 @@ class PatternFiberBundle(BaseFiberBundle):
         
         return form.coefficients
 
-    def connection_form(self, tangent_vector: Tensor) -> Tensor:
-        """Compute connection form with pattern-specific features.
-        
-        Args:
-            tangent_vector: Tangent vector at a point
-            
-        Returns:
-            Connection form value with pattern structure
-        """
-        # Handle batch dimension if present
-        has_batch = len(tangent_vector.shape) > 1
-        if not has_batch:
-            tangent_vector = tangent_vector.unsqueeze(0)
-            
-        # Extract base and vertical components
-        base_components = tangent_vector[..., :self.base_dim]
-        vertical_components = tangent_vector[..., self.base_dim:]
-        
-        # For purely vertical vectors, add pattern structure
-        if torch.allclose(base_components, torch.zeros_like(base_components)):
-            stability_dict = self.pattern_formation.compute_stability(vertical_components)
-            pattern_stability = stability_dict["pattern_stability"].to(vertical_components.device)
-            
-            # Ensure proper broadcasting
-            if len(pattern_stability.shape) < len(vertical_components.shape):
-                pattern_stability = pattern_stability.unsqueeze(-1)
-                
-            result = vertical_components * pattern_stability
-            return result if has_batch else result.squeeze(0)
-            
-        # For horizontal vectors, compute connection with pattern features
-        result = torch.zeros_like(vertical_components)
-        
-        # Add geometric flow contribution
-        flow_metric = self.geometric_flow.metric.compute_fisher_metric(base_components)
-        
-        # Contract connection with base components and flow metric
-        result = torch.einsum('...i,ijk,ij->...k', base_components, self.connection, flow_metric)
-            
-        return result if has_batch else result.squeeze(0)
-
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Parallel transport with pattern evolution.
         
@@ -410,55 +498,21 @@ class PatternFiberBundle(BaseFiberBundle):
         
         return evolved_step
 
-    def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
-        """Implementation of FiberBundle.local_trivialization.
-        
-        Compute local trivialization at a point, integrating pattern dynamics
-        and symplectic structure.
-        
-        Properties preserved:
-        1. Pattern evolution in fiber coordinates
-        2. Symplectic structure of pattern space
-        3. Geometric flow stability
-        
-        Args:
-            point: Point in total space
+    def _pad_for_symplectic(self, tensor: Tensor) -> Tensor:
+        """Pad tensor for symplectic operations."""
+        if self._symplectic_padding == 0:
+            return tensor
             
-        Returns:
-            Tuple of (local_chart, fiber_chart)
-        """
-        # Get base coordinates through projection
-        base_coords = self.bundle_projection(point)
-        
-        # Get fiber coordinates with pattern dynamics
-        fiber_coords = point[..., self.base_dim:]
-        
-        # Compute symplectic form at current point
-        symplectic_form = self.symplectic.compute_form(fiber_coords)
-        
-        # Create transition maps dictionary with geometric flow
-        transition_maps = {
-            'geometric_flow': self.geometric_flow,
-            'symplectic_form': symplectic_form,
-            'pattern_dynamics': self.pattern_dynamics
-        }
-        
-        # Create local chart with enhanced structure
-        local_chart = LocalChart(
-            coordinates=base_coords,
-            dimension=self.base_dim,
-            transition_maps=transition_maps
+        padding = torch.zeros(
+            *tensor.shape[:-1],
+            self._symplectic_padding,
+            device=tensor.device,
+            dtype=tensor.dtype
         )
+        return torch.cat([tensor, padding], dim=-1)
         
-        # Create fiber chart with pattern-specific features
-        fiber_chart = FiberChart(
-            fiber_coordinates=fiber_coords,
-            structure_group=self._structure_group_str,  # Use stored string version
-            transition_functions={
-                'evolution': self.pattern_evolution,
-                'dynamics': self.pattern_dynamics,
-                'symplectic': symplectic_form
-            }
-        )
-        
-        return local_chart, fiber_chart
+    def _unpad_from_symplectic(self, tensor: Tensor) -> Tensor:
+        """Remove padding used for symplectic operations."""
+        if self._symplectic_padding == 0:
+            return tensor
+        return tensor[..., :-self._symplectic_padding]

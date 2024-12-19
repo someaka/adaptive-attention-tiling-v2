@@ -27,7 +27,7 @@ from src.validation.geometric.flow import (
     TilingFlowValidationResult as FlowValidationResult
 )
 from src.neural.attention.pattern.dynamics import PatternDynamics
-from src.core.tiling.geometric_flow import GeometricFlow, PatternFlow
+from src.core.tiling.geometric_flow import GeometricFlow
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -489,11 +489,13 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_v
         params['grid_size']
     ) * 0.1
     
-    # Create pattern flow
-    pattern_flow = PatternFlow(
-        input_dim=pattern.shape[1],
+    # Create geometric flow
+    pattern_flow = GeometricFlow(
         hidden_dim=128,
-        manifold_dim=32
+        manifold_dim=32,
+        motive_rank=4,
+        num_charts=1,
+        integration_steps=params['time_steps']
     )
     
     # Validate stability
@@ -521,19 +523,19 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_v
     assert isinstance(stability_result.lyapunov_exponents, torch.Tensor)
     assert isinstance(stability_result.perturbation_response, dict)
     
-    # Evolve pattern using pattern flow
-    output, metrics = pattern_flow(pattern, return_paths=True)
+    # Evolve pattern using geometric flow
+    output, metrics = pattern_flow(pattern)
     
     # Validate flow
     flow_result = flow_validator.validate_long_time_existence(output)
     assert flow_result.is_valid, "Flow should exist for long time"
     
     # Check flow metrics
-    assert "energy" in metrics[0]
-    assert "geodesic_distance" in metrics[0]
-    if "flow_path" in metrics[0]:
-        assert isinstance(metrics[0]["flow_path"], torch.Tensor)
-        assert len(metrics[0]["flow_path"].shape) == 4  # [batch, time, seq_len, hidden]
+    assert "energy" in metrics
+    assert "geodesic_distance" in metrics
+    if "flow_path" in metrics:
+        assert isinstance(metrics["flow_path"], torch.Tensor)
+        assert len(metrics["flow_path"].shape) == 4  # [batch, time, seq_len, hidden]
 
 def test_pattern_flow_energy(setup_test_parameters, flow_validator):
     """Test energy conservation in pattern flow."""
@@ -547,13 +549,15 @@ def test_pattern_flow_energy(setup_test_parameters, flow_validator):
         params['grid_size']
     ) * 0.1
     
-    # Create and evolve pattern flow
-    pattern_flow = PatternFlow(
-        input_dim=pattern.shape[1],
+    # Create and evolve geometric flow
+    pattern_flow = GeometricFlow(
         hidden_dim=128,
-        manifold_dim=32
+        manifold_dim=32,
+        motive_rank=4,
+        num_charts=1,
+        integration_steps=params['time_steps']
     )
-    output, metrics = pattern_flow(pattern, return_paths=True)
+    output, metrics = pattern_flow(pattern)
     
     # Validate energy conservation
     energy_result = flow_validator.validate_energy_conservation(output)

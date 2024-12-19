@@ -24,7 +24,7 @@ from src.validation.flow.stability import (
     NonlinearStabilityValidation,
     StructuralStabilityValidation
 )
-from src.core.tiling.geometric_flow import GeometricFlow, PatternFlow
+from src.core.tiling.geometric_flow import GeometricFlow
 
 
 @dataclass
@@ -130,7 +130,7 @@ class PatternValidator:
 
     def validate(
         self,
-        pattern_flow: PatternFlow,
+        pattern_flow: GeometricFlow,
         initial_state: torch.Tensor,
         time_steps: int = 100
     ) -> PatternStabilityResult:
@@ -202,7 +202,7 @@ class PatternValidator:
 
     def _compute_lyapunov_exponents(
         self,
-        pattern_flow: PatternFlow,
+        pattern_flow: GeometricFlow,
         initial_state: torch.Tensor,
         time_steps: int
     ) -> torch.Tensor:
@@ -241,7 +241,7 @@ class PatternValidator:
 
     def _test_perturbation_response(
         self,
-        pattern_flow: PatternFlow,
+        pattern_flow: GeometricFlow,
         initial_state: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
         """Test response to different types of perturbations."""

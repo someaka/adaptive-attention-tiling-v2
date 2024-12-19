@@ -5,8 +5,7 @@ including symplectic forms, Hamiltonian flows, and Poisson brackets.
 """
 
 from dataclasses import dataclass
-from typing import Tuple, Optional
-
+from typing import Tuple, Optional, cast
 import torch
 from torch import Tensor
 
@@ -17,7 +16,7 @@ class SymplecticForm:
 
     matrix: Tensor  # The symplectic form matrix
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Validate symplectic form properties."""
         if not torch.allclose(self.matrix, -self.matrix.transpose(-1, -2)):
             raise ValueError("Symplectic form must be antisymmetric")
@@ -25,6 +24,38 @@ class SymplecticForm:
     def evaluate(self, v1: Tensor, v2: Tensor) -> Tensor:
         """Evaluate symplectic form on two vectors."""
         return torch.einsum('...ij,...i,...j->...', self.matrix, v1, v2)
+
+    def transpose(self, *args) -> 'SymplecticForm':
+        """Return transposed symplectic form.
+        
+        Args:
+            *args: Dimension arguments (ignored)
+            
+        Returns:
+            Transposed symplectic form
+        """
+        return SymplecticForm(self.matrix.transpose(-2, -1))
+
+    def __neg__(self) -> 'SymplecticForm':
+        """Return negated symplectic form.
+        
+        Returns:
+            Negated symplectic form
+        """
+        return SymplecticForm(-self.matrix)
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality with another symplectic form.
+        
+        Args:
+            other: Object to compare with
+            
+        Returns:
+            True if equal, False otherwise
+        """
+        if not isinstance(other, SymplecticForm):
+            return NotImplemented
+        return torch.allclose(self.matrix, other.matrix)
 
 
 class SymplecticStructure:
@@ -100,7 +131,7 @@ class SymplecticStructure:
             Hamiltonian vector field at point
         """
         form = self.compute_form(point)
-        grad_h = torch.autograd.grad(hamiltonian, point, create_graph=True)[0]
+        grad_h = cast(Tensor, torch.autograd.grad(hamiltonian, point, create_graph=True)[0])
         return torch.einsum('ij,j->i', form.matrix, grad_h)
 
     def poisson_bracket(
@@ -120,6 +151,6 @@ class SymplecticStructure:
             Poisson bracket value
         """
         form = self.compute_form(point)
-        grad_f = torch.autograd.grad(f, point, create_graph=True)[0]
-        grad_g = torch.autograd.grad(g, point, create_graph=True)[0]
+        grad_f = cast(Tensor, torch.autograd.grad(f, point, create_graph=True)[0])
+        grad_g = cast(Tensor, torch.autograd.grad(g, point, create_graph=True)[0])
         return form.evaluate(grad_f, grad_g) 

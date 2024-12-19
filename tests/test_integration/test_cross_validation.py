@@ -17,7 +17,7 @@ from src.validation.geometric.model import ModelGeometricValidator
 from src.validation.quantum.state import QuantumStateValidator
 from src.validation.patterns.stability import PatternValidator, LinearStabilityValidator, NonlinearStabilityValidator, StructuralStabilityValidator
 from src.validation.patterns.formation import PatternFormationValidator
-from src.core.tiling.geometric_flow import GeometricFlow, PatternFlow
+from src.core.tiling.geometric_flow import GeometricFlow
 from src.core.performance.cpu.memory import MemoryManager, MemoryStats
 from src.core.performance import CPUOptimizer, PerformanceMetrics
 from src.core.models.base import LayerGeometry, ModelGeometry
@@ -85,12 +85,14 @@ class TestCrossValidation:
         )
 
     @pytest.fixture
-    def flow(self, manifold_dim: int) -> PatternFlow:
-        """Create pattern flow."""
-        return PatternFlow(
-            input_dim=manifold_dim,
+    def flow(self, manifold_dim: int) -> GeometricFlow:
+        """Create geometric flow."""
+        return GeometricFlow(
             hidden_dim=manifold_dim * 2,
-            manifold_dim=manifold_dim
+            manifold_dim=manifold_dim,
+            motive_rank=4,
+            num_charts=4,
+            integration_steps=10
         )
 
     @pytest.fixture
@@ -133,7 +135,7 @@ class TestCrossValidation:
         )
 
     def test_geometric_pattern_coupling(
-        self, framework: ValidationFramework, flow: PatternFlow, batch_size: int, dim: int
+        self, framework: ValidationFramework, flow: GeometricFlow, batch_size: int, dim: int
     ):
         """Test coupling between geometric and pattern components."""
         # Generate metric tensor

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -181,36 +181,72 @@ class QuantumMotivicTile(nn.Module):
         nn.init.xavier_uniform_(self.field_proj.weight)
         nn.init.xavier_uniform_(self.height_proj.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_metrics: bool = True
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Forward pass applying quantum motivic attention.
 
         Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            q: Query tensor of shape (batch_size, seq_len, hidden_dim)
+            k: Key tensor of shape (batch_size, seq_len, hidden_dim)
+            v: Value tensor of shape (batch_size, seq_len, hidden_dim)
+            return_metrics: Whether to return attention metrics
 
         Returns:
-            Processed tensor with quantum structure
+            If return_metrics is True:
+                Tuple of (attention_pattern, metrics_dict)
+            Otherwise:
+                Just the attention_pattern tensor
         """
-        return self._apply_attention(x)
+        # Get attention pattern through internal method
+        attention_pattern = self._apply_attention(q, k, v)
+        
+        if not return_metrics:
+            return attention_pattern
+            
+        # Compute quantum metrics
+        metrics = {
+            "cohomology_class": (self._metrics["cohomology_class"].detach().cpu().numpy() 
+                               if torch.is_tensor(self._metrics["cohomology_class"]) 
+                               else np.array([self._metrics["cohomology_class"]])),
+            "motive_height": float(self._metrics["motive_height"]),
+            "l_function_value": float(self._metrics["l_function_value"]),
+            "adelic_norm": float(self._metrics["adelic_norm"]),
+            "quantum_entropy": float(self._metrics["quantum_entropy"]),
+            "memory_stats": self.get_memory_stats()
+        }
+        
+        return attention_pattern, metrics
 
     def _apply_attention(
-        self, x: torch.Tensor, state: Optional[torch.Tensor] = None
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        state: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Apply quantum motivic attention.
 
         Args:
-            x: Input tensor
+            q: Query tensor
+            k: Key tensor
+            v: Value tensor
             state: Optional state tensor
 
         Returns:
-            Processed tensor with quantum structure
+            Attention pattern tensor
         """
-        batch_size, seq_len, _ = x.shape
+        batch_size, seq_len, _ = q.shape
         head_dim = self.hidden_dim // self.num_heads
 
-        # Standard attention
-        query = self.query(x).view(batch_size, seq_len, self.num_heads, head_dim)
-        key = self.key(x).view(batch_size, seq_len, self.num_heads, head_dim)
-        value = self.value(x).view(batch_size, seq_len, self.num_heads, head_dim)
+        # Project through attention layers
+        query = self.query(q).view(batch_size, seq_len, self.num_heads, head_dim)
+        key = self.key(k).view(batch_size, seq_len, self.num_heads, head_dim)
+        value = self.value(v).view(batch_size, seq_len, self.num_heads, head_dim)
 
         # Transpose for attention computation
         query = query.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
@@ -232,42 +268,25 @@ class QuantumMotivicTile(nn.Module):
         # Project back to hidden dimension
         attention_output = self.output(attention_output)
 
-        # Compute cohomology class
+        # Compute cohomology class and update metrics
         cohomology = self.cohomology_proj(attention_output)
         cohomology = cohomology.view(
             batch_size * seq_len, self.motive_rank, self.cohomology_dim
         )
+        self._metrics["cohomology_class"] = cohomology.mean(dim=0).mean(dim=0)
 
         # Apply quantum field structure
-        field = self.field_proj(
-            attention_output
-        )  # Shape: (batch_size, seq_len, hidden_dim)
+        field = self.field_proj(attention_output)
         field_flat = field.view(batch_size * seq_len, self.hidden_dim)
 
-        # Compute scaling factor
-        scaling = torch.sigmoid(
-            cohomology.mean(dim=1)
-        )  # Shape: (batch_size * seq_len, cohomology_dim)
-        scaling = F.linear(
-            scaling, torch.ones(self.hidden_dim, self.cohomology_dim, device=x.device)
-        )
-
-        # Apply scaling and reshape
-        field = (field_flat * scaling).view(batch_size, seq_len, self.hidden_dim)
-
-        # Store metrics
+        # Update quantum metrics
         with torch.no_grad():
-            self._metrics["cohomology_class"] = cohomology.mean(dim=(0, 1)).detach()
-            self._metrics["motive_height"] = (
-                self.height_proj(
-                    cohomology.view(-1, self.cohomology_dim * self.motive_rank)
-                )
-                .mean()
-                .item()
-            )
-            self._update_quantum_metrics(field)
+            self._metrics["motive_height"] = self.height_proj(cohomology.mean(dim=0)).mean().item()
+            self._metrics["l_function_value"] = field_flat.norm(p=2, dim=-1).mean().item()
+            self._metrics["adelic_norm"] = cohomology.norm(p=2, dim=-1).mean().item()
+            self._metrics["quantum_entropy"] = -(attention_weights * torch.log(attention_weights + 1e-10)).sum(dim=-1).mean().item()
 
-        return field
+        return attention_weights
 
     def _update_quantum_metrics(self, field: torch.Tensor) -> None:
         """Update quantum-specific metrics.
@@ -471,11 +490,19 @@ class QuantumMotivicTile(nn.Module):
         self._neighbors.append(neighbor)
 
     def _process_impl(self, x: torch.Tensor, update_metrics: bool = False) -> torch.Tensor:
-        """Process input and optionally update metrics."""
-        output = self.forward(x)
+        """Process input and optionally update metrics.
+        
+        Note: This method assumes self-attention where query=key=value=x
+        """
+        result = self.forward(x, x, x, return_metrics=False)
+        # At this point result is guaranteed to be a Tensor since return_metrics=False
+        assert isinstance(result, torch.Tensor), "Expected Tensor when return_metrics=False"
+        
         if update_metrics:
-            self._update_quantum_metrics(output)
-        return output
+            # Since result is a Tensor, we can safely pass it to _update_quantum_metrics
+            self._update_quantum_metrics(result)
+        
+        return result
 
     def adapt_resolution(self, density_metric: float, strategy: str) -> None:
         """Adapt resolution based on density metric."""

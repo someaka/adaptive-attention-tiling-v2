@@ -41,7 +41,7 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         """
         super().__init__()  # Initialize nn.Module
         self.base_dim = base_dim
-        self.fiber_dim = fiber_dim
+        self._fiber_dim = fiber_dim  # Store as protected attribute
         self.total_dim = base_dim + fiber_dim
         self.structure_group = structure_group
 
@@ -51,6 +51,11 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         # Initialize connection form
         # Shape: (base_dim, fiber_dim, fiber_dim)
         self.connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim)
+
+    @property
+    def fiber_dim(self) -> int:
+        """Return the fiber dimension."""
+        return self._fiber_dim
 
     def bundle_projection(self, total_space: Tensor) -> Tensor:
         """Implementation of FiberBundle.bundle_projection.

@@ -241,6 +241,62 @@ class ArithmeticDynamics(nn.Module):
         # Monte Carlo integration
         return integrand.mean(dim=1)
 
+    def compute_quantum_correction(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute quantum corrections to the metric.
+        
+        Args:
+            metric: Input metric tensor
+            
+        Returns:
+            Quantum correction tensor of same shape as input
+        """
+        # Project metric to height space
+        height_coords = self.height_map(metric.reshape(-1, self.hidden_dim))
+        height_coords = height_coords.view(*metric.shape[:-1], self.height_dim)
+        
+        # Compute quantum correction using flow
+        correction = self.flow(height_coords.reshape(-1, self.height_dim))
+        correction = correction.view(*metric.shape[:-1], self.height_dim)
+        
+        # Project back to metric space
+        correction = self.output_proj(correction.reshape(-1, self.height_dim))
+        correction = correction.view(*metric.shape)
+        
+        return correction
+
+    def compute_quantum_metric(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute quantum geometric metric.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            Quantum metric tensor
+        """
+        # Project to height space
+        height_coords = self.height_map(x.reshape(-1, self.hidden_dim))
+        height_coords = height_coords.view(*x.shape[:-1], self.height_dim)
+        
+        # Compute L-function values
+        l_values = self.l_function(x.reshape(-1, self.hidden_dim))
+        l_values = l_values.view(*x.shape[:-1], self.motive_rank)
+        
+        # Compute adelic projection
+        adelic = self.adelic_proj(x.reshape(-1, self.hidden_dim))
+        adelic = adelic.view(*x.shape[:-1], self.num_primes, self.motive_rank)
+        
+        # Combine components into quantum metric
+        quantum_metric = torch.einsum('...i,...j->...ij', height_coords, height_coords)
+        l_correction = torch.einsum('...i,...j->...ij', l_values, l_values)
+        adelic_correction = torch.einsum('...pi,...pj->...ij', adelic, adelic).mean(dim=-3)
+        
+        # Project back to input space
+        combined = quantum_metric + 0.1 * l_correction + 0.01 * adelic_correction
+        metric = self.output_proj(combined.reshape(-1, self.height_dim))
+        metric = metric.view(*x.shape[:-1], self.hidden_dim)
+        
+        return metric
+
 
 class ArithmeticPattern(nn.Module):
     """Pattern detection through arithmetic dynamics."""
