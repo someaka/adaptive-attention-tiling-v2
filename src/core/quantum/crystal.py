@@ -8,13 +8,14 @@ This module implements crystalline structures for attention patterns:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import torch
 from torch import nn
 
 from .state_space import HilbertSpace, QuantumState
+from ..crystal.scale import ScaleCohomology, RGFlow, ScaleConnectionData
 
 
 @dataclass
@@ -197,4 +198,53 @@ class CrystalSymmetry:
             amplitudes=new_amplitudes,
             basis_labels=state.basis_labels,
             phase=state.phase + torch.angle(phase),
+        )
+
+
+class CrystalScaleAnalysis:
+    """Analysis of crystal structures across scales."""
+
+    def __init__(self, lattice: BravaisLattice, hilbert_space: HilbertSpace):
+        self.lattice = lattice
+        self.hilbert_space = hilbert_space
+        self.scale_cohomology = ScaleCohomology(lattice.dim)
+        self.bloch = BlochFunction(lattice, hilbert_space)
+
+    def analyze_scale_structure(self, state: QuantumState, k_point: torch.Tensor) -> Dict[str, Any]:
+        """Analyze quantum state across scales."""
+        # Get Bloch function
+        bloch_state = self.bloch.compute_bloch_function(k_point, state.amplitudes)
+        
+        # Analyze scale properties
+        scale_conn = self.scale_cohomology.scale_connection(
+            bloch_state.amplitudes, 1.0, 2.0
+        )
+        
+        rg_flow = self.scale_cohomology.renormalization_flow(bloch_state.amplitudes)
+        fixed_points = self.scale_cohomology.fixed_points(bloch_state.amplitudes)
+        anomalies = self.scale_cohomology.anomaly_polynomial(bloch_state.amplitudes)
+        invariants = self.scale_cohomology.scale_invariants(bloch_state.amplitudes)
+        
+        # Check conformal properties
+        is_conformal = self.scale_cohomology.conformal_symmetry(bloch_state.amplitudes)
+        
+        return {
+            'scale_connection': scale_conn,
+            'rg_flow': rg_flow,
+            'fixed_points': fixed_points,
+            'anomalies': anomalies,
+            'scale_invariants': invariants,
+            'is_conformal': is_conformal
+        }
+
+    def compute_operator_expansion(self, state1: QuantumState, state2: QuantumState) -> torch.Tensor:
+        """Compute operator product expansion between states."""
+        return self.scale_cohomology.operator_product_expansion(
+            state1.amplitudes, state2.amplitudes
+        )
+
+    def compute_callan_symanzik(self, state: QuantumState, coupling: torch.Tensor) -> torch.Tensor:
+        """Compute Callan-Symanzik operator."""
+        return self.scale_cohomology.callan_symanzik_operator(
+            state.amplitudes, coupling
         )

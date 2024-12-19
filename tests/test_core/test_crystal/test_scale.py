@@ -32,9 +32,7 @@ class TestScaleCohomology:
         """Create scale system fixture."""
         return ScaleCohomology(
             dim=space_dim,
-            num_scales=4,
-            min_scale=0.1,
-            max_scale=10.0
+            num_scales=4
         )
 
     def test_scale_connection(self, scale_system, space_dim):

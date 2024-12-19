@@ -248,122 +248,104 @@ class ScaleInvariance:
 
 class ScaleCohomology:
     """Analysis of scale cohomology and obstructions."""
-    
-    def __init__(self, dim: int, num_scales: int = 4, min_scale: float = 0.1, max_scale: float = 10.0):
+
+    def __init__(self, dim: int, num_scales: int = 4):
         """Initialize scale cohomology analysis.
         
         Args:
-            dim: Dimension of state space
+            dim: Dimension of the system
             num_scales: Number of scales to analyze
-            min_scale: Minimum scale value
-            max_scale: Maximum scale value
         """
         self.dim = dim
         self.num_scales = num_scales
-        self.min_scale = min_scale
-        self.max_scale = max_scale
         
-        # Generate scale points
-        self.scale_points = torch.logspace(
-            np.log10(min_scale),
-            np.log10(max_scale),
-            num_scales,
-            dtype=torch.float32
-        )
-        
-        # Cohomology computation networks
-        self.cocycle_network = nn.Sequential(
+        # Initialize components
+        self.scale_conn = ScaleConnection(dim, num_scales)
+        self.rg_flow = RenormalizationFlow(dim)
+        self.anomaly_det = AnomalyDetector(dim)
+        self.scale_inv = ScaleInvariance(dim, num_scales)
+
+        # Initialize specialized networks
+        self.callan_symanzik_net = nn.Sequential(
             nn.Linear(dim * 2, dim * 4),
             nn.ReLU(),
-            nn.Linear(dim * 4, dim),
+            nn.Linear(dim * 4, dim)
         )
         
-        self.coboundary_network = nn.Sequential(
+        self.ope_net = nn.Sequential(
+            nn.Linear(dim * 2, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim)
+        )
+
+        self.conformal_net = nn.Sequential(
             nn.Linear(dim, dim * 2),
             nn.ReLU(),
-            nn.Linear(dim * 2, dim),
+            nn.Linear(dim * 2, 1)
         )
+
+    def scale_connection(self, source_state: torch.Tensor, source_scale: float, target_scale: float) -> ScaleConnectionData:
+        """Compute scale connection between states."""
+        target_state = self.scale_conn.connect_scales(source_state, source_scale, target_scale)
+        holonomy = self.scale_conn.compute_holonomy([source_state, target_state])
         
-        # Obstruction detector
-        self.obstruction_detector = nn.Sequential(
-            nn.Linear(dim * 3, dim * 4),
-            nn.ReLU(),
-            nn.Linear(dim * 4, 1),
-            nn.Sigmoid(),
+        return ScaleConnectionData(
+            source_scale=source_scale,
+            target_scale=target_scale,
+            connection_map=target_state,
+            holonomy=holonomy
         )
+
+    def renormalization_flow(self, observable: torch.Tensor) -> RGFlow:
+        """Compute renormalization group flow for observable."""
+        # Get initial points around observable
+        points = observable + 0.1 * torch.randn(10, self.dim)
         
-    def compute_cocycle(
-        self,
-        state1: torch.Tensor,
-        state2: torch.Tensor,
-        scale: float,
-    ) -> torch.Tensor:
-        """Compute cocycle between states at given scale.
+        # Find fixed points and stability
+        fixed_points, stability = self.rg_flow.find_fixed_points(points)
         
-        Args:
-            state1: First quantum state
-            state2: Second quantum state
-            scale: Scale parameter
-            
-        Returns:
-            Cocycle tensor
-        """
-        combined = torch.cat([state1, state2], dim=-1)
-        cocycle = self.cocycle_network(combined)
-        return cocycle * scale
+        # Compute flow lines
+        flow_lines = self.rg_flow.compute_flow_lines(points)
         
-    def compute_coboundary(
-        self,
-        state: torch.Tensor,
-        scale1: float,
-        scale2: float,
-    ) -> torch.Tensor:
-        """Compute coboundary of state between scales.
-        
-        Args:
-            state: Quantum state
-            scale1: First scale
-            scale2: Second scale
-            
-        Returns:
-            Coboundary tensor
-        """
-        coboundary = self.coboundary_network(state)
-        return coboundary * (scale2 - scale1)
-        
-    def detect_obstructions(
-        self,
-        states: List[torch.Tensor],
-        scales: List[float],
-    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """Detect cohomological obstructions.
-        
-        Args:
-            states: List of quantum states
-            scales: List of scale parameters
-            
-        Returns:
-            Obstruction probability and list of obstruction tensors
-        """
-        obstructions = []
-        
-        for i in range(len(states) - 2):
-            # Compute consecutive cocycles
-            cocycle1 = self.compute_cocycle(states[i], states[i+1], scales[i])
-            cocycle2 = self.compute_cocycle(states[i+1], states[i+2], scales[i+1])
-            
-            # Compute coboundary
-            coboundary = self.compute_coboundary(states[i+1], scales[i], scales[i+2])
-            
-            # Compute obstruction
-            combined = torch.cat([cocycle1, cocycle2, coboundary], dim=-1)
-            obstruction_prob = self.obstruction_detector(combined)
-            
-            if obstruction_prob > 0.5:
-                obstructions.append(cocycle2 - cocycle1 - coboundary)
-                
-        return torch.tensor(len(obstructions) > 0, dtype=torch.float), obstructions
-        
+        return RGFlow(
+            beta_function=self.rg_flow.beta_function,
+            fixed_points=fixed_points,
+            stability=stability,
+            flow_lines=flow_lines
+        )
+
+    def fixed_points(self, observable: torch.Tensor) -> List[torch.Tensor]:
+        """Find fixed points of the RG flow."""
+        points = observable + 0.1 * torch.randn(10, self.dim)
+        fixed_points, _ = self.rg_flow.find_fixed_points(points)
+        return fixed_points
+
+    def anomaly_polynomial(self, state: torch.Tensor) -> List[AnomalyPolynomial]:
+        """Compute anomaly polynomials."""
+        return self.anomaly_det.detect_anomalies(state)
+
+    def scale_invariants(self, structure: torch.Tensor) -> List[Tuple[torch.Tensor, float]]:
+        """Find scale invariant structures."""
+        return self.scale_inv.find_invariant_structures(structure.unsqueeze(0))
+
+    def callan_symanzik_operator(self, state: torch.Tensor, coupling: torch.Tensor) -> torch.Tensor:
+        """Compute Callan-Symanzik operator."""
+        combined = torch.cat([state, coupling], dim=-1)
+        return self.callan_symanzik_net(combined)
+
+    def operator_product_expansion(self, op1: torch.Tensor, op2: torch.Tensor) -> torch.Tensor:
+        """Compute operator product expansion."""
+        combined = torch.cat([op1, op2], dim=-1)
+        return self.ope_net(combined)
+
+    def conformal_symmetry(self, state: torch.Tensor) -> bool:
+        """Check if state has conformal symmetry."""
+        return bool(self.conformal_net(state).item() > 0.5)
+
+    def minimal_invariant_number(self) -> int:
+        """Get minimal number of scale invariants."""
+        return self.dim // 2  # Reasonable default based on dimension
+
     def analyze_cohomology(
         self,
         states: List[torch.Tensor],
@@ -378,26 +360,37 @@ class ScaleCohomology:
         Returns:
             Dictionary with analysis results
         """
-        has_obstruction, obstructions = self.detect_obstructions(states, scales)
+        results = {}
         
-        # Compute cohomology groups
-        cocycles = []
-        coboundaries = []
-        
+        # Analyze scale connections
         for i in range(len(states) - 1):
-            cocycles.append(
-                self.compute_cocycle(states[i], states[i+1], scales[i])
-            )
-            coboundaries.append(
-                self.compute_coboundary(states[i], scales[i], scales[i+1])
-            )
+            conn = self.scale_connection(states[i], scales[i], scales[i + 1])
+            results[f'connection_{i}'] = conn
             
-        return {
-            'has_obstruction': has_obstruction,
-            'obstructions': obstructions,
-            'cocycles': cocycles,
-            'coboundaries': coboundaries,
-        }
+        # Compute RG flow
+        rg_flow = self.renormalization_flow(states[0])
+        results['rg_flow'] = rg_flow
+        
+        # Find fixed points
+        fixed_pts = self.fixed_points(states[0])
+        results['fixed_points'] = fixed_pts
+        
+        # Detect anomalies
+        for i, state in enumerate(states):
+            anomalies = self.anomaly_polynomial(state)
+            results[f'anomalies_{i}'] = anomalies
+            
+        # Find scale invariants
+        for i, state in enumerate(states):
+            invariants = self.scale_invariants(state)
+            results[f'invariants_{i}'] = invariants
+            
+        # Check conformal properties
+        for i, state in enumerate(states):
+            is_conformal = self.conformal_symmetry(state)
+            results[f'conformal_{i}'] = is_conformal
+            
+        return results
 
 
 class ScaleSystem:
@@ -434,6 +427,7 @@ class ScaleSystem:
         invariants = self.invariance.find_invariant_structures(torch.stack(states))
 
         # Analyze cohomology
-        cohomology_results = self.cohomology.analyze_cohomology(states, [1.0] * len(states))
+        scales = [1.0] * len(states)  # Default scales
+        cohomology_results = self.cohomology.analyze_cohomology(states, scales)
 
         return rg_flow, anomalies, invariants, cohomology_results
