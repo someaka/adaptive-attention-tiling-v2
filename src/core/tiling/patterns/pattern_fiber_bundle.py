@@ -34,7 +34,7 @@ from ...patterns.dynamics import PatternDynamics
 from ...patterns.evolution import PatternEvolution
 from ...patterns.symplectic import SymplecticStructure
 from ...patterns.riemannian import PatternRiemannianStructure
-from ...patterns.operadic_structure import AttentionOperad, OperadicOperation
+from ...patterns.operadic_structure import AttentionOperad, OperadicOperation, OperadicComposition
 from ...patterns.enriched_structure import PatternTransition, WaveEmergence
 
 
@@ -121,10 +121,11 @@ class PatternFiberBundle(BaseFiberBundle):
             momentum=momentum
         )
         
-        # Initialize symplectic structure with padded dimension
-        padded_dim = (fiber_dim + 1) & ~1  # Round up to next even number
-        self.symplectic = SymplecticStructure(dim=padded_dim)
-        self._symplectic_padding = padded_dim - fiber_dim
+        # Initialize symplectic structure directly with fiber dimension
+        self.symplectic = SymplecticStructure(dim=fiber_dim)
+        
+        # Initialize operadic structure for dimensional transitions
+        self.operadic = OperadicComposition()
         
         # Initialize Lie algebra basis matrices for SO(3)
         self.basis_matrices = torch.zeros(
@@ -150,30 +151,16 @@ class PatternFiberBundle(BaseFiberBundle):
         # Store structure group string for fiber chart creation
         self._structure_group_str = structure_group
 
-    def _handle_dimension(self, tensor: Tensor, target_dim: int) -> Tensor:
-        """Handle dimensional transition using operadic structure.
-        
-        Args:
-            tensor: Input tensor
-            target_dim: Target dimension
-            
-        Returns:
-            Transformed tensor with target dimension
-        """
+    def _handle_dimension_transition(self, tensor: Tensor) -> Tensor:
+        """Handle dimensional transitions using operadic structure."""
         source_dim = tensor.shape[-1]
+        target_dim = self.fiber_dim
+        
         if source_dim == target_dim:
             return tensor
             
-        # Create operadic operation for transition
-        operation = self.operad.create_operation(source_dim, target_dim)
-        
-        # Create enriched morphism for transition
-        source_space = tensor
-        target_space = torch.zeros(*tensor.shape[:-1], target_dim, device=tensor.device)
-        morphism = self.transition.create_morphism(source_space, target_space)
-        
-        # Apply transition
-        return morphism.structure_map
+        operation = self.operadic.create_operation(source_dim, target_dim)
+        return torch.einsum('...i,ij->...j', tensor, operation.composition_law)
         
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Compute connection form using operadic structure.
@@ -195,7 +182,7 @@ class PatternFiberBundle(BaseFiberBundle):
         flow_metric = self.geometric_flow.compute_metric(base_components)
         
         # Ensure connection tensor has correct dimensions using operadic structure
-        connection_matrix = self._handle_dimension(
+        connection_matrix = self._handle_dimension_transition(
             self.connection,
             self.fiber_dim
         )
@@ -502,17 +489,27 @@ class PatternFiberBundle(BaseFiberBundle):
         """Pad tensor for symplectic operations."""
         if self._symplectic_padding == 0:
             return tensor
-            
-        padding = torch.zeros(
-            *tensor.shape[:-1],
-            self._symplectic_padding,
-            device=tensor.device,
-            dtype=tensor.dtype
-        )
-        return torch.cat([tensor, padding], dim=-1)
         
+        # Handle different input shapes
+        if len(tensor.shape) == 1:
+            padding = torch.zeros(self._symplectic_padding, device=tensor.device, dtype=tensor.dtype)
+            return torch.cat([tensor, padding])
+        elif len(tensor.shape) == 2:
+            padding = torch.zeros(*tensor.shape[:-1], self._symplectic_padding, device=tensor.device, dtype=tensor.dtype)
+            return torch.cat([tensor, padding], dim=-1)
+        else:
+            # For higher dimensional tensors
+            padding_shape = list(tensor.shape[:-1]) + [self._symplectic_padding]
+            padding = torch.zeros(*padding_shape, device=tensor.device, dtype=tensor.dtype)
+            return torch.cat([tensor, padding], dim=-1)
+
     def _unpad_from_symplectic(self, tensor: Tensor) -> Tensor:
         """Remove padding used for symplectic operations."""
         if self._symplectic_padding == 0:
             return tensor
-        return tensor[..., :-self._symplectic_padding]
+        
+        # Remove padding from last dimension
+        if len(tensor.shape) == 1:
+            return tensor[:-self._symplectic_padding]
+        else:
+            return tensor[..., :-self._symplectic_padding]

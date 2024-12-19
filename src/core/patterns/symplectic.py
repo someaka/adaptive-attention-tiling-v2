@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, cast
 import torch
 from torch import Tensor
+from .operadic_structure import OperadicComposition, OperadicOperation
 
 
 @dataclass
@@ -26,33 +27,15 @@ class SymplecticForm:
         return torch.einsum('...ij,...i,...j->...', self.matrix, v1, v2)
 
     def transpose(self, *args) -> 'SymplecticForm':
-        """Return transposed symplectic form.
-        
-        Args:
-            *args: Dimension arguments (ignored)
-            
-        Returns:
-            Transposed symplectic form
-        """
+        """Return transposed symplectic form."""
         return SymplecticForm(self.matrix.transpose(-2, -1))
 
     def __neg__(self) -> 'SymplecticForm':
-        """Return negated symplectic form.
-        
-        Returns:
-            Negated symplectic form
-        """
+        """Return negated symplectic form."""
         return SymplecticForm(-self.matrix)
 
     def __eq__(self, other: object) -> bool:
-        """Check equality with another symplectic form.
-        
-        Args:
-            other: Object to compare with
-            
-        Returns:
-            True if equal, False otherwise
-        """
+        """Check equality with another symplectic form."""
         if not isinstance(other, SymplecticForm):
             return NotImplemented
         return torch.allclose(self.matrix, other.matrix)
@@ -70,11 +53,23 @@ class SymplecticStructure:
         """Initialize symplectic structure.
         
         Args:
-            dim: Dimension of the manifold (must be even)
+            dim: Dimension of the manifold (can be odd or even)
         """
-        if dim % 2 != 0:
-            raise ValueError("Symplectic manifold dimension must be even")
         self.dim = dim
+        self.operadic = OperadicComposition()
+
+    def _get_symplectic_dim(self) -> int:
+        """Get dimension for symplectic operations."""
+        return self.dim if self.dim % 2 == 0 else self.dim + 1
+
+    def _handle_dimension(self, tensor: Tensor) -> Tensor:
+        """Handle dimensional transition for symplectic operations."""
+        if tensor.shape[-1] == self.dim and self.dim % 2 == 0:
+            return tensor
+            
+        target_dim = self._get_symplectic_dim()
+        operation = self.operadic.create_operation(tensor.shape[-1], target_dim)
+        return torch.einsum('...i,ij->...j', tensor, operation.composition_law)
 
     def standard_form(self, device: Optional[torch.device] = None) -> SymplecticForm:
         """Compute standard symplectic form.
@@ -85,8 +80,9 @@ class SymplecticStructure:
         Returns:
             Standard symplectic form matrix
         """
-        n = self.dim // 2
-        omega = torch.zeros(self.dim, self.dim, device=device)
+        symplectic_dim = self._get_symplectic_dim()
+        n = symplectic_dim // 2
+        omega = torch.zeros(symplectic_dim, symplectic_dim, device=device)
         omega[:n, n:] = torch.eye(n, device=device)
         omega[n:, :n] = -torch.eye(n, device=device)
         return SymplecticForm(omega)
@@ -100,9 +96,12 @@ class SymplecticStructure:
         Returns:
             Symplectic form at point
         """
+        # Handle dimensional transition
+        point_symplectic = self._handle_dimension(point)
+        
         # For now, just return standard form
         # This can be extended for more complex symplectic structures
-        return self.standard_form(point.device)
+        return self.standard_form(point_symplectic.device)
 
     def compute_volume(self, point: Tensor) -> Tensor:
         """Compute symplectic volume form at a point.
@@ -113,13 +112,17 @@ class SymplecticStructure:
         Returns:
             Volume form value
         """
-        form = self.compute_form(point)
+        # Handle dimensional transition
+        point_symplectic = self._handle_dimension(point)
+        form = self.compute_form(point_symplectic)
         # Volume is Pfaffian of symplectic form
         # For standard form, this is 1
-        return torch.ones(1, device=point.device)
+        return torch.ones(1, device=point_symplectic.device)
 
     def hamiltonian_vector_field(
-        self, hamiltonian: Tensor, point: Tensor
+        self,
+        hamiltonian: Tensor,
+        point: Tensor
     ) -> Tensor:
         """Compute Hamiltonian vector field.
         
@@ -130,9 +133,17 @@ class SymplecticStructure:
         Returns:
             Hamiltonian vector field at point
         """
-        form = self.compute_form(point)
-        grad_h = cast(Tensor, torch.autograd.grad(hamiltonian, point, create_graph=True)[0])
-        return torch.einsum('ij,j->i', form.matrix, grad_h)
+        # Handle dimensional transition
+        point_symplectic = self._handle_dimension(point)
+        form = self.compute_form(point_symplectic)
+        grad_h = cast(Tensor, torch.autograd.grad(hamiltonian, point_symplectic, create_graph=True)[0])
+        field = torch.einsum('ij,j->i', form.matrix, grad_h)
+        
+        # Project back to original dimension if needed
+        if field.shape[-1] != self.dim:
+            operation = self.operadic.create_operation(field.shape[-1], self.dim)
+            field = torch.einsum('...i,ij->...j', field, operation.composition_law)
+        return field
 
     def poisson_bracket(
         self,
@@ -150,7 +161,9 @@ class SymplecticStructure:
         Returns:
             Poisson bracket value
         """
-        form = self.compute_form(point)
-        grad_f = cast(Tensor, torch.autograd.grad(f, point, create_graph=True)[0])
-        grad_g = cast(Tensor, torch.autograd.grad(g, point, create_graph=True)[0])
+        # Handle dimensional transition
+        point_symplectic = self._handle_dimension(point)
+        form = self.compute_form(point_symplectic)
+        grad_f = cast(Tensor, torch.autograd.grad(f, point_symplectic, create_graph=True)[0])
+        grad_g = cast(Tensor, torch.autograd.grad(g, point_symplectic, create_graph=True)[0])
         return form.evaluate(grad_f, grad_g) 
