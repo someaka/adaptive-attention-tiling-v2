@@ -4,14 +4,15 @@ This module provides a specialized implementation of geometric flows for quantum
 incorporating quantum corrections and uncertainty principles into the flow evolution.
 """
 
-from typing import List, Optional, Tuple, Dict, Any, Union
+from typing import Dict, List, Tuple, Any, Optional, cast
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn, Tensor
 
 from .base import BaseGeometricFlow
-from .protocol import FlowMetrics, SingularityInfo
+from .protocol import FlowMetrics, QuantumFlowMetrics, SingularityInfo
 
 # Quantum and Wave Packet imports
 from ..patterns.enriched_structure import EnrichedMorphism, EnrichedTransition
@@ -27,13 +28,6 @@ from ...validation.quantum.state import (
     TomographyValidator
 )
 from ...neural.attention.pattern.quantum import QuantumGeometricTensor
-
-@dataclass
-class ExtendedFlowMetrics(FlowMetrics):
-    """Extended metrics for quantum geometric flow."""
-    berry_phase: Optional[Tensor] = None
-    mean_curvature: Optional[Tensor] = None
-    quantum_corrections: Optional[Tensor] = None
 
 @dataclass
 class AnalyzerMetrics:
@@ -145,6 +139,75 @@ class QuantumGeometricFlow(BaseGeometricFlow):
             nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim * 2)  # Real and imaginary parts
         )
+
+    def flow_step(
+        self,
+        metric: Tensor,
+        ricci: Optional[Tensor] = None,
+        timestep: float = 0.1,
+        quantum_state: Optional[QuantumState] = None
+    ) -> Tuple[Tensor, QuantumFlowMetrics]:
+        """Perform quantum-aware flow step."""
+        # Get base flow step
+        new_metric, base_metrics = super().flow_step(metric, ricci, timestep)
+        
+        # Get quantum metrics
+        quantum_metrics = self.compute_quantum_metrics(quantum_state) if quantum_state else {}
+        
+        # Create QuantumFlowMetrics instance
+        metrics = QuantumFlowMetrics(
+            flow_magnitude=base_metrics.flow_magnitude,
+            metric_determinant=base_metrics.metric_determinant,
+            ricci_scalar=base_metrics.ricci_scalar,
+            energy=base_metrics.energy + self.hbar * base_metrics.flow_magnitude,
+            singularity=base_metrics.singularity,
+            normalized_flow=torch.linalg.det(new_metric).mean().item(),
+            quantum_entropy=quantum_metrics.get("von_neumann_entropy", torch.tensor(0.0, device=metric.device)),
+            berry_phase=quantum_metrics.get("berry_phase", torch.tensor(0.0, device=metric.device)),
+            mean_curvature=quantum_metrics.get("mean_curvature", torch.tensor(0.0, device=metric.device)),
+            quantum_corrections=quantum_metrics.get("quantum_corrections", torch.tensor(0.0, device=metric.device))
+        )
+        
+        return new_metric, metrics
+
+    def compute_quantum_metrics(
+        self,
+        quantum_state: Optional[QuantumState]
+    ) -> Dict[str, Optional[Tensor]]:
+        """Compute quantum-specific metrics from state."""
+        if quantum_state is None or self.hilbert_space is None:
+            return {}
+            
+        # Get density matrix
+        rho = quantum_state.density_matrix()
+        
+        # Compute von Neumann entropy
+        entropy = self.hilbert_space.compute_entropy(quantum_state)
+        
+        # Compute purity
+        purity = torch.trace(torch.matmul(rho, rho)).real
+        
+        # Get entanglement metrics if state is multipartite
+        try:
+            # Use HilbertSpace's compute_negativity directly
+            negativity = self.hilbert_space.compute_negativity(quantum_state)
+            negativity = torch.tensor(float(negativity), device=rho.device)
+        except:
+            negativity = torch.tensor(0.0, device=rho.device)
+            
+        # Convert dt to tensor for exp operation
+        dt_tensor = torch.tensor(self.dt, device=rho.device)
+        T2_tensor = torch.tensor(self.decoherence_rates["T2"], device=rho.device)
+            
+        return {
+            "von_neumann_entropy": entropy,
+            "purity": purity,
+            "negativity": negativity,
+            "decoherence_factor": torch.exp(-dt_tensor / T2_tensor),
+            "berry_phase": torch.tensor(0.0, device=rho.device),  # Placeholder
+            "mean_curvature": torch.tensor(0.0, device=rho.device),  # Placeholder
+            "quantum_corrections": torch.tensor(0.0, device=rho.device)  # Placeholder
+        }
 
     def set_points(self, points: Tensor) -> None:
         """Set current points for flow computation."""
@@ -269,99 +332,6 @@ class QuantumGeometricFlow(BaseGeometricFlow):
                     correction[..., i, j] += dephasing * torch.abs(rho[..., i, j])
         
         return metric + self.hbar * correction
-
-    def flow_step(
-        self,
-        metric: Tensor,
-        ricci: Optional[Tensor] = None,
-        timestep: float = 0.1,
-        quantum_state: Optional[QuantumState] = None
-    ) -> Tuple[Tensor, ExtendedFlowMetrics]:
-        """Perform quantum-corrected flow step with comprehensive metrics."""
-        # Store current quantum state
-        self._current_state = quantum_state
-        
-        # Get quantum metric tensor if state provided
-        if quantum_state is not None and self.hilbert_space is not None:
-            # Apply both quantum and decoherence corrections
-            quantum_metric = self.compute_quantum_metric_tensor(quantum_state, metric)
-            metric = metric + quantum_metric
-            metric = self.compute_decoherence_correction(metric, quantum_state)
-            
-            # Evolve quantum state with decoherence
-            if isinstance(quantum_state, QuantumState):
-                evolved_states = self.hilbert_space.evolve_with_decoherence(
-                    quantum_state,
-                    self.decoherence_rates["T1"],
-                    self.decoherence_rates["T2"],
-                    torch.tensor([0.0, timestep])
-                )
-                quantum_state = evolved_states[-1]
-                self._current_state = quantum_state
-        
-        # Get classical flow step
-        new_metric, base_metrics = super().flow_step(metric, ricci, timestep)
-        
-        # Apply quantum normalization
-        norm = torch.sqrt(torch.diagonal(new_metric, dim1=-2, dim2=-1).sum(-1))
-        new_metric = new_metric / (norm.unsqueeze(-1).unsqueeze(-1) + 1e-8)
-        
-        # Compute quantum metrics
-        quantum_metrics = self.compute_quantum_metrics(quantum_state) if quantum_state else {}
-        
-        # Initialize extended metrics with proper tensor types
-        metrics = ExtendedFlowMetrics(
-            flow_magnitude=base_metrics.flow_magnitude,
-            metric_determinant=base_metrics.metric_determinant,
-            ricci_scalar=base_metrics.ricci_scalar,
-            energy=base_metrics.energy + self.hbar * base_metrics.flow_magnitude,
-            singularity=base_metrics.singularity,
-            normalized_flow=torch.linalg.det(new_metric).mean().item(),
-            berry_phase=quantum_metrics.get("berry_phase", torch.tensor(0.0, device=metric.device)),
-            mean_curvature=quantum_metrics.get("mean_curvature", torch.tensor(0.0, device=metric.device)),
-            quantum_corrections=quantum_metrics.get("quantum_corrections", torch.tensor(0.0, device=metric.device))
-        )
-        
-        return new_metric, metrics
-
-    def compute_quantum_metrics(
-        self,
-        quantum_state: Optional[QuantumState]
-    ) -> Dict[str, Optional[Tensor]]:
-        """Compute quantum-specific metrics from state."""
-        if quantum_state is None or self.hilbert_space is None:
-            return {}
-            
-        # Get density matrix
-        rho = quantum_state.density_matrix()
-        
-        # Compute von Neumann entropy
-        entropy = self.hilbert_space.compute_entropy(quantum_state)
-        
-        # Compute purity
-        purity = torch.trace(torch.matmul(rho, rho)).real
-        
-        # Get entanglement metrics if state is multipartite
-        try:
-            # Use HilbertSpace's compute_negativity directly
-            negativity = self.hilbert_space.compute_negativity(quantum_state)
-            negativity = torch.tensor(float(negativity), device=rho.device)
-        except:
-            negativity = torch.tensor(0.0, device=rho.device)
-            
-        # Convert dt to tensor for exp operation
-        dt_tensor = torch.tensor(self.dt, device=rho.device)
-        T2_tensor = torch.tensor(self.decoherence_rates["T2"], device=rho.device)
-            
-        return {
-            "von_neumann_entropy": entropy,
-            "purity": purity,
-            "negativity": negativity,
-            "decoherence_factor": torch.exp(-dt_tensor / T2_tensor),
-            "berry_phase": torch.tensor(0.0, device=rho.device),  # Placeholder
-            "mean_curvature": torch.tensor(0.0, device=rho.device),  # Placeholder
-            "quantum_corrections": torch.tensor(0.0, device=rho.device)  # Placeholder
-        }
 
     def parallel_transport(
         self,
@@ -559,7 +529,7 @@ class GeometricFlowAnalyzer:
         """
         self.flow = flow
         self.hilbert_space = hilbert_space
-        self.history: List[ExtendedFlowMetrics] = []
+        self.history: List[QuantumFlowMetrics] = []
         
         # Initialize validators
         self.state_validator = StateValidator(tolerance=tolerance)
@@ -633,13 +603,18 @@ class GeometricFlowAnalyzer:
         else:
             energy_conservation = 1.0
             
+        # Get tensor values safely
+        mean_curvature_val = metrics.mean_curvature.norm().item() if metrics.mean_curvature is not None else 0.0
+        berry_phase_val = metrics.berry_phase.abs().item() if metrics.berry_phase is not None else 0.0
+        quantum_corrections_val = metrics.quantum_corrections.norm().item() if metrics.quantum_corrections is not None else 0.0
+            
         # Compile analyzer metrics
         analyzer_metrics = AnalyzerMetrics(
             ricci_scalar=float(metrics.ricci_scalar),
-            mean_curvature=float(torch.norm(metrics.mean_curvature).item() if metrics.mean_curvature is not None else 0.0),
-            berry_phase=float(torch.abs(metrics.berry_phase).item() if metrics.berry_phase is not None else 0.0),
+            mean_curvature=mean_curvature_val,
+            berry_phase=berry_phase_val,
             holonomy=float(metrics.normalized_flow),
-            quantum_corrections=float(torch.norm(metrics.quantum_corrections).item() if metrics.quantum_corrections is not None else 0.0),
+            quantum_corrections=quantum_corrections_val,
             stability=float(stability),
             convergence=float(convergence),
             energy_conservation=float(energy_conservation)
@@ -750,7 +725,7 @@ class GeometricFlowAnalyzer:
         flow_magnitudes = torch.tensor([m.flow_magnitude for m in self.history])
         energies = torch.tensor([m.energy for m in self.history])
         berry_phases = torch.tensor([
-            torch.abs(m.berry_phase).item() if m.berry_phase is not None else 0.0
+            m.berry_phase.abs().item() if m.berry_phase is not None else 0.0
             for m in self.history
         ])
         

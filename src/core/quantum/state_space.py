@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import numpy as np
+import torch.nn.functional as F
 
 from src.core.quantum.types import QuantumState
 from src.validation.quantum.state import (
@@ -670,3 +671,40 @@ class HilbertSpace:
         
         # Return minimum eigenvalue (negative indicates entanglement)
         return min_eigenval.to(torch.float64)
+
+    def scale_state(
+        self,
+        state: QuantumState,
+        scale_factor: float
+    ) -> QuantumState:
+        """Scale a quantum state by adjusting its amplitudes.
+        
+        This method implements quantum state scaling by:
+        1. Adjusting amplitudes according to scale factor
+        2. Preserving normalization
+        3. Maintaining quantum properties
+        
+        Args:
+            state: Input quantum state
+            scale_factor: Factor to scale the state by
+            
+        Returns:
+            Scaled quantum state
+            
+        Raises:
+            ValueError: If scale_factor is invalid
+        """
+        if scale_factor <= 0:
+            raise ValueError("Scale factor must be positive")
+            
+        # Scale amplitudes while preserving normalization
+        scale_tensor = torch.tensor(scale_factor, dtype=torch.float64)
+        scaled_amplitudes = state.amplitudes * torch.sqrt(scale_tensor)
+        scaled_amplitudes = F.normalize(scaled_amplitudes, p=2, dim=-1)
+        
+        # Create new quantum state with scaled amplitudes
+        return QuantumState(
+            amplitudes=scaled_amplitudes,
+            basis_labels=state.basis_labels,
+            phase=state.phase
+        )

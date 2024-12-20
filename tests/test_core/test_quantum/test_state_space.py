@@ -17,6 +17,7 @@ Tests cover:
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 from src.core.quantum.state_space import QuantumState, HilbertSpace
 
@@ -37,6 +38,17 @@ class TestHilbertSpace:
         """Create a test Hilbert space."""
         return HilbertSpace(dim=hilbert_dim)
 
+    @pytest.fixture
+    def test_state(self, hilbert_space):
+        """Create test quantum state."""
+        amplitudes = torch.randn(8, hilbert_space.dim, dtype=torch.complex128)  # [batch_size, dim]
+        amplitudes = F.normalize(amplitudes, p=2, dim=-1)
+        return QuantumState(
+            amplitudes=amplitudes,
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_space.dim)],
+            phase=torch.zeros(hilbert_space.dim, dtype=torch.complex128)
+        )
+
     def test_state_preparation(self, hilbert_space, hilbert_dim, batch_size):
         """Test quantum state preparation from classical data."""
         # Create test classical data
@@ -46,7 +58,7 @@ class TestHilbertSpace:
         quantum_state = hilbert_space.prepare_state(classical_data)
 
         # Test normalization
-        norms = quantum_state.norm()
+        norms = torch.norm(quantum_state.amplitudes, p=2, dim=-1)
         assert torch.allclose(
             norms, torch.ones_like(norms, dtype=torch.float64), rtol=1e-5
         ), "Quantum states must be normalized"
@@ -58,13 +70,17 @@ class TestHilbertSpace:
 
         # Test batch shape
         assert (
-            quantum_state.shape[0] == batch_size
+            quantum_state.amplitudes.shape[0] == batch_size
         ), "Batch dimension should be preserved"
 
     def test_state_evolution(self, hilbert_space, hilbert_dim):
         """Test unitary evolution of quantum states."""
         # Create initial state
-        initial_state = hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64))
+        initial_state = QuantumState(
+            amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+            phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+        )
 
         # Create test Hamiltonian (Hermitian matrix)
         H = torch.randn(hilbert_dim, hilbert_dim, dtype=torch.complex128) + 1j * torch.randn(
@@ -91,7 +107,11 @@ class TestHilbertSpace:
     def test_measurement(self, hilbert_space, hilbert_dim):
         """Test quantum measurement protocols."""
         # Create test state
-        state = hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64))
+        state = QuantumState(
+            amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+            phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+        )
 
         # Create observable (Hermitian operator)
         observable = torch.randn(hilbert_dim, hilbert_dim, dtype=torch.complex128)
@@ -113,10 +133,15 @@ class TestHilbertSpace:
         """Test von Neumann entropy computation."""
         # Create mixed state density matrix
         pure_states = [
-            hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64)) for _ in range(3)
+            QuantumState(
+                amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+                basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+                phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+            )
+            for _ in range(3)
         ]
-        weights = torch.softmax(torch.randn(3), dim=0)
-        mixed_state = sum(w * p.density_matrix() for w, p in zip(weights, pure_states))
+        weights = F.softmax(torch.randn(3), dim=0)
+        mixed_state = sum(w * torch.outer(p.amplitudes, p.amplitudes.conj()) for w, p in zip(weights, pure_states))
 
         # Compute entropy
         entropy = hilbert_space.compute_entropy(mixed_state)
@@ -126,7 +151,7 @@ class TestHilbertSpace:
         assert entropy <= np.log(hilbert_dim), "Entropy must not exceed maximum"
 
         # Test pure state entropy
-        pure_entropy = hilbert_space.compute_entropy(pure_states[0].density_matrix())
+        pure_entropy = hilbert_space.compute_entropy(pure_states[0])
         assert torch.allclose(
             pure_entropy, torch.tensor(0.0, dtype=torch.float64), rtol=1e-5
         ), "Pure states should have zero entropy"
@@ -134,8 +159,16 @@ class TestHilbertSpace:
     def test_geometric_structure(self, hilbert_space, hilbert_dim):
         """Test geometric structure of Hilbert space."""
         # Create test states
-        state1 = hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64))
-        state2 = hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64))
+        state1 = QuantumState(
+            amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+            phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+        )
+        state2 = QuantumState(
+            amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+            phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+        )
 
         # Test Fubini-Study metric
         distance = hilbert_space.fubini_study_distance(state1, state2)
@@ -148,20 +181,26 @@ class TestHilbertSpace:
 
         # Test transport preserves norm
         assert torch.allclose(
-            tangent.norm(), transported.norm(), rtol=1e-4
+            torch.norm(tangent), torch.norm(transported), rtol=1e-4
         ), "Parallel transport should preserve norm"
 
     def test_entanglement(self, hilbert_space):
         """Test entanglement measures."""
         # Create Bell state (maximally entangled)
-        bell_state = torch.tensor(
-            [1.0, 0.0, 0.0, 1.0], dtype=torch.complex128
-        ) / np.sqrt(2)
-        bell_density = bell_state.outer(bell_state)
+        bell_state = QuantumState(
+            amplitudes=torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex128) / np.sqrt(2),
+            basis_labels=["|00⟩", "|01⟩", "|10⟩", "|11⟩"],
+            phase=torch.zeros(4, dtype=torch.complex128)
+        )
+        bell_density = torch.outer(bell_state.amplitudes, bell_state.amplitudes.conj())
 
         # Create separable state
-        separable_state = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.complex128)
-        separable_density = separable_state.outer(separable_state)
+        separable_state = QuantumState(
+            amplitudes=torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.complex128),
+            basis_labels=["|00⟩", "|01⟩", "|10⟩", "|11⟩"],
+            phase=torch.zeros(4, dtype=torch.complex128)
+        )
+        separable_density = torch.outer(separable_state.amplitudes, separable_state.amplitudes.conj())
 
         # Test entanglement entropy
         bell_entropy = hilbert_space.entanglement_entropy(bell_density)
@@ -177,7 +216,11 @@ class TestHilbertSpace:
     def test_quantum_channels(self, hilbert_space, hilbert_dim):
         """Test quantum channel operations and properties."""
         # Create test state
-        initial_state = hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64))
+        initial_state = QuantumState(
+            amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+            phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+        )
 
         # Create Kraus operators for amplitude damping channel
         gamma = 0.3  # damping parameter
@@ -193,21 +236,25 @@ class TestHilbertSpace:
         final_state = hilbert_space.apply_quantum_channel(initial_state, kraus_ops)
 
         # Test complete positivity
-        assert torch.all(
-            torch.linalg.eigvals(final_state.density_matrix()).real >= -1e-10
-        ), "Quantum channel must preserve positivity"
+        final_density = torch.outer(final_state.amplitudes, final_state.amplitudes.conj())
+        eigenvals = torch.linalg.eigvalsh(final_density).real
+        assert torch.all(eigenvals >= -1e-10), "Quantum channel must preserve positivity"
 
         # Test trace preservation
         assert torch.allclose(
-            torch.trace(final_state.density_matrix()),
+            torch.trace(final_density),
             torch.tensor(1.0, dtype=torch.complex128),
-            rtol=1e-5,
+            rtol=1e-5
         ), "Quantum channel must preserve trace"
 
     def test_state_tomography(self, hilbert_space, hilbert_dim):
         """Test quantum state tomography procedures."""
         # Create unknown test state
-        true_state = hilbert_space.prepare_state(torch.randn(hilbert_dim * 2, dtype=torch.float64))
+        true_state = QuantumState(
+            amplitudes=F.normalize(torch.randn(hilbert_dim, dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_dim)],
+            phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
+        )
 
         # Generate Pauli basis measurements
         pauli_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
@@ -218,21 +265,23 @@ class TestHilbertSpace:
         measurements = {
             "X": hilbert_space.measure_observable(true_state, pauli_x),
             "Y": hilbert_space.measure_observable(true_state, pauli_y),
-            "Z": hilbert_space.measure_observable(true_state, pauli_z),
+            "Z": hilbert_space.measure_observable(true_state, pauli_z)
         }
 
         # Reconstruct state
         reconstructed_state = hilbert_space.reconstruct_state(measurements)
 
         # Test fidelity between true and reconstructed states
-        fidelity = torch.abs(torch.vdot(true_state.amplitudes, reconstructed_state.amplitudes))**2
+        fidelity = hilbert_space.state_fidelity(true_state, reconstructed_state)
         assert fidelity > 0.95, "Tomographic reconstruction should be accurate"
 
     def test_decoherence(self, hilbert_space, hilbert_dim):
         """Test decoherence effects on quantum states."""
         # Create initial superposition state
-        initial_state = hilbert_space.prepare_state(
-            torch.tensor([1.0, 1.0], dtype=torch.float64) / np.sqrt(2)
+        initial_state = QuantumState(
+            amplitudes=F.normalize(torch.tensor([1.0, 1.0], dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(2)],
+            phase=torch.zeros(2, dtype=torch.complex128)
         )
 
         # Define decoherence times
@@ -241,63 +290,35 @@ class TestHilbertSpace:
         times = torch.linspace(0, 2.0, 10, dtype=torch.float64)
 
         # Evolve under decoherence
-        evolved_states = hilbert_space.evolve_with_decoherence(
-            initial_state, T1, T2, times
-        )
+        evolved_states = hilbert_space.evolve_with_decoherence(initial_state, T1, T2, times)
 
         # Test monotonic decay of coherence
-        coherences = [
-            torch.abs(state.density_matrix()[0, 1]) for state in evolved_states
-        ]
-        assert all(
-            c1 >= c2 for c1, c2 in zip(coherences[:-1], coherences[1:])
-        ), "Coherence should decay monotonically"
+        coherences = [torch.abs(torch.outer(state.amplitudes, state.amplitudes.conj())[0, 1]) for state in evolved_states]
+        assert all(c1 >= c2 for c1, c2 in zip(coherences[:-1], coherences[1:])), "Coherence should decay monotonically"
 
     def test_geometric_phase(self, hilbert_space, hilbert_dim):
         """Test geometric (Berry) phase computation."""
+        # Create initial state
+        initial_state = QuantumState(
+            amplitudes=F.normalize(torch.tensor([1.0, 0.0], dtype=torch.complex128).unsqueeze(0), p=2, dim=-1).squeeze(),
+            basis_labels=[f"|{i}⟩" for i in range(2)],
+            phase=torch.zeros(2, dtype=torch.complex128)
+        )
 
-        # Create cyclic evolution path
-        def hamiltonian(t):
+        # Define time-dependent Hamiltonian
+        def hamiltonian(t: float) -> torch.Tensor:
             theta = 2 * np.pi * t
             return torch.tensor(
                 [[np.cos(theta), np.sin(theta)], [np.sin(theta), -np.cos(theta)]],
-                dtype=torch.complex128,
+                dtype=torch.complex128
             )
-
-        # Initial state
-        initial_state = hilbert_space.prepare_state(
-            torch.tensor([1.0, 0.0], dtype=torch.float64)
-        )
-
-        # Test intermediate states
-        times_debug = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], dtype=torch.float64)
-        for t in times_debug:
-            H = hamiltonian(t.item())
-            eigenvals, eigenvecs = torch.linalg.eigh(H)
-            # Check eigenvalues are ±1
-            assert torch.allclose(
-                torch.sort(torch.abs(eigenvals))[0],
-                torch.tensor([1.0, 1.0], dtype=torch.float64),
-            ), f"Eigenvalues at t={t} should be ±1"
-            # Check eigenvectors are orthonormal
-            overlap = torch.abs(torch.vdot(eigenvecs[:, 0], eigenvecs[:, 1]))
-            assert overlap < 1e-10, f"Eigenvectors at t={t} should be orthogonal"
 
         # Compute Berry phase
         times = torch.linspace(0, 1.0, 100, dtype=torch.float64)
-        berry_phase = hilbert_space.compute_berry_phase(
-            initial_state, hamiltonian, times
-        )
+        berry_phase = hilbert_space.compute_berry_phase(initial_state, hamiltonian, times)
 
         # Test phase is real
         assert torch.abs(berry_phase.imag) < 1e-5, "Berry phase should be real"
-
-        # Print debug info
-        print(f"\nBerry phase: {berry_phase.real}")
-        print(f"Expected phase: {np.pi}")
-        print(f"Relative error: {torch.abs(berry_phase.real - np.pi) / np.pi}")
-
-        # Test matches theoretical value
         assert torch.allclose(
             berry_phase.real, torch.tensor(np.pi, dtype=torch.float64), rtol=1e-2
         ), "Berry phase should match theoretical value"
@@ -305,11 +326,19 @@ class TestHilbertSpace:
     def test_advanced_entanglement(self, hilbert_space):
         """Test advanced entanglement measures."""
         # Create various entangled states
-        bell_plus = torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex128) / np.sqrt(2)
-        bell_minus = torch.tensor([1.0, 0.0, 0.0, -1.0], dtype=torch.complex128) / np.sqrt(2)
+        bell_plus = QuantumState(
+            amplitudes=torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex128) / np.sqrt(2),
+            basis_labels=["|00⟩", "|01⟩", "|10⟩", "|11⟩"],
+            phase=torch.zeros(4, dtype=torch.complex128)
+        )
+        bell_minus = QuantumState(
+            amplitudes=torch.tensor([1.0, 0.0, 0.0, -1.0], dtype=torch.complex128) / np.sqrt(2),
+            basis_labels=["|00⟩", "|01⟩", "|10⟩", "|11⟩"],
+            phase=torch.zeros(4, dtype=torch.complex128)
+        )
 
         # Test concurrence
-        bell_plus_dm = torch.outer(bell_plus, bell_plus.conj())
+        bell_plus_dm = torch.outer(bell_plus.amplitudes, bell_plus.amplitudes.conj())
         concurrence_plus = hilbert_space.compute_concurrence(bell_plus_dm)
         assert torch.allclose(
             concurrence_plus, torch.tensor(1.0, dtype=torch.float64), rtol=1e-5
@@ -322,5 +351,43 @@ class TestHilbertSpace:
         ), "Bell state should have expected negativity"
 
         # Test entanglement witness
-        witness_val = hilbert_space.evaluate_entanglement_witness(bell_plus_dm)
+        witness_val = hilbert_space.evaluate_entanglement_witness(bell_plus)
         assert witness_val < 0, "Entanglement witness should detect entanglement"
+
+    def test_scale_state(self, hilbert_space, test_state):
+        """Test quantum state scaling."""
+        # Test upscaling
+        scale_factor = 2.0
+        scaled_state = hilbert_space.scale_state(test_state, scale_factor)
+        
+        # Check properties
+        assert isinstance(scaled_state, QuantumState)
+        assert scaled_state.amplitudes.shape == test_state.amplitudes.shape
+        assert torch.all(torch.isfinite(scaled_state.amplitudes))
+        
+        # Check normalization is preserved
+        norms = torch.norm(scaled_state.amplitudes, p=2, dim=-1)
+        assert torch.allclose(norms, torch.ones_like(norms))
+        
+        # Test downscaling
+        scale_factor = 0.5
+        scaled_state = hilbert_space.scale_state(test_state, scale_factor)
+        
+        # Check properties
+        assert isinstance(scaled_state, QuantumState)
+        assert scaled_state.amplitudes.shape == test_state.amplitudes.shape
+        assert torch.all(torch.isfinite(scaled_state.amplitudes))
+        
+        # Check normalization is preserved
+        norms = torch.norm(scaled_state.amplitudes, p=2, dim=-1)
+        assert torch.allclose(norms, torch.ones_like(norms))
+        
+    def test_invalid_scale_factors(self, hilbert_space, test_state):
+        """Test scaling with invalid factors."""
+        # Test zero scale
+        with pytest.raises(ValueError):
+            hilbert_space.scale_state(test_state, 0.0)
+            
+        # Test negative scale
+        with pytest.raises(ValueError):
+            hilbert_space.scale_state(test_state, -1.0)

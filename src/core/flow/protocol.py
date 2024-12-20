@@ -35,6 +35,96 @@ class FlowMetrics:
     """Normalized flow magnitude."""
 
 @dataclass
+class QuantumFlowMetrics(FlowMetrics):
+    """Extended metrics for quantum geometric flow."""
+    
+    quantum_entropy: Tensor
+    """Von Neumann entropy of the quantum state."""
+    
+    berry_phase: Optional[Tensor] = None
+    """Berry phase along the flow path."""
+    
+    mean_curvature: Optional[Tensor] = None
+    """Mean curvature of the quantum manifold."""
+    
+    quantum_corrections: Optional[Tensor] = None
+    """Quantum corrections to the classical flow."""
+    
+    def __init__(
+        self,
+        flow_magnitude: float,
+        metric_determinant: float,
+        ricci_scalar: float,
+        energy: float,
+        singularity: float,
+        normalized_flow: float,
+        quantum_entropy: Union[float, Tensor, None],
+        berry_phase: Optional[Union[float, Tensor]] = None,
+        mean_curvature: Optional[Union[float, Tensor]] = None,
+        quantum_corrections: Optional[Union[float, Tensor]] = None,
+        device: Optional[torch.device] = None
+    ):
+        super().__init__(
+            flow_magnitude=flow_magnitude,
+            metric_determinant=metric_determinant,
+            ricci_scalar=ricci_scalar,
+            energy=energy,
+            singularity=singularity,
+            normalized_flow=normalized_flow
+        )
+        
+        # Convert quantum metrics to tensors if they're not None
+        device = device or (
+            quantum_entropy.device if isinstance(quantum_entropy, Tensor)
+            else berry_phase.device if isinstance(berry_phase, Tensor)
+            else mean_curvature.device if isinstance(mean_curvature, Tensor)
+            else quantum_corrections.device if isinstance(quantum_corrections, Tensor)
+            else torch.device('cpu')
+        )
+        
+        # Convert quantum_entropy to tensor
+        self.quantum_entropy = (
+            quantum_entropy if isinstance(quantum_entropy, Tensor)
+            else torch.tensor(float(quantum_entropy), device=device) if quantum_entropy is not None
+            else torch.tensor(0.0, device=device)
+        )
+        
+        # Convert optional fields to tensors if they're not None
+        self.berry_phase = (
+            berry_phase if isinstance(berry_phase, Tensor)
+            else torch.tensor(float(berry_phase), device=device) if berry_phase is not None
+            else None
+        )
+        
+        self.mean_curvature = (
+            mean_curvature if isinstance(mean_curvature, Tensor)
+            else torch.tensor(float(mean_curvature), device=device) if mean_curvature is not None
+            else None
+        )
+        
+        self.quantum_corrections = (
+            quantum_corrections if isinstance(quantum_corrections, Tensor)
+            else torch.tensor(float(quantum_corrections), device=device) if quantum_corrections is not None
+            else None
+        )
+    
+    def to_device(self, device: torch.device) -> 'QuantumFlowMetrics':
+        """Move all tensor fields to the specified device."""
+        return QuantumFlowMetrics(
+            flow_magnitude=self.flow_magnitude,
+            metric_determinant=self.metric_determinant,
+            ricci_scalar=self.ricci_scalar,
+            energy=self.energy,
+            singularity=self.singularity,
+            normalized_flow=self.normalized_flow,
+            quantum_entropy=self.quantum_entropy.to(device),
+            berry_phase=self.berry_phase.to(device) if self.berry_phase is not None else None,
+            mean_curvature=self.mean_curvature.to(device) if self.mean_curvature is not None else None,
+            quantum_corrections=self.quantum_corrections.to(device) if self.quantum_corrections is not None else None,
+            device=device
+        )
+
+@dataclass
 class SingularityInfo(Generic[T]):
     """Information about detected singularities."""
     

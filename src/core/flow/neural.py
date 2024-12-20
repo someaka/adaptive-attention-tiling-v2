@@ -1,96 +1,50 @@
 """Neural Geometric Flow Implementation.
 
-This module provides a specialized implementation of geometric flows for neural networks,
-incorporating learned dynamics, adaptive regularization, and pattern fiber bundle structure.
+This module provides a neural network-specific implementation of geometric flows,
+building on top of pattern formation dynamics and adding neural-specific features.
+Implements the vertical integration between pattern, geometric, and quantum layers.
 """
 
-from typing import List, Optional, Tuple, Dict, Any, cast
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import torch
-import numpy as np
-from torch import nn, Tensor
 import torch.nn.functional as F
+from torch import nn, Tensor
 
-# Base components
-from .base import BaseGeometricFlow
-from .protocol import FlowMetrics, SingularityInfo
+from .pattern import PatternFormationFlow
+from ..quantum.neural_quantum_bridge import NeuralQuantumBridge
+from ..quantum.types import QuantumState
+from ...validation.quantum.state import QuantumStateValidationResult
+from .protocol import FlowMetrics, QuantumFlowMetrics
 
-# Geometric components
-from ..patterns.riemannian_base import (
-    RiemannianStructure,
-    MetricTensor,
-    ChristoffelSymbols,
-    CurvatureTensor,
-    ValidationMixin
-)
+logger = logging.getLogger(__name__)
 
-# Flow components
-from ..patterns.riemannian_flow import RiemannianFlow
-from ..tiling.geometric_flow import GeometricFlow
-from .computation import FlowComputation
-
-# Pattern components
-from ..patterns.dynamics import PatternDynamics
-from ..patterns.formation import PatternFormation
-from ..patterns.enriched_structure import PatternTransition
-from ..patterns.evolution import PatternEvolution
-from ..patterns.riemannian import PatternRiemannianStructure
-from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
-
-# Metric components
-from ..metrics.advanced_metrics import InformationFlowMetrics
-from ..metrics.height_theory import HeightStructure, AdaptiveHeightTheory
-from ..metrics.evolution import FlowEvolution
-
-# Validation components
-from ...validation.geometric.motivic import (
-    MotivicValidation,
-    MotivicValidator,
-    MotivicRiemannianValidator
-)
-
-class NeuralGeometricFlow(BaseGeometricFlow):
-    """Neural network-specific implementation of geometric flow with pattern bundle integration.
+class NeuralGeometricFlow(PatternFormationFlow):
+    """Neural network-specific implementation of geometric flow.
     
-    This class extends the base geometric flow implementation with neural network-specific features:
-    1. Learned dynamics - Neural networks for learning flow dynamics
-    2. Adaptive regularization - Context-dependent regularization of the flow
-    3. Weight space normalization - Proper scaling in neural weight space
-    4. Gradient-aware transport - Transport that respects gradient structure
-    5. Fisher-Rao metric computation - Statistical manifold structure
-    6. Pattern fiber bundle integration - Geometric structure from patterns
+    This class implements the vertical integration between:
+    1. Pattern Processing Layer (inherited from PatternFormationFlow)
+    2. Geometric Processing Layer (neural weight space geometry)
+    3. Quantum Integration Layer (quantum state management and evolution)
     
-    The class combines multiple geometric structures:
-    - Base manifold geometry (from BaseGeometricFlow)
-    - Fisher-Rao information geometry
-    - Pattern bundle geometry
-    - Neural network weight space geometry
-    
-    Key Components:
-    - Pattern Fiber Bundle: Manages the geometric structure of patterns
-    - Dynamics Network: Learns the flow dynamics
-    - Regularization Network: Provides adaptive regularization
-    - Fisher-Rao Network: Computes information geometry
-    
-    Implementation Details:
-    - All computations support batched operations
-    - Numerical stability is ensured through regularization
-    - Proper tensor shape management throughout
-    - Device-aware computations (CPU/GPU)
-    
-    Example Usage:
-        flow = NeuralGeometricFlow(
-            manifold_dim=64,  # Dimension of neural network layer
-            hidden_dim=128,   # Internal computation dimension
-            dt=0.1,          # Integration time step
-            bundle_weight=1.0 # Weight for pattern structure
-        )
-        
-        # Compute geodesic between two points
-        path = flow.compute_geodesic(start_point, end_point, num_steps=10)
-        
-        # Perform flow step
-        new_metric, metrics = flow.flow_step(metric, ricci)
+    Key Integration Points:
+    1. Pattern → Geometric
+       - Pattern field mapping
+       - Geometric flow preservation
+       - Scale connection handling
+       
+    2. Geometric → Quantum
+       - Quantum state preparation
+       - Geometric phase tracking
+       - Entanglement management
+       
+    3. Horizontal Integration
+       - Information transport
+       - Structure preservation
+       - Resource allocation
     """
     
     def __init__(
@@ -99,22 +53,26 @@ class NeuralGeometricFlow(BaseGeometricFlow):
         hidden_dim: int,
         dt: float = 0.1,
         stability_threshold: float = 1e-6,
-        regularization_strength: float = 0.1,
         fisher_rao_weight: float = 1.0,
-        bundle_weight: float = 1.0,
-        num_primes: int = 8,
+        quantum_weight: float = 1.0,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+        quantum_correction_strength: float = 0.1,
+        phase_tracking_enabled: bool = True,
     ):
-        """Initialize neural geometric flow.
+        """Initialize neural geometric flow with quantum integration.
         
         Args:
             manifold_dim: Dimension of the base manifold
             hidden_dim: Hidden dimension for computations
             dt: Time step for flow integration
             stability_threshold: Threshold for stability checks
-            regularization_strength: Strength of regularization
             fisher_rao_weight: Weight for Fisher-Rao metric contribution
-            bundle_weight: Weight for pattern bundle contribution
-            num_primes: Number of primes for height structure
+            quantum_weight: Weight for quantum contribution
+            num_heads: Number of attention heads for quantum bridge
+            dropout: Dropout rate for quantum bridge
+            quantum_correction_strength: Strength of quantum corrections
+            phase_tracking_enabled: Whether to track geometric phases
         """
         super().__init__(
             manifold_dim=manifold_dim,
@@ -122,56 +80,89 @@ class NeuralGeometricFlow(BaseGeometricFlow):
             dt=dt,
             stability_threshold=stability_threshold
         )
-        self.regularization_strength = regularization_strength
+        
         self.fisher_rao_weight = fisher_rao_weight
-        self.bundle_weight = bundle_weight
+        self.quantum_weight = quantum_weight
+        self.quantum_correction_strength = quantum_correction_strength
+        self.phase_tracking_enabled = phase_tracking_enabled
         
-        # Initialize pattern fiber bundle
-        self.pattern_bundle = PatternFiberBundle(
-            base_dim=manifold_dim,
-            fiber_dim=hidden_dim,
-            structure_group="O(n)",
-            num_primes=num_primes
+        # Initialize quantum bridge for state management
+        self.quantum_bridge = NeuralQuantumBridge(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout
         )
         
-        # Dynamics networks
-        self.dynamics_net = nn.Sequential(
-            nn.Linear(manifold_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
-        )
-        
-        # Regularization networks
-        self.regularization_net = nn.Sequential(
-            nn.Linear(manifold_dim * 3, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
-        )
-        
-        # Fisher-Rao networks
+        # Neural-specific networks
         self.fisher_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, manifold_dim)
         )
+        
+        # Quantum correction networks
+        self.quantum_correction_net = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, manifold_dim)
+        )
+
+    def prepare_quantum_state(
+        self,
+        points: Tensor,
+        return_validation: bool = True
+    ) -> Union[QuantumState, Tuple[QuantumState, QuantumStateValidationResult]]:
+        """Prepare quantum state from neural points.
+        
+        Implements the Geometric → Quantum vertical integration by:
+        1. Converting neural patterns to quantum states
+        2. Validating state preparation
+        3. Tracking geometric phases if enabled
+        
+        Args:
+            points: Neural pattern points
+            return_validation: Whether to return validation metrics
+            
+        Returns:
+            Quantum state and optional validation result
+        """
+        return self.quantum_bridge.neural_to_quantum(points, return_validation)
+
+    def compute_quantum_corrections(
+        self,
+        state: QuantumState,
+        metric: Tensor
+    ) -> Tensor:
+        """Compute quantum corrections to the geometric flow."""
+        # Get quantum expectations using density matrix
+        expectations = state.density_matrix().diagonal(dim1=-2, dim2=-1)
+        
+        # Compute corrections
+        corrections = self.quantum_correction_net(
+            torch.cat([
+                expectations.real,
+                metric.reshape(metric.shape[0], -1)
+            ], dim=-1)
+        )
+        
+        return self.quantum_correction_strength * corrections
 
     def compute_fisher_rao_metric(
         self,
         points: Tensor,
     ) -> Tensor:
-        """Compute Fisher-Rao information metric.
+        """Compute Fisher-Rao information metric for neural networks.
         
-        The Fisher-Rao metric captures the statistical structure of the
-        pattern space through the score function.
+        Part of the Pattern → Geometric vertical integration.
         
         Args:
             points: Points in pattern space, shape (batch_size, manifold_dim)
             
         Returns:
-            Fisher-Rao metric tensor, shape (batch_size, manifold_dim, manifold_dim)
+            Fisher-Rao metric tensor
         """
         # Compute score function (gradient of log probability)
-        score = self.fisher_net(points)  # Shape: (batch_size, manifold_dim)
+        score = self.fisher_net(points)
         
         # Compute outer product to get Fisher-Rao metric
         fisher_metric = torch.einsum('bi,bj->bij', score, score)
@@ -190,131 +181,94 @@ class NeuralGeometricFlow(BaseGeometricFlow):
         points: Tensor,
         connection: Optional[Tensor] = None
     ) -> Tensor:
-        """Compute neural network-aware metric tensor with pattern bundle integration.
-        
-        Incorporates:
-        1. Base neural metric
-        2. Weight space geometry
-        3. Fisher-Rao information metric
-        4. Pattern fiber bundle metric
-        5. Regularization
-        
-        Args:
-            points: Points in pattern space
-            connection: Optional connection coefficients
-            
-        Returns:
-            Combined metric tensor
-        """
-        # Get base metric
+        """Compute neural network-aware metric tensor with quantum integration."""
+        # Get pattern-aware metric from parent
         metric = super().compute_metric(points, connection)
         
-        # Compute dynamics contribution
-        batch_size = points.shape[0]
-        dynamics = self.dynamics_net(
-            torch.cat([points, points.roll(1, dims=-1)], dim=-1)
-        )
-        dynamics = dynamics.view(batch_size, self.manifold_dim, self.manifold_dim)
-        
-        # Add dynamics contribution
-        metric = metric + dynamics
-        
-        # Compute and add Fisher-Rao metric
+        # Add Fisher-Rao metric (Pattern → Geometric)
         fisher_metric = self.compute_fisher_rao_metric(points)
         metric = metric + self.fisher_rao_weight * fisher_metric
         
-        # Compute and add pattern bundle metric
-        bundle_metric = self.pattern_bundle.compute_metric(points).values
-        metric = metric + self.bundle_weight * bundle_metric
-        
-        # Ensure positive definiteness
-        eye = torch.eye(self.manifold_dim, device=points.device).unsqueeze(0)
-        metric = metric + eye * self.stability_threshold
+        # Add quantum contribution (Geometric → Quantum)
+        quantum_state = self.prepare_quantum_state(points, return_validation=False)
+        if isinstance(quantum_state, QuantumState):
+            # Get density matrix tensor directly
+            density_matrix = quantum_state.density_matrix()
+            metric = metric + self.quantum_weight * density_matrix
+            
+            # Add quantum corrections if enabled
+            corrections = self.compute_quantum_corrections(quantum_state, metric)
+            metric = metric + corrections.view_as(metric)
         
         return metric
-
-    def compute_connection(
-        self,
-        metric: Tensor,
-        points: Optional[Tensor] = None
-    ) -> Tensor:
-        """Compute connection coefficients with pattern bundle integration."""
-        # Get base connection
-        connection = super().compute_connection(metric, points)
-        
-        if points is not None:
-            # Add gradient information
-            batch_size = points.shape[0]
-            grad_scale = torch.norm(points, dim=-1, keepdim=True)
-            connection = connection * (1.0 + grad_scale.unsqueeze(-1))
-            
-            # Add pattern bundle connection using connection_form
-            if hasattr(self, 'pattern_bundle') and isinstance(self.pattern_bundle, PatternFiberBundle):
-                # Create tangent vector from points and metric
-                tangent_vector = torch.cat([points, metric.reshape(batch_size, -1)], dim=-1)
-                bundle_connection = self.pattern_bundle.connection_form(tangent_vector)
-                connection = connection + self.bundle_weight * bundle_connection
-        
-        return connection
-
-    def compute_ricci_tensor(
-        self,
-        metric: Tensor,
-        points: Optional[Tensor] = None,
-        connection: Optional[Tensor] = None
-    ) -> Tensor:
-        """Compute Ricci tensor with pattern bundle integration."""
-        # Get base Ricci tensor
-        ricci = super().compute_ricci_tensor(metric, points, connection)
-        
-        if points is not None:
-            # Add regularization
-            batch_size = points.shape[0]
-            regularization = self.regularization_net(
-                torch.cat([
-                    points,
-                    points.roll(1, dims=-1),
-                    points.roll(-1, dims=-1)
-                ], dim=-1)
-            )
-            regularization = regularization.view(
-                batch_size, self.manifold_dim, self.manifold_dim
-            )
-            ricci = ricci + self.regularization_strength * regularization
-            
-            # Add pattern bundle contribution using geometric flow
-            if hasattr(self, 'pattern_bundle') and isinstance(self.pattern_bundle, PatternFiberBundle):
-                # Get the geometric flow component
-                geometric_flow = self.pattern_bundle.geometric_flow
-                if geometric_flow is not None:
-                    # Compute curvature using geometric flow
-                    bundle_metric = self.pattern_bundle.compute_metric(points)
-                    bundle_ricci = geometric_flow.compute_ricci_tensor(bundle_metric.values, points)
-                    ricci = ricci + self.bundle_weight * bundle_ricci
-        
-        return ricci
 
     def flow_step(
         self,
         metric: Tensor,
         ricci: Optional[Tensor] = None,
         timestep: float = 0.1
-    ) -> Tuple[Tensor, FlowMetrics]:
-        """Perform neural network-aware flow step with pattern bundle integration."""
-        # Get base flow step
-        new_metric, metrics = super().flow_step(metric, ricci, timestep)
+    ) -> Tuple[Tensor, QuantumFlowMetrics]:
+        """Perform neural network-aware flow step with quantum integration."""
+        # Get pattern flow step from parent
+        new_metric, base_metrics = super().flow_step(metric, ricci, timestep)
         
-        # Apply weight space normalization
+        # Apply neural weight space normalization
         norm = torch.sqrt(torch.diagonal(new_metric, dim1=-2, dim2=-1).sum(-1))
         new_metric = new_metric / (norm.unsqueeze(-1).unsqueeze(-1) + 1e-8)
         
-        # Update metrics with regularization and bundle contribution
-        metrics.energy = (
-            metrics.energy +
-            self.regularization_strength * metrics.flow_magnitude +
-            self.bundle_weight * torch.linalg.det(new_metric).mean().item()
+        # Initialize quantum metrics
+        quantum_entropy = torch.tensor(0.0, device=metric.device)
+        berry_phase = None
+        mean_curvature = None
+        quantum_corrections = None
+        
+        # Quantum evolution and metrics
+        if hasattr(self, 'quantum_bridge'):
+            initial_state = self.prepare_quantum_state(
+                metric.view(-1, self.manifold_dim),
+                return_validation=False
+            )
+            if isinstance(initial_state, QuantumState):
+                evolved_state = self.quantum_bridge.evolve_quantum_state(
+                    initial_state,
+                    time=timestep
+                )
+                
+                # Compute quantum metrics using inner product
+                quantum_entropy = -torch.abs(
+                    evolved_state.inner_product(initial_state)
+                ).log()
+                
+                if self.phase_tracking_enabled:
+                    # Compute phase using inner product
+                    phase = torch.angle(evolved_state.inner_product(initial_state))
+                    berry_phase = phase
+                
+                # Compute geometric quantities
+                mean_curvature = torch.mean(
+                    torch.diagonal(new_metric, dim1=-2, dim2=-1)
+                )
+                
+                # Get quantum corrections
+                quantum_corrections = self.compute_quantum_corrections(
+                    evolved_state,
+                    new_metric
+                )
+        
+        # Create enhanced flow metrics
+        metrics = QuantumFlowMetrics(
+            flow_magnitude=base_metrics.flow_magnitude,
+            metric_determinant=base_metrics.metric_determinant,
+            ricci_scalar=base_metrics.ricci_scalar,
+            energy=base_metrics.energy,
+            singularity=base_metrics.singularity,
+            normalized_flow=torch.linalg.det(new_metric).mean().item(),
+            quantum_entropy=quantum_entropy,
+            berry_phase=berry_phase,
+            mean_curvature=mean_curvature,
+            quantum_corrections=quantum_corrections,
+            device=metric.device
         )
-        metrics.normalized_flow = torch.linalg.det(new_metric)
         
         return new_metric, metrics
 
@@ -325,117 +279,26 @@ class NeuralGeometricFlow(BaseGeometricFlow):
         end_point: Tensor,
         connection: Optional[Tensor] = None
     ) -> Tensor:
-        """Parallel transport with pattern bundle integration."""
-        # Get base transport
+        """Parallel transport with neural network and quantum awareness."""
+        # Get pattern-aware transport from parent
         transported = super().parallel_transport(
             vector, start_point, end_point, connection
         )
         
-        # Scale by gradient ratio
+        # Scale by gradient ratio for neural networks
         start_norm = torch.norm(start_point, dim=-1, keepdim=True)
         end_norm = torch.norm(end_point, dim=-1, keepdim=True)
         scale = torch.sqrt(end_norm / (start_norm + 1e-8))
         transported = transported * scale
         
-        # Construct path tensor for pattern bundle transport
-        path = torch.stack([start_point, end_point], dim=0)  # Shape: [2, *start_point.shape]
-        
-        # Add pattern bundle transport
-        bundle_transport = self.pattern_bundle.parallel_transport(vector, path)
-        transported = transported + self.bundle_weight * bundle_transport
+        # Add quantum geometric contribution if enabled
+        if self.phase_tracking_enabled:
+            start_state = self.prepare_quantum_state(start_point, return_validation=False)
+            end_state = self.prepare_quantum_state(end_point, return_validation=False)
+            
+            if isinstance(start_state, QuantumState) and isinstance(end_state, QuantumState):
+                # Compute transport phase using inner product
+                phase = torch.angle(end_state.inner_product(start_state))
+                transported = transported * torch.exp(1j * phase).real
         
         return transported
-
-    def compute_geodesic(
-        self,
-        start_point: Tensor,
-        end_point: Tensor,
-        num_steps: int = 10
-    ) -> Tensor:
-        """Compute a geodesic path between two points with pattern bundle integration.
-        
-        This method computes a geodesic path between two points in the neural manifold,
-        taking into account both the base manifold structure and the pattern bundle geometry.
-        
-        The computation follows these steps:
-        1. If pattern bundle exists:
-            a. Compute bundle metric and connection at start point
-            b. Initialize geometric flow with proper dimensions
-            c. Use flow's forward method to compute initial path
-            d. Apply norm regularization to maintain proper scaling
-            e. Interpolate path norms between start and end points
-        2. If no pattern bundle:
-            a. Use simple linear interpolation between points
-        
-        Implementation Details:
-        - Handles batched inputs properly
-        - Maintains numerical stability through regularization
-        - Preserves path endpoint constraints
-        - Device-aware computation (CPU/GPU)
-        
-        Args:
-            start_point: Starting point tensor of shape (batch_size, manifold_dim)
-            end_point: Ending point tensor of shape (batch_size, manifold_dim)
-            num_steps: Number of steps for path discretization (default: 10)
-            
-        Returns:
-            Tensor of shape (num_steps + 1, manifold_dim) representing the geodesic path
-            The path includes both endpoints and intermediate points
-            
-        Technical Notes:
-        - The path is computed using the geometric flow's forward method
-        - Norm interpolation ensures smooth scaling along the path
-        - When pattern bundle is absent, falls back to linear interpolation
-        - All operations maintain proper tensor dimensions and device placement
-        
-        Example:
-            flow = NeuralGeometricFlow(manifold_dim=64, hidden_dim=128)
-            start = torch.randn(1, 64)  # Single point
-            end = torch.randn(1, 64)    # Single point
-            path = flow.compute_geodesic(start, end, num_steps=20)
-            # path.shape = (21, 64)  # num_steps + 1 points
-        """
-        # Initialize path
-        batch_size = start_point.shape[0]
-        device = start_point.device
-        
-        # Compute initial velocity
-        velocity = (end_point - start_point) / num_steps
-        
-        # Get base geodesic using geometric flow
-        if hasattr(self, 'pattern_bundle') and isinstance(self.pattern_bundle, PatternFiberBundle):
-            # Compute bundle metric and connection
-            bundle_metric = self.pattern_bundle.compute_metric(start_point)
-            bundle_connection = self.pattern_bundle.connection_form(start_point)
-            
-            # Initialize flow with bundle structure
-            flow = GeometricFlow(
-                manifold_dim=self.manifold_dim,
-                hidden_dim=self.hidden_dim,
-                dt=1.0/num_steps
-            ).to(device)
-            
-            # Compute path using flow
-            path, _ = flow.forward(start_point, return_path=True)
-            path = path.reshape(-1, self.manifold_dim)
-            
-            # Apply regularization to path
-            norms = torch.norm(path, dim=-1, keepdim=True)
-            weights = torch.linspace(0, 1, num_steps + 1, device=device)
-            weights = weights.unsqueeze(-1)
-            
-            # Interpolate norms
-            start_norm = norms[0]
-            end_norm = norms[-1]
-            target_norms = start_norm * (1 - weights) + end_norm * weights
-            
-            # Normalize path
-            path = path * (target_norms / (norms + 1e-8))
-            
-            return path
-        else:
-            # If no pattern bundle, use linear interpolation
-            weights = torch.linspace(0, 1, num_steps + 1, device=device)
-            weights = weights.unsqueeze(-1)
-            path = start_point * (1 - weights) + end_point * weights
-            return path 
