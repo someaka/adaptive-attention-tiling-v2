@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 import numpy as np
 from typing import Dict
 
@@ -169,3 +170,138 @@ class TestScaleTransitionSystem:
         
         # Check that quantum coherence is not present
         assert "quantum_coherence" not in metrics
+
+    def test_scale_transition_accuracy(self, transition_system: ScaleTransitionSystem) -> None:
+        """Test accuracy of scale transitions at different scales."""
+        # Create test states at different scales
+        batch_size = 8
+        dim = transition_system.config.dim
+        base_state = torch.randn(batch_size, dim)
+        
+        scales = [0.5, 1.0, 2.0, 4.0]
+        states = {
+            scale: F.normalize(base_state * scale, p=2, dim=-1)
+            for scale in scales
+        }
+        
+        # Test transitions between all pairs of scales
+        for source_scale in scales:
+            for target_scale in scales:
+                if source_scale != target_scale:
+                    # Perform transition
+                    source_state = states[source_scale]
+                    transitioned = transition_system.connect_scales(
+                        states=[source_state],
+                        scales=[source_scale, target_scale]
+                    )[0]  # Get first state from list
+                    
+                    # Check scale-appropriate properties
+                    scale_ratio = target_scale / source_scale
+                    expected_norm = torch.linalg.vector_norm(source_state, dim=-1) * scale_ratio
+                    actual_norm = torch.linalg.vector_norm(transitioned, dim=-1)
+                    
+                    assert torch.allclose(
+                        actual_norm, 
+                        expected_norm, 
+                        rtol=1e-4
+                    ), f"Scale transition from {source_scale} to {target_scale} did not preserve expected norm"
+
+    def test_scale_transition_reversibility(self, transition_system: ScaleTransitionSystem) -> None:
+        """Test reversibility of scale transitions."""
+        # Create test state
+        batch_size = 8
+        dim = transition_system.config.dim
+        original_state = F.normalize(torch.randn(batch_size, dim), p=2, dim=-1)
+        
+        # Test round-trip transitions
+        scale_pairs = [
+            (1.0, 2.0),
+            (1.0, 0.5),
+            (2.0, 4.0),
+            (4.0, 1.0)
+        ]
+        
+        for scale1, scale2 in scale_pairs:
+            # Forward transition
+            intermediate = transition_system.connect_scales(
+                states=[original_state],
+                scales=[scale1, scale2]
+            )[0]  # Get first state from list
+            
+            # Backward transition
+            recovered = transition_system.connect_scales(
+                states=[intermediate],
+                scales=[scale2, scale1]
+            )[0]  # Get first state from list
+            
+            # Check recovery accuracy
+            recovery_error = torch.linalg.vector_norm(recovered - original_state, dim=-1)
+            assert torch.all(recovery_error < 1e-4), f"Scale transition {scale1}->{scale2}->{scale1} not reversible"
+
+    def test_quantum_property_preservation(self, transition_system: ScaleTransitionSystem) -> None:
+        """Test preservation of quantum properties during scale transitions."""
+        # Create quantum-like test state (normalized with phase)
+        batch_size = 8
+        dim = transition_system.config.dim
+        amplitudes = F.normalize(torch.randn(batch_size, dim), p=2, dim=-1)
+        phase = torch.exp(1j * torch.rand(batch_size, dim))
+        quantum_state = amplitudes * phase
+        
+        # Test scale transition
+        source_scale = 1.0
+        target_scale = 2.0
+        
+        transitioned = transition_system.connect_scales(
+            states=[quantum_state],
+            scales=[source_scale, target_scale]
+        )[0]  # Get first state from list
+        
+        # Check normalization preservation
+        orig_norm = torch.linalg.vector_norm(quantum_state, dim=-1)
+        trans_norm = torch.linalg.vector_norm(transitioned, dim=-1)
+        assert torch.allclose(
+            trans_norm / orig_norm,
+            torch.tensor(target_scale / source_scale),
+            rtol=1e-4
+        ), "Scale transition did not preserve quantum state normalization"
+        
+        # Check phase coherence
+        phase_correlation = torch.abs(torch.sum(
+            torch.conj(quantum_state) * transitioned,
+            dim=-1
+        ))
+        assert torch.all(phase_correlation > 0.9), "Scale transition disrupted phase coherence"
+
+    def test_scale_transition_stability(self, transition_system: ScaleTransitionSystem) -> None:
+        """Test stability of scale transitions under perturbations."""
+        # Create base state and perturbed variants
+        batch_size = 8
+        dim = transition_system.config.dim
+        base_state = F.normalize(torch.randn(batch_size, dim), p=2, dim=-1)
+        
+        perturbation_scales = [0.01, 0.05, 0.1]
+        source_scale = 1.0
+        target_scale = 2.0
+        
+        base_transition = transition_system.connect_scales(
+            states=[base_state],
+            scales=[source_scale, target_scale]
+        )[0]  # Get first state from list
+        
+        for eps in perturbation_scales:
+            # Create perturbed state
+            noise = torch.randn_like(base_state) * eps
+            perturbed_state = F.normalize(base_state + noise, p=2, dim=-1)
+            
+            # Transition perturbed state
+            perturbed_transition = transition_system.connect_scales(
+                states=[perturbed_state],
+                scales=[source_scale, target_scale]
+            )[0]  # Get first state from list
+            
+            # Check stability (transition difference should be proportional to perturbation)
+            transition_diff = torch.linalg.vector_norm(
+                perturbed_transition - base_transition,
+                dim=-1
+            )
+            assert torch.all(transition_diff < eps * 10), f"Scale transition unstable for perturbation {eps}"

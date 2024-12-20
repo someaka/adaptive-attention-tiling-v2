@@ -1,4 +1,4 @@
-digraph "packages" {
+digraph "packages_adaptive_attention" {
 rankdir=BT
 charset="utf-8"
 "src" [color="black", label=<src>, shape="box", style="solid"];

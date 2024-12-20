@@ -181,12 +181,18 @@ class NeuralQuantumBridge(nn.Module):
             Evolved quantum state
         """
         # Get attention pattern
-        attention_pattern = self.quantum_tile(
+        attention_result = self.quantum_tile(
             state.amplitudes,
             state.amplitudes,
             state.amplitudes,
             return_metrics=False
         )
+        
+        # Handle different return types from quantum tile
+        if isinstance(attention_result, tuple):
+            attention_pattern = attention_result[0]
+        else:
+            attention_pattern = attention_result
 
         # Construct evolution Hamiltonian
         hamiltonian = torch.matmul(
@@ -194,16 +200,24 @@ class NeuralQuantumBridge(nn.Module):
             attention_pattern
         )
 
-        # Evolve state and ensure single state output
+        # Evolve state
         evolved = self.hilbert_space.evolve_state(
             initial_state=state,
             hamiltonian=hamiltonian,
             t=time
         )
         
-        # Cast to ensure type safety
-        evolved_state = cast(QuantumState, evolved)
-        return evolved_state
+        # Handle different return types
+        if isinstance(evolved, list):
+            # If we got a list of states, take the last one
+            evolved_state = evolved[-1]
+            if not isinstance(evolved_state, QuantumState):
+                raise ValueError("Expected QuantumState from evolution")
+            return evolved_state
+        
+        if not isinstance(evolved, QuantumState):
+            raise ValueError("Expected QuantumState from evolution")
+        return evolved
 
     def construct_pattern_bundle(
         self,
@@ -237,33 +251,114 @@ class NeuralQuantumBridge(nn.Module):
     def evolve_pattern_bundle(
         self,
         section: PatternSection,
-        time: float = 1.0
-    ) -> PatternSection:
+        time: float = 1.0,
+        scale_factor: Optional[float] = None
+    ) -> Tuple[PatternSection, Dict[str, Any]]:
         """Evolve pattern bundle section using quantum geometric flow.
         
         Args:
             section: Input pattern section
             time: Evolution time
+            scale_factor: Optional scale factor for multi-scale evolution
             
         Returns:
-            Evolved pattern section
+            Tuple of (evolved section, evolution metrics)
         """
-        # Create path for parallel transport
-        path = torch.linspace(0, time, steps=10, device=section.coordinates.device)
+        metrics: Dict[str, Any] = {}
+        device = section.coordinates.device
+        
+        # 1. Create path for parallel transport
+        path = torch.linspace(0, time, steps=10, device=device)
         path = path.unsqueeze(-1).expand(-1, self.hidden_dim)
         
-        # Parallel transport the section along the path
-        evolved_section = self.pattern_bundle.parallel_transport(
+        # 2. Apply quantum evolution
+        quantum_result = self.neural_to_quantum(section.coordinates)
+        if isinstance(quantum_result, tuple):
+            quantum_state = quantum_result[0]  # Extract just the quantum state
+        else:
+            quantum_state = quantum_result
+            
+        evolved_state = self.evolve_quantum_state(quantum_state)
+            
+        # Ensure we have valid quantum states for metrics
+        if not isinstance(quantum_state, QuantumState) or not isinstance(evolved_state, QuantumState):
+            raise ValueError("Expected QuantumState for evolution metrics")
+            
+        metrics["quantum_evolution"] = {
+            "initial_norm": float(quantum_state.norm().item()),
+            "final_norm": float(evolved_state.norm().item())
+        }
+        
+        # 3. Parallel transport the section along the path
+        evolved_coordinates = self.pattern_bundle.parallel_transport(
             section.coordinates,
             path
         )
+        path_diff = path[-1] - path[0]
+        coord_diff = evolved_coordinates[-1] - section.coordinates
+        path_norm = torch.linalg.vector_norm(path_diff)
+        coord_norm = torch.linalg.vector_norm(coord_diff)
+        metrics["transport"] = {
+            "path_length": float(path_norm.item()),
+            "coordinate_shift": float(coord_norm.item())
+        }
         
-        # Return the final point as a new section
-        return PatternSection(
-            coordinates=evolved_section[-1],
+        # 4. Apply scale transition if requested
+        if scale_factor is not None:
+            # Get current scale from section properties
+            current_scale = getattr(section, 'scale', 1.0)
+            target_scale = current_scale * scale_factor
+            
+            # Create default couplings tensor
+            couplings = torch.zeros(1, self.hidden_dim, device=device)
+            
+            # Analyze scale transition using scale system
+            evolved_coords_batch = evolved_coordinates[-1].unsqueeze(0)
+            scale_results = self.scale_system.analyze_scales(
+                states=[evolved_coords_batch],
+                couplings=couplings
+            )
+            rg_flow, anomalies = scale_results[0], scale_results[1]
+            
+            # Apply scale transformation using connection
+            evolved_coords_scaled = self.scale_system.connection.connect_scales(
+                source_state=evolved_coords_batch,
+                source_scale=current_scale,
+                target_scale=target_scale
+            )
+            evolved_coordinates = evolved_coords_scaled.squeeze(0)
+            
+            # Convert scale results to serializable format
+            metrics["scale"] = {
+                "initial_scale": float(current_scale),
+                "target_scale": float(target_scale),
+                "rg_flow": rg_flow.tolist() if isinstance(rg_flow, torch.Tensor) else rg_flow,
+                "anomalies": [a.tolist() if isinstance(a, torch.Tensor) else a for a in anomalies]
+            }
+        else:
+            evolved_coordinates = evolved_coordinates[-1]
+            
+        # 5. Convert evolved quantum state back to classical coordinates
+        classical_coords = self.quantum_to_neural(evolved_state)
+        evolved_coordinates = evolved_coordinates + classical_coords
+        
+        # 6. Create new section with updated transition maps
+        local_chart, fiber_chart = self.pattern_bundle.local_trivialization(evolved_coordinates)
+        evolved_section = PatternSection(
+            coordinates=evolved_coordinates,
             dimension=self.hidden_dim,
-            transition_maps={}
+            transition_maps=local_chart.transition_maps
         )
+        
+        # 7. Validate evolution
+        metric_tensor = self.pattern_bundle.riemannian_framework.compute_metric(evolved_coordinates)
+        coord_norm = torch.linalg.vector_norm(evolved_coordinates)
+        metrics["validation"] = {
+            "coordinate_norm": float(coord_norm.item()),
+            "transition_consistency": float(torch.trace(metric_tensor.values).item())  # Use metric tensor trace as consistency measure
+        }
+        
+        return evolved_section, metrics
 
     def compute_scale_cohomology(
         self,

@@ -391,3 +391,190 @@ class TestHilbertSpace:
         # Test negative scale
         with pytest.raises(ValueError):
             hilbert_space.scale_state(test_state, -1.0)
+
+    def test_state_conversion_fidelity(self, hilbert_space, test_state):
+        """Test fidelity preservation during state conversion."""
+        # Initial state properties
+        initial_norm = torch.linalg.vector_norm(test_state.amplitudes, dim=-1)
+        initial_phase = test_state.phase.clone()
+        
+        # Convert to neural representation and back
+        neural_repr = hilbert_space.state_to_neural(test_state)
+        reconstructed = hilbert_space.neural_to_state(neural_repr)
+        
+        # Check norm preservation
+        final_norm = torch.linalg.vector_norm(reconstructed.amplitudes, dim=-1)
+        norm_diff = torch.abs(final_norm - initial_norm)
+        assert torch.all(norm_diff < 1e-6), "Norm not preserved during conversion"
+        
+        # Check phase preservation
+        phase_diff = torch.abs(reconstructed.phase - initial_phase)
+        assert torch.all(phase_diff < 1e-6), "Phase not preserved during conversion"
+        
+        # Check fidelity (overlap) between initial and reconstructed states
+        fidelity = torch.abs(torch.sum(
+            torch.conj(test_state.amplitudes) * reconstructed.amplitudes, 
+            dim=-1
+        ))
+        assert torch.all(fidelity > 0.99), "Low fidelity in state reconstruction"
+
+    def test_batch_conversion_consistency(self, hilbert_space):
+        """Test consistency of batch conversion operations."""
+        # Create batch of states with different properties
+        batch_size = 16
+        states = []
+        for i in range(batch_size):
+            amplitudes = torch.randn(hilbert_space.dim, dtype=torch.complex128)
+            amplitudes = F.normalize(amplitudes, p=2, dim=-1)
+            phase = torch.exp(1j * torch.rand(hilbert_space.dim, dtype=torch.complex128))
+            states.append(QuantumState(
+                amplitudes=amplitudes,
+                basis_labels=[f"|{j}⟩" for j in range(hilbert_space.dim)],
+                phase=phase
+            ))
+            
+        # Convert batch to neural form
+        neural_batch = torch.stack([
+            hilbert_space.state_to_neural(state) 
+            for state in states
+        ])
+        
+        # Convert back and check consistency
+        reconstructed_states = [
+            hilbert_space.neural_to_state(neural)
+            for neural in neural_batch
+        ]
+        
+        for orig, recon in zip(states, reconstructed_states):
+            # Check amplitude preservation
+            amp_diff = torch.abs(orig.amplitudes - recon.amplitudes)
+            assert torch.all(amp_diff < 1e-6), "Amplitude not preserved in batch"
+            
+            # Check phase consistency
+            phase_diff = torch.abs(orig.phase - recon.phase)
+            assert torch.all(phase_diff < 1e-6), "Phase not preserved in batch"
+
+    def test_conversion_edge_cases(self, hilbert_space):
+        """Test state conversion for edge cases."""
+        # Test zero state
+        zero_amplitudes = torch.zeros(hilbert_space.dim, dtype=torch.complex128)
+        zero_state = QuantumState(
+            amplitudes=zero_amplitudes,
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_space.dim)],
+            phase=torch.ones(hilbert_space.dim, dtype=torch.complex128)
+        )
+        
+        # Should raise ValueError for zero state
+        with pytest.raises(ValueError):
+            hilbert_space.state_to_neural(zero_state)
+            
+        # Test maximum superposition state
+        max_super = torch.ones(hilbert_space.dim, dtype=torch.complex128) / np.sqrt(hilbert_space.dim)
+        super_state = QuantumState(
+            amplitudes=max_super,
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_space.dim)],
+            phase=torch.ones(hilbert_space.dim, dtype=torch.complex128)
+        )
+        
+        neural_super = hilbert_space.state_to_neural(super_state)
+        reconstructed = hilbert_space.neural_to_state(neural_super)
+        
+        # Check equal superposition preserved
+        amp_diff = torch.abs(reconstructed.amplitudes - max_super)
+        assert torch.all(amp_diff < 1e-6), "Equal superposition not preserved"
+
+    def test_evolution_consistency(self, hilbert_space, test_state):
+        """Test consistency of quantum evolution over time."""
+        # Create test Hamiltonian
+        H = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
+        H = H + H.conj().T  # Make Hermitian
+        
+        # Test different time steps
+        time_steps = [10, 20, 40]
+        final_states = []
+        
+        for steps in time_steps:
+            time = torch.linspace(0, 1.0, steps, dtype=torch.float64)
+            evolved = hilbert_space.evolve_state(test_state, H, time)
+            final_states.append(evolved[-1])
+        
+        # Check consistency across different time discretizations
+        for state1, state2 in zip(final_states[:-1], final_states[1:]):
+            fidelity = torch.abs(torch.sum(
+                torch.conj(state1.amplitudes) * state2.amplitudes,
+                dim=-1
+            ))
+            assert torch.all(fidelity > 0.99), "Evolution should be consistent across time discretizations"
+
+    def test_energy_conservation(self, hilbert_space, test_state):
+        """Test energy conservation during evolution."""
+        # Create test Hamiltonian
+        H = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
+        H = H + H.conj().T  # Make Hermitian
+        
+        # Initial energy
+        initial_energy = hilbert_space.measure_observable(test_state, H)
+        
+        # Evolve state
+        time = torch.linspace(0, 2.0, 20, dtype=torch.float64)
+        evolved_states = hilbert_space.evolve_state(test_state, H, time)
+        
+        # Check energy conservation
+        for state in evolved_states:
+            energy = hilbert_space.measure_observable(state, H)
+            energy_diff = torch.abs(energy - initial_energy)
+            assert torch.all(energy_diff < 1e-6), "Energy should be conserved during evolution"
+
+    def test_geometric_phase_consistency(self, hilbert_space, test_state):
+        """Test consistency of geometric phase accumulation."""
+        # Create cyclic Hamiltonian
+        def cyclic_hamiltonian(t: float) -> torch.Tensor:
+            theta = 2 * np.pi * t
+            H = torch.tensor([
+                [np.cos(theta), np.sin(theta)],
+                [np.sin(theta), -np.cos(theta)]
+            ], dtype=torch.complex128)
+            return H
+        
+        # Compute geometric phase for different time discretizations
+        time_steps = [50, 100, 200]
+        phases = []
+        
+        for steps in time_steps:
+            times = torch.linspace(0, 1.0, steps, dtype=torch.float64)
+            phase = hilbert_space.compute_berry_phase(test_state, cyclic_hamiltonian, times)
+            phases.append(phase)
+        
+        # Check phase consistency
+        for phase1, phase2 in zip(phases[:-1], phases[1:]):
+            phase_diff = torch.abs(phase1 - phase2)
+            assert phase_diff < 1e-4, "Geometric phase should be consistent across time discretizations"
+
+    def test_entanglement_preservation(self, hilbert_space):
+        """Test preservation of entanglement during evolution."""
+        # Create maximally entangled Bell state
+        bell_state = QuantumState(
+            amplitudes=torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex128) / np.sqrt(2),
+            basis_labels=["|00⟩", "|01⟩", "|10⟩", "|11⟩"],
+            phase=torch.zeros(4, dtype=torch.complex128)
+        )
+        
+        # Create local Hamiltonian (acts separately on each qubit)
+        H_local = torch.kron(
+            torch.tensor([[1.0, 0.0], [0.0, -1.0]], dtype=torch.complex128),
+            torch.eye(2, dtype=torch.complex128)
+        )
+        
+        # Evolve under local Hamiltonian
+        time = torch.linspace(0, 1.0, 10, dtype=torch.float64)
+        evolved_states = hilbert_space.evolve_state(bell_state, H_local, time)
+        
+        # Check entanglement preservation
+        initial_concurrence = hilbert_space.compute_concurrence(
+            torch.outer(bell_state.amplitudes, bell_state.amplitudes.conj())
+        )
+        
+        for state in evolved_states:
+            density = torch.outer(state.amplitudes, state.amplitudes.conj())
+            concurrence = hilbert_space.compute_concurrence(density)
+            assert torch.abs(concurrence - initial_concurrence) < 1e-6, "Local evolution should preserve entanglement"
