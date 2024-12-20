@@ -10,7 +10,7 @@ from torch import Tensor
 from torch.types import Number
 
 from .base import ValidationResult
-from .patterns.stability import PatternValidator as StabilityValidator
+from .patterns.stability import PatternValidator
 from .patterns.decomposition import ModeDecomposer
 from ..core.patterns.formation import BifurcationAnalyzer
 from .geometric.metric import GeometricMetricValidator, CurvatureBounds
@@ -28,6 +28,13 @@ from .geometric.motivic import (
     MotivicValidation,
     HeightValidation
 )
+from .geometric.symplectic import (
+    SymplecticStructureValidator,
+    WavePacketValidator,
+    OperadicValidator,
+    QuantumGeometricValidator
+)
+from ..core.patterns.symplectic import SymplecticStructure
 
 T = TypeVar('T')
 
@@ -438,21 +445,23 @@ class ConcreteValidationResult(ValidationResult[Dict[str, Any]]):
 
 
 class ValidationFramework:
-    """Framework for model validation."""
-    
+    """Framework for comprehensive validation."""
+
     def __init__(
         self,
         geometric_validator: ModelGeometricValidator,
         quantum_validator: QuantumStateValidator,
-        pattern_validator: StabilityValidator,
-        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+        pattern_validator: PatternValidator,
+        symplectic_validator: Optional[SymplecticStructureValidator] = None,
+        tolerance: float = 1e-6
     ):
         """Initialize validation framework."""
         self.geometric_validator = geometric_validator
         self.quantum_validator = quantum_validator
         self.pattern_validator = pattern_validator
-        self.device = device
-        
+        self.symplectic_validator = symplectic_validator or SymplecticStructureValidator(tolerance)
+        self.tolerance = tolerance
+
     def _convert_tensor(self, tensor: Tensor, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> Tensor:
         """Convert tensor to specified device and dtype."""
         if device is not None and dtype is not None:
@@ -471,54 +480,43 @@ class ValidationFramework:
 
     def validate_all(
         self,
-        model: Optional[nn.Module],
-        data: torch.Tensor,
-        metric: Optional[torch.Tensor] = None,
-        riemannian: Optional[RiemannianFramework] = None,
+        model: Any,
+        data: Dict[str, Any],
+        include_symplectic: bool = True
     ) -> FrameworkValidationResult:
-        """Run complete validation on model and data."""
-        # Initialize messages list
-        messages = []
+        """Perform comprehensive validation.
         
-        # Run geometric validation
-        geometric_result = None
-        if metric is not None or riemannian is not None:
-            if riemannian is None and metric is not None:
-                # Create basic Riemannian framework from metric
-                manifold_dim = metric.shape[-1]
-                riemannian = PatternRiemannianStructure(
-                    manifold_dim=manifold_dim,
-                    pattern_dim=manifold_dim  # Using manifold_dim as pattern_dim for basic case
-                )
-                # Initialize metric factors from input metric
-                with torch.no_grad():
-                    riemannian.metric_factors.copy_(metric.reshape(manifold_dim, -1))
-            geometric_result = self.validate_geometry(model, data, riemannian)
-            messages.append(geometric_result.message)
+        Args:
+            model: Model to validate
+            data: Validation data
+            include_symplectic: Whether to include symplectic validation
             
-        # Run quantum validation
-        quantum_result = self.validate_quantum_state(data)
-        messages.append(quantum_result.message)
+        Returns:
+            Combined validation result
+        """
+        results = []
         
-        # Run pattern validation
-        pattern_result = self.validate_pattern_formation(data)
-        messages.append(pattern_result.message)
+        # Existing validations
+        results.append(self.validate_geometric(model, data))
+        results.append(self.validate_quantum(data.get('quantum_state')))
+        results.append(self.validate_patterns(data.get('patterns')))
         
-        # Determine overall validity
-        is_valid = all([
-            geometric_result.is_valid if geometric_result else True,
-            quantum_result.is_valid,
-            pattern_result.is_valid
-        ])
+        # Add symplectic validation if requested
+        if include_symplectic and 'symplectic' in data:
+            symplectic_data = data['symplectic']
+            results.append(self.validate_symplectic(
+                structure=symplectic_data.get('structure'),
+                point=symplectic_data.get('point'),
+                wave_packet=symplectic_data.get('wave_packet'),
+                target_point=symplectic_data.get('target_point')
+            ))
         
-        # Create framework validation result
-        return FrameworkValidationResult(
-            is_valid=is_valid,
-            message="; ".join(messages),
-            geometric_result=geometric_result,
-            quantum_result=quantum_result,
-            pattern_result=pattern_result
-        )
+        # Combine results
+        final_result = results[0]
+        for result in results[1:]:
+            final_result = final_result.merge(result)
+            
+        return final_result
 
     def safe_int_cast(self, value: Union[int, float, torch.Tensor, nn.Module]) -> int:
         """Safely cast a value to int, handling various input types."""
@@ -535,54 +533,103 @@ class ValidationFramework:
                     return int(out_feat.item())
         raise ValueError(f"Cannot safely cast {type(value)} to int")
 
-    def validate_geometry(
-        self,
-        model: Optional[nn.Module],
-        data: torch.Tensor,
-        riemannian: Optional[RiemannianFramework] = None
-    ) -> GeometricValidationResult:
-        """Validate geometric properties."""
-        # Handle case where no Riemannian structure is provided
-        if riemannian is None:
+    def validate_geometric(self, model: Any, data: Dict[str, Any]) -> GeometricValidationResult:
+        """Validate geometric properties of the model.
+        
+        Args:
+            model: Model to validate
+            data: Validation data
+            
+        Returns:
+            Geometric validation result
+        """
+        if not isinstance(data.get('points'), torch.Tensor):
             return GeometricValidationResult(
                 is_valid=True,
-                message="No Riemannian structure provided for validation",
+                message="No geometric data provided",
                 data={}
             )
+        return self.geometric_validator.validate_layer_geometry("default", data['points'])
 
-        # Get metric validation
-        metric = riemannian.compute_metric(data)
-        metric_result = self.geometric_validator.validate_layer_geometry("default", data)
+    def validate_quantum(self, quantum_state: Optional[Any]) -> QuantumStateValidationResult:
+        """Validate quantum state.
         
-        # Get flow validation if model has geometric flow
-        flow_result = None
-        if model is not None and hasattr(model, 'geometric_flow'):
-            geometric_flow = model.geometric_flow  # Access as property
-            if isinstance(geometric_flow, (nn.Module, torch.Tensor)):
-                # Convert to GeometricFlow if needed
-                if not isinstance(geometric_flow, GeometricFlow):
-                    raise TypeError(f"Expected GeometricFlow, got {type(geometric_flow)}")
+        Args:
+            quantum_state: Quantum state to validate
             
-            flow_validator = FlowValidator(
-                flow=geometric_flow,
-                stability_threshold=1e-6,
-                curvature_bounds=(-1.0, 1.0),
-                max_energy=1e3
+        Returns:
+            Quantum state validation result
+        """
+        if quantum_state is None:
+            return QuantumStateValidationResult(
+                is_valid=True,
+                message="No quantum state provided",
+                data={}
             )
-            flow_result = flow_validator.validate_flow(data)
         
-        # Create combined geometric result
-        result = metric_result
-        if flow_result is not None:
-            # Handle both single result and dictionary of results
-            if isinstance(flow_result, dict):
-                # Take the first result from the dictionary
-                first_result = next(iter(flow_result.values()))
-                result = cast(GeometricValidationResult, result.merge(first_result))
-            else:
-                result = cast(GeometricValidationResult, result.merge(flow_result))
+        # Convert to QuantumState if needed
+        if isinstance(quantum_state, torch.Tensor):
+            state = QuantumState(
+                amplitudes=quantum_state,
+                basis_labels=[f"|{i}⟩" for i in range(quantum_state.shape[-1])],
+                phase=torch.zeros_like(quantum_state, dtype=torch.complex64)
+            )
+        else:
+            state = quantum_state
             
-        return result
+        return self.quantum_validator.validate(
+            target=state,
+            prepared=state,  # Use same state as prepared
+            measurements=state.amplitudes.unsqueeze(0),  # Single measurement
+            bases=[torch.eye(state.amplitudes.shape[-1], dtype=torch.complex64)]  # Computational basis
+        )
+
+    def validate_patterns(self, patterns: Optional[Any]) -> ValidationResult:
+        """Validate patterns.
+        
+        Args:
+            patterns: Patterns to validate
+            
+        Returns:
+            Pattern validation result
+        """
+        if patterns is None:
+            return FrameworkValidationResult(
+                is_valid=True,
+                message="No patterns provided",
+                data={}
+            )
+        
+        # Get initial state and determine dimensions
+        if isinstance(patterns, torch.Tensor):
+            initial_state = patterns
+            hidden_dim = initial_state.shape[-1]
+            manifold_dim = initial_state.shape[-1]
+        else:
+            initial_state = patterns.get('initial_state')
+            if initial_state is None:
+                return FrameworkValidationResult(
+                    is_valid=False,
+                    message="No initial state provided in patterns",
+                    data={}
+                )
+            hidden_dim = initial_state.shape[-1]
+            manifold_dim = initial_state.shape[-1]
+            
+        # Get or create pattern flow
+        flow = patterns.get('pattern_flow') if not isinstance(patterns, torch.Tensor) else None
+        if flow is None or not isinstance(flow, GeometricFlow):
+            pattern_flow = GeometricFlow(
+                hidden_dim=hidden_dim,
+                manifold_dim=manifold_dim
+            )
+        else:
+            pattern_flow = flow
+                
+        return self.pattern_validator.validate(
+            initial_state=initial_state,
+            pattern_flow=pattern_flow
+        )
 
     def validate_quantum_state(
         self,
@@ -675,6 +722,51 @@ class ValidationFramework:
             initial=pattern,
             time_steps=time_steps
         )
+
+    def validate_symplectic(
+        self,
+        structure: SymplecticStructure,
+        point: Tensor,
+        wave_packet: Optional[Tensor] = None,
+        target_point: Optional[Tensor] = None
+    ) -> FrameworkValidationResult:
+        """Validate symplectic structure and related components.
+        
+        Args:
+            structure: Symplectic structure to validate
+            point: Point to validate at
+            wave_packet: Optional wave packet to validate
+            target_point: Optional target point for operadic transition
+            
+        Returns:
+            Validation result
+        """
+        try:
+            result = self.symplectic_validator.validate_all(
+                structure,
+                point,
+                wave_packet=wave_packet,
+                target_point=target_point
+            )
+            
+            return FrameworkValidationResult(
+                is_valid=result.is_valid,
+                message=result.message,
+                data={
+                    'symplectic': result.data,
+                    'validation_type': 'symplectic'
+                }
+            )
+            
+        except Exception as e:
+            return FrameworkValidationResult(
+                is_valid=False,
+                message=f"Error in symplectic validation: {str(e)}",
+                data={
+                    'error': str(e),
+                    'validation_type': 'symplectic'
+                }
+            )
 
     def save_results(self, results: FrameworkValidationResult, path: str):
         """Save validation results to file."""
