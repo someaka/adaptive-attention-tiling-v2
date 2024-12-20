@@ -85,7 +85,8 @@ def state_manager():
     return StateManager(config=config)
 
 
-class TestEndToEndFlow:
+@pytest.mark.dependency(depends=["TestStateSpace", "TestScaleTransition", "TestTransitionAccuracy"])
+class TestEndToEnd:
     """End-to-end integration tests."""
     
     def test_attention_quantum_flow(

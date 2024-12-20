@@ -22,7 +22,8 @@ import torch.nn.functional as F
 from src.core.quantum.state_space import QuantumState, HilbertSpace
 
 
-class TestHilbertSpace:
+@pytest.mark.dependency()
+class TestStateSpace:
     @pytest.fixture
     def hilbert_dim(self):
         """Dimension of test Hilbert space."""
@@ -578,3 +579,62 @@ class TestHilbertSpace:
             density = torch.outer(state.amplitudes, state.amplitudes.conj())
             concurrence = hilbert_space.compute_concurrence(density)
             assert torch.abs(concurrence - initial_concurrence) < 1e-6, "Local evolution should preserve entanglement"
+
+
+@pytest.mark.dependency(depends=["TestStateSpace"])
+class TestStateConversion:
+    """Tests for quantum state conversion operations."""
+    
+    def test_classical_to_quantum(self, hilbert_space):
+        """Test conversion from classical to quantum states."""
+        classical_data = torch.randn(8, hilbert_space.dim * 2)  # Complex embedding
+        quantum_state = hilbert_space.prepare_state(classical_data)
+        
+        assert isinstance(quantum_state, QuantumState)
+        assert torch.allclose(quantum_state.norm(), torch.tensor(1.0))
+        
+    def test_quantum_to_classical(self, hilbert_space, test_state):
+        """Test conversion from quantum to classical states."""
+        classical_data = hilbert_space.measure_state(test_state)
+        
+        assert classical_data.shape[-1] == hilbert_space.dim * 2
+        assert torch.all(torch.isfinite(classical_data))
+
+
+@pytest.mark.dependency(depends=["TestStateSpace", "TestStateConversion"])
+class TestEvolutionConsistency:
+    """Tests for quantum evolution consistency."""
+    
+    def test_unitary_evolution(self, hilbert_space, test_state):
+        """Test that evolution preserves unitarity."""
+        # Create test Hamiltonian
+        H = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
+        H = H + H.conj().T  # Make Hermitian
+        
+        # Evolve state
+        time = torch.linspace(0, 1.0, 10)
+        evolved_states = hilbert_space.evolve_state(test_state, H, time)
+        
+        # Check unitarity preservation
+        for state in evolved_states:
+            assert torch.allclose(state.norm(), torch.tensor(1.0), rtol=1e-5)
+            
+    def test_observable_expectation(self, hilbert_space, test_state):
+        """Test consistency of observable expectations during evolution."""
+        # Create test observable
+        O = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
+        O = O + O.conj().T  # Make Hermitian
+        
+        # Initial expectation
+        initial_exp = hilbert_space.expectation_value(test_state, O)
+        
+        # Create compatible Hamiltonian that commutes with O
+        H = torch.matmul(O, O)  # Guaranteed to commute
+        
+        # Evolve and check expectation preservation
+        time = torch.linspace(0, 1.0, 10)
+        evolved_states = hilbert_space.evolve_state(test_state, H, time)
+        
+        for state in evolved_states:
+            exp_val = hilbert_space.expectation_value(state, O)
+            assert torch.allclose(exp_val, initial_exp, rtol=1e-5)

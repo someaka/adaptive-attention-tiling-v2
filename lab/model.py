@@ -18,6 +18,8 @@ from src.core.tiling.arithmetic_dynamics import ArithmeticPattern
 from src.core.tiling.quantum_attention_tile import QuantumMotivicTile
 import tiktoken
 import torch.nn.functional as F
+from src.core.initialization import InitializationConfig, InitializationSystem
+from src.core.tiling.state_manager import StateType
 
 class AdaptiveAttention(nn.Module):
     def __init__(self, 
@@ -204,30 +206,25 @@ class SimpleTransformer(nn.Module):
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoding = nn.Parameter(torch.randn(1, 128, d_model))
         
-        # Initialize quantum geometric attention
-        self.quantum_attention = CoreQuantumGeometricAttention(
+        # Initialize the central initialization system
+        init_config = InitializationConfig(
             hidden_dim=d_model,
             num_heads=n_heads,
-            dropout=dropout,
+            state_type=StateType.PURE,
+            max_entanglement=1.0,
+            epsilon=1e-6,
+            min_scale=0.25,
+            max_scale=4.0,
+            num_scales=4,
             motive_rank=4,
-            manifold_dim=8,
-            num_layers=3,
-            tile_size=16,
-            manifold_type="hyperbolic",
-            curvature=-1.0
+            num_primes=8
         )
-        
-        # Quantum state preparation
-        self.state_prep = nn.Sequential(
-            nn.Linear(d_model, d_model * 2),  # Complex amplitude
-            nn.Tanh(),  # Bounded activation
-            nn.Linear(d_model * 2, d_model)
-        )
+        self.init_system = InitializationSystem(init_config)
         
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # Minimal feed-forward with quantum phase encoding
+        # Minimal feed-forward
         self.feed_forward = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
@@ -246,41 +243,24 @@ class SimpleTransformer(nn.Module):
         # Embedding + positional encoding
         x = self.embedding(x) + self.pos_encoding[:, :seq_len, :]
         
-        # Prepare quantum state
-        quantum_state = self.state_prep(x)
+        # Process through initialization system
+        attention_out = self.init_system(x)
         
-        # Apply quantum geometric attention with pattern detection
-        if return_metrics:
-            # First detect patterns - handle tuple return
-            patterns, pattern_metrics = self.quantum_attention.detect_patterns(quantum_state)
-            
-            # Process patterns through attention
-            output = self.quantum_attention._process_attention(patterns)
-            
-            # Extract metrics from the pattern detection pipeline
-            attention_metrics = {
-                'attention': torch.ones(batch_size, self.quantum_attention.num_heads, seq_len, seq_len) / seq_len,
-                'quantum_norm': torch.tensor(1.0),
-                'geometric_flow': pattern_metrics['flow'][0].get('stability', 0.1723) if pattern_metrics['flow'] else 0.1723,
-                'arithmetic_metrics': pattern_metrics['arithmetic']
-            }
-        else:
-            # Just use the patterns directly
-            output = self.quantum_attention(quantum_state)
-        
-        # First residual connection and norm
-        x = self.norm1(x + output)
-        
-        # Feed-forward with phase encoding
+        # Post-attention processing
+        x = self.norm1(x + attention_out)
         ff_out = self.feed_forward(x)
-        x = self.norm2(x + self.dropout(ff_out))
+        x = self.norm2(x + ff_out)
         
         # Final projection
-        output = self.final(x)
+        x = self.final(x)
         
         if return_metrics:
-            return output, attention_metrics
-        return output
+            metrics = {
+                'component_states': self.init_system.get_component_states(),
+                'initialization_validation': self.init_system.validate_initialization()
+            }
+            return x, metrics
+        return x
     
     def predict_next(self, input_ids, top_k=5):
         """Predict the top_k most likely next tokens."""
