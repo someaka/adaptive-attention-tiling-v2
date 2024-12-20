@@ -5,6 +5,7 @@ providing clean state management and validation.
 """
 
 from typing import Dict, List, Optional, Tuple, Union, Any, cast, TypeVar, assert_type
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +19,8 @@ from ..tiling.quantum_geometric_attention import QuantumGeometricAttention
 from ...validation.quantum.state import (
     StateValidator,
     StatePreparationValidator,
-    QuantumStateValidationResult
+    QuantumStateValidationResult,
+    StateValidationErrorType
 )
 from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
 from ..patterns.fiber_types import LocalChart as PatternSection
@@ -450,73 +452,74 @@ class NeuralQuantumBridge(nn.Module):
         source_scale: float,
         target_scale: float
     ) -> torch.Tensor:
-        """Bridge between different scales using quantum geometric transport.
-        
-        This method implements scale transitions by:
-        1. Converting neural state to quantum state
-        2. Applying scale-dependent quantum operations
-        3. Converting back to neural representation
+        """Bridge between different scales using quantum operations.
         
         Args:
-            state: Neural state tensor
+            state: Input state tensor
             source_scale: Source scale factor
             target_scale: Target scale factor
             
         Returns:
             Transformed state tensor
-            
-        Raises:
-            ValueError: If scales are invalid or state dimensions don't match
         """
-        # Validate scales
-        if source_scale <= 0 or target_scale <= 0:
-            raise ValueError("Scale factors must be positive")
+        # Convert to quantum state with validation
+        quantum_result = self.neural_to_quantum(state, return_validation=True)
+        if isinstance(quantum_result, tuple):
+            quantum_state, validation = quantum_result
             
-        # Validate state dimensions
-        if state.shape[-1] != self.hidden_dim:
-            raise ValueError(
-                f"State dimension {state.shape[-1]} does not match hidden dimension {self.hidden_dim}"
-            )
-            
-        # Convert to quantum state
-        quantum_state = self.neural_to_quantum(state, return_validation=False)
-        if not isinstance(quantum_state, QuantumState):
-            raise ValueError("Failed to convert to quantum state")
-            
-        # Get scale ratio for quantum operations
-        scale_ratio = target_scale / source_scale
+            if not validation.is_valid and validation.error_type is not None:
+                # Apply correction if state preparation failed
+                quantum_state = self.state_preparation.correct_state(
+                    quantum_state,
+                    validation.error_type
+                )
+        else:
+            quantum_state = quantum_result
         
-        # Apply scale-dependent quantum operations
-        scaled_state = self.hilbert_space.scale_state(
+        # Get scale ratio for time evolution
+        scale_ratio = abs(np.log2(target_scale / source_scale))
+        
+        # Evolve state using quantum geometric attention
+        evolved_state = self.evolve_quantum_state(
             quantum_state,
-            scale_factor=scale_ratio
-        )
-        
-        # Apply quantum attention at target scale
-        attention_pattern = self.quantum_tile(
-            scaled_state.amplitudes,
-            scaled_state.amplitudes,
-            scaled_state.amplitudes,
-            return_metrics=False
-        )
-        
-        # Evolve state with attention-based Hamiltonian
-        hamiltonian = torch.matmul(
-            attention_pattern.transpose(-2, -1),
-            attention_pattern
-        )
-        evolved_state = self.hilbert_space.evolve_state(
-            initial_state=scaled_state,
-            hamiltonian=hamiltonian,
-            t=1.0
+            time=scale_ratio
         )
         
         # Convert back to neural representation
-        if not isinstance(evolved_state, QuantumState):
-            raise ValueError("Evolution failed to produce valid quantum state")
-            
-        return self.quantum_to_neural(evolved_state)
+        neural_state = self.quantum_to_neural(evolved_state, state.shape)
         
+        # Track cross-scale entanglement
+        self._update_entanglement_tracking(
+            source_scale=source_scale,
+            target_scale=target_scale,
+            evolved_state=evolved_state
+        )
+        
+        return neural_state
+        
+    def _update_entanglement_tracking(
+        self,
+        source_scale: float,
+        target_scale: float,
+        evolved_state: QuantumState
+    ) -> None:
+        """Update entanglement tracking between scales.
+        
+        Args:
+            source_scale: Source scale factor
+            target_scale: Target scale factor
+            evolved_state: Evolved quantum state
+        """
+        # Compute entanglement entropy
+        entropy = self.hilbert_space.compute_entanglement_entropy(evolved_state)
+        
+        # Store in state manager
+        self.state_manager.update_entanglement(
+            source_scale=source_scale,
+            target_scale=target_scale,
+            entropy=entropy
+        )
+
     def compute_coherence(
         self,
         state1: torch.Tensor,

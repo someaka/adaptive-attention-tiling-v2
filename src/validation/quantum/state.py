@@ -9,12 +9,21 @@ This module validates quantum state properties:
 
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional, Any
+from enum import Enum
 
 import torch
 import numpy as np
 
 from ..base import ValidationResult
 from ...core.quantum.types import QuantumState
+
+
+class StateValidationErrorType(Enum):
+    """Types of state validation errors."""
+    INVALID_NORM = "invalid_norm"
+    INVALID_PHASE = "invalid_phase"
+    INVALID_DIMENSIONS = "invalid_dimensions"
+    INVALID_ENTANGLEMENT = "invalid_entanglement"
 
 
 @dataclass
@@ -27,51 +36,32 @@ class QuantumStateValidationResult(ValidationResult[Dict[str, Any]]):
     - Purity and mixedness
     - State tomography
     """
+    error_type: Optional[StateValidationErrorType] = None
     
-    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        is_valid: bool,
+        message: str,
+        data: Optional[Dict[str, Any]] = None,
+        error_type: Optional[StateValidationErrorType] = None
+    ):
         """Initialize quantum state validation result.
         
         Args:
             is_valid: Whether validation passed
             message: Description of validation result
             data: Optional validation data containing quantum metrics and tensors
+            error_type: Type of validation error if any
         """
         super().__init__(is_valid, message, data)
+        self.error_type = error_type
     
     def merge(self, other: ValidationResult) -> 'QuantumStateValidationResult':
-        """Merge with another validation result.
-        
-        Args:
-            other: Another validation result to merge with
-            
-        Returns:
-            New QuantumStateValidationResult combining both results
-            
-        Raises:
-            TypeError: If other is not a ValidationResult
-        """
-        if not isinstance(other, ValidationResult):
-            raise TypeError(f"Cannot merge with {type(other)}")
-            
-        # Merge metrics dictionaries carefully
-        merged_data = {**(self.data or {})}
-        other_data = other.data or {}
-        
-        # Special handling for quantum metrics
-        for key, value in other_data.items():
-            if key in merged_data and isinstance(value, dict):
-                if isinstance(merged_data[key], dict):
-                    merged_data[key].update(value)
-                else:
-                    merged_data[key] = value
-            else:
-                merged_data[key] = value
-        
-        return QuantumStateValidationResult(
-            is_valid=bool(self.is_valid and other.is_valid),
-            message=f"{self.message}; {other.message}",
-            data=merged_data
-        )
+        """Merge with another validation result."""
+        merged = super().merge(other)
+        if isinstance(other, QuantumStateValidationResult):
+            self.error_type = other.error_type if not self.is_valid else None
+        return self
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with proper tensor handling."""
@@ -104,7 +94,8 @@ class QuantumStateValidationResult(ValidationResult[Dict[str, Any]]):
         return cls(
             is_valid=bool(data["is_valid"]),
             message=data["message"],
-            data=data.get("data", {})
+            data=data.get("data", {}),
+            error_type=data.get("error_type")
         )
 
     def _convert_tensor_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -234,52 +225,43 @@ class StatePreparationValidator:
         self.tomography_validator = TomographyValidator()
 
     def validate_preparation(
-        self, target: QuantumState, prepared: QuantumState
+        self,
+        target: QuantumState,
+        prepared: QuantumState
     ) -> QuantumStateValidationResult:
-        """Validate state preparation quality."""
+        """Validate prepared quantum state against target."""
+        # Check norm
+        norm = torch.norm(prepared.amplitudes)
+        if not torch.isclose(norm, torch.tensor(1.0)):
+            return QuantumStateValidationResult(
+                is_valid=False,
+                message=f"Invalid norm: {norm}",
+                error_type=StateValidationErrorType.INVALID_NORM
+            )
+            
+        # Check dimensions
+        if target.amplitudes.shape != prepared.amplitudes.shape:
+            return QuantumStateValidationResult(
+                is_valid=False,
+                message="Dimension mismatch",
+                error_type=StateValidationErrorType.INVALID_DIMENSIONS
+            )
+            
         # Compute fidelity
-        fidelity = self._compute_fidelity(target, prepared)
-
-        # Compute trace distance
-        trace_dist = self._compute_trace_distance(target, prepared)
-
-        # Compute purity
-        purity = self._compute_purity(prepared)
-
-        # Compute concurrence (entanglement)
-        concurrence = self._compute_concurrence(prepared)
-
-        # Check if preparation is valid
-        is_valid = bool(
-            fidelity > (1 - self.tolerance) and
-            trace_dist < self.tolerance and
-            abs(purity - 1.0) < self.tolerance
-        )
-
-        # Create validation message
-        if is_valid:
-            message = "State preparation successful"
-        else:
-            issues = []
-            if fidelity <= (1 - self.tolerance):
-                issues.append(f"Low fidelity: {fidelity:.4f}")
-            if trace_dist >= self.tolerance:
-                issues.append(f"High trace distance: {trace_dist:.4f}")
-            if abs(purity - 1.0) >= self.tolerance:
-                issues.append(f"Non-unit purity: {purity:.4f}")
-            message = "State preparation issues: " + "; ".join(issues)
-
+        fidelity = torch.abs(torch.sum(torch.conj(target.amplitudes) * prepared.amplitudes))
+        
+        # Validate phase
+        if fidelity < 0.99:  # Allow small phase differences
+            return QuantumStateValidationResult(
+                is_valid=False,
+                message=f"Low fidelity: {fidelity}",
+                error_type=StateValidationErrorType.INVALID_PHASE
+            )
+            
         return QuantumStateValidationResult(
-            is_valid=is_valid,
-            message=message,
-            data={
-                "preparation": {
-                    "fidelity": float(fidelity.item()),
-                    "trace_distance": float(trace_dist.item()),
-                    "purity": float(purity.item()),
-                    "concurrence": float(concurrence.item())
-                }
-            }
+            is_valid=True,
+            message="State preparation successful",
+            data={"fidelity": fidelity}
         )
 
     def _compute_fidelity(
@@ -472,6 +454,26 @@ class StatePreparationValidator:
         # Convert to confidence level (using exponential decay)
         confidence = torch.exp(-chi_squared / len(projectors))
         return confidence
+
+    def correct_state(
+        self,
+        state: QuantumState,
+        error_type: StateValidationErrorType
+    ) -> QuantumState:
+        """Correct invalid quantum state."""
+        if error_type == StateValidationErrorType.INVALID_NORM:
+            # Normalize amplitudes
+            state.amplitudes = state.amplitudes / torch.norm(state.amplitudes)
+            
+        elif error_type == StateValidationErrorType.INVALID_PHASE:
+            # Apply global phase correction
+            phase = torch.angle(state.amplitudes[0])
+            state.amplitudes = state.amplitudes * torch.exp(-1j * phase)
+            
+        elif error_type == StateValidationErrorType.INVALID_DIMENSIONS:
+            raise ValueError("Cannot correct dimension mismatch")
+            
+        return state
 
 
 class DensityMatrixValidator:

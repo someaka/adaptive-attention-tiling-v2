@@ -30,6 +30,7 @@ from ...patterns.fiber_types import (
     LocalChart,
     FiberChart,
     StructureGroup,
+    FiberTypeManager,
 )
 from ...patterns.riemannian_base import (
     MetricTensor,
@@ -232,7 +233,7 @@ class PatternFiberBundle(BaseFiberBundle):
         self,
         base_dim: int = 2,
         fiber_dim: int = 3,  # SO(3) fiber dimension
-        structure_group: str = "O(n)",
+        structure_group: str = "SO3",
         device: Optional[torch.device] = None,
         num_primes: int = 8,
         motive_rank: int = 4,
@@ -248,6 +249,10 @@ class PatternFiberBundle(BaseFiberBundle):
         self.device = device or torch.device('cpu')
         self._structure_group_str = structure_group
         
+        # Initialize fiber type manager
+        self.fiber_type_manager = FiberTypeManager()
+        self._fiber_type = "Vector"  # Default to vector bundle
+        
         # Store configuration in type-safe dataclass
         self._config = BundleConfig(
             base_dim=base_dim,
@@ -259,17 +264,6 @@ class PatternFiberBundle(BaseFiberBundle):
             stability_threshold=stability_threshold,
             learning_rate=learning_rate,
             momentum=momentum,
-        )
-        
-        # Initialize geometric flow for Fisher-Rao metric
-        self.geometric_flow = GeometricFlow(
-            hidden_dim=fiber_dim,  # Hidden dimension for flow computations
-            manifold_dim=base_dim,  # Base manifold dimension for Fisher-Rao
-            motive_rank=motive_rank,  # Default rank for motivic structure
-            num_charts=1,  # Single chart for now
-            integration_steps=integration_steps,  # Default integration steps
-            dt=dt,  # Default time step
-            stability_threshold=stability_threshold
         )
         
         # Initialize all components
@@ -1284,3 +1278,171 @@ class PatternFiberBundle(BaseFiberBundle):
         result = torch.cat([base_coords, transformed_fiber], dim=-1)
         
         return result
+
+    #--------------------------------------------------------------------------
+    # Enhanced Bundle Construction
+    #--------------------------------------------------------------------------
+
+    def construct_bundle(
+        self,
+        structure_group: str,
+        fiber_type: str,
+        base_manifold: Optional[str] = None
+    ) -> None:
+        """Construct fiber bundle with specified structure.
+        
+        Args:
+            structure_group: Structure group ('SO3', 'U1', etc.)
+            fiber_type: Type of fiber ('Vector', 'Principal', etc.)
+            base_manifold: Optional base manifold type
+        """
+        self._structure_group_str = structure_group
+        self._fiber_type = fiber_type
+        self._base_manifold = base_manifold or 'Euclidean'
+        
+        # Initialize structure group
+        if structure_group == 'SO3':
+            self._initialize_so3_structure()
+        elif structure_group == 'U1':
+            self._initialize_u1_structure()
+        else:
+            raise ValueError(f"Unsupported structure group: {structure_group}")
+            
+        # Initialize fiber type
+        if fiber_type == 'Vector':
+            self._initialize_vector_fiber()
+        elif fiber_type == 'Principal':
+            self._initialize_principal_fiber()
+        else:
+            raise ValueError(f"Unsupported fiber type: {fiber_type}")
+
+    def _initialize_so3_structure(self) -> None:
+        """Initialize SO(3) structure group."""
+        # Initialize Lie algebra basis
+        self._initialize_basis_matrices()
+        
+        # Initialize group action
+        def so3_action(g: Tensor, v: Tensor) -> Tensor:
+            return torch.matmul(g, v)
+        self._group_action = so3_action
+
+    def _initialize_u1_structure(self) -> None:
+        """Initialize U(1) structure group."""
+        # Initialize phase action
+        def u1_action(theta: Tensor, v: Tensor) -> Tensor:
+            return v * torch.exp(1j * theta)
+        self._group_action = u1_action
+
+    def _initialize_vector_fiber(self) -> None:
+        """Initialize vector bundle structure."""
+        self.fiber_transition = lambda g, v: torch.matmul(g, v)
+        self.fiber_metric = lambda v1, v2: torch.sum(v1 * v2, dim=-1)
+
+    def _initialize_principal_fiber(self) -> None:
+        """Initialize principal bundle structure."""
+        self.fiber_transition = self._group_action
+        self.fiber_metric = lambda g1, g2: torch.trace(
+            torch.matmul(g1, g2.transpose(-2, -1))
+        )
+
+    #--------------------------------------------------------------------------
+    # Type Management
+    #--------------------------------------------------------------------------
+
+    def validate_fiber_type(self, section: Tensor) -> bool:
+        """Validate that section has correct fiber type.
+        
+        Args:
+            section: Section to validate
+            
+        Returns:
+            bool: Whether section has valid type
+        """
+        return self.fiber_type_manager.validate_fiber_type(
+            section,
+            self._fiber_type,
+            self.fiber_dim
+        )
+
+    def convert_fiber_type(
+        self,
+        section: Tensor,
+        target_type: str
+    ) -> Tensor:
+        """Convert section between fiber types.
+        
+        Args:
+            section: Section to convert
+            target_type: Target fiber type
+            
+        Returns:
+            Converted section
+        """
+        return self.fiber_type_manager.convert_fiber_type(
+            section,
+            self._fiber_type,
+            target_type,
+            self.fiber_dim
+        )
+
+    def set_fiber_type(self, fiber_type: str) -> None:
+        """Set the fiber type.
+        
+        Args:
+            fiber_type: Name of fiber type to use
+            
+        Raises:
+            ValueError: If fiber type not compatible
+        """
+        if not self.fiber_type_manager.check_compatibility(
+            fiber_type,
+            self._structure_group_str
+        ):
+            raise ValueError(
+                f"Fiber type {fiber_type} not compatible with "
+                f"structure group {self._structure_group_str}"
+            )
+        self._fiber_type = fiber_type
+
+    #--------------------------------------------------------------------------
+    # Enhanced Connection Forms
+    #--------------------------------------------------------------------------
+
+    def compute_connection(
+        self,
+        tangent_vector: Tensor,
+        connection_type: str = 'Levi-Civita'
+    ) -> Tensor:
+        """Compute connection form with specified type.
+        
+        This method uses the existing RiemannianStructure and validation
+        implementations from riemannian_base.py and metric.py.
+        
+        Args:
+            tangent_vector: Tangent vector
+            connection_type: Type of connection
+            
+        Returns:
+            Connection form value
+        """
+        # Use the existing RiemannianStructure implementation
+        if connection_type == 'Levi-Civita':
+            # Get metric and compute Christoffel symbols using existing implementation
+            metric = self.compute_metric(tangent_vector)
+            christoffel = self.riemannian_framework.compute_christoffel(tangent_vector)
+            return christoffel.values
+        else:
+            raise ValueError(f"Unsupported connection type: {connection_type}")
+
+    def compute_curvature(self) -> CurvatureTensor:
+        """Compute curvature using existing RiemannianStructure implementation."""
+        points = torch.ones(1, self.total_dim, device=self.device)
+        return self.riemannian_framework.compute_curvature(points)
+
+    def validate_connection(self, connection: ChristoffelSymbols) -> bool:
+        """Validate connection using existing implementation."""
+        return self.riemannian_framework.validate_connection_properties(connection)
+
+    def validate_metric(self, metric: MetricTensor) -> bool:
+        """Validate metric using existing implementation."""
+        return self.riemannian_framework.validate_metric_properties(metric)

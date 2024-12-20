@@ -6,7 +6,7 @@ It handles state initialization, updates, and validation.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import torch
 
@@ -157,3 +157,66 @@ class StateManager:
         norm_ok = abs(torch.norm(state).item() - 1.0) < self.config.epsilon
         entanglement = torch.abs(torch.det(state)).item()
         return norm_ok and entanglement <= self.config.max_entanglement
+
+    def update_entanglement(
+        self,
+        source_scale: float,
+        target_scale: float,
+        entropy: torch.Tensor
+    ) -> None:
+        """Update entanglement tracking between scales.
+        
+        Args:
+            source_scale: Source scale factor
+            target_scale: Target scale factor
+            entropy: Entanglement entropy tensor
+        """
+        # Create scale transition key
+        transition_key = f"{source_scale:.2f}->{target_scale:.2f}"
+        
+        # Initialize entanglement tracking if needed
+        if not hasattr(self, "_entanglement_tracking"):
+            self._entanglement_tracking = {}
+            
+        # Update tracking
+        if transition_key not in self._entanglement_tracking:
+            self._entanglement_tracking[transition_key] = []
+            
+        self._entanglement_tracking[transition_key].append(entropy.item())
+        
+        # Keep only recent history
+        max_history = 100
+        if len(self._entanglement_tracking[transition_key]) > max_history:
+            self._entanglement_tracking[transition_key] = (
+                self._entanglement_tracking[transition_key][-max_history:]
+            )
+            
+    def get_entanglement_history(
+        self,
+        source_scale: Optional[float] = None,
+        target_scale: Optional[float] = None
+    ) -> Dict[str, List[float]]:
+        """Get entanglement history for scale transitions.
+        
+        Args:
+            source_scale: Optional source scale to filter
+            target_scale: Optional target scale to filter
+            
+        Returns:
+            Dictionary mapping transition keys to entropy histories
+        """
+        if not hasattr(self, "_entanglement_tracking"):
+            return {}
+            
+        if source_scale is None and target_scale is None:
+            return self._entanglement_tracking
+            
+        # Filter transitions
+        filtered = {}
+        for key, history in self._entanglement_tracking.items():
+            src, tgt = map(float, key.split("->"))
+            if (source_scale is None or src == source_scale) and \
+               (target_scale is None or tgt == target_scale):
+                filtered[key] = history
+                
+        return filtered

@@ -328,3 +328,94 @@ class ScaleTransitionSystem:
             )
             
         return metrics
+
+
+class ScaleFlowIntegrator(nn.Module):
+    """Integrates scale transitions with quantum geometric flow."""
+    
+    def __init__(self, config: ScaleTransitionConfig):
+        super().__init__()
+        self.config = config
+        
+        # Scale-aware quantum components
+        self.scale_quantum_proj = nn.Linear(config.dim, config.hidden_dim)
+        self.scale_classical_proj = nn.Linear(config.hidden_dim, config.dim)
+        
+        # Scale-dependent quantum operations
+        self.scale_dependent_ops = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(config.hidden_dim, config.hidden_dim),
+                nn.LayerNorm(config.hidden_dim),
+                nn.ReLU()
+            )
+            for _ in range(config.num_scales)
+        ])
+        
+        # Entanglement tracking
+        self.entanglement_tracker = nn.Parameter(
+            torch.zeros(config.num_scales, config.hidden_dim)
+        )
+        
+    def compute_scale_quantum_state(
+        self,
+        state: torch.Tensor,
+        scale_idx: int
+    ) -> torch.Tensor:
+        """Compute scale-dependent quantum state."""
+        # Project to quantum space
+        quantum_state = self.scale_quantum_proj(state)
+        
+        # Apply scale-dependent operations
+        quantum_state = self.scale_dependent_ops[scale_idx](quantum_state)
+        
+        # Track entanglement
+        self.entanglement_tracker.data[scale_idx] = torch.mean(
+            torch.abs(quantum_state), dim=0
+        )
+        
+        return quantum_state
+        
+    def integrate_flow(
+        self,
+        state: torch.Tensor,
+        source_scale: float,
+        target_scale: float,
+        quantum_bridge: Optional[NeuralQuantumBridge] = None
+    ) -> torch.Tensor:
+        """Integrate quantum geometric flow between scales."""
+        # Get scale indices
+        source_idx = int(np.log2(source_scale / self.config.min_scale))
+        target_idx = int(np.log2(target_scale / self.config.min_scale))
+        
+        # Compute quantum states
+        source_quantum = self.compute_scale_quantum_state(state, source_idx)
+        
+        if quantum_bridge is not None:
+            # Use quantum bridge for evolution
+            quantum_result = quantum_bridge.neural_to_quantum(source_quantum)
+            if isinstance(quantum_result, tuple):
+                quantum_state, _ = quantum_result
+            else:
+                quantum_state = quantum_result
+                
+            evolved = quantum_bridge.evolve_quantum_state(
+                quantum_state,
+                time=abs(target_scale - source_scale)
+            )
+            target_quantum = quantum_bridge.quantum_to_neural(evolved)
+        else:
+            # Direct evolution in quantum space
+            target_quantum = self.compute_scale_quantum_state(state, target_idx)
+        
+        # Project back to classical space
+        evolved_state = self.scale_classical_proj(target_quantum)
+        
+        return evolved_state
+        
+    def get_entanglement_metrics(self) -> Dict[str, torch.Tensor]:
+        """Get entanglement tracking metrics."""
+        return {
+            "mean_entanglement": torch.mean(self.entanglement_tracker, dim=1),
+            "max_entanglement": torch.max(self.entanglement_tracker, dim=1)[0],
+            "entanglement_std": torch.std(self.entanglement_tracker, dim=1)
+        }

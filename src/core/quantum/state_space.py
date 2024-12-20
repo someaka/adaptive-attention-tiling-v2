@@ -708,3 +708,39 @@ class HilbertSpace:
             basis_labels=state.basis_labels,
             phase=state.phase
         )
+
+    def compute_entanglement_entropy(
+        self,
+        state: QuantumState
+    ) -> torch.Tensor:
+        """Compute the entanglement entropy of a quantum state.
+        
+        Args:
+            state: Input quantum state
+            
+        Returns:
+            Entanglement entropy tensor
+        """
+        # Reshape amplitudes into bipartite system
+        shape = state.amplitudes.shape
+        mid_dim = shape[-1] // 2
+        amplitudes = state.amplitudes.view(-1, mid_dim, mid_dim)
+        
+        # Compute reduced density matrix
+        rho = torch.einsum('ijk,ijl->ikl', amplitudes, torch.conj(amplitudes))
+        
+        # Compute eigenvalues
+        eigenvalues = torch.linalg.eigvalsh(rho)
+        
+        # Remove small negative eigenvalues due to numerical errors
+        eigenvalues = torch.clamp(eigenvalues, min=0.0)
+        
+        # Normalize eigenvalues
+        eigenvalues = eigenvalues / torch.sum(eigenvalues)
+        
+        # Compute von Neumann entropy
+        entropy = -torch.sum(
+            eigenvalues * torch.log2(eigenvalues + 1e-10)
+        )
+        
+        return entropy

@@ -3,7 +3,8 @@
 import pytest
 import torch
 
-from src.neural.flow.geometric_flow import GeometricFlow, RicciTensorNetwork
+from src.core.flow.neural import NeuralGeometricFlow
+from src.core.flow.protocol import RicciTensorNetwork
 from src.neural.flow.hamiltonian import HamiltonianSystem
 from src.validation.geometric.flow import (
     TilingFlowValidator as FlowValidator,
@@ -26,7 +27,10 @@ class TestTensorShapes:
     @pytest.fixture
     def flow(self, phase_dim):
         """Create geometric flow instance."""
-        return GeometricFlow(phase_dim=phase_dim)
+        return NeuralGeometricFlow(
+            manifold_dim=phase_dim // 2,  # phase_dim is twice manifold_dim
+            hidden_dim=phase_dim
+        )
         
     @pytest.fixture
     def ricci_network(self, phase_dim):

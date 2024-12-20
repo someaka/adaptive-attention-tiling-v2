@@ -11,7 +11,9 @@ from .state import (
     StatePreparationValidator,
     DensityMatrixValidator,
     TomographyValidator,
-    QuantumStateValidator
+    QuantumStateValidator,
+    QuantumStateValidationResult,
+    StateValidationErrorType
 )
 
 __all__ = [
@@ -25,5 +27,7 @@ __all__ = [
     'StatePreparationValidator',
     'DensityMatrixValidator',
     'TomographyValidator',
-    'QuantumStateValidator'
+    'QuantumStateValidator',
+    'QuantumStateValidationResult',
+    'StateValidationErrorType'
 ]

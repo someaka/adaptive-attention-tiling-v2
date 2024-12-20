@@ -16,7 +16,6 @@ from numpy.typing import NDArray, ArrayLike
 from torch import Tensor
 
 from src.neural.attention.pattern.dynamics import PatternDynamics
-from src.neural.flow.geometric_flow import GeometricFlow
 from src.neural.flow.hamiltonian import HamiltonianSystem
 from src.validation.base import ValidationResult
 

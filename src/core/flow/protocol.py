@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Generic, List, Optional, Protocol, Tuple, TypeVar, Union
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 T = TypeVar('T')  # Generic type for tensor-like objects
 
@@ -236,3 +236,48 @@ class GeometricFlowProtocol(Protocol[T]):
     ) -> T:
         """Compute geodesic between points."""
         pass 
+
+class RicciTensorNetwork(nn.Module):
+    """Neural network for computing Ricci tensor components."""
+    
+    def __init__(self, manifold_dim: int, hidden_dim: Optional[int] = None):
+        """Initialize Ricci tensor network.
+        
+        Args:
+            manifold_dim: Dimension of the manifold
+            hidden_dim: Hidden dimension for computations (defaults to 2*manifold_dim)
+        """
+        super().__init__()
+        self.manifold_dim = manifold_dim
+        self.hidden_dim = hidden_dim or (2 * manifold_dim)
+        
+        # Network layers
+        self.projection = nn.Linear(manifold_dim, self.hidden_dim)
+        self.hidden = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim)
+        )
+        self.output = nn.Linear(self.hidden_dim, manifold_dim * manifold_dim)
+        
+    def forward(self, x: Tensor) -> Tensor:
+        """Compute Ricci tensor components.
+        
+        Args:
+            x: Input tensor of shape (..., manifold_dim)
+            
+        Returns:
+            Ricci tensor components of shape (..., manifold_dim, manifold_dim)
+        """
+        # Project to hidden space
+        h = self.projection(x)
+        
+        # Apply hidden layers
+        h = self.hidden(h)
+        
+        # Project to Ricci tensor space
+        ricci = self.output(h)
+        
+        # Reshape to matrix form
+        return ricci.view(*ricci.shape[:-1], self.manifold_dim, self.manifold_dim)
+  

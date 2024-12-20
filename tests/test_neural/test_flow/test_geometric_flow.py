@@ -21,11 +21,8 @@ import numpy as np
 import pytest
 import torch
 
-from src.neural.flow.geometric_flow import (
-    FlowMetrics,
-    GeometricFlow,
-    SingularityInfo as Singularity,
-)
+from src.core.flow.neural import NeuralGeometricFlow
+from src.core.flow.protocol import FlowMetrics, SingularityInfo as Singularity
 from src.validation.geometric.flow import (
     TilingFlowValidator as FlowValidator,
     TilingFlowValidationResult as FlowValidationResult,
@@ -48,7 +45,10 @@ class TestGeometricFlow:
     @pytest.fixture
     def flow(self, manifold_dim):
         """Create flow system fixture."""
-        return GeometricFlow(phase_dim=manifold_dim * 2)  # phase_dim is twice manifold_dim
+        return NeuralGeometricFlow(
+            manifold_dim=manifold_dim,
+            hidden_dim=manifold_dim * 2
+        )
 
     @pytest.fixture
     def points(self, batch_size, manifold_dim):
@@ -177,10 +177,14 @@ class TestGeometricFlow:
     def test_energy_conservation(self, flow, random_states, energy_validator):
         """Test that energy is conserved during flow evolution."""
         # Create flow and validator
-        flow = GeometricFlow(phase_dim=4)  # 2D manifold = 4D phase space
+        flow = NeuralGeometricFlow(
+            manifold_dim=2,  # 2D manifold
+            hidden_dim=4     # 4D phase space
+        )
         
         # Set initial states with non-zero momentum
-        initial_energy = flow.compute_energy(random_states)
+        initial_energies = flow.pattern_dynamics.compute_energy(random_states)
+        initial_total = torch.sum(torch.stack(list(initial_energies.values())))
         
         # Evolve system
         points = random_states[:, :flow.manifold_dim]
@@ -189,8 +193,9 @@ class TestGeometricFlow:
         evolved_metric, _ = flow.flow_step(metric, ricci)
         
         # Check energy conservation
-        final_energy = flow.compute_energy(random_states)
-        error = torch.abs(final_energy - initial_energy)
+        final_energies = flow.pattern_dynamics.compute_energy(random_states)
+        final_total = torch.sum(torch.stack(list(final_energies.values())))
+        error = torch.abs(final_total - initial_total)
         assert torch.all(error < 1e-5)
 
     @pytest.mark.dependency(depends=["TestGeometricFlow::test_geometric_invariants"])
@@ -304,8 +309,10 @@ class TestGeometricFlow:
         # Verify singularity properties
         for singularity in singularities:
             assert isinstance(singularity, Singularity)
-            assert torch.all(torch.isfinite(singularity.location))
-            assert torch.all(torch.isfinite(singularity.curvature))
+            if singularity.location is not None:
+                assert torch.all(torch.isfinite(singularity.location))
+            if singularity.curvature is not None:
+                assert torch.all(torch.isfinite(singularity.curvature))
 
 
 class TestFlowStability:
@@ -314,7 +321,10 @@ class TestFlowStability:
     @pytest.fixture
     def flow_system(self):
         """Create flow system fixture."""
-        return GeometricFlow(phase_dim=4)  # 2D manifold = 4D phase space
+        return NeuralGeometricFlow(
+            manifold_dim=2,  # 2D manifold
+            hidden_dim=4     # 4D phase space
+        )
         
     @pytest.fixture
     def points(self):

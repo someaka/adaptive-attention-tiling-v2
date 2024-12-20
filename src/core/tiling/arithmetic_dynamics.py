@@ -13,7 +13,7 @@ arithmetic structure that can be understood through dynamical
 systems over adelic spaces.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ from torch import nn
 
 
 class ArithmeticDynamics(nn.Module):
-    """Arithmetic dynamics computation."""
+    """Arithmetic dynamics computation with quantum corrections."""
 
     def __init__(
         self,
@@ -29,6 +29,7 @@ class ArithmeticDynamics(nn.Module):
         motive_rank: int,
         num_primes: int = 8,  # Number of prime bases for adelic structure
         height_dim: int = 4,  # Dimension of height space
+        quantum_weight: float = 0.1,  # Weight for quantum corrections
     ):
         super().__init__()
 
@@ -36,6 +37,7 @@ class ArithmeticDynamics(nn.Module):
         self.motive_rank = motive_rank
         self.num_primes = num_primes
         self.height_dim = height_dim
+        self.quantum_weight = quantum_weight
 
         # Initialize prime bases (first num_primes primes)
         self.register_buffer(
@@ -67,54 +69,57 @@ class ArithmeticDynamics(nn.Module):
         # Dynamical system parameters
         self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank))
 
+        # Quantum correction networks
+        self.quantum_height = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, height_dim)
+        )
+        
+        self.quantum_l_function = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, motive_rank)
+        )
+
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute arithmetic height of input.
-
+        """Compute height with quantum corrections.
+        
         Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
-
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
         Returns:
-            Tensor of shape (batch_size, seq_len) containing heights
+            Height tensor of shape [batch_size, height_dim]
         """
-        # Get original dimensions
-        batch_size, seq_len, _ = x.shape
+        # Classical height
+        classical_height = self.height_map(x)
+        
+        # Quantum correction
+        quantum_correction = self.quantum_height(x)
+        
+        # Combine with quantum weight
+        return classical_height + self.quantum_weight * quantum_correction
 
-        # Reshape x to (batch_size * seq_len, hidden_dim)
-        x_flat = x.reshape(-1, self.hidden_dim)
-
-        # Project to height space
-        height_coords = self.height_map(
-            x_flat
-        )  # Shape: (batch_size * seq_len, height_dim)
-
-        # Compute adelic projection
-        adelic_coords = self.adelic_proj(
-            x_flat
-        )  # Shape: (batch_size * seq_len, num_primes * motive_rank)
-        adelic_coords = adelic_coords.view(-1, self.num_primes, self.motive_rank)
-
-        # Local height computation using p-adic norms
-        local_heights = torch.log(1 + torch.abs(adelic_coords))
-        local_heights = local_heights * self.coupling[None, :, :]
-
-        # Sum over primes and motives
-        total_local_height = local_heights.sum(
-            dim=(1, 2)
-        )  # Shape: (batch_size * seq_len)
-
-        # Archimedean height
-        arch_height = torch.norm(
-            height_coords, p=2, dim=-1
-        )  # Shape: (batch_size * seq_len)
-
-        # Combine heights with motivic correction
-        combined_height = total_local_height + arch_height
-
-        # Reshape back to (batch_size, seq_len)
-        return combined_height.view(batch_size, seq_len)
+    def compute_l_function(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute L-function with quantum corrections.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            L-function values of shape [batch_size, motive_rank]
+        """
+        # Classical L-function
+        classical_l = self.l_function(x)
+        
+        # Quantum correction
+        quantum_correction = self.quantum_l_function(x)
+        
+        # Combine with quantum weight
+        return classical_l + self.quantum_weight * quantum_correction
 
     def compute_dynamics(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute arithmetic dynamics.
+        """Compute arithmetic dynamics with quantum corrections.
         
         Args:
             x: Input tensor of shape [batch_size, hidden_dim]
@@ -126,8 +131,8 @@ class ArithmeticDynamics(nn.Module):
         if x.dim() == 1:
             x = x.unsqueeze(0)
             
-        # Project through L-function network
-        dynamics = self.l_function(x)
+        # Project through L-function network with quantum corrections
+        dynamics = self.compute_l_function(x)
         
         # Compute adelic projection
         adelic = self.adelic_proj(x)
@@ -142,7 +147,7 @@ class ArithmeticDynamics(nn.Module):
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
     ) -> Tuple[torch.Tensor, Dict]:
-        """Apply arithmetic dynamics.
+        """Apply arithmetic dynamics with quantum corrections.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, hidden_dim)
@@ -154,9 +159,9 @@ class ArithmeticDynamics(nn.Module):
         """
         batch_size, seq_len, _ = x.shape
 
-        # Project to height space while maintaining batch and sequence dimensions
-        x_flat = x.reshape(-1, self.hidden_dim)  # Shape: (batch_size * seq_len, hidden_dim)
-        height_coords = self.height_map(x_flat)  # Shape: (batch_size * seq_len, height_dim)
+        # Project to height space with quantum corrections
+        x_flat = x.reshape(-1, self.hidden_dim)
+        height_coords = self.compute_height(x_flat)
         height_coords = height_coords.view(batch_size, seq_len, self.height_dim)
 
         # Initialize trajectory storage
@@ -175,8 +180,8 @@ class ArithmeticDynamics(nn.Module):
             if return_trajectory:
                 trajectory.append(height_coords.clone())
 
-        # Compute L-function value for the entire batch
-        l_value = self.l_function(x_flat)
+        # Compute L-function value with quantum corrections
+        l_value = self.compute_l_function(x_flat)
         l_value = l_value.view(batch_size, seq_len, -1)
 
         # Compute adelic projection
@@ -189,10 +194,11 @@ class ArithmeticDynamics(nn.Module):
 
         # Gather metrics
         metrics = {
-            "height": self.compute_height(x).mean().item(),
+            "height": self.compute_height(x_flat).mean().item(),
             "l_value": l_value.norm(dim=-1).mean().item(),
             "flow_magnitude": flow_field.norm(dim=-1).mean().item(),
             "adelic_norm": adelic.norm(dim=(-1, -2)).mean().item(),
+            "quantum_correction": self.quantum_weight * self.quantum_height(x_flat).norm().item()
         }
 
         if return_trajectory:
@@ -356,3 +362,221 @@ class ArithmeticPattern(nn.Module):
         output = self.pattern_proj(current)
 
         return output, metrics
+
+
+class ModularFormComputer(nn.Module):
+    """Compute modular forms for arithmetic dynamics."""
+    
+    def __init__(
+        self,
+        hidden_dim: int,
+        weight: int = 2,  # Weight of the modular form
+        level: int = 1,   # Level of the modular form
+        num_coeffs: int = 10,  # Number of q-expansion coefficients
+    ):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.weight = weight
+        self.level = level
+        self.num_coeffs = num_coeffs
+        
+        # Network for computing q-expansion coefficients
+        self.coeff_net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_coeffs * 2)  # Real and imaginary parts
+        )
+        
+        # Network for computing symmetry parameters
+        self.symmetry_net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, 2)  # Translation and inversion parameters
+        )
+        
+    def compute_q_expansion(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute q-expansion coefficients.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            Complex coefficients of shape [batch_size, num_coeffs]
+        """
+        # Get coefficients from network
+        coeffs = self.coeff_net(x)
+        
+        # Split into real and imaginary parts
+        real = coeffs[..., :self.num_coeffs]
+        imag = coeffs[..., self.num_coeffs:]
+        
+        # Combine into complex coefficients
+        return torch.complex(real, imag)
+    
+    def compute_symmetries(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Compute modular symmetry parameters.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            Dictionary containing symmetry parameters
+        """
+        params = self.symmetry_net(x)
+        
+        return {
+            'translation': params[..., 0],  # Translation parameter
+            'inversion': params[..., 1]     # Inversion parameter
+        }
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Compute modular form.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            - q-expansion coefficients
+            - Dictionary of symmetry parameters and metrics
+        """
+        # Compute q-expansion
+        q_coeffs = self.compute_q_expansion(x)
+        
+        # Compute symmetries
+        symmetries = self.compute_symmetries(x)
+        
+        # Compute metrics
+        metrics = {
+            'weight': self.weight,
+            'level': self.level,
+            'q_norm': torch.norm(q_coeffs, dim=-1).mean().item(),
+            'translation_param': symmetries['translation'].mean().item(),
+            'inversion_param': symmetries['inversion'].mean().item()
+        }
+        
+        return q_coeffs, metrics
+
+class MotivicIntegrator(nn.Module):
+    """Compute motivic integrals for arithmetic dynamics."""
+    
+    def __init__(
+        self,
+        hidden_dim: int,
+        motive_rank: int = 4,
+        num_samples: int = 100,
+        monte_carlo_steps: int = 10
+    ):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.motive_rank = motive_rank
+        self.num_samples = num_samples
+        self.monte_carlo_steps = monte_carlo_steps
+        
+        # Network for computing motivic measure
+        self.measure_net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, motive_rank)
+        )
+        
+        # Network for computing integration domain
+        self.domain_net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, motive_rank * 2)  # Domain bounds
+        )
+        
+    def compute_measure(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute motivic measure.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            Measure values of shape [batch_size, motive_rank]
+        """
+        return self.measure_net(x)
+    
+    def compute_domain(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute integration domain bounds.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            Tuple of (lower_bounds, upper_bounds) each of shape [batch_size, motive_rank]
+        """
+        bounds = self.domain_net(x)
+        lower = bounds[..., :self.motive_rank]
+        upper = bounds[..., self.motive_rank:]
+        return lower, upper
+    
+    def monte_carlo_integrate(
+        self,
+        measure: torch.Tensor,
+        lower: torch.Tensor,
+        upper: torch.Tensor
+    ) -> torch.Tensor:
+        """Perform Monte Carlo integration.
+        
+        Args:
+            measure: Measure values of shape [batch_size, motive_rank]
+            lower: Lower bounds of shape [batch_size, motive_rank]
+            upper: Upper bounds of shape [batch_size, motive_rank]
+            
+        Returns:
+            Integral values of shape [batch_size]
+        """
+        batch_size = measure.shape[0]
+        
+        # Initialize integral estimate
+        integral = torch.zeros(batch_size, device=measure.device)
+        
+        # Monte Carlo steps
+        for _ in range(self.monte_carlo_steps):
+            # Generate random samples in the domain
+            samples = torch.rand(
+                batch_size, self.num_samples, self.motive_rank,
+                device=measure.device
+            )
+            
+            # Scale samples to domain
+            samples = samples * (upper - lower).unsqueeze(1) + lower.unsqueeze(1)
+            
+            # Evaluate measure at samples
+            measure_expanded = measure.unsqueeze(1).expand(-1, self.num_samples, -1)
+            integrand = torch.sum(measure_expanded * samples, dim=-1)
+            
+            # Update integral estimate
+            integral = integral + integrand.mean(dim=1)
+        
+        return integral / self.monte_carlo_steps
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Compute motivic integral.
+        
+        Args:
+            x: Input tensor of shape [batch_size, hidden_dim]
+            
+        Returns:
+            - Integral values of shape [batch_size]
+            - Dictionary of metrics
+        """
+        # Compute measure and domain
+        measure = self.compute_measure(x)
+        lower, upper = self.compute_domain(x)
+        
+        # Perform integration
+        integral = self.monte_carlo_integrate(measure, lower, upper)
+        
+        # Compute metrics
+        metrics = {
+            'measure_norm': torch.norm(measure, dim=-1).mean().item(),
+            'domain_volume': torch.prod(upper - lower, dim=-1).mean().item(),
+            'integral_mean': integral.mean().item(),
+            'integral_std': integral.std().item()
+        }
+        
+        return integral, metrics
