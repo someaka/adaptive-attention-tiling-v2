@@ -50,6 +50,7 @@ from ...patterns.symplectic import SymplecticStructure
 from ...patterns.riemannian import PatternRiemannianStructure
 from ...patterns.operadic_structure import AttentionOperad, OperadicOperation, OperadicComposition
 from ...patterns.enriched_structure import PatternTransition, WaveEmergence
+from ...tiling.geometric_flow import GeometricFlow
 
 # Type variables for generic type hints
 T_co = TypeVar('T_co', bound=Tensor, covariant=True)  # Covariant type for tensor operations
@@ -258,6 +259,17 @@ class PatternFiberBundle(BaseFiberBundle):
             stability_threshold=stability_threshold,
             learning_rate=learning_rate,
             momentum=momentum,
+        )
+        
+        # Initialize geometric flow for Fisher-Rao metric
+        self.geometric_flow = GeometricFlow(
+            hidden_dim=fiber_dim,  # Hidden dimension for flow computations
+            manifold_dim=base_dim,  # Base manifold dimension for Fisher-Rao
+            motive_rank=motive_rank,  # Default rank for motivic structure
+            num_charts=1,  # Single chart for now
+            integration_steps=integration_steps,  # Default integration steps
+            dt=dt,  # Default time step
+            stability_threshold=stability_threshold
         )
         
         # Initialize all components
@@ -737,7 +749,39 @@ class PatternFiberBundle(BaseFiberBundle):
         return values
 
     def compute_metric(self, points: torch.Tensor) -> MotivicMetricTensor:
-        """Compute metric tensor with pattern-specific features using operadic structure."""
+        """Compute metric tensor with pattern-specific features using operadic structure.
+        
+        This method computes a comprehensive metric tensor that combines:
+        1. Base manifold metric from geometric flow
+        2. Fiber metric with perturbation
+        3. Fisher-Rao information metric for statistical structure
+        4. Cross terms through operadic composition
+        
+        The Fisher-Rao metric is added to the base manifold part to capture
+        the information geometry of the pattern space. This provides a
+        statistical measure of pattern distinguishability and is computed
+        using the geometric flow's metric computation.
+        
+        The total metric has a block structure:
+        [base_metric + fisher_rao   cross_terms        ]
+        [cross_terms.T             fiber_metric        ]
+        
+        Args:
+            points: Input points tensor of shape (batch_size, total_dim)
+                   where total_dim = base_dim + fiber_dim
+            
+        Returns:
+            MotivicMetricTensor containing:
+            - values: Metric tensor of shape (batch_size, total_dim, total_dim)
+            - dimension: Total dimension of the bundle
+            - height_structure: Arithmetic height structure
+            - is_compatible: Whether metric satisfies compatibility conditions
+            
+        Note:
+            The Fisher-Rao metric contribution ensures the base manifold
+            metric captures the statistical distinguishability of patterns
+            in addition to their geometric structure.
+        """
         points = self._ensure_tensor_format(points)
         batch_size = points.shape[0]
         
@@ -763,6 +807,10 @@ class PatternFiberBundle(BaseFiberBundle):
         values[:, self.base_dim:, self.base_dim:] = (
             self.metric[self.base_dim:, self.base_dim:] + fiber_metric
         )
+        
+        # Add Fisher-Rao metric to base part
+        fisher = self.geometric_flow.compute_metric(base_points)
+        values[:, :self.base_dim, :self.base_dim] += fisher
         
         # Add cross terms efficiently using operadic structure
         if cross_terms.numel() > 0:
@@ -928,14 +976,34 @@ class PatternFiberBundle(BaseFiberBundle):
         return evolved
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
-        """Parallel transport with pattern evolution.
+        """Parallel transport with pattern evolution and stability control.
+        
+        This method extends the base parallel transport with pattern-specific features:
+        1. Pattern Evolution: Evolves unstable points using reaction-diffusion dynamics
+        2. Stability Control: Monitors and corrects unstable transport paths
+        3. Dimension Handling: Ensures correct fiber dimension through operadic transitions
+        
+        The transport process:
+        1. Computes base geometric transport
+        2. Evolves transport path with pattern formation dynamics
+        3. Detects and corrects unstable points through pattern evolution
+        4. Ensures dimension compatibility through operadic transitions
         
         Args:
-            section: Section to transport
-            path: Path to transport along
+            section: Section to transport (shape: [..., fiber_dim])
+            path: Path to transport along (shape: [num_points, base_dim])
             
         Returns:
-            Transported section as a Tensor
+            Transported section as a Tensor (shape: [num_points, fiber_dim])
+            
+        Note:
+            The method combines geometric parallel transport with pattern
+            evolution to ensure the transported section maintains both
+            geometric and pattern-specific properties along the path.
+            
+            For unstable points (determined by stability_threshold), the
+            method applies pattern evolution using reaction-diffusion
+            dynamics to stabilize the transport.
         """
         # Ensure section is a tensor and on the correct device
         result: Tensor = self._ensure_tensor_format(section)

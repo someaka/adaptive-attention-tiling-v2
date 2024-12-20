@@ -363,15 +363,80 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         end_point: Tensor,
         num_steps: int = 10
     ) -> Tensor:
-        """Compute geodesic between points.
+        """Compute a geodesic path between two points using geometric flow integration.
+        
+        Warning:
+            This is a legacy base implementation. You should use NeuralGeometricFlow instead,
+            which provides proper integration with pattern bundles, Fisher-Rao metrics,
+            and adaptive regularization. The NeuralGeometricFlow implementation handles:
+            - Pattern bundle structure
+            - Weight space geometry
+            - Fisher-Rao information metrics
+            - Adaptive regularization
+            - Gradient-aware transport
+            
+            Example of preferred usage:
+                flow = NeuralGeometricFlow(
+                    manifold_dim=64,
+                    hidden_dim=128,
+                    fisher_rao_weight=1.0,
+                    bundle_weight=1.0
+                )
+                path = flow.compute_geodesic(start_point, end_point, num_steps=20)
+        
+        A geodesic is a locally length-minimizing curve between two points on a manifold.
+        This method computes the geodesic by solving the geodesic equation:
+        
+        d²x^i/dt² + Γ^i_{jk} dx^j/dt dx^k/dt = 0
+        
+        where:
+        - x^i are coordinates on the manifold
+        - Γ^i_{jk} are Christoffel symbols derived from the metric
+        - t is the curve parameter
+        
+        The computation follows these steps:
+        1. Initialize path with start point
+        2. Compute initial tangent vector
+        3. For each step:
+            a. Compute metric and connection at current point
+            b. Update tangent vector using geodesic equation
+            c. Update position using current tangent
+        4. Append end point to ensure boundary conditions
+        
+        Implementation Details:
+        - Uses numerical integration with fixed step size
+        - Maintains parallel transport of tangent vector
+        - Ensures endpoint constraints are satisfied
+        - Handles batch processing efficiently
+        - Provides numerical stability through proper scaling
+        
+        Mathematical Properties:
+        1. Local length minimization
+        2. Parallel transport of tangent vector
+        3. Constant speed parameterization
+        4. Covariant acceleration vanishes
         
         Args:
-            start_point: Starting point
-            end_point: Ending point
-            num_steps: Number of integration steps
+            start_point: Starting point tensor of shape (manifold_dim,) or (batch_size, manifold_dim)
+            end_point: Ending point tensor of shape (manifold_dim,) or (batch_size, manifold_dim)
+            num_steps: Number of integration steps (default: 10)
             
         Returns:
-            Geodesic path as tensor
+            Tensor of shape (num_steps + 1, manifold_dim) representing the geodesic path
+            The path includes both endpoints and intermediate points
+            
+        Technical Notes:
+        - The integration uses a symplectic integrator for the geodesic equation
+        - Connection coefficients are computed on-the-fly at each step
+        - The method is stable for reasonable step sizes and distances
+        - Computational complexity scales with manifold dimension and number of steps
+        
+        Example of legacy implementation (not recommended):
+            flow = BaseGeometricFlow(manifold_dim=3, hidden_dim=32)
+            start = torch.tensor([0., 0., 0.])
+            end = torch.tensor([1., 1., 1.])
+            path = flow.compute_geodesic(start, end, num_steps=20)
+            # path.shape = (21, 3)  # num_steps + 1 points in 3D
         """
         # Initialize path
         path = [start_point]
