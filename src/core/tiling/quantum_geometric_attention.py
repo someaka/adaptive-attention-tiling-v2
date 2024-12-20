@@ -239,20 +239,64 @@ class QuantumGeometricAttention(nn.Module):
             - Pattern tensor of shape (batch_size, seq_len, hidden_dim)
             - Combined metrics dictionary
         """
-        # Apply arithmetic pattern detection - handle tuple return
+        batch_size, seq_len, _ = x.shape
+        metrics = {}
+
+        # 1. Apply arithmetic pattern detection
         arithmetic_out, arithmetic_layer_metrics = self.arithmetic(x)
-        arithmetic_metrics = {"arithmetic": arithmetic_layer_metrics}
+        metrics["arithmetic"] = arithmetic_layer_metrics
 
-        # Apply geometric flow - handle tuple return
+        # 2. Apply geometric flow
         flow_out, flow_layer_metrics = self.flow(arithmetic_out)
-        flow_metrics = {"flow": flow_layer_metrics}
+        metrics["flow"] = flow_layer_metrics
 
-        # Project to pattern space
-        patterns = self.pattern_proj(flow_out)
+        # 3. Convert to quantum state
+        quantum_state = self.classical_to_quantum(flow_out)
+        
+        # 4. Apply quantum pattern detection
+        quantum_patterns = []
+        quantum_metrics = []
+        
+        for h, tile in enumerate(self.tiles):
+            # Process through quantum tile
+            tile_pattern, tile_metrics = tile(
+                quantum_state,
+                quantum_state,
+                quantum_state,
+                return_metrics=True
+            )
+            quantum_patterns.append(tile_pattern)
+            quantum_metrics.append(tile_metrics)
+        
+        # Combine quantum patterns
+        quantum_out = torch.stack(quantum_patterns, dim=1).mean(dim=1)
+        metrics["quantum"] = {
+            f"tile_{i}": m for i, m in enumerate(quantum_metrics)
+        }
 
-        # Combine metrics
-        combined_metrics = {**arithmetic_metrics, **flow_metrics}
-        return patterns, combined_metrics
+        # 5. Project to pattern space with geometric structure
+        patterns = self.pattern_proj(quantum_out)
+        
+        # 6. Apply parallel transport for geometric consistency
+        transported_patterns = self._apply_parallel_transport(patterns)
+        
+        # 7. Compute geometric features
+        geometric_features = self._compute_geometric_features(transported_patterns)
+        
+        # 8. Combine with quantum features
+        quantum_features = self._compute_quantum_features(quantum_out)
+        final_patterns = geometric_features + quantum_features
+        
+        # 9. Compute pattern metrics
+        pattern_metrics = {
+            "entropy": self.compute_entropy(final_patterns).mean().item(),
+            "complexity": self.compute_complexity(final_patterns).mean().item(),
+            "stability": self.compute_stability(final_patterns).mean().item(),
+            "sparsity": self.compute_sparsity(final_patterns).mean().item()
+        }
+        metrics["patterns"] = pattern_metrics
+
+        return final_patterns, metrics
 
     def forward(
         self,

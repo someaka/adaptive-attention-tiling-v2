@@ -25,16 +25,27 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Union, Tuple, TypeVar, cast, Protocol
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch import nn, Tensor
 import numpy as np
 
 from .config import CONFIG
 
 logger = logging.getLogger(__name__)
+
+# Type definitions
+T = TypeVar('T')
+FloatValue = Union[float, List[float]]
+MetricsDict = Dict[str, Union[FloatValue, Dict[str, float]]]
+
+class AttentionResult(Protocol):
+    """Protocol for attention results."""
+    def __call__(self) -> Union[Tensor, Tuple[Tensor, Dict[str, Any]]]: ...
+
+AttentionOutput = Union[Tensor, Tuple[Tensor, Dict[str, Any]]]
 
 
 class LoadProfile:
@@ -183,11 +194,11 @@ class QuantumMotivicTile(nn.Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
         return_metrics: bool = True
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
+    ) -> Union[Tensor, Tuple[Tensor, Dict[str, Any]]]:
         """Forward pass applying quantum motivic attention.
 
         Args:
@@ -203,16 +214,20 @@ class QuantumMotivicTile(nn.Module):
                 Just the attention_pattern tensor
         """
         # Get attention pattern through internal method
-        attention_pattern = self._apply_attention(q, k, v)
+        result = self._apply_attention(q, k, v, return_metrics=return_metrics)
         
         if not return_metrics:
-            return attention_pattern
+            assert isinstance(result, torch.Tensor)
+            return result
+            
+        assert isinstance(result, tuple)
+        attention_pattern, internal_metrics = result
             
         # Compute quantum metrics
-        metrics = {
-            "cohomology_class": (self._metrics["cohomology_class"].detach().cpu().numpy() 
+        metrics: Dict[str, Any] = {
+            "cohomology_class": (self._metrics["cohomology_class"].detach().cpu().numpy().tolist()
                                if torch.is_tensor(self._metrics["cohomology_class"]) 
-                               else np.array([self._metrics["cohomology_class"]])),
+                               else [float(self._metrics["cohomology_class"])]),
             "motive_height": float(self._metrics["motive_height"]),
             "l_function_value": float(self._metrics["l_function_value"]),
             "adelic_norm": float(self._metrics["adelic_norm"]),
@@ -220,15 +235,19 @@ class QuantumMotivicTile(nn.Module):
             "memory_stats": self.get_memory_stats()
         }
         
+        # Merge internal metrics
+        metrics.update(internal_metrics)
+        
         return attention_pattern, metrics
 
     def _apply_attention(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        state: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        state: Optional[Tensor] = None,
+        return_metrics: bool = True
+    ) -> Union[Tensor, Tuple[Tensor, Dict[str, Any]]]:
         """Apply quantum motivic attention.
 
         Args:
@@ -236,57 +255,92 @@ class QuantumMotivicTile(nn.Module):
             k: Key tensor
             v: Value tensor
             state: Optional state tensor
+            return_metrics: Whether to return metrics dictionary
 
         Returns:
-            Attention pattern tensor
+            If return_metrics is True:
+                Tuple of (attention output tensor, metrics dictionary)
+            Otherwise:
+                Just the attention output tensor
         """
         batch_size, seq_len, _ = q.shape
         head_dim = self.hidden_dim // self.num_heads
 
-        # Project through attention layers
+        # 1. Project through attention layers with quantum structure
         query = self.query(q).view(batch_size, seq_len, self.num_heads, head_dim)
         key = self.key(k).view(batch_size, seq_len, self.num_heads, head_dim)
         value = self.value(v).view(batch_size, seq_len, self.num_heads, head_dim)
 
-        # Transpose for attention computation
+        # 2. Transpose for attention computation
         query = query.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        # Compute attention scores
-        attention_weights = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(
-            head_dim
+        # 3. Compute quantum cohomology structure
+        cohomology = self.cohomology_proj(query)
+        cohomology = cohomology.view(
+            batch_size * seq_len, self.motive_rank, self.cohomology_dim
         )
+
+        # 4. Apply quantum field structure
+        field = self.field_proj(key)
+        field_flat = field.view(batch_size * seq_len, self.hidden_dim)
+
+        # 5. Compute attention scores with quantum evolution
+        attention_weights = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
+        
+        # Apply quantum phase
+        phase = torch.angle(field_flat.view(batch_size, seq_len, -1))
+        phase_factor = torch.exp(1j * phase)
+        attention_weights = attention_weights * phase_factor.unsqueeze(1)
+        
+        # Normalize with quantum structure
+        attention_weights = torch.abs(attention_weights)  # Take magnitude
         attention_weights = F.softmax(attention_weights, dim=-1)
         attention_weights = self.dropout_layer(attention_weights)
 
-        # Apply attention to values
+        # 6. Apply evolved attention to values
         attention_output = torch.matmul(attention_weights, value)
         attention_output = attention_output.transpose(1, 2).contiguous()
         attention_output = attention_output.view(batch_size, seq_len, self.hidden_dim)
 
-        # Project back to hidden dimension
+        # 7. Project through quantum output
         attention_output = self.output(attention_output)
 
-        # Compute cohomology class and update metrics
-        cohomology = self.cohomology_proj(attention_output)
-        cohomology = cohomology.view(
-            batch_size * seq_len, self.motive_rank, self.cohomology_dim
-        )
-        self._metrics["cohomology_class"] = cohomology.mean(dim=0).mean(dim=0)
+        # 8. Apply quantum evolution if state provided
+        if state is not None:
+            # Evolve quantum state
+            evolved_state = attention_output + state * torch.exp(1j * phase_factor.mean(dim=1))
+            attention_output = evolved_state.real
 
-        # Apply quantum field structure
-        field = self.field_proj(attention_output)
-        field_flat = field.view(batch_size * seq_len, self.hidden_dim)
+        # 9. Update internal quantum metrics
+        self._update_quantum_metrics(attention_output)
 
-        # Update quantum metrics
-        with torch.no_grad():
-            self._metrics["motive_height"] = self.height_proj(cohomology.mean(dim=0)).mean().item()
-            self._metrics["l_function_value"] = field_flat.norm(p=2, dim=-1).mean().item()
-            self._metrics["adelic_norm"] = cohomology.norm(p=2, dim=-1).mean().item()
-            self._metrics["quantum_entropy"] = -(attention_weights * torch.log(attention_weights + 1e-10)).sum(dim=-1).mean().item()
-
-        return attention_weights
+        # 10. Return with optional metrics
+        if return_metrics:
+            metrics: Dict[str, Any] = {}
+            with torch.no_grad():
+                # Add cohomology metrics
+                metrics["cohomology_class"] = cohomology.mean(dim=0).mean(dim=0).detach().cpu().numpy().tolist()
+                
+                # Add quantum metrics
+                metrics.update({
+                    "motive_height": float(self.height_proj(cohomology.mean(dim=0)).mean().item()),
+                    "l_function_value": float(field_flat.norm(p=2, dim=-1).mean().item()),
+                    "adelic_norm": float(cohomology.norm(p=2, dim=-1).mean().item()),
+                    "quantum_entropy": float(-(attention_weights * torch.log(attention_weights + 1e-10)).sum(dim=-1).mean().item())
+                })
+                
+                # Add evolution metrics if state was provided
+                if state is not None:
+                    metrics["state_evolution"] = {
+                        "phase_coherence": float(torch.abs(phase_factor.mean(dim=1)).mean().item()),
+                        "state_norm": float(torch.norm(attention_output).item())
+                    }
+            
+            return attention_output, metrics
+        
+        return attention_output
 
     def _update_quantum_metrics(self, field: torch.Tensor) -> None:
         """Update quantum-specific metrics.
@@ -465,23 +519,39 @@ class QuantumMotivicTile(nn.Module):
         load_variance_history: List[float],
         window_size: int = 10,
     ) -> float:
-        """Compute Adaptation Efficiency (AE)."""
+        """Compute Adaptation Efficiency (AE).
+        
+        Args:
+            resolution_history: History of resolution values
+            load_variance_history: History of load variance values
+            window_size: Size of window for computing metrics
+            
+        Returns:
+            Adaptation efficiency value between 0 and 1
+        """
+        # Handle empty histories
         if not resolution_history or not load_variance_history:
             return 1.0
             
         # Compute resolution smoothness
-        res_diffs = [
-            abs(resolution_history[i + 1] - resolution_history[i])
-            for i in range(len(resolution_history) - 1)
-        ]
-        smoothness = 1.0 / (1.0 + float(np.mean(res_diffs)) if res_diffs else 1.0)
+        diffs = []
+        for i in range(len(resolution_history) - 1):
+            curr = resolution_history[i]
+            next_val = resolution_history[i + 1]
+            diffs.append(abs(next_val - curr))
+            
+        smoothness = 1.0 / (1.0 + (sum(diffs) / len(diffs)) if diffs else 1.0)
         
         # Compute load balancing effectiveness
-        load_balance = 1.0 / (1.0 + float(np.mean(load_variance_history)))
+        total_variance = sum(load_variance_history)
+        avg_variance = total_variance / len(load_variance_history)
+        load_balance = 1.0 / (1.0 + avg_variance)
         
-        # Combine metrics
+        # Combine metrics (equal weighting)
         ae = 0.5 * (smoothness + load_balance)
-        return float(ae)
+        
+        # Ensure return value is in [0, 1]
+        return max(0.0, min(1.0, float(ae)))
 
     def add_neighbor(self, neighbor: "QuantumMotivicTile") -> None:
         """Add a neighboring tile."""
@@ -518,3 +588,18 @@ class QuantumMotivicTile(nn.Module):
         # Simple load balancing
         avg_resolution = sum(n.resolution for n in neighbors) / len(neighbors)
         self.resolution = 0.8 * self.resolution + 0.2 * avg_resolution
+
+def _convert_metrics(metrics: MetricsDict) -> Dict[str, Any]:
+    """Convert metrics to standard dictionary format."""
+    result: Dict[str, Any] = {}
+    for key, value in metrics.items():
+        if isinstance(value, dict):
+            result[key] = {k: float(v) for k, v in value.items()}
+        elif isinstance(value, np.ndarray):
+            result[key] = value.tolist()
+        elif isinstance(value, list):
+            result[key] = [float(x) for x in value]
+        else:
+            # Handle single numeric value
+            result[key] = float(value) if value is not None else 0.0
+    return result
