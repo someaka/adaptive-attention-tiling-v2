@@ -228,16 +228,8 @@ class PatternDynamics:
         
         # Use a more efficient eigenvalue computation method
         try:
-            # Try using eigvals first with GPU if available
-            if torch.cuda.is_available():
-                jacobian = jacobian.cuda()
-                eigenvalues = torch.linalg.eigvals(jacobian)
-                eigenvalues = eigenvalues.cpu()
-            else:
-                # Use numpy for CPU computation which is generally faster
-                eigenvalues = torch.from_numpy(
-                    np.linalg.eigvals(jacobian.numpy())
-                ).to(torch.complex64)
+            # Try using eigvals with device
+            eigenvalues = torch.linalg.eigvals(jacobian)
         except Exception:
             # Fallback to a more stable but slower method
             eigenvalues, _ = torch.linalg.eig(jacobian)

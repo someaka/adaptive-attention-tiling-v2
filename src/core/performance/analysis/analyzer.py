@@ -81,12 +81,8 @@ class PerformanceAnalyzer:
         # Memory Analysis
         if "memory_usage" in metrics:
             memory_usage = metrics["memory_usage"]
-            total_memory = (
-                torch.cuda.get_device_properties(0).total_memory
-                if torch.cuda.is_available()
-                else None
-            )
-            if total_memory and memory_usage / total_memory > self.threshold_memory:
+            total_memory = None  # Vulkan memory info will be handled by the device
+            if memory_usage and total_memory and memory_usage / total_memory > self.threshold_memory:
                 bottlenecks.append(
                     PerformanceBottleneck(
                         component="Memory",

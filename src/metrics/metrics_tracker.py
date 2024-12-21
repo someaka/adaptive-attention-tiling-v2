@@ -45,13 +45,9 @@ class MetricsTracker:
         metrics["peak_memory"] = process.memory_info().rss
         metrics["memory_allocated"] = process.memory_info().vms
         
-        # PyTorch memory metrics
-        if torch.cuda.is_available():
-            metrics["torch_allocated"] = torch.cuda.memory_allocated()
-            metrics["torch_reserved"] = torch.cuda.memory_reserved()
-        else:
-            metrics["torch_allocated"] = 0
-            metrics["torch_reserved"] = 0
+        # PyTorch memory metrics - using device-agnostic tracking
+        metrics["torch_allocated"] = 0  # Placeholder for device-specific memory tracking
+        metrics["torch_reserved"] = 0   # Placeholder for device-specific memory tracking
 
         # Model metrics
         total_params = sum(p.numel() for p in model.parameters())

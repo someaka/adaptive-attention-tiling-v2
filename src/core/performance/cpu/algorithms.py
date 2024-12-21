@@ -12,6 +12,7 @@ from functools import wraps, reduce
 from typing import Any, Callable, Dict, List, TypeVar, Union, TypedDict
 import dis
 import inspect
+import time
 
 import torch
 
@@ -171,8 +172,7 @@ class NumericalOptimizer:
             return tensor
 
         # Use lower precision for intermediate computations
-        with torch.cuda.amp.autocast(enabled=True):
-            result = tensor.to(torch.float16)
+        result = tensor.to(torch.float16)
 
         # Check numerical stability
         error = torch.abs(tensor - result.to(tensor.dtype)).max().item()
@@ -274,15 +274,11 @@ class AlgorithmOptimizer:
 
         @wraps(optimized_func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            start_time = torch.cuda.Event(enable_timing=True)
-            end_time = torch.cuda.Event(enable_timing=True)
-
-            start_time.record(torch.cuda.current_stream())
+            start_time = time.perf_counter()
             result = optimized_func(*args, **kwargs)
-            end_time.record(torch.cuda.current_stream())
+            end_time = time.perf_counter()
 
-            torch.cuda.synchronize()
-            execution_time = start_time.elapsed_time(end_time)
+            execution_time = (end_time - start_time) * 1000  # Convert to milliseconds
 
             # Get optimized instruction count
             optimized_instruction_count = self.instruction_counter.get_instruction_count(optimized_func)

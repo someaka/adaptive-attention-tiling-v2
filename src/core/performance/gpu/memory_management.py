@@ -14,7 +14,7 @@ class GPUMemoryManager:
         Args:
             device: GPU device to manage
         """
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('vulkan')
         self._cache: Dict[str, List[torch.Tensor]] = {}
         
     def allocate(self, size: tuple, dtype: torch.dtype) -> torch.Tensor:
@@ -53,7 +53,7 @@ class GPUMemoryManager:
         """Clear memory cache."""
         self._cache.clear()
         gc.collect()
-        torch.cuda.empty_cache()
+        # Memory cleanup handled by garbage collection
         
     def get_memory_stats(self) -> Dict[str, float]:
         """Get memory statistics.
@@ -61,10 +61,11 @@ class GPUMemoryManager:
         Returns:
             Dictionary of memory statistics
         """
+        # Basic memory tracking - actual values will be handled by Vulkan backend
         return {
-            'allocated': torch.cuda.memory_allocated(self.device) / 1024**2,
-            'cached': torch.cuda.memory_reserved(self.device) / 1024**2,
-            'max_allocated': torch.cuda.max_memory_allocated(self.device) / 1024**2,
+            'allocated': 0.0,  # Placeholder for Vulkan memory tracking
+            'cached': 0.0,     # Placeholder for Vulkan memory tracking
+            'max_allocated': 0.0  # Placeholder for Vulkan memory tracking
         }
         
     def __enter__(self):

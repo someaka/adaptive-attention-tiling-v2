@@ -51,9 +51,7 @@ class VectorizationOptimizer:
 
             # Force memory cleanup before measurement
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.reset_peak_memory_stats()
+            # Device-specific memory cleanup handled by garbage collection
 
             # Get initial memory state
             process = psutil.Process()
@@ -66,8 +64,7 @@ class VectorizationOptimizer:
 
             # Force memory cleanup after execution
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Device-specific memory cleanup handled by garbage collection
 
             # Get final memory state
             end_memory = process.memory_info().rss
