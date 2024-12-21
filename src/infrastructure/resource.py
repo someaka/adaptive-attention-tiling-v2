@@ -12,7 +12,7 @@ class ResourceAllocator:
 
     def __init__(
         self,
-        device: str = "cuda",
+        device: str = "vulkan",
         memory_limit: Optional[int] = None,
         compute_limit: Optional[int] = None
     ):

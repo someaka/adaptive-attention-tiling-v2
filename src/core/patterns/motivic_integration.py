@@ -266,7 +266,7 @@ class MotivicIntegrationSystem(nn.Module):
         self.monte_carlo_steps = monte_carlo_steps
         self.num_samples = num_samples
         
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('vulkan')
         self.dtype = dtype or torch.float32
         
         # Initialize geometric structure

@@ -19,7 +19,7 @@ class GeometricQuantization:
         self,
         prequantum_line_bundle_dim: int = 1,
         polarization_dim: Optional[int] = None,
-        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device: torch.device = torch.device('vulkan')
     ):
         """Initialize geometric quantization.
         

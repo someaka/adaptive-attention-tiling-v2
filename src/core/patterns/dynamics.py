@@ -14,7 +14,7 @@ class PatternDynamics:
     def __init__(
         self,
         dt: float = 0.1,
-        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device: torch.device = torch.device('vulkan')
     ):
         """Initialize dynamics.
         

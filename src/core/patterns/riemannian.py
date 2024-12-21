@@ -50,13 +50,13 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         
         Args:
             manifold_dim: Dimension of the manifold
-            device: Computation device (defaults to CUDA if available)
+            device: Computation device (defaults to Vulkan)
             dtype: Data type (defaults to float32)
         """
         super().__init__()
         
         self.manifold_dim = manifold_dim
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('vulkan')
         self.dtype = dtype or torch.float32
         
         # Initialize metric as identity plus low-rank perturbation for stability

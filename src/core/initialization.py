@@ -58,7 +58,7 @@ class InitializationSystem(nn.Module):
         self.config = config
         
         # Set device and dtype
-        self.device = config.device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = config.device or torch.device('vulkan')
         self.dtype = config.dtype or torch.float32
         
         # Initialize components

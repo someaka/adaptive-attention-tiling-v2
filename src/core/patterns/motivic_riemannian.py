@@ -154,7 +154,10 @@ class MotivicRiemannianStructure(
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        try:
+            self.device = device or torch.device('vulkan')
+        except:
+            self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.float32
         
         # Initialize fiber and connection maps for RiemannianFiberBundle

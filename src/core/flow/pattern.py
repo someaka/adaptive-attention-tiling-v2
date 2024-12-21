@@ -97,7 +97,10 @@ class PatternFormationFlow(BaseGeometricFlow):
         self.reaction_strength = reaction_strength
         
         # Initialize device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        try:
+            device = torch.device('vulkan')
+        except:
+            device = torch.device('cpu')
         
         # Initialize pattern-specific components
         self.pattern_dynamics = PatternDynamics(
