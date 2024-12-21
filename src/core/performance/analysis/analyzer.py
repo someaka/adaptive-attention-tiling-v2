@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+import os
 
 
 @dataclass
@@ -81,11 +82,7 @@ class PerformanceAnalyzer:
         # Memory Analysis
         if "memory_usage" in metrics:
             memory_usage = metrics["memory_usage"]
-            total_memory = (
-                torch.cuda.get_device_properties(0).total_memory
-                if torch.cuda.is_available()
-                else None
-            )
+            total_memory = self.get_total_memory()
             if total_memory and memory_usage / total_memory > self.threshold_memory:
                 bottlenecks.append(
                     PerformanceBottleneck(
@@ -149,6 +146,13 @@ class PerformanceAnalyzer:
 
         self.regressions.extend(regressions)
         return regressions
+
+    def get_total_memory(self) -> int:
+        """Get total available memory in bytes."""
+        try:
+            return torch.vulkan.get_device_properties().total_memory
+        except:
+            return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
 
 
 class PerformanceVisualizer:
