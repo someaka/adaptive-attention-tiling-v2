@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import psutil
 import torch
+import gc
 
 from ...cpu.memory import MemoryManager
 from ..core.operations import CoreBenchmarks
@@ -208,7 +209,8 @@ class ScalingBenchmarks:
                     self.memory_manager.release_tensor(tensor)
                 del tensor
 
-            torch.cuda.empty_cache() if self.device == "cuda" else None
+            # Memory cleanup handled by garbage collection
+            gc.collect()
 
         return results
 

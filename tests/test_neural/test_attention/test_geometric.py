@@ -30,7 +30,6 @@ from tests.utils.config_loader import load_test_config
 def print_memory_usage(tag: str):
     """Print current memory usage."""
     gc.collect()
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
     print(f"\n[{tag}]")
 
 

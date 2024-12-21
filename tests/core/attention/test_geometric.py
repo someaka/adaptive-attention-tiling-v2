@@ -20,8 +20,6 @@ from src.core.attention.geometric import (
 def cleanup_tensors():
     """Clean up tensors and free memory."""
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test():

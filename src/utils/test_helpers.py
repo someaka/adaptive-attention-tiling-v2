@@ -72,16 +72,16 @@ def benchmark_forward_backward(
     backward_times = []
     
     for _ in range(num_iterations):
-        start = time.time()
+        start = time.perf_counter()
         output = model(input_data)
-        torch.cuda.synchronize()
-        forward_times.append(time.time() - start)
+        end = time.perf_counter()
+        forward_times.append(end - start)
         
-        start = time.time()
+        start = time.perf_counter()
         loss = loss_fn(output, target)
         loss.backward()
-        torch.cuda.synchronize()
-        backward_times.append(time.time() - start)
+        end = time.perf_counter()
+        backward_times.append(end - start)
         
     return float(np.mean(forward_times)), float(np.mean(backward_times))
 

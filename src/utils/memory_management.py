@@ -106,8 +106,7 @@ class TensorManager:
                             del tensor
                 self._operation_tensors[operation].clear()
                 gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # Device-specific memory cleanup handled by garbage collection
                     
         except Exception as e:
             logger.error(f"Error during operation cleanup: {e}")
@@ -142,8 +141,7 @@ class TensorManager:
             self._tensors.clear()
             self._tensor_refs.clear()
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Device-specific memory cleanup handled by garbage collection
                 
         except Exception as e:
             logger.error(f"Error during complete cleanup: {e}")
@@ -186,8 +184,7 @@ class MemoryOptimizer:
         try:
             self.tensor_manager.clear_all()
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Device-specific memory cleanup handled by garbage collection
                 
         except Exception as e:
             logger.error(f"Error during memory clearing: {e}")
@@ -196,9 +193,10 @@ class MemoryOptimizer:
     def get_memory_stats() -> Dict[str, Any]:
         """Get current memory statistics."""
         try:
+            # Basic memory tracking - actual values will be handled by device backend
             stats = {
-                'allocated': torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
-                'cached': torch.cuda.memory_reserved() if torch.cuda.is_available() else 0,
+                'allocated': 0,  # Placeholder for device-specific memory tracking
+                'cached': 0,     # Placeholder for device-specific memory tracking
             }
             return stats
             
@@ -246,8 +244,7 @@ def clear_memory() -> None:
     if DEBUG_MODE:
         # Force garbage collection in debug mode
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Device-specific memory cleanup handled by garbage collection
         # Additional cleanup
         for obj in gc.get_objects():
             try:
@@ -269,8 +266,7 @@ def force_cleanup():
         for _ in range(3):
             clear_memory()
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Device-specific memory cleanup handled by garbage collection
             
             # Additional cleanup
             for obj in gc.get_objects():

@@ -81,7 +81,7 @@ class BenchmarkMonitor:
 
         # Get GPU utilization if available
         try:
-            gpu_util = torch.cuda.utilization()
+            gpu_util = self.get_gpu_utilization()
         except (AttributeError, RuntimeError):
             gpu_util = None
 
@@ -228,3 +228,8 @@ class BenchmarkMonitor:
         plt.tight_layout()
         plt.savefig(self.results_dir / f"{test_name}_trends.png")
         plt.close()
+
+    def get_gpu_utilization(self) -> float:
+        """Get GPU utilization percentage."""
+        # Placeholder for Vulkan GPU utilization
+        return 0.0

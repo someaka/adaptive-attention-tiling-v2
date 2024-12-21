@@ -106,15 +106,9 @@ class MemoryBenchmarks:
             for _ in range(self.runs_per_test):
                 # Create source and destination tensors
                 src = torch.randn(size, dtype=dtype, device="cpu")
-                if self.device == "cuda":
-                    start = time.perf_counter()
-                    dst = src.cuda()
-                    torch.cuda.synchronize()
-                    end = time.perf_counter()
-                else:
-                    start = time.perf_counter()
-                    dst = src.clone()
-                    end = time.perf_counter()
+                start = time.perf_counter()
+                dst = src.to(self.device)
+                end = time.perf_counter()
 
                 transfer_time = end - start
                 transfer_times.append(transfer_time)

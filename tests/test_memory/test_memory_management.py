@@ -73,8 +73,6 @@ def force_cleanup():
         for _ in range(3):
             clear_memory()
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
             
             # Additional cleanup
             for obj in gc.get_objects():

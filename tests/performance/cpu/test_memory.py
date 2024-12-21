@@ -58,9 +58,8 @@ def resource_guard() -> Generator[None, None, None]:
         signal.signal(signal.SIGALRM, old_handler)
         # Reset memory limit
         resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-        # Force garbage collection
+        # Memory cleanup handled by garbage collection
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
 @pytest.fixture

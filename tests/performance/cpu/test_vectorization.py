@@ -59,7 +59,6 @@ def resource_guard() -> Generator[None, None, None]:
         resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
         # Force garbage collection
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
 @pytest.fixture

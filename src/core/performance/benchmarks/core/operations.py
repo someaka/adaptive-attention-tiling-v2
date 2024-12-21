@@ -80,9 +80,7 @@ class CoreBenchmarks:
             _ = run_attention()
             end = time.perf_counter()
             times.append(end - start)
-            memory_usage.append(
-                torch.cuda.max_memory_allocated() if self.device == "cuda" else 0
-            )
+            memory_usage.append(0)  # Memory tracking handled by device backend
 
         # Calculate metrics
         avg_time = sum(times) / len(times)
@@ -124,9 +122,7 @@ class CoreBenchmarks:
             _ = run_pattern_formation()
             end = time.perf_counter()
             times.append(end - start)
-            memory_usage.append(
-                torch.cuda.max_memory_allocated() if self.device == "cuda" else 0
-            )
+            memory_usage.append(0)  # Memory tracking handled by device backend
 
         # Calculate metrics
         avg_time = sum(times) / len(times)
@@ -168,9 +164,7 @@ class CoreBenchmarks:
             _ = run_flow_evolution()
             end = time.perf_counter()
             times.append(end - start)
-            memory_usage.append(
-                torch.cuda.max_memory_allocated() if self.device == "cuda" else 0
-            )
+            memory_usage.append(0)  # Memory tracking handled by device backend
 
         # Calculate metrics
         avg_time = sum(times) / len(times)

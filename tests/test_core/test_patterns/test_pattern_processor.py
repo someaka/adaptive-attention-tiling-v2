@@ -76,14 +76,11 @@ def test_forward(processor, test_pattern):
 
 def test_device_handling(processor):
     """Test device placement and movement."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-        
     # Create processor on GPU
     gpu_processor = PatternProcessor(
         manifold_dim=16,
         hidden_dim=32,
-        device=torch.device("cuda")
+        device=torch.device("vulkan")
     )
     
     # Create data on CPU
@@ -92,7 +89,7 @@ def test_device_handling(processor):
     # Process should automatically move to GPU
     result = gpu_processor.process_pattern(data, return_intermediates=True)
     evolved, _ = result
-    assert evolved.device.type == "cuda"
+    assert evolved.device.type == "vulkan"
 
 
 def test_error_handling(processor):
