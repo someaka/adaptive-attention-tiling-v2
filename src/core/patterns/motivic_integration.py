@@ -68,25 +68,25 @@ class MotivicIntegrator(nn.Module):
         
         # Initial projection to minimum required dimension
         self.initial_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim, self.min_dim),  # Input is hidden_dim from constructor
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, self.min_dim),  # Changed output dim to min_dim
+            nn.Linear(self.min_dim, self.min_dim),  # Project to min_dim
             nn.Tanh()
         )
         
         # Network for computing motivic measure
         self.measure_net = nn.Sequential(
-            nn.Linear(self.min_dim, hidden_dim // 2),
+            nn.Linear(self.min_dim, self.min_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, self.min_dim),  # Changed output dim to min_dim
+            nn.Linear(self.min_dim, self.min_dim),  # Output min_dim measure space
             nn.Tanh()
         )
         
         # Network for computing integration domain
         self.domain_net = nn.Sequential(
-            nn.Linear(self.min_dim, hidden_dim // 2),
+            nn.Linear(self.min_dim, self.min_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, 2 * self.min_dim),  # Output bounds for min_dim space
+            nn.Linear(self.min_dim, 2 * self.min_dim),  # Output bounds for min_dim space
             nn.Tanh()
         )
         
@@ -106,6 +106,10 @@ class MotivicIntegrator(nn.Module):
         x: torch.Tensor  # Accept any tensor with correct shape
     ) -> torch.Tensor:  # Return tensor with shape [batch, min_dim]
         """Compute motivic measure with shape checking."""
+        # Ensure input has correct shape
+        if len(x.shape) == 1:
+            x = x.unsqueeze(0)  # Add batch dimension
+        
         # Project to min_dim first
         x = self.initial_proj(x)  # [batch_size, min_dim]
         
@@ -281,7 +285,7 @@ class MotivicIntegrationSystem(nn.Module):
         # Initialize integrator with fixed motive_rank=2
         self.integrator = MotivicIntegrator(
             hidden_dim=hidden_dim,
-            motive_rank=2,  # Fixed to 2 for measure computation
+            motive_rank=motive_rank,  # Use the same motive_rank as the rest of the system
             num_samples=num_samples,
             monte_carlo_steps=monte_carlo_steps
         )
@@ -382,7 +386,7 @@ class MotivicIntegrationSystem(nn.Module):
         pattern: Tensor,
         time_steps: int = 10,
         with_quantum: bool = True
-    ) -> Tuple[List[Tensor], Dict[str, Any]]:
+    ) -> Tuple[Tensor, Dict[str, Any]]:
         """Evolve motivic integral over time.
         
         Args:
@@ -392,7 +396,7 @@ class MotivicIntegrationSystem(nn.Module):
             
         Returns:
             Tuple of:
-            - List of integral values at each time step
+            - Tensor of integral values at each time step [time_steps, batch_size]
             - Dictionary of evolution metrics
         """
         integrals = []
@@ -412,13 +416,16 @@ class MotivicIntegrationSystem(nn.Module):
             # Evolve pattern
             current_pattern = self.dynamics.compute_dynamics(current_pattern)
         
+        # Stack integrals into tensor
+        integrals = torch.stack(integrals)  # [time_steps, batch_size]
+        
         # Compute evolution metrics
         evolution_metrics = {
             'initial_integral': integrals[0].mean().item(),
             'final_integral': integrals[-1].mean().item(),
             'integral_change': (integrals[-1] - integrals[0]).mean().item(),
-            'max_integral': max(i.mean().item() for i in integrals),
-            'min_integral': min(i.mean().item() for i in integrals),
+            'max_integral': integrals.mean(dim=1).max().item(),
+            'min_integral': integrals.mean(dim=1).min().item(),
             'mean_measure_norm': sum(m['measure_norm'] for m in metrics_list) / len(metrics_list),
             'mean_domain_volume': sum(m['domain_volume'] for m in metrics_list) / len(metrics_list)
         }
@@ -461,7 +468,10 @@ class MotivicIntegrationSystem(nn.Module):
         
         # Stack results
         perturbations = torch.stack(perturbations)  # [num_perturbations, batch_size, features]
-        perturbed_integrals = torch.stack(perturbed_integrals)  # [num_perturbations, batch_size, 2]
+        perturbed_integrals = torch.stack(perturbed_integrals)  # [num_perturbations, batch_size]
+        
+        # Compute relative variations
+        relative_variations = (perturbed_integrals - base_integral).abs() / (base_integral.abs() + 1e-8)
         
         # Compute metrics
         metrics = {
@@ -474,8 +484,8 @@ class MotivicIntegrationSystem(nn.Module):
                     perturbed_integrals.reshape(num_perturbations, -1).mean(dim=1)  # Average over all dimensions
                 ])
             )[0, 1].item(),
-            'mean_variation': (perturbed_integrals - base_integral).abs().mean().item(),  # Same as mean_integral_change
-            'max_variation': (perturbed_integrals - base_integral).abs().max().item()  # Same as max_integral_change
+            'mean_variation': relative_variations.mean().item() * perturbation_scale,  # Scale with perturbation size
+            'max_variation': relative_variations.max().item() * perturbation_scale  # Scale with perturbation size
         }
         
-        return metrics 
+        return metrics

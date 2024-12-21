@@ -69,8 +69,9 @@ class ArithmeticDynamics(nn.Module):
         self.adelic_proj = nn.Linear(hidden_dim, num_primes * motive_rank)
 
         # Output projection layers
-        self.measure_proj = nn.Linear(height_dim, max(4, 2 * motive_rank))  # Project to min_dim measure space
-        self.output_proj = nn.Linear(max(4, 2 * motive_rank), hidden_dim)  # Project back from min_dim space
+        self.min_dim = max(4, 2 * motive_rank)  # Define min_dim
+        self.measure_proj = nn.Linear(height_dim, self.min_dim)  # Project to min_dim measure space
+        self.output_proj = nn.Linear(self.min_dim, hidden_dim)  # Project back from min_dim space
 
         # Dynamical system parameters
         self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank))
@@ -89,7 +90,7 @@ class ArithmeticDynamics(nn.Module):
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(max(4, 2 * motive_rank), max(4, 2 * motive_rank))  # Project within min_dim measure space
+        self.quantum_proj = nn.Linear(self.min_dim, self.min_dim)  # Project within min_dim measure space
 
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
         """Compute height with quantum corrections.
@@ -131,38 +132,32 @@ class ArithmeticDynamics(nn.Module):
         """Compute arithmetic dynamics with quantum corrections.
         
         Args:
-            x: Input tensor of shape [batch_size, hidden_dim] or [batch_size, seq_len, hidden_dim]
+            x: Input tensor of shape [batch_size, hidden_dim]
             
         Returns:
-            Dynamics state tensor with same shape as input
+            Evolved tensor of shape [batch_size, hidden_dim]
         """
-        # Get original shape
-        orig_shape = x.shape
+        # Compute height
+        height = self.compute_height(x)  # [batch_size, height_dim]
         
-        # Ensure input is 2D: [batch_size * seq_len, hidden_dim]
-        if x.dim() == 3:
-            x = x.reshape(-1, self.hidden_dim)
-        elif x.dim() == 1:
-            x = x.unsqueeze(0)
-            
-        # Project through L-function network with quantum corrections
-        dynamics = self.compute_l_function(x)
+        # Compute L-function
+        l_values = self.compute_l_function(x)  # [batch_size, motive_rank]
         
-        # Compute adelic projection
-        adelic = self.adelic_proj(x)
-        adelic = adelic.view(-1, self.num_primes, self.motive_rank)
+        # Project to measure space
+        measure = self.measure_proj(height)  # [batch_size, min_dim]
         
-        # Combine with coupling
-        coupled = torch.einsum('bpm,pm->bm', adelic, self.coupling)
+        # Apply quantum corrections
+        quantum_correction = self.quantum_proj(measure)  # [batch_size, min_dim]
+        quantum_correction = quantum_correction * self.quantum_weight  # Scale quantum effects
         
-        # Final dynamics state
-        result = dynamics + coupled
+        # Project back to input space
+        output = self.output_proj(quantum_correction)  # [batch_size, hidden_dim]
         
-        # Restore original shape
-        if len(orig_shape) == 3:
-            result = result.view(orig_shape[0], orig_shape[1], -1)
+        # Add residual connection with stability factor
+        alpha = 0.1  # Small factor for stability
+        output = (1 - alpha) * x + alpha * output
         
-        return result
+        return output
 
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
@@ -252,7 +247,7 @@ class ArithmeticDynamics(nn.Module):
             metric: Input metric tensor of shape [batch_size, hidden_dim] or [batch_size, seq_len, hidden_dim]
             
         Returns:
-            Quantum correction tensor projected to measure space
+            Quantum correction tensor projected to measure space with shape [batch_size, min_dim]
         """
         # Get original shape
         orig_shape = metric.shape[:-1]  # Remove last dimension (hidden_dim)
@@ -264,14 +259,17 @@ class ArithmeticDynamics(nn.Module):
             metric = metric.unsqueeze(0)
         
         # Project metric to height space
-        height_coords = self.height_map(metric)
+        height_coords = self.height_map(metric)  # [batch_size, height_dim]
         
         # Compute quantum correction using flow
-        correction = self.flow(height_coords)
+        correction = self.flow(height_coords)  # [batch_size, height_dim]
         
-        # Project to measure space (2 dimensions)
-        correction = self.measure_proj(correction)  # Project to 2D
-        correction = self.quantum_proj(correction)  # Final 2D projection
+        # Project to measure space with correct dimensions
+        correction = self.measure_proj(correction)  # [batch_size, min_dim]
+        correction = self.quantum_proj(correction)  # [batch_size, min_dim]
+        
+        # Add ones to ensure multiplicative stability
+        correction = correction + 1.0
         
         # Restore original shape if needed
         if len(orig_shape) > 1:
