@@ -69,8 +69,8 @@ class ArithmeticDynamics(nn.Module):
         self.adelic_proj = nn.Linear(hidden_dim, num_primes * motive_rank)
 
         # Output projection layers
-        self.measure_proj = nn.Linear(height_dim, 2)  # Project to 2D measure space
-        self.output_proj = nn.Linear(2, hidden_dim)  # Project back to input space
+        self.measure_proj = nn.Linear(height_dim, max(4, 2 * motive_rank))  # Project to min_dim measure space
+        self.output_proj = nn.Linear(max(4, 2 * motive_rank), hidden_dim)  # Project back from min_dim space
 
         # Dynamical system parameters
         self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank))
@@ -89,7 +89,7 @@ class ArithmeticDynamics(nn.Module):
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(2, 2)  # Project within 2D measure space
+        self.quantum_proj = nn.Linear(max(4, 2 * motive_rank), max(4, 2 * motive_rank))  # Project within min_dim measure space
 
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
         """Compute height with quantum corrections.

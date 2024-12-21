@@ -7,7 +7,9 @@
         "**/node_modules",
         "**/__pycache__",
         "**/typing.py",
-        "**/.*"
+        "**/.*",
+        "**/fx_graph_*",
+        "**/torch_compile_debug"
     ],
     "ignore": [
         "**/typing.py"

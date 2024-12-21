@@ -24,3 +24,7 @@ MANIFEST
 .venv
 venv/
 ENV/
+torch_compile_debug/
+**/torch_compile_debug/
+fx_graph_*
+**/fx_graph_*

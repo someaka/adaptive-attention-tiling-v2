@@ -9,6 +9,7 @@ This module tests the core motivic cohomology implementation including:
 
 import pytest
 import torch
+import torch.nn as nn
 from torch import Tensor
 from typing import Tuple
 
@@ -19,13 +20,25 @@ from src.core.patterns.motivic_riemannian import (
 from src.core.patterns.cohomology import (
     MotivicCohomology,
     ArithmeticForm,
-    HeightStructure
+    HeightStructure,
+    RiemannianFiberBundle
 )
+from src.core.patterns.fiber_bundle import BaseFiberBundle
 from src.core.patterns.riemannian_base import MetricTensor, VectorField
 
 
 class MockMotivicRiemannianStructure(MotivicRiemannianStructure):
     """Mock implementation of MotivicRiemannianStructure for testing."""
+    
+    def __init__(self, manifold_dim: int, hidden_dim: int, motive_rank: int):
+        """Initialize mock structure."""
+        # Initialize the full inheritance chain properly
+        super().__init__(
+            manifold_dim=manifold_dim,
+            hidden_dim=hidden_dim,
+            motive_rank=motive_rank,
+            num_primes=8
+        )
     
     def geodesic_flow(
         self,

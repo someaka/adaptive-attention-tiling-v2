@@ -177,9 +177,12 @@ This document outlines the comprehensive testing strategy for the Adaptive Atten
 - Skipped: 31
 - Errors: 136
 - Warnings: 19
-- Total Runtime: 2m 52s
+- Total Runtime: 172.95s (2m 52s)
 
-Note: First full test run completed on 2024-03-21
+Note: Latest test run completed on 2024-12-21 using:
+```bash
+python -m pytest -v --override-ini="addopts=" --import-mode=importlib
+```
 
 ### 4.2 Critical Issues
 1. [🚫] Vulkan backend missing core operators (aten::as_strided)
@@ -252,6 +255,7 @@ python -m pytest --cov=src tests/
 ## 7. Notes and Updates
 
 ### Latest Updates
+- 2024-12-21: Full test run with importlib mode
 - 2024-03-19: Initial test strategy document created
 - 2024-03-19: Identified initial test failures and issues
 

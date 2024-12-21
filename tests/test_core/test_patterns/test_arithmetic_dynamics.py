@@ -10,6 +10,7 @@ import pytest
 import torch
 from torch import Tensor
 from typing import Tuple, Dict, Any
+import logging
 
 from src.core.patterns.arithmetic_dynamics import (
     ArithmeticDynamics,
@@ -154,10 +155,22 @@ def test_quantum_correction(arithmetic_dynamics):
 
 def test_quantum_metric(arithmetic_dynamics):
     """Test quantum metric computation."""
+    import torch._dynamo as dynamo
+    import logging
+
+    # Set up logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
     batch_size = 2
     x = torch.randn(batch_size, arithmetic_dynamics.hidden_dim)
     
-    metric = arithmetic_dynamics.compute_quantum_metric(x)
+    # Compile the compute_quantum_metric function
+    compiled_fn = torch.compile(arithmetic_dynamics.compute_quantum_metric, 
+                              fullgraph=True,  # This will error if shape issues occur
+                              options={"debug": True})  # Enable debug output
+    
+    metric = compiled_fn(x)
     
     assert metric.shape == (batch_size, arithmetic_dynamics.hidden_dim)
     assert not torch.isnan(metric).any()

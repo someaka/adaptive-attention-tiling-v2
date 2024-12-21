@@ -23,7 +23,9 @@
     "python.analysis.exclude": [
         "**/typing.py",
         "**/__pycache__",
-        "**/.*"
+        "**/.*",
+        "**/torch_compile_debug/**",
+        "**/fx_graph_*/**"
     ],
     "python.analysis.typeCheckingMode": "basic",
     "python.analysis.diagnosticMode": "workspace",

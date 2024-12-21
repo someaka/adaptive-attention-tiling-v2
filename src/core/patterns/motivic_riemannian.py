@@ -126,11 +126,9 @@ class MotivicCurvatureTensor(CurvatureTensor[Tensor]):
 
 
 class MotivicRiemannianStructure(
-    BaseFiberBundle,
     RiemannianFiberBundle,
     RiemannianStructure[Tensor],
-    ValidationMixin,
-    nn.Module
+    ValidationMixin
 ):
     """Riemannian structure enhanced with motivic cohomology.
     
@@ -148,9 +146,7 @@ class MotivicRiemannianStructure(
         dtype: Optional[torch.dtype] = None
     ):
         """Initialize motivic Riemannian structure."""
-        nn.Module.__init__(self)
-        BaseFiberBundle.__init__(self, base_dim=manifold_dim, fiber_dim=hidden_dim)
-        RiemannianFiberBundle.__init__(self, dimension=manifold_dim)
+        super().__init__(dimension=manifold_dim)
         
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim

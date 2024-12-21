@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any, cast
 import torch
 from torch import nn, Tensor
 
-from .motivic_integration import MotivicRiemannianStructureImpl
+from .motivic_riemannian_impl import MotivicRiemannianStructureImpl
 from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
 from .operadic_structure import OperadicOperation, OperadicComposition, AttentionOperad
 from .cohomology import (

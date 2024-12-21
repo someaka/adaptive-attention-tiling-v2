@@ -15,6 +15,7 @@ import torch
 from torch import nn
 
 from .riemannian import PatternRiemannianStructure
+from .fiber_bundle import BaseFiberBundle
 
 
 class FiberBundle(Protocol):
@@ -24,11 +25,11 @@ class FiberBundle(Protocol):
     def get_connection(self, point: torch.Tensor) -> torch.Tensor: ...
 
 
-class RiemannianFiberBundle(nn.Module):
+class RiemannianFiberBundle(BaseFiberBundle):
     """Concrete implementation of FiberBundle for Riemannian manifolds."""
     
     def __init__(self, dimension: int):
-        super().__init__()
+        super().__init__(base_dim=dimension, fiber_dim=dimension)
         self.dimension = dimension
         self.fiber_map = nn.Linear(dimension, dimension)
         self.connection_map = nn.Linear(dimension, dimension * dimension)
@@ -491,10 +492,10 @@ class QuantumMotivicCohomology:
         """Initialize quantum structure.
         
         Returns:
-            Quantum structure matrix of shape [dimension × dimension]
+            Quantum structure matrix of shape [motive_rank × motive_rank]
         """
-        # Use manifold_dim which is guaranteed to be an int
-        return torch.eye(self.metric.manifold_dim, dtype=torch.float32)
+        # Use motive_rank instead of manifold_dim to match classical motive shape
+        return torch.eye(self.motivic.motive_rank, dtype=torch.float32)
 
     def compute_quantum_motive(self, form: ArithmeticForm) -> torch.Tensor:
         """Compute quantum motivic cohomology."""

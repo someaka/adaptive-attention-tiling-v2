@@ -9,7 +9,7 @@ jobs=0
 load-plugins=
 
 # Allow loading modules/packages from outside the project directory
-ignore=CVS,venv,.venv
+ignore=CVS,venv,.venv,torch_compile_debug,fx_graph_*
 
 [MESSAGES CONTROL]
 # Disable specific warnings that are handled by ruff or are project-specific
