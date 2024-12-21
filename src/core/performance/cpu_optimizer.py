@@ -9,6 +9,8 @@ This module provides CPU-specific optimizations including:
 
 import cProfile
 import time
+import psutil
+import os
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, List, Optional, Callable
@@ -16,6 +18,7 @@ from typing import Any, List, Optional, Callable
 import line_profiler
 import memory_profiler
 import torch
+from torch.utils.benchmark import Timer
 
 
 @dataclass
@@ -27,6 +30,15 @@ class PerformanceMetrics:
     cpu_utilization: float
     cache_hits: float
     vectorization_efficiency: float
+
+    def __post_init__(self):
+        """Validate metric ranges."""
+        if not 0 <= self.cpu_utilization <= 100:
+            raise ValueError("CPU utilization must be between 0 and 100")
+        if not 0 <= self.cache_hits <= 1:
+            raise ValueError("Cache hits must be between 0 and 1")
+        if not 0 <= self.vectorization_efficiency <= 1:
+            raise ValueError("Vectorization efficiency must be between 0 and 1")
 
 
 class CPUOptimizer:
@@ -191,13 +203,81 @@ class CPUOptimizer:
         Returns:
             PerformanceMetrics object with current metrics
         """
+        # Get CPU utilization using psutil
+        cpu_percent = psutil.Process(os.getpid()).cpu_percent(interval=0.1)
+        
+        # Estimate cache performance using a simple benchmark
+        cache_hits = self._measure_cache_performance()
+        
+        # Measure vectorization efficiency
+        vec_efficiency = self._measure_vectorization_efficiency()
+        
         # Collect current metrics
         metrics = PerformanceMetrics(
             execution_time=time.perf_counter(),
             memory_usage=memory_profiler.memory_usage()[0],
-            cpu_utilization=0.0,  # TODO: Implement CPU utilization tracking
-            cache_hits=0.0,  # TODO: Implement cache monitoring
-            vectorization_efficiency=0.0,  # TODO: Implement vectorization metrics
+            cpu_utilization=cpu_percent,
+            cache_hits=cache_hits,
+            vectorization_efficiency=vec_efficiency
         )
 
         return metrics
+        
+    def _measure_cache_performance(self) -> float:
+        """Measure cache performance using memory access patterns.
+        
+        Returns:
+            float: Ratio of cache hits (0-1)
+        """
+        # Create two test tensors
+        size = 1000000
+        x = torch.randn(size)
+        y = torch.randn(size)
+        
+        # Measure sequential access time
+        t0 = time.perf_counter()
+        torch.dot(x, y)
+        sequential_time = time.perf_counter() - t0
+        
+        # Measure random access time (worst case)
+        indices = torch.randperm(size)
+        t0 = time.perf_counter()
+        torch.dot(x[indices], y[indices])
+        random_time = time.perf_counter() - t0
+        
+        # Compute cache hit ratio estimate
+        # If random_time is much larger than sequential_time, it indicates poor cache utilization
+        cache_ratio = sequential_time / max(random_time, sequential_time)
+        return float(cache_ratio)  # Closer to 1 means better cache utilization
+        
+    def _measure_vectorization_efficiency(self) -> float:
+        """Measure vectorization efficiency using torch.vmap.
+        
+        Returns:
+            float: Vectorization efficiency ratio (0-1)
+        """
+        # Create test data
+        batch_size = 1000
+        feature_size = 100
+        x = torch.randn(batch_size, feature_size)
+        
+        # Define test function
+        def scalar_fn(x):
+            return torch.sum(torch.sin(x))
+        
+        # Measure scalar version time
+        t0 = time.perf_counter()
+        for i in range(len(x)):
+            scalar_fn(x[i])
+        scalar_time = time.perf_counter() - t0
+        
+        # Measure vectorized version time
+        vectorized_fn = torch.vmap(scalar_fn)
+        t0 = time.perf_counter()
+        vectorized_fn(x)
+        vector_time = time.perf_counter() - t0
+        
+        # Compute efficiency ratio
+        # If vector_time is much smaller than scalar_time, vectorization is efficient
+        efficiency = scalar_time / max(vector_time * batch_size, scalar_time)
+        return float(efficiency)  # Closer to 1 means better vectorization
