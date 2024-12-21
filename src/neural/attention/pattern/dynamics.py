@@ -1,8 +1,13 @@
 """Main pattern dynamics implementation."""
 
-from typing import Optional, Union, Tuple, List, Callable
+from typing import Callable, List, Optional, Tuple, Union
+
 import torch
-import numpy as np
+from torch import nn
+
+from ...flow.hamiltonian import HamiltonianSystem
+from .stability import StabilityAnalyzer
+from .quantum import QuantumState, QuantumGeometricTensor
 
 from .models import (
     ReactionDiffusionState,
@@ -14,8 +19,6 @@ from .models import (
 )
 from .diffusion import DiffusionSystem
 from .reaction import ReactionSystem
-from .stability import StabilityAnalyzer
-from .quantum import QuantumState, QuantumGeometricTensor
 
 
 class PatternDynamics:
@@ -57,6 +60,9 @@ class PatternDynamics:
         
         if quantum_enabled:
             # Initialize quantum components
+            from ....core.flow.quantum import QuantumGeometricFlow
+            from ....core.quantum.types import QuantumState
+            self.quantum_flow = QuantumGeometricFlow(manifold_dim=space_dim, hidden_dim=hidden_dim)
             self.quantum_tensor = QuantumGeometricTensor(dim=space_dim)
             
     def _to_quantum_state(self, state: torch.Tensor) -> QuantumState:
@@ -69,10 +75,22 @@ class PatternDynamics:
             Quantum state
         """
         # Extract amplitude and phase
-        amplitude = torch.abs(state)
-        phase = torch.angle(state.to(torch.complex64))
+        amplitudes = state.to(torch.complex64)
+        phase = torch.angle(amplitudes)
         
-        return QuantumState(amplitude, phase)
+        # Create basis labels based on state shape
+        basis_size = state.shape[-1]
+        basis_labels = [f"basis_{i}" for i in range(basis_size)]
+        
+        # Ensure proper normalization
+        norm = torch.sqrt(torch.sum(torch.abs(amplitudes) ** 2, dim=-1, keepdim=True))
+        amplitudes = amplitudes / (norm + 1e-8)
+        
+        return QuantumState(
+            amplitudes=amplitudes,
+            basis_labels=basis_labels,
+            phase=phase
+        )
         
     def _from_quantum_state(self, quantum_state: QuantumState) -> torch.Tensor:
         """Convert quantum state to classical state.
@@ -83,7 +101,9 @@ class PatternDynamics:
         Returns:
             Classical state tensor
         """
-        return quantum_state.state_vector.real
+        # Get the full state vector including phase
+        state = quantum_state.amplitudes * torch.exp(1j * quantum_state.phase)
+        return state.real
 
     def compute_next_state(self, state: torch.Tensor) -> torch.Tensor:
         """Perform one step of pattern dynamics.
@@ -104,10 +124,28 @@ class PatternDynamics:
             # Decompose into metric and Berry curvature
             g, B = self.quantum_tensor.decompose(Q)
             
-            # Apply quantum evolution
-            # TODO: Implement proper Hamiltonian
-            H = torch.eye(self.dim, dtype=torch.complex64)
-            evolved = quantum_state.evolve(H, self.dt)
+            # Apply quantum evolution using proper Hamiltonian
+            if not hasattr(self, 'hamiltonian_system'):
+                self.hamiltonian_system = HamiltonianSystem(manifold_dim=2*self.dim)  # 2x for complex dimension
+                
+            # Convert quantum state to phase space representation
+            phase_space = torch.cat([
+                quantum_state.amplitudes.real,
+                quantum_state.amplitudes.imag
+            ], dim=-1)
+            
+            # Evolve using Hamiltonian dynamics
+            evolved_phase = self.hamiltonian_system.evolve(phase_space, dt=self.dt)
+            
+            # Convert back to quantum state
+            evolved = QuantumState(
+                amplitudes=torch.complex(
+                    evolved_phase[..., :self.dim],
+                    evolved_phase[..., self.dim:]
+                ),
+                basis_labels=quantum_state.basis_labels,
+                phase=quantum_state.phase
+            )
             
             # Convert back to classical state
             next_state = self._from_quantum_state(evolved)
@@ -1106,11 +1144,14 @@ class PatternDynamics:
     def compute_quantum_potential(self, state: torch.Tensor) -> torch.Tensor:
         """Compute quantum potential for pattern state.
         
+        Uses the quantum geometric flow infrastructure to compute proper
+        quantum corrections to the classical dynamics.
+        
         Args:
             state: Pattern state tensor
             
         Returns:
-            Quantum potential tensor
+            Quantum potential tensor with same shape as input
         """
         if not self.quantum_enabled:
             raise RuntimeError("Quantum features not enabled")
@@ -1118,21 +1159,25 @@ class PatternDynamics:
         # Convert to quantum state
         quantum_state = self._to_quantum_state(state)
         
-        # Compute quantum geometric tensor
-        Q = self.quantum_tensor.compute_tensor(quantum_state)
+        # Get quantum metrics including corrections
+        metrics = self.quantum_flow.compute_quantum_metrics(quantum_state)
         
-        # Extract metric
-        g, _ = self.quantum_tensor.decompose(Q)
+        # Get quantum geometric tensor
+        Q = self.quantum_flow.compute_quantum_metric_tensor(quantum_state)
         
-        # Compute quantum potential (simplified version)
-        # TODO: Implement full quantum potential
-        psi = quantum_state.state_vector
-        laplacian = torch.zeros_like(psi)
-        for i in range(self.dim):
-            for j in range(self.dim):
-                laplacian += g[i,j] * torch.gradient(torch.gradient(psi, dim=i)[0], dim=j)[0]
-                
-        V_quantum = -0.5 * laplacian / (psi + 1e-6)
+        # Compute geometric contribution
+        V_geometric = -0.5 * torch.einsum('...ij,...ij->...', Q, Q)
+        
+        # Add corrections if available
+        corrections = metrics.get("quantum_corrections")
+        if corrections is not None:
+            V_corrections = -0.5 * torch.sum(corrections * corrections, dim=-1)
+            V_quantum = V_geometric + V_corrections
+        else:
+            V_quantum = V_geometric
+        
+        # Ensure numerical stability
+        V_quantum = torch.clamp(V_quantum, min=-10.0, max=10.0)
         
         return V_quantum.real
 
@@ -1171,8 +1216,7 @@ class PatternDynamics:
             dp = p2 - p1
             berry_phase += torch.sum(B @ dp)
             
-            # Evolve state to next point
-            # TODO: Implement proper parallel transport
+            # Evolve state to next point using proper parallel transport
             quantum_state = self._parallel_transport(quantum_state, p1, p2)
             
         return float(berry_phase)
@@ -1185,6 +1229,8 @@ class PatternDynamics:
     ) -> QuantumState:
         """Parallel transport quantum state between points.
         
+        Uses the quantum geometric flow infrastructure for proper parallel transport.
+        
         Args:
             state: Quantum state
             p1: Starting point
@@ -1193,11 +1239,12 @@ class PatternDynamics:
         Returns:
             Transported quantum state
         """
-        # TODO: Implement proper parallel transport
-        # For now just do simple evolution
-        dp = p2 - p1
-        phase = torch.sum(dp)
-        return QuantumState(
-            state.amplitude,
-            state.phase + phase
+        # Compute transport vector
+        vector = p2 - p1
+        
+        # Use quantum flow parallel transport
+        return self.quantum_flow.parallel_transport_state(
+            state=state,
+            vector=vector,
+            connection=None  # Let the quantum flow compute the connection
         )

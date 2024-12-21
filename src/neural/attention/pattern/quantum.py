@@ -5,43 +5,8 @@ import torch
 import numpy as np
 from dataclasses import dataclass
 
-
-@dataclass
-class QuantumState:
-    """Quantum state representation for patterns."""
-    
-    amplitude: torch.Tensor  # Complex amplitude tensor
-    phase: torch.Tensor  # Phase tensor
-    
-    @property
-    def state_vector(self) -> torch.Tensor:
-        """Get full quantum state vector."""
-        return self.amplitude * torch.exp(1j * self.phase)
-    
-    def evolve(self, hamiltonian: torch.Tensor, dt: float) -> 'QuantumState':
-        """Evolve quantum state using Hamiltonian.
-        
-        Args:
-            hamiltonian: Hamiltonian operator
-            dt: Time step
-            
-        Returns:
-            Evolved quantum state
-        """
-        # Convert to complex tensor
-        state = self.state_vector
-        
-        # Time evolution operator
-        U = torch.matrix_exp(-1j * hamiltonian * dt)
-        
-        # Evolve state
-        evolved = torch.matmul(U, state)
-        
-        # Extract new amplitude and phase
-        new_amplitude = torch.abs(evolved)
-        new_phase = torch.angle(evolved)
-        
-        return QuantumState(new_amplitude, new_phase)
+from ....core.quantum.types import QuantumState
+from ....core.quantum.neural_quantum_bridge import NeuralQuantumBridge
 
 
 class QuantumGeometricTensor:
@@ -54,6 +19,7 @@ class QuantumGeometricTensor:
             dim: Dimension of parameter space
         """
         self.dim = dim
+        self.bridge = NeuralQuantumBridge(hidden_dim=dim)
         
     def compute_tensor(self, state: QuantumState) -> torch.Tensor:
         """Compute quantum geometric tensor.
@@ -65,10 +31,10 @@ class QuantumGeometricTensor:
             Quantum geometric tensor
         """
         # Get state vector
-        psi = state.state_vector
+        psi = state.amplitudes
         
         # Initialize tensor
-        Q = torch.zeros((self.dim, self.dim), dtype=torch.complex64)
+        Q = torch.zeros((self.dim, self.dim), dtype=torch.complex64, device=psi.device)
         
         # Compute tensor components
         for i in range(self.dim):
@@ -100,7 +66,7 @@ class QuantumGeometricTensor:
         return g, B
     
     def _parameter_derivative(self, state: torch.Tensor, param_idx: int) -> torch.Tensor:
-        """Compute parameter derivative of state.
+        """Compute parameter derivative of state using autograd.
         
         Args:
             state: Quantum state vector
@@ -109,28 +75,41 @@ class QuantumGeometricTensor:
         Returns:
             Parameter derivative
         """
-        # Use finite differences for now
-        # TODO: Implement analytic derivatives
-        eps = 1e-6
-        param_shift = torch.zeros(self.dim)
-        param_shift[param_idx] = eps
+        # Enable gradient computation
+        state_grad = state.detach().requires_grad_(True)
         
-        state_plus = self._apply_param_shift(state, param_shift)
-        state_minus = self._apply_param_shift(state, -param_shift)
+        # Create parameter vector
+        param = torch.zeros(self.dim, device=state.device)
+        param[param_idx] = 1.0
         
-        return (state_plus - state_minus) / (2 * eps)
+        # Compute derivative using autograd
+        derivative = torch.autograd.grad(
+            state_grad.sum(),
+            state_grad,
+            grad_outputs=param,
+            create_graph=True
+        )[0]
+        
+        return derivative
     
     def _apply_param_shift(self, state: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
-        """Apply parameter shift to state.
+        """Apply parameter transformation using quantum bridge.
         
         Args:
             state: Quantum state vector
             shift: Parameter shift vector
             
         Returns:
-            Shifted state
+            Transformed state
         """
-        # For now just apply phase shift
-        # TODO: Implement proper parameter transformations
-        phase = torch.sum(shift)
-        return state * torch.exp(1j * phase) 
+        # Use quantum bridge to transform state
+        source_scale = 1.0
+        target_scale = 1.0 + torch.sum(shift).item()
+        
+        transformed = self.bridge.bridge_scales(
+            state=state,
+            source_scale=source_scale,
+            target_scale=target_scale
+        )
+        
+        return transformed

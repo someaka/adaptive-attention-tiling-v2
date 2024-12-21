@@ -230,6 +230,24 @@ class BenchmarkMonitor:
         plt.close()
 
     def get_gpu_utilization(self) -> float:
-        """Get GPU utilization percentage."""
-        # Placeholder for Vulkan GPU utilization
-        return 0.0
+        """Get GPU utilization percentage.
+        
+        Returns:
+            float: GPU utilization percentage between 0 and 100, or 0 if not available.
+            
+        Note:
+            This is a placeholder implementation. In a production environment,
+            you would want to implement proper Vulkan GPU utilization tracking
+            using platform-specific tools or libraries.
+        """
+        try:
+            # TODO: Implement actual Vulkan GPU utilization tracking
+            # This could involve:
+            # 1. Using VK_EXT_device_memory_report extension
+            # 2. Using platform-specific tools (nvidia-smi, rocm-smi, etc.)
+            # 3. Using system-specific APIs
+            # For now, return a placeholder value
+            return 0.0
+        except Exception as e:
+            self.logger.warning(f"Failed to get GPU utilization: {e}")
+            return 0.0
