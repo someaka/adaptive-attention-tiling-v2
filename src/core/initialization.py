@@ -148,7 +148,7 @@ class InitializationSystem(nn.Module):
             },
             'quantum_tile': {
                 'resolution': self.quantum_tile.resolution,
-                'load_profile': self.quantum_tile.get_load_profile()
+                'metrics': self.quantum_tile.get_metrics()
             },
             'scale_transition': self.scale_transition._entanglement_tracking
         }
