@@ -22,13 +22,33 @@ import gc
 
 @dataclass
 class BenchmarkResult:
-    """Container for benchmark results."""
+    """Container for benchmark results.
+    
+    Attributes:
+        mean_time: Mean execution time in seconds
+        std_time: Standard deviation of execution time
+        peak_memory: Peak memory usage in bytes
+        flops: Floating point operations per second
+        iterations: Number of benchmark iterations
+    """
 
     mean_time: float
     std_time: float
     peak_memory: int
     flops: int
     iterations: int
+
+    def __str__(self) -> str:
+        """Return string representation of benchmark results."""
+        return (
+            f"BenchmarkResult(\n"
+            f"  mean_time: {self.mean_time:.4f}s\n"
+            f"  std_time: {self.std_time:.4f}s\n"
+            f"  peak_memory: {self.peak_memory/1024/1024:.2f}MB\n"
+            f"  flops: {self.flops/1e9:.2f}GFLOPS\n"
+            f"  iterations: {self.iterations}\n"
+            f")"
+        )
 
 
 class TensorAssertions:
@@ -169,9 +189,21 @@ class PerformanceBenchmark:
 
     @staticmethod
     def benchmark_function(
-        func: Callable, *args, n_runs: int = 100, warmup: int = 10
+        func: Callable, *args, n_runs: int = 100, warmup: int = 10, flops_per_run: Optional[int] = None
     ) -> BenchmarkResult:
-        """Benchmark a function's performance."""
+        """Benchmark a function's performance.
+        
+        Args:
+            func: Function to benchmark
+            *args: Arguments to pass to the function
+            n_runs: Number of benchmark runs
+            warmup: Number of warmup runs
+            flops_per_run: Optional number of floating point operations per run
+                          If provided, will be used to calculate FLOPS
+                          
+        Returns:
+            BenchmarkResult containing timing and performance metrics
+        """
         # Warmup runs
         for _ in range(warmup):
             func(*args)
@@ -191,11 +223,14 @@ class PerformanceBenchmark:
             peak_memory = max(peak_memory, end_memory - start_memory)
             times.append(end - start)
 
+        mean_time = float(np.mean(times))
+        flops = int(flops_per_run / mean_time) if flops_per_run is not None else 0
+
         return BenchmarkResult(
-            mean_time=float(np.mean(times)),
+            mean_time=mean_time,
             std_time=float(np.std(times)),
             peak_memory=peak_memory,
-            flops=0,  # TODO: Implement FLOPS counting
+            flops=flops,
             iterations=n_runs,
         )
 

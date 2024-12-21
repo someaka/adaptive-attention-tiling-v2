@@ -367,3 +367,134 @@ def test_information_flow() -> None:
         isinstance(v, float) and v >= 0
         for v in [metrics["gradient_norm"], metrics["pattern_diff"], metrics["flow"]]
     )
+
+
+def test_error_handling() -> None:
+    """Test error handling and edge cases."""
+    tile = TestAttentionTile(input_dim=128, hidden_dim=128)
+    
+    # Test invalid resolution
+    with pytest.raises(ValueError):
+        tile.resolution = -0.1
+    with pytest.raises(ValueError):
+        tile.resolution = 1.5
+        
+    # Test state operations without state
+    with pytest.raises(ValueError):
+        tile.compress_state()
+    with pytest.raises(ValueError):
+        tile.expand_state(32)
+        
+    # Test invalid input dimensions
+    with pytest.raises(RuntimeError):
+        tile.process(torch.randn(1, 64))  # Missing dimension
+    with pytest.raises(RuntimeError):
+        tile.process(torch.randn(1, 64, 256))  # Wrong input dimension
+
+
+@pytest.mark.benchmark
+def test_resource_profiling() -> None:
+    """Test resource profiling capabilities."""
+    tile = TestAttentionTile(input_dim=128, hidden_dim=128)
+    
+    # Profile memory usage
+    inputs = torch.randn(1, 64, 128)
+    
+    # Get initial memory state
+    initial_stats = tile.get_memory_stats()
+    
+    # Process and track memory
+    outputs = tile.process(inputs)
+    process_stats = tile.get_memory_stats()
+    
+    # Verify memory tracking
+    assert process_stats["allocated_memory"] >= initial_stats["allocated_memory"]
+    assert process_stats["peak_memory"] >= initial_stats["peak_memory"]
+    
+    # Profile computation cost
+    metrics = tile.get_metrics()
+    assert "compute_cost" in metrics
+    assert metrics["compute_cost"] > 0
+    assert metrics["compute_cost"] <= metrics["full_compute_cost"]
+
+
+def test_attention_computation() -> None:
+    """Test attention computation correctness."""
+    tile = TestAttentionTile(input_dim=128, hidden_dim=128)
+    
+    # Test with different sequence lengths
+    for seq_len in [16, 32, 64]:
+        query = torch.randn(1, seq_len, 128)
+        key = torch.randn(1, seq_len, 128)
+        value = torch.randn(1, seq_len, 128)
+        
+        # Test without mask
+        output = tile.compute_attention(query, key, value)
+        assert output.shape == (1, seq_len, 128)
+        
+        # Test with attention mask
+        mask = torch.ones(1, seq_len, seq_len).bool()
+        mask[:, :, seq_len//2:] = False  # Mask out second half
+        output_masked = tile.compute_attention(query, key, value, mask)
+        assert output_masked.shape == (1, seq_len, 128)
+        
+        # Verify masked attention has different values
+        assert not torch.allclose(output, output_masked)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_multi_device_support() -> None:
+    """Test attention tile functionality across devices."""
+    # Create tiles on different devices
+    cpu_tile = TestAttentionTile(input_dim=128, hidden_dim=128, device="cpu")
+    gpu_tile = TestAttentionTile(input_dim=128, hidden_dim=128, device="cuda")
+    
+    # Test data transfer
+    inputs = torch.randn(1, 64, 128)
+    cpu_output = cpu_tile.process(inputs)
+    gpu_output = gpu_tile.process(inputs)
+    
+    # Results should be similar regardless of device
+    cpu_output_gpu = cpu_output.cuda()
+    assert torch.allclose(cpu_output_gpu, gpu_output, rtol=1e-5)
+    
+    # Test state transfer between devices
+    state = torch.randn(1, 32, 64)
+    cpu_tile.state = state
+    gpu_tile.state = state
+    
+    assert torch.allclose(
+        cpu_tile.state.cuda(),
+        gpu_tile.state,
+        rtol=1e-5
+    )
+
+
+def test_resolution_impact() -> None:
+    """Test the impact of resolution on computation and accuracy."""
+    tile = TestAttentionTile(input_dim=128, hidden_dim=128)
+    inputs = torch.randn(1, 64, 128)
+    
+    # Get baseline results at full resolution
+    tile.resolution = 1.0
+    baseline_output = tile.process(inputs)
+    baseline_metrics = tile.get_metrics()
+    
+    # Test different resolutions
+    resolutions = [0.25, 0.5, 0.75]
+    for res in resolutions:
+        tile.resolution = res
+        output = tile.process(inputs)
+        metrics = tile.get_metrics()
+        
+        # Verify computation cost scales with resolution
+        assert abs(metrics["compute_cost"] - 
+                  baseline_metrics["compute_cost"] * res) < 1e-5
+        
+        # Verify output maintains reasonable similarity
+        similarity = torch.nn.functional.cosine_similarity(
+            baseline_output.flatten(),
+            output.flatten(),
+            dim=0
+        )
+        assert similarity > 0.5  # Outputs should maintain some similarity

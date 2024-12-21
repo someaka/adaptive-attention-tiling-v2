@@ -370,20 +370,30 @@ class VulkanMemoryManager:
         return sum(self._buffer_allocations.values())
 
     def get_fragmentation_ratio(self) -> float:
-        """Calculate memory fragmentation ratio."""
-        if not self._allocated_memory:
+        """Calculate current memory fragmentation ratio.
+        
+        Returns:
+            Ratio of wasted space between allocations (0.0 to 1.0)
+        """
+        if not self._buffer_allocations:
             return 0.0
-
-        # Calculate fragmentation based on buffer allocation patterns
+            
+        # Sort allocations by memory offset
+        sorted_allocs = sorted(
+            self._buffer_allocations.items(),
+            key=lambda x: x[1]
+        )
+        
+        # Calculate total gaps between allocations
         total_gaps = 0
-        sorted_allocations = sorted(self._buffer_allocations.values())
-
-        for i in range(len(sorted_allocations) - 1):
-            gap = sorted_allocations[i + 1] - sorted_allocations[i]
+        for i in range(len(sorted_allocs) - 1):
+            current_end = sorted_allocs[i][1]
+            next_start = sorted_allocs[i + 1][1]
+            gap = next_start - current_end
             if gap > 0:
                 total_gaps += gap
-
-        return total_gaps / self._allocated_memory if self._allocated_memory else 0.0
+                
+        return total_gaps / self._allocated_memory if self._allocated_memory > 0 else 0.0
 
     def optimize_memory_layout(self) -> None:
         """Optimize Vulkan memory layout to reduce fragmentation."""
@@ -415,18 +425,153 @@ class VulkanMemoryManager:
         # 4. Updating buffer references
 
     def _clear_buffer_pool(self) -> None:
-        """Clear Vulkan buffer pool."""
+        """Clear unused buffers from the pool."""
+        # Identify buffers to free
+        to_free = []
+        for buffer_id, size in self._buffer_allocations.items():
+            if buffer_id not in self._buffer_memory:
+                to_free.append(buffer_id)
+                
+        # Free buffers
+        for buffer_id in to_free:
+            self._allocated_memory -= self._buffer_allocations[buffer_id]
+            del self._buffer_allocations[buffer_id]
+            
+    def defragment_memory(self) -> None:
+        """Defragment device memory by consolidating and reallocating buffers.
+        
+        This operation:
+        1. Identifies fragmented memory regions
+        2. Creates new contiguous allocations
+        3. Copies data to new locations
+        4. Frees old fragmented allocations
+        
+        Returns:
+            None
+            
+        Raises:
+            VulkanMemoryError: If defragmentation fails
+        """
         try:
-            # Reset tracking first
-            self._allocated_memory = 0
-            self._buffer_allocations.clear()
-            self._buffer_memory.clear()
-            self._buffer_shapes.clear()
-            self._buffer_dtypes.clear()
-
+            # Get memory properties
+            mem_properties = vk.vkGetPhysicalDeviceMemoryProperties(self._physical_device)
+            
+            # Get list of active buffers and their memory requirements
+            active_buffers = []
+            for buffer_id, memory in self._buffer_memory.items():
+                if buffer_id in self._buffer_allocations:
+                    size = self._buffer_allocations[buffer_id]
+                    active_buffers.append((buffer_id, size, memory))
+                    
+            if not active_buffers:
+                return
+                
+            # Sort buffers by size for optimal packing
+            active_buffers.sort(key=lambda x: x[1], reverse=True)
+            
+            # Calculate total size needed
+            total_size = sum(size for _, size, _ in active_buffers)
+            
+            # Allocate new contiguous memory block
+            alloc_info = vk.VkMemoryAllocateInfo(
+                sType=vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                allocationSize=total_size,
+                memoryTypeIndex=self._find_memory_type(
+                    0xFFFFFFFF,  # All memory types
+                    vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                    | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                ),
+            )
+            
+            new_memory = vk.vkAllocateMemory(self._device, alloc_info, None)
+            
+            # Create command pool and buffer for memory transfers
+            cmd_pool_info = vk.VkCommandPoolCreateInfo(
+                sType=vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                queueFamilyIndex=0,
+            )
+            cmd_pool = vk.vkCreateCommandPool(self._device, cmd_pool_info, None)
+            
+            cmd_buffer_info = vk.VkCommandBufferAllocateInfo(
+                sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                commandPool=cmd_pool,
+                level=vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                commandBufferCount=1,
+            )
+            cmd_buffer = vk.vkAllocateCommandBuffers(self._device, cmd_buffer_info)[0]
+            
+            # Begin command buffer
+            begin_info = vk.VkCommandBufferBeginInfo(
+                sType=vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                flags=vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            )
+            vk.vkBeginCommandBuffer(cmd_buffer, begin_info)
+            
+            # Copy data from old locations to new contiguous block
+            offset = 0
+            for buffer_id, size, old_memory in active_buffers:
+                # Create staging buffer
+                staging_info = vk.VkBufferCreateInfo(
+                    sType=vk.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    size=size,
+                    usage=vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    sharingMode=vk.VK_SHARING_MODE_EXCLUSIVE,
+                )
+                staging_buffer = vk.vkCreateBuffer(self._device, staging_info, None)
+                
+                # Bind staging buffer to new memory
+                vk.vkBindBufferMemory(self._device, staging_buffer, new_memory, offset)
+                
+                # Copy memory
+                copy_region = vk.VkBufferCopy(
+                    srcOffset=0,
+                    dstOffset=offset,
+                    size=size,
+                )
+                vk.vkCmdCopyBuffer(cmd_buffer, staging_buffer, staging_buffer, 1, [copy_region])
+                
+                # Update tracking
+                self._buffer_memory[buffer_id] = new_memory
+                offset += size
+                
+                # Cleanup staging buffer
+                vk.vkDestroyBuffer(self._device, staging_buffer, None)
+                
+            # End and submit command buffer
+            vk.vkEndCommandBuffer(cmd_buffer)
+            
+            submit_info = vk.VkSubmitInfo(
+                sType=vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                commandBufferCount=1,
+                pCommandBuffers=[cmd_buffer],
+            )
+            
+            queue = vk.vkGetDeviceQueue(self._device, 0, 0)
+            vk.vkQueueSubmit(queue, 1, [submit_info], None)
+            vk.vkQueueWaitIdle(queue)
+            
+            # Cleanup
+            vk.vkDestroyCommandPool(self._device, cmd_pool, None)
+            
+            # Free old memory blocks
+            for _, _, old_memory in active_buffers:
+                vk.vkFreeMemory(self._device, old_memory, None)
+                
+            # Update metrics
+            self._metrics.append(
+                VulkanMemoryMetrics(
+                    allocated_memory=self._allocated_memory,
+                    peak_memory=self._peak_memory,
+                    fragmentation_ratio=0.0,  # After defrag, no fragmentation
+                    buffer_memory=total_size,
+                    operation_type="defragment",
+                    device_index=self._device_index,
+                )
+            )
+            
         except Exception as e:
-            raise VulkanMemoryError(f"Failed to clear buffer pool: {e}")
-
+            raise VulkanMemoryError(f"Failed to defragment memory: {e}")
+            
     def copy_to_device(self, buffer: Any, data: np.ndarray) -> None:
         """Copy data from host to device buffer.
 
