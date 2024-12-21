@@ -18,7 +18,11 @@ from src.validation.geometric.motivic import (
     HeightValidation,
     MotivicValidation
 )
-from src.core.tiling.patterns.cohomology import HeightStructure, ArithmeticDynamics, ArithmeticForm
+from src.core.patterns.cohomology import (
+    HeightStructure,
+    ArithmeticDynamics,
+    ArithmeticForm
+)
 from src.core.patterns.riemannian_base import MetricTensor, VectorField
 from src.validation.framework import ValidationFramework
 from src.validation.geometric.model import ModelGeometricValidator

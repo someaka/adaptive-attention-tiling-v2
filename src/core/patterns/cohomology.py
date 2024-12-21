@@ -14,7 +14,7 @@ from typing import List, TypeVar, Protocol, Generic, Optional
 import torch
 from torch import nn
 
-from ...patterns.riemannian import PatternRiemannianStructure
+from .riemannian import PatternRiemannianStructure
 
 
 class FiberBundle(Protocol):

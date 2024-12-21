@@ -26,7 +26,7 @@ from ..attention.geometric import (
     EuclideanLogarithm,
     ParallelTransport,
 )
-from .arithmetic_dynamics import ArithmeticPattern
+from ..patterns.arithmetic_dynamics import ArithmeticPattern
 from .geometric_flow import GeometricFlow
 from .quantum_attention_tile import QuantumMotivicTile
 from ..patterns.symplectic import SymplecticStructure

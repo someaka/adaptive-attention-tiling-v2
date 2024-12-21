@@ -13,11 +13,16 @@ arithmetic structure that can be understood through dynamical
 systems over adelic spaces.
 """
 
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Union
 
 import numpy as np
 import torch
 from torch import nn
+from torchtyping import TensorType, patch_typeguard
+from typeguard import typechecked
+from torchinfo import summary
+
+patch_typeguard()  # Enable runtime shape checking
 
 
 class ArithmeticDynamics(nn.Module):
@@ -63,8 +68,9 @@ class ArithmeticDynamics(nn.Module):
         # Adelic projection
         self.adelic_proj = nn.Linear(hidden_dim, num_primes * motive_rank)
 
-        # Output projection
-        self.output_proj = nn.Linear(height_dim, hidden_dim)
+        # Output projection layers
+        self.measure_proj = nn.Linear(height_dim, 2)  # Project to 2D measure space
+        self.output_proj = nn.Linear(2, hidden_dim)  # Project back to input space
 
         # Dynamical system parameters
         self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank))
@@ -83,7 +89,7 @@ class ArithmeticDynamics(nn.Module):
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(hidden_dim, 2)  # Project to 2D measure space
+        self.quantum_proj = nn.Linear(2, 2)  # Project within 2D measure space
 
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
         """Compute height with quantum corrections.
@@ -125,13 +131,18 @@ class ArithmeticDynamics(nn.Module):
         """Compute arithmetic dynamics with quantum corrections.
         
         Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
+            x: Input tensor of shape [batch_size, hidden_dim] or [batch_size, seq_len, hidden_dim]
             
         Returns:
-            Dynamics state tensor of shape [batch_size, motive_rank]
+            Dynamics state tensor with same shape as input
         """
-        # Ensure input is 2D: [batch_size, hidden_dim]
-        if x.dim() == 1:
+        # Get original shape
+        orig_shape = x.shape
+        
+        # Ensure input is 2D: [batch_size * seq_len, hidden_dim]
+        if x.dim() == 3:
+            x = x.reshape(-1, self.hidden_dim)
+        elif x.dim() == 1:
             x = x.unsqueeze(0)
             
         # Project through L-function network with quantum corrections
@@ -145,7 +156,13 @@ class ArithmeticDynamics(nn.Module):
         coupled = torch.einsum('bpm,pm->bm', adelic, self.coupling)
         
         # Final dynamics state
-        return dynamics + coupled
+        result = dynamics + coupled
+        
+        # Restore original shape
+        if len(orig_shape) == 3:
+            result = result.view(orig_shape[0], orig_shape[1], -1)
+        
+        return result
 
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
@@ -191,8 +208,9 @@ class ArithmeticDynamics(nn.Module):
         adelic = self.adelic_proj(x_flat)
         adelic = adelic.view(batch_size, seq_len, self.num_primes, self.motive_rank)
 
-        # Project back to input space using output projection
-        output = self.output_proj(height_coords.reshape(-1, self.height_dim))
+        # Project through measure space and back to input space
+        measure = self.measure_proj(height_coords.reshape(-1, self.height_dim))
+        output = self.output_proj(measure)
         output = output.view(batch_size, seq_len, self.hidden_dim)
 
         # Gather metrics
@@ -227,50 +245,37 @@ class ArithmeticDynamics(nn.Module):
 
         return q_powers.sum(dim=-1)
 
-    def compute_motivic_integral(
-        self, x: torch.Tensor, num_samples: int = 100
-    ) -> torch.Tensor:
-        """Compute motivic integral using Monte Carlo.
-
-        This gives us a way to integrate over the space of
-        arithmetic motives, capturing global patterns.
-        """
-        # Generate random samples in motive space
-        samples = torch.randn(
-            num_samples, x.shape[0], self.motive_rank, device=x.device
-        )
-
-        # Project samples to height space
-        height_samples = self.height_map(x)[:, None].expand(-1, num_samples, -1)
-
-        # Compute integrand
-        integrand = torch.exp(-torch.norm(samples, p=2, dim=-1))
-        integrand = integrand * self.compute_height(x)[:, None]
-
-        # Monte Carlo integration
-        return integrand.mean(dim=1)
-
     def compute_quantum_correction(self, metric: torch.Tensor) -> torch.Tensor:
         """Compute quantum corrections to the metric.
         
         Args:
-            metric: Input metric tensor
+            metric: Input metric tensor of shape [batch_size, hidden_dim] or [batch_size, seq_len, hidden_dim]
             
         Returns:
             Quantum correction tensor projected to measure space
         """
+        # Get original shape
+        orig_shape = metric.shape[:-1]  # Remove last dimension (hidden_dim)
+        
+        # Ensure input is 2D: [batch_size * seq_len, hidden_dim]
+        if metric.dim() == 3:
+            metric = metric.reshape(-1, self.hidden_dim)
+        elif metric.dim() == 1:
+            metric = metric.unsqueeze(0)
+        
         # Project metric to height space
-        height_coords = self.height_map(metric.reshape(-1, self.hidden_dim))
-        height_coords = height_coords.view(*metric.shape[:-1], self.height_dim)
+        height_coords = self.height_map(metric)
         
         # Compute quantum correction using flow
-        correction = self.flow(height_coords.reshape(-1, self.height_dim))
-        correction = correction.view(*metric.shape[:-1], self.height_dim)
+        correction = self.flow(height_coords)
         
         # Project to measure space (2 dimensions)
-        correction = self.output_proj(correction.reshape(-1, self.height_dim))
-        correction = correction.view(*metric.shape[:-1], -1)
-        correction = self.quantum_proj(correction)  # Use pre-initialized layer
+        correction = self.measure_proj(correction)  # Project to 2D
+        correction = self.quantum_proj(correction)  # Final 2D projection
+        
+        # Restore original shape if needed
+        if len(orig_shape) > 1:
+            correction = correction.view(*orig_shape, -1)
         
         return correction
 
@@ -300,10 +305,17 @@ class ArithmeticDynamics(nn.Module):
         l_correction = torch.einsum('...i,...j->...ij', l_values, l_values)
         adelic_correction = torch.einsum('...pi,...pj->...ij', adelic, adelic).mean(dim=-3)
         
-        # Project back to input space
+        # Project through measure space and back to input space
         combined = quantum_metric + 0.1 * l_correction + 0.01 * adelic_correction
-        metric = self.output_proj(combined.reshape(-1, self.height_dim))
-        metric = metric.view(*x.shape[:-1], self.hidden_dim)
+        batch_size = x.shape[0]
+        
+        # Reshape for projection while preserving batch dimension
+        combined_flat = combined.reshape(-1, self.height_dim)  # Flatten all but last dim
+        measure = self.measure_proj(combined_flat)  # Project to measure space
+        metric = self.output_proj(measure)  # Project back to input space
+        
+        # Average over height dimensions to get final metric
+        metric = metric.reshape(batch_size, self.height_dim, -1).mean(dim=1)
         
         return metric
 
@@ -460,127 +472,3 @@ class ModularFormComputer(nn.Module):
         }
         
         return q_coeffs, metrics
-
-class MotivicIntegrator(nn.Module):
-    """Compute motivic integrals for arithmetic dynamics."""
-    
-    def __init__(
-        self,
-        hidden_dim: int,
-        motive_rank: int = 4,
-        num_samples: int = 100,
-        monte_carlo_steps: int = 10
-    ):
-        super().__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.motive_rank = motive_rank
-        self.num_samples = num_samples
-        self.monte_carlo_steps = monte_carlo_steps
-        
-        # Network for computing motivic measure - output 2D measure
-        self.measure_net = nn.Sequential(
-            nn.Linear(hidden_dim, 2),  # Project to 2D immediately
-            nn.SiLU(),
-            nn.Linear(2, 2)  # Keep in 2D space
-        )
-        
-        # Network for computing integration domain
-        self.domain_net = nn.Sequential(
-            nn.Linear(hidden_dim, 2),  # Project to 2D immediately
-            nn.SiLU(),
-            nn.Linear(2, 4)  # Output domain bounds for 2D measure
-        )
-        
-    def compute_measure(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute motivic measure.
-        
-        Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
-            
-        Returns:
-            Measure values of shape [batch_size, 2]
-        """
-        return self.measure_net(x)
-    
-    def compute_domain(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute integration domain bounds.
-        
-        Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
-            
-        Returns:
-            Tuple of (lower_bounds, upper_bounds) each of shape [batch_size, 2]
-        """
-        bounds = self.domain_net(x)
-        lower = bounds[..., :2]
-        upper = bounds[..., 2:]
-        return lower, upper
-    
-    def monte_carlo_integrate(
-        self,
-        measure: torch.Tensor,
-        lower: torch.Tensor,
-        upper: torch.Tensor
-    ) -> torch.Tensor:
-        """Perform Monte Carlo integration.
-        
-        Args:
-            measure: Measure values of shape [batch_size, 2]
-            lower: Lower bounds of shape [batch_size, 2]
-            upper: Upper bounds of shape [batch_size, 2]
-            
-        Returns:
-            Integral values of shape [batch_size]
-        """
-        batch_size = measure.shape[0]
-        
-        # Initialize integral estimate
-        integral = torch.zeros(batch_size, device=measure.device)
-        
-        # Monte Carlo steps
-        for _ in range(self.monte_carlo_steps):
-            # Generate random samples in the domain
-            samples = torch.rand(
-                batch_size, self.num_samples, 2,
-                device=measure.device
-            )
-            
-            # Scale samples to domain
-            samples = samples * (upper - lower).unsqueeze(1) + lower.unsqueeze(1)
-            
-            # Evaluate measure at samples
-            measure_expanded = measure.unsqueeze(1).expand(-1, self.num_samples, -1)
-            integrand = torch.sum(measure_expanded * samples, dim=-1)
-            
-            # Update integral estimate
-            integral = integral + integrand.mean(dim=1)
-        
-        return integral / self.monte_carlo_steps
-    
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """Compute motivic integral.
-        
-        Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
-            
-        Returns:
-            - Integral values of shape [batch_size]
-            - Dictionary of metrics
-        """
-        # Compute measure and domain
-        measure = self.compute_measure(x)
-        lower, upper = self.compute_domain(x)
-        
-        # Perform integration
-        integral = self.monte_carlo_integrate(measure, lower, upper)
-        
-        # Compute metrics
-        metrics = {
-            'measure_norm': torch.norm(measure, dim=-1).mean().item(),
-            'domain_volume': torch.prod(upper - lower, dim=-1).mean().item(),
-            'integral_mean': integral.mean().item(),
-            'integral_std': integral.std().item()
-        }
-        
-        return integral, metrics

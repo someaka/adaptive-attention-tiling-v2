@@ -42,7 +42,11 @@ from ...patterns.motivic_riemannian import (
     MotivicRiemannianStructure,
     MotivicMetricTensor
 )
-from ..patterns.cohomology import HeightStructure, ArithmeticForm
+from ...patterns.cohomology import (
+    MotivicCohomology,
+    ArithmeticForm,
+    HeightStructure
+)
 from ...patterns.riemannian_flow import RiemannianFlow
 from ...patterns.formation import PatternFormation
 from ...patterns.dynamics import PatternDynamics

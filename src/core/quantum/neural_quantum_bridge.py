@@ -25,11 +25,11 @@ from ...validation.quantum.state import (
 from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
 from ..patterns.fiber_types import LocalChart as PatternSection
 from ..crystal.scale import ScaleSystem
-from ..tiling.patterns.cohomology import (
+from ..patterns.cohomology import (
     MotivicCohomology,
-    CohomologyGroup,
-    RiemannianFiberBundle,
-    ArithmeticForm
+    QuantumMotivicCohomology,
+    ArithmeticForm,
+    RiemannianFiberBundle
 )
 
 

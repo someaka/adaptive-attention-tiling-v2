@@ -14,7 +14,7 @@ from src.core.attention.geometric import (
 )
 from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention as CoreQuantumGeometricAttention
 from src.core.tiling.geometric_flow import GeometricFlow
-from src.core.tiling.arithmetic_dynamics import ArithmeticPattern
+from src.core.patterns.arithmetic_dynamics import ArithmeticPattern
 from src.core.tiling.quantum_attention_tile import QuantumMotivicTile
 import tiktoken
 import torch.nn.functional as F
@@ -220,6 +220,13 @@ class SimpleTransformer(nn.Module):
             num_primes=8
         )
         self.init_system = InitializationSystem(init_config)
+        
+        # Add quantum geometric attention
+        self.quantum_attention = QuantumGeometricAttention(
+            dim=d_model,
+            heads=n_heads,
+            dropout=dropout
+        )
         
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)

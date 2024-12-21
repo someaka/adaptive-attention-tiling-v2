@@ -18,7 +18,7 @@ from .riemannian_base import (
     CurvatureTensor,
     ValidationMixin
 )
-from ..tiling.patterns.cohomology import (
+from .cohomology import (
     MotivicCohomology,
     ArithmeticForm,
     HeightStructure,

@@ -16,7 +16,7 @@ from src.core.patterns.motivic_riemannian import (
     MotivicRiemannianStructure,
     MotivicCurvatureTensor
 )
-from src.core.tiling.patterns.cohomology import (
+from src.core.patterns.cohomology import (
     MotivicCohomology,
     ArithmeticForm,
     HeightStructure

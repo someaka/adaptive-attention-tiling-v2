@@ -113,11 +113,13 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
                 )
             if other.flow_result:
                 if isinstance(other.flow_result, dict):
-                    first_result = next(iter(other.flow_result.values()))
-                    flow_result = (
-                        flow_result.merge(first_result)
-                        if flow_result else first_result
-                    )
+                    values = other.flow_result.values()
+                    if values:  # Check if values is not empty
+                        first_result = next(iter(values))
+                        flow_result = (
+                            flow_result.merge(first_result)
+                            if flow_result else first_result
+                        )
                 else:
                     flow_result = (
                         flow_result.merge(other.flow_result)

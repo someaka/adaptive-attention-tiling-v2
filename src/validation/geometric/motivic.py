@@ -16,9 +16,10 @@ from ...core.patterns.motivic_riemannian import (
     MotivicCurvatureTensor,
     MotivicRiemannianStructure
 )
-from ...core.tiling.patterns.cohomology import (
-    ArithmeticForm,
-    HeightStructure
+from ...core.patterns.cohomology import (
+    HeightStructure,
+    ArithmeticDynamics,
+    ArithmeticForm
 )
 
 __all__ = [

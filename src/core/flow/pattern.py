@@ -26,7 +26,7 @@ from ..patterns.motivic_riemannian import (
     MotivicRiemannianStructure,
     MotivicMetricTensor
 )
-from ..tiling.arithmetic_dynamics import ArithmeticDynamics
+from ..patterns.arithmetic_dynamics import ArithmeticDynamics
 from ..patterns.riemannian_flow import RiemannianFlow
 from ..patterns.operadic_structure import AttentionOperad, OperadicOperation, OperadicComposition
 from ..patterns.enriched_structure import PatternTransition, WaveEmergence

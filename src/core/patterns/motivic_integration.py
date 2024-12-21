@@ -14,6 +14,9 @@ The implementation follows these key principles:
 from typing import Dict, Tuple, Optional, Any, List, Callable, Union
 import torch
 from torch import nn, Tensor
+from torchtyping import TensorType, patch_typeguard
+from typeguard import typechecked
+from torchinfo import summary
 
 from .motivic_riemannian import (
     MotivicRiemannianStructure,
@@ -25,17 +28,175 @@ from .riemannian_base import (
     CurvatureTensor
 )
 from .riemannian import PatternRiemannianStructure
-from ..tiling.patterns.cohomology import (
+from .cohomology import (
     MotivicCohomology,
     QuantumMotivicCohomology,
     ArithmeticForm,
     HeightStructure
 )
-from ..tiling.arithmetic_dynamics import (
-    ArithmeticDynamics,
-    MotivicIntegrator
-)
+from .arithmetic_dynamics import ArithmeticDynamics
 from ...utils.device import get_device
+
+patch_typeguard()  # Enable runtime shape checking
+
+@typechecked
+class MotivicIntegrator(nn.Module):
+    """Compute motivic integrals for arithmetic dynamics."""
+    
+    def __init__(
+        self,
+        hidden_dim: int,
+        motive_rank: int = 4,
+        num_samples: int = 100,
+        monte_carlo_steps: int = 10
+    ):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.motive_rank = motive_rank
+        self.num_samples = num_samples
+        self.monte_carlo_steps = monte_carlo_steps
+        
+        # Initial projection to 2D
+        self.initial_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),  # Reduce dimension first
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),  # Further reduce dimension
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 4, 2),  # Project to 2D
+            nn.Tanh()  # Bound the output to [-1, 1]
+        )
+        
+        # Print model summary for shape checking
+        print("\nInitial Projection Network:")
+        summary(self.initial_proj, input_size=(1, hidden_dim))
+        
+        # Network for computing motivic measure - output 2D measure
+        self.measure_net = nn.Sequential(
+            nn.Linear(2, hidden_dim // 2),  # Project from 2D to hidden_dim/2
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),  # Further reduce dimension
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 4, 2),  # Project to 2D measure space
+            nn.Tanh()  # Bound the output to [-1, 1]
+        )
+        
+        print("\nMeasure Network:")
+        summary(self.measure_net, input_size=(1, 2))
+        
+        # Network for computing integration domain
+        self.domain_net = nn.Sequential(
+            nn.Linear(2, hidden_dim // 2),  # Project from 2D to hidden_dim/2
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),  # Further reduce dimension
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 4, 4),  # Output domain bounds for 2D measure
+            nn.Tanh()  # Bound the output to [-1, 1]
+        )
+        
+        print("\nDomain Network:")
+        summary(self.domain_net, input_size=(1, 2))
+    
+    @typechecked
+    def compute_measure(
+        self, 
+        x: torch.Tensor  # Accept any tensor with correct shape
+    ) -> torch.Tensor:  # Return tensor with shape [batch, 2]
+        """Compute motivic measure with shape checking."""
+        # Project to 2D first
+        x = self.initial_proj(x)  # [batch_size, 2]
+        
+        # Compute measure - outputs [batch_size, 2]
+        measure = self.measure_net(x)
+        
+        # Scale measure to have reasonable magnitude
+        measure = measure * 0.1
+        
+        return measure
+    
+    @typechecked
+    def compute_domain(
+        self,
+        x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute integration domain bounds with shape checking."""
+        # Project to 2D first
+        x = self.initial_proj(x)  # [batch_size, 2]
+        
+        # Compute bounds
+        bounds = self.domain_net(x)  # [batch_size, 4]
+        lower = bounds[..., :2]  # [batch_size, 2]
+        upper = bounds[..., 2:]  # [batch_size, 2]
+        
+        # Scale bounds to reasonable range
+        lower = lower - 1.0  # Shift to [-2, 0]
+        upper = upper + 1.0  # Shift to [0, 2]
+        
+        return lower, upper
+
+    @typechecked
+    def monte_carlo_integrate(
+        self,
+        measure: torch.Tensor,
+        lower: torch.Tensor,
+        upper: torch.Tensor
+    ) -> torch.Tensor:
+        """Perform Monte Carlo integration over the given measure and domain.
+        
+        Args:
+            measure: Measure tensor of shape [batch_size, 2]
+            lower: Lower bounds tensor of shape [batch_size, 2]
+            upper: Upper bounds tensor of shape [batch_size, 2]
+            
+        Returns:
+            Integral values tensor of shape [batch_size]
+        """
+        batch_size = measure.shape[0]
+        device = measure.device
+        
+        # Initialize integral estimates
+        integral_estimates = torch.zeros(batch_size, device=device)
+        
+        # Compute volume of integration domain
+        domain_volume = torch.prod(upper - lower, dim=-1)  # [batch_size]
+        
+        # Monte Carlo integration with importance sampling
+        for _ in range(self.monte_carlo_steps):
+            # Generate random samples in the domain
+            # Shape: [batch_size, num_samples, 2]
+            samples = torch.rand(
+                batch_size, self.num_samples, 2, device=device
+            )
+            
+            # Scale samples to domain
+            # Shape: [batch_size, num_samples, 2]
+            samples = samples * (upper.unsqueeze(1) - lower.unsqueeze(1)) + lower.unsqueeze(1)
+            
+            # Evaluate measure at sample points
+            # First reshape samples to [batch_size * num_samples, 2]
+            flat_samples = samples.reshape(-1, 2)
+            
+            # Compute measure values - outputs [batch_size * num_samples, 2]
+            measure_values = self.measure_net(flat_samples)
+            
+            # Reshape back to [batch_size, num_samples, 2]
+            measure_values = measure_values.reshape(batch_size, self.num_samples, 2)
+            
+            # Compute contribution to integral (mean over samples)
+            # First compute L2 norm of measure values: [batch_size, num_samples]
+            measure_norms = torch.norm(measure_values, dim=-1)
+            
+            # Take mean over samples and multiply by domain volume
+            # Shape: [batch_size]
+            step_integral = torch.mean(measure_norms, dim=1) * domain_volume
+            
+            # Update running average
+            integral_estimates = integral_estimates + step_integral
+            
+        # Take average over Monte Carlo steps
+        integral_estimates = integral_estimates / self.monte_carlo_steps
+        
+        return integral_estimates
 
 
 class MotivicRiemannianStructureImpl(PatternRiemannianStructure):

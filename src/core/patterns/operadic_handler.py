@@ -16,10 +16,10 @@ from .operadic_structure import (
     OperadicComposition
 )
 from .motivic_integration import MotivicIntegrationSystem
-from ..tiling.patterns.cohomology import (
+from .cohomology import (
     MotivicCohomology,
-    QuantumMotivicCohomology,
-    ArithmeticForm
+    ArithmeticForm,
+    HeightStructure
 )
 
 

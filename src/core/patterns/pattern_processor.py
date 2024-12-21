@@ -11,10 +11,10 @@ from torch import nn, Tensor
 from .motivic_integration import MotivicRiemannianStructureImpl
 from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle
 from .operadic_structure import OperadicOperation, OperadicComposition, AttentionOperad
-from ..tiling.patterns.cohomology import (
+from .cohomology import (
     MotivicCohomology,
-    QuantumMotivicCohomology,
-    ArithmeticForm
+    ArithmeticForm,
+    HeightStructure
 )
 from ..quantum.neural_quantum_bridge import NeuralQuantumBridge
 from ..flow.pattern_heat import PatternHeatFlow
@@ -34,7 +34,7 @@ from .motivic_riemannian import (
     MotivicRiemannianStructure,
     MotivicMetricTensor
 )
-from ..tiling.arithmetic_dynamics import ArithmeticDynamics
+from .arithmetic_dynamics import ArithmeticDynamics
 from .riemannian_flow import RiemannianFlow
 from .enriched_structure import PatternTransition, WaveEmergence
 from .formation import PatternFormation

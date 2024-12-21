@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
-from .arithmetic_dynamics import ArithmeticDynamics
+from ..patterns.arithmetic_dynamics import ArithmeticDynamics
 from ..patterns.riemannian_flow import RiemannianFlow
 
 class GeometricFlow(RiemannianFlow):
