@@ -12,7 +12,7 @@ import vulkan as vk
 from .command_buffer import CommandBufferManager, CommandConfig
 from .memory_manager import BufferUsage, VulkanMemoryManager
 from .pipeline import PipelineType, VulkanPipeline
-from .shader_manager import ShaderManager
+from .shader_manager import ShaderManager, ShaderType
 
 
 @dataclass
@@ -63,9 +63,45 @@ class VulkanTensorOps:
         self._init_pipelines()
 
     def _init_pipelines(self) -> None:
-        """Initialize compute pipelines."""
-        # TODO: Initialize compute pipelines when needed
-        pass
+        """Initialize compute pipelines.
+        
+        Initializes the following pipelines:
+        - TILE_PROCESSOR: For basic tensor operations and matrix multiplication
+        - CROSS_TILE_ROUTER: For cross-tile communication and metrics
+        """
+        # Load and compile shaders
+        tile_shader = self.shader_manager.load_shader(ShaderType.TILE_PROCESSOR)
+        router_shader = self.shader_manager.load_shader(ShaderType.CROSS_TILE_ROUTER)
+        
+        # Create pipelines with appropriate push constant sizes
+        if tile_shader is not None:
+            # Pipeline for basic tensor ops and matmul
+            self.pipeline_manager.create_pipeline(
+                PipelineType.TILE_PROCESSOR,
+                bytes(tile_shader),  # Convert to bytes
+                push_constant_size=4 * 4  # 4 integers for dimensions and operation type
+            )
+            
+            # Also use for matrix multiplication
+            self.pipeline_manager.create_pipeline(
+                PipelineType.MATMUL,
+                bytes(tile_shader),  # Convert to bytes
+                push_constant_size=3 * 4  # 3 integers for M, N, K dimensions
+            )
+        
+        if router_shader is not None:
+            # Pipeline for metrics collection and cross-tile routing
+            self.pipeline_manager.create_pipeline(
+                PipelineType.METRICS_COLLECTOR,
+                bytes(router_shader),  # Convert to bytes
+                push_constant_size=2 * 4  # 2 integers for buffer size and metric type
+            )
+            
+            self.pipeline_manager.create_pipeline(
+                PipelineType.CROSS_TILE_ROUTER,
+                bytes(router_shader),  # Convert to bytes
+                push_constant_size=3 * 4  # 3 integers for routing configuration
+            )
 
     def register_tensor(self, tensor: torch.Tensor) -> TensorDescriptor:
         """Register a PyTorch tensor for Vulkan operations."""

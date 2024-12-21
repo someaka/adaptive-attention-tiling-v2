@@ -199,8 +199,11 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
             QuantumStateValidationResult.from_dict(data["quantum"])
             if "quantum" in data else None
         )
-        pattern_result = None  # TODO: Add pattern result deserialization
-        motivic_result = None  # TODO: Add motivic result deserialization
+        pattern_result = (
+            ValidationResult.from_dict(data["pattern"])
+            if "pattern" in data else None
+        )
+        motivic_result = None
         if "motivic" in data:
             motivic_data = data["motivic"]
             motivic_result = MotivicValidation(
@@ -209,7 +212,7 @@ class FrameworkValidationResult(ValidationResult[Dict[str, Any]]):
                 dynamics_valid=motivic_data["dynamics_valid"],
                 cohomology_valid=motivic_data["cohomology_valid"],
                 message=motivic_data["message"],
-                data={}  # Initialize empty data dict
+                data=motivic_data.get("data", {})
             )
         
         return cls(

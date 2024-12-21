@@ -38,7 +38,7 @@ def test_config():
     config_path = f"configs/test_regimens/{config_name}.yaml"
     
     with open(config_path) as f:
-        config = yaml.safe_load(f)
+        config: dict = yaml.safe_load(f)
     return config
 
 
