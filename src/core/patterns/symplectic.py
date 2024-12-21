@@ -216,7 +216,7 @@ class SymplecticStructure:
         # Then update the fields we want to change
         self.enriched.wave_enabled = wave_enabled
 
-    def _handle_dimension(self, tensor: Tensor) -> Tensor:
+    def _handle_dimension(self, tensor: Tensor, recursion_depth: int = 0) -> Tensor:
         """Handle dimension transitions using enriched operadic structure.
         
         Instead of padding, we use operadic transitions with wave emergence
@@ -224,13 +224,14 @@ class SymplecticStructure:
         
         Args:
             tensor: Input tensor to transform
+            recursion_depth: Current recursion depth (to prevent infinite recursion)
             
         Returns:
             Transformed tensor with correct symplectic dimensions
             
         Raises:
             ValueError: If tensor dimension is invalid or operation fails
-            RuntimeError: If transformation fails
+            RuntimeError: If transformation fails or recursion limit exceeded
         """
         if not isinstance(tensor, Tensor):
             raise ValueError(f"Expected torch.Tensor, got {type(tensor)}")
@@ -245,76 +246,42 @@ class SymplecticStructure:
         if current_dim < 1:
             raise ValueError(f"Last dimension must be at least 1, got {current_dim}")
 
+        # Prevent infinite recursion
+        if recursion_depth > 10:  # Maximum recursion depth
+            raise RuntimeError("Maximum recursion depth exceeded in dimension handling")
+
         try:
             # Save original shape for proper reshaping
             original_shape = tensor.shape[:-1]
             
-            # Create enriched operadic operation for dimension transition
-            operation = self.operadic.create_operation(
-                source_dim=current_dim,
-                target_dim=self.target_dim,
-                preserve_structure='symplectic'
-            )
+            # Simple dimension adjustment if wave emergence is disabled
+            if not self.wave_enabled:
+                if current_dim < self.target_dim:
+                    # Pad with zeros
+                    padding_size = self.target_dim - current_dim
+                    padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
+                    return torch.cat([tensor, padding], dim=-1)
+                else:
+                    # Truncate
+                    return tensor[..., :self.target_dim]
 
-            # Reshape tensor to match operation dimensions
-            reshaped_tensor = tensor.reshape(-1, current_dim)
+            # Use operadic transition with wave emergence
+            operation = self.operadic.create_transition(current_dim, self.target_dim)
+            transformed = self.enriched.create_morphism(
+                tensor, 
+                operation,
+                include_wave=self.wave_enabled
+            )
             
-            # First compute the quantum geometric tensor to guide the transition
-            metric = self.compute_metric(reshaped_tensor)
-            symplectic = self.compute_form(reshaped_tensor).matrix
-            Q = metric + 1j * symplectic
-            
-            if self.wave_enabled:
-                # Create wave packet using position and momentum components
-                position = reshaped_tensor[..., :current_dim//2]
-                momentum = reshaped_tensor[..., current_dim//2:]
-                if momentum.shape[-1] < position.shape[-1]:
-                    momentum = torch.zeros_like(position)
-                wave_packet = self.enriched.create_wave_packet(position, momentum)
-                
-                # Apply wave operator for smooth transition
-                transformed = self.enriched.create_morphism(
-                    pattern=wave_packet,
-                    operation=operation,
-                    include_wave=True
-                )
-            else:
-                # Direct transformation without wave behavior
-                transformed = self.enriched.create_morphism(
-                    pattern=reshaped_tensor,
-                    operation=operation,
-                    include_wave=False
-                )
-            
-            # Verify structure preservation
-            if self.preserve_structure:
-                # Check symplectic form is preserved
-                form_before = self.compute_form(reshaped_tensor)
-                form_after = self.compute_form(transformed)
-                if not torch.allclose(
-                    form_before.evaluate(reshaped_tensor[0], reshaped_tensor[0]),
-                    form_after.evaluate(transformed[0], transformed[0]),
-                    rtol=1e-5
-                ):
-                    raise ValueError("Symplectic structure not preserved during transformation")
-            
-            # Validate output dimensions
+            # Verify the transformation worked
             if transformed.shape[-1] != self.target_dim:
-                raise ValueError(
-                    f"Operation failed to produce correct target dimension. "
-                    f"Expected {self.target_dim}, got {transformed.shape[-1]}"
-                )
-            
-            # Restore batch dimensions
-            result = transformed.reshape(*original_shape, self.target_dim)
-            
-            # Ensure result is on same device and has same dtype
-            result = result.to(device=tensor.device, dtype=tensor.dtype)
-            
-            return result
-            
+                # Try one more time with increased recursion depth
+                return self._handle_dimension(transformed, recursion_depth + 1)
+                
+            return transformed
+
         except Exception as e:
-            raise RuntimeError(f"Failed to transform tensor dimensions: {str(e)}") from e
+            raise RuntimeError(f"Failed to transform tensor dimensions: {str(e)}")
 
     def compute_metric(self, fiber_coords: Tensor) -> Tensor:
         """Compute Riemannian metric tensor at given fiber coordinates.

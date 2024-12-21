@@ -364,6 +364,35 @@ class AttentionOperad(OperadicComposition):
         
         return combined
 
+    def create_transition(
+        self,
+        source_dim: int,
+        target_dim: int
+    ) -> OperadicOperation:
+        """Create a simple transition operation between dimensions.
+        
+        This is a simplified version of create_operation that automatically
+        determines the appropriate structure preservation based on the class settings.
+        
+        Args:
+            source_dim: Source dimension
+            target_dim: Target dimension
+            
+        Returns:
+            An operadic operation that handles the dimensional transition
+        """
+        preserve_structure = None
+        if self.preserve_symplectic:
+            preserve_structure = 'symplectic'
+        elif self.preserve_metric:
+            preserve_structure = 'metric'
+            
+        return self.create_operation(
+            source_dim=source_dim,
+            target_dim=target_dim,
+            preserve_structure=preserve_structure
+        )
+
 @dataclass
 class EnrichedAttention:
     """Enriched attention structure with wave emergence support.

@@ -1104,7 +1104,7 @@ class TestVulkanShaders:
             vk.vkDestroyShaderModule(self.device, shader_module, None)
             
         desc_time = (time.time() - start) / self.iterations
-        
+
         print("\nParameter Passing Performance")
         print(f"Push constant time: {push_time:.4f}s")
         print(f"Descriptor set time: {desc_time:.4f}s")

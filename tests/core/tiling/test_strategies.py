@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Any, Tuple
 
+
+
 from src.core.backends.base import AttentionTile, ResolutionStrategy, ResourceProfile
 from tests.utils.test_helpers import (
     assert_tensor_equal,
@@ -19,6 +21,11 @@ try:
     HAS_VULKAN = torch_vulkan.is_available()
 except ImportError:
     HAS_VULKAN = False
+
+# Only allow CPU and Vulkan devices
+ALLOWED_DEVICES = ["cpu"]
+if HAS_VULKAN:
+    ALLOWED_DEVICES.append("vulkan")
 
 
 class TestAttentionTile(nn.Module):
@@ -175,7 +182,7 @@ def test_random_seed_consistency() -> None:
     assert_tensor_equal(output1, output2)
 
 
-@pytest.mark.parametrize("device", ["cpu"])
+@pytest.mark.parametrize("device", ALLOWED_DEVICES)
 def test_device_support(device: str) -> None:
     """Test tile functionality on different devices."""
     tile = TestAttentionTile(input_dim=128, hidden_dim=128, device=device)
@@ -442,30 +449,30 @@ def test_attention_computation() -> None:
         assert not torch.allclose(output, output_masked)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not HAS_VULKAN, reason="Vulkan not available")
 def test_multi_device_support() -> None:
     """Test attention tile functionality across devices."""
     # Create tiles on different devices
     cpu_tile = TestAttentionTile(input_dim=128, hidden_dim=128, device="cpu")
-    gpu_tile = TestAttentionTile(input_dim=128, hidden_dim=128, device="cuda")
+    vulkan_tile = TestAttentionTile(input_dim=128, hidden_dim=128, device="vulkan")
     
     # Test data transfer
     inputs = torch.randn(1, 64, 128)
     cpu_output = cpu_tile.process(inputs)
-    gpu_output = gpu_tile.process(inputs)
+    vulkan_output = vulkan_tile.process(inputs)
     
     # Results should be similar regardless of device
-    cpu_output_gpu = cpu_output.cuda()
-    assert torch.allclose(cpu_output_gpu, gpu_output, rtol=1e-5)
+    cpu_output_vulkan = cpu_output.to(device="vulkan")
+    assert torch.allclose(cpu_output_vulkan, vulkan_output, rtol=1e-5)
     
     # Test state transfer between devices
     state = torch.randn(1, 32, 64)
     cpu_tile.state = state
-    gpu_tile.state = state
+    vulkan_tile.state = state
     
     assert torch.allclose(
-        cpu_tile.state.cuda(),
-        gpu_tile.state,
+        cpu_tile.state.to(device="vulkan"),
+        vulkan_tile.state,
         rtol=1e-5
     )
 

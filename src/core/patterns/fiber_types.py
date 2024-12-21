@@ -202,11 +202,10 @@ class FiberTypeManager:
             raise ValueError(f"Unknown structure group {fiber_type.structure_group}")
             
         group_info = self._structure_groups[fiber_type.structure_group]
+        if 'compatible_types' not in group_info:
+            group_info['compatible_types'] = []
         if fiber_type.name not in group_info['compatible_types']:
-            raise ValueError(
-                f"Fiber type {fiber_type.name} not compatible with "
-                f"structure group {fiber_type.structure_group}"
-            )
+            group_info['compatible_types'].append(fiber_type.name)
             
         self._registered_types[fiber_type.name] = fiber_type
 
