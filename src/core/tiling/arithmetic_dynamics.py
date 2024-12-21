@@ -82,6 +82,9 @@ class ArithmeticDynamics(nn.Module):
             nn.Linear(hidden_dim, motive_rank)
         )
 
+        # Quantum correction projection
+        self.quantum_proj = nn.Linear(hidden_dim, 2)  # Project to 2D measure space
+
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
         """Compute height with quantum corrections.
         
@@ -254,7 +257,7 @@ class ArithmeticDynamics(nn.Module):
             metric: Input metric tensor
             
         Returns:
-            Quantum correction tensor of same shape as input
+            Quantum correction tensor projected to measure space
         """
         # Project metric to height space
         height_coords = self.height_map(metric.reshape(-1, self.hidden_dim))
@@ -264,9 +267,10 @@ class ArithmeticDynamics(nn.Module):
         correction = self.flow(height_coords.reshape(-1, self.height_dim))
         correction = correction.view(*metric.shape[:-1], self.height_dim)
         
-        # Project back to metric space
+        # Project to measure space (2 dimensions)
         correction = self.output_proj(correction.reshape(-1, self.height_dim))
-        correction = correction.view(*metric.shape)
+        correction = correction.view(*metric.shape[:-1], -1)
+        correction = self.quantum_proj(correction)  # Use pre-initialized layer
         
         return correction
 
@@ -474,18 +478,18 @@ class MotivicIntegrator(nn.Module):
         self.num_samples = num_samples
         self.monte_carlo_steps = monte_carlo_steps
         
-        # Network for computing motivic measure
+        # Network for computing motivic measure - output 2D measure
         self.measure_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, 2),  # Project to 2D immediately
             nn.SiLU(),
-            nn.Linear(hidden_dim, motive_rank)
+            nn.Linear(2, 2)  # Keep in 2D space
         )
         
         # Network for computing integration domain
         self.domain_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim, 2),  # Project to 2D immediately
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, motive_rank * 2)  # Domain bounds
+            nn.Linear(2, 4)  # Output domain bounds for 2D measure
         )
         
     def compute_measure(self, x: torch.Tensor) -> torch.Tensor:
@@ -495,7 +499,7 @@ class MotivicIntegrator(nn.Module):
             x: Input tensor of shape [batch_size, hidden_dim]
             
         Returns:
-            Measure values of shape [batch_size, motive_rank]
+            Measure values of shape [batch_size, 2]
         """
         return self.measure_net(x)
     
@@ -506,11 +510,11 @@ class MotivicIntegrator(nn.Module):
             x: Input tensor of shape [batch_size, hidden_dim]
             
         Returns:
-            Tuple of (lower_bounds, upper_bounds) each of shape [batch_size, motive_rank]
+            Tuple of (lower_bounds, upper_bounds) each of shape [batch_size, 2]
         """
         bounds = self.domain_net(x)
-        lower = bounds[..., :self.motive_rank]
-        upper = bounds[..., self.motive_rank:]
+        lower = bounds[..., :2]
+        upper = bounds[..., 2:]
         return lower, upper
     
     def monte_carlo_integrate(
@@ -522,9 +526,9 @@ class MotivicIntegrator(nn.Module):
         """Perform Monte Carlo integration.
         
         Args:
-            measure: Measure values of shape [batch_size, motive_rank]
-            lower: Lower bounds of shape [batch_size, motive_rank]
-            upper: Upper bounds of shape [batch_size, motive_rank]
+            measure: Measure values of shape [batch_size, 2]
+            lower: Lower bounds of shape [batch_size, 2]
+            upper: Upper bounds of shape [batch_size, 2]
             
         Returns:
             Integral values of shape [batch_size]
@@ -538,7 +542,7 @@ class MotivicIntegrator(nn.Module):
         for _ in range(self.monte_carlo_steps):
             # Generate random samples in the domain
             samples = torch.rand(
-                batch_size, self.num_samples, self.motive_rank,
+                batch_size, self.num_samples, 2,
                 device=measure.device
             )
             

@@ -502,8 +502,16 @@ class QuantumMotivicCohomology:
         return self._quantize_motive(classical_motive)
 
     def _quantize_motive(self, classical: torch.Tensor) -> torch.Tensor:
-        """Convert classical motive to quantum version."""
-        return torch.matmul(self.quantum_structure, classical)
+        """Convert classical motive to quantum version.
+        
+        Args:
+            classical: Classical motive tensor of shape [batch_size x motive_rank]
+            
+        Returns:
+            Quantum motive tensor of shape [batch_size x motive_rank]
+        """
+        # Transpose the multiplication to handle batched inputs
+        return torch.matmul(classical, self.quantum_structure.T)
 
 
 class AdvancedMetricsAnalyzer:

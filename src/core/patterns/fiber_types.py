@@ -329,7 +329,7 @@ class FiberTypeManager:
             # Check unit modulus
             return torch.allclose(
                 torch.abs(element),
-                torch.ones_like(element),
+                torch.ones(element.shape, device=element.device, dtype=torch.float32),
                 rtol=1e-5
             )
         return False

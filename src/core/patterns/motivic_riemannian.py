@@ -31,6 +31,7 @@ from .fiber_bundle import (
     LocalChart,
     FiberChart
 )
+from ...utils.device import get_device
 
 
 class MotivicMetricTensor(MetricTensor[Tensor]):
@@ -154,8 +155,10 @@ class MotivicRiemannianStructure(
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
+        
+        # Use device utilities with fallback
         try:
-            self.device = device or torch.device('vulkan')
+            self.device = device or get_device()
         except:
             self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.float32

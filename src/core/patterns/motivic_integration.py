@@ -35,6 +35,7 @@ from ..tiling.arithmetic_dynamics import (
     ArithmeticDynamics,
     MotivicIntegrator
 )
+from ...utils.device import get_device
 
 
 class MotivicRiemannianStructureImpl(PatternRiemannianStructure):
@@ -266,7 +267,11 @@ class MotivicIntegrationSystem(nn.Module):
         self.monte_carlo_steps = monte_carlo_steps
         self.num_samples = num_samples
         
-        self.device = device or torch.device('vulkan')
+        # Use device utilities with fallback
+        try:
+            self.device = device or get_device()
+        except:
+            self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.float32
         
         # Initialize geometric structure
@@ -286,10 +291,10 @@ class MotivicIntegrationSystem(nn.Module):
             motive_rank=motive_rank
         )
         
-        # Initialize integrator
+        # Initialize integrator with fixed motive_rank=2
         self.integrator = MotivicIntegrator(
             hidden_dim=hidden_dim,
-            motive_rank=motive_rank,
+            motive_rank=2,  # Fixed to 2 for measure computation
             num_samples=num_samples,
             monte_carlo_steps=monte_carlo_steps
         )
@@ -466,8 +471,8 @@ class MotivicIntegrationSystem(nn.Module):
             perturbed_integrals.append(integral)
         
         # Stack results
-        perturbations = torch.stack(perturbations)
-        perturbed_integrals = torch.stack(perturbed_integrals)
+        perturbations = torch.stack(perturbations)  # [num_perturbations, batch_size, features]
+        perturbed_integrals = torch.stack(perturbed_integrals)  # [num_perturbations, batch_size, 2]
         
         # Compute metrics
         metrics = {
@@ -476,8 +481,8 @@ class MotivicIntegrationSystem(nn.Module):
             'integral_std': perturbed_integrals.std().item(),
             'perturbation_correlation': torch.corrcoef(
                 torch.stack([
-                    perturbations.flatten(),
-                    perturbed_integrals.flatten()
+                    perturbations.reshape(num_perturbations, -1).mean(dim=1),  # Average over all dimensions
+                    perturbed_integrals.reshape(num_perturbations, -1).mean(dim=1)  # Average over all dimensions
                 ])
             )[0, 1].item()
         }

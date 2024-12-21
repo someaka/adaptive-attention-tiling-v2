@@ -3,14 +3,14 @@ from src.utils.device import get_device, create_identity
 
 def test_device_identity():
     # Get the best available device
-    device, is_vulkan = get_device()
-    print(f"Using device: {device} (Vulkan available: {is_vulkan})")
+    device = get_device()
+    print(f"Using device: {device}")
 
     # Create identity matrix
     size = 3
     try:
         # Create identity matrix directly on target device
-        device_eye = create_identity(size, device)
+        device_eye = create_identity(size)
         print(f"\nIdentity matrix created on {device}:")
         print(device_eye)
         # Move to CPU for verification

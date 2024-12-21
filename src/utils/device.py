@@ -1,44 +1,27 @@
 """Device management utilities."""
 
 import torch
-from typing import Optional, Tuple
+from typing import Optional, Union
 
-def get_device(prefer_vulkan: bool = False) -> Tuple[torch.device, bool]:
-    """Get the best available device for computation.
-    Currently forcing CPU usage until Vulkan support is complete.
-    
-    Args:
-        prefer_vulkan: Whether to try Vulkan first (currently ignored)
-        
-    Returns:
-        Tuple of (device, is_vulkan_available)
-    """
-    # Force CPU for now
-    return torch.device('cpu'), False
+def get_device() -> torch.device:
+    """Get the default device for tensor operations."""
+    # Force CPU-only mode
+    return torch.device('cpu')
 
-def to_device(tensor: torch.Tensor, device: Optional[torch.device] = None, force_cpu: bool = True) -> torch.Tensor:
-    """Move tensor to device, with graceful fallback to CPU.
-    Currently forcing CPU usage until Vulkan support is complete.
-    
-    Args:
-        tensor: Input tensor
-        device: Target device (currently ignored)
-        force_cpu: If True, always returns CPU tensor
-        
-    Returns:
-        Tensor on CPU
-    """
-    return tensor.cpu()
+def to_device(tensor: torch.Tensor) -> torch.Tensor:
+    """Move tensor to the default device."""
+    # Force CPU-only mode
+    return tensor.to(device='cpu')
 
-def create_identity(size: int, device: Optional[torch.device] = None) -> torch.Tensor:
-    """Create an identity matrix.
-    Currently always creates on CPU until Vulkan support is complete.
+def create_identity(size: int, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    """Create an identity matrix on the default device.
     
     Args:
         size: Size of the identity matrix
-        device: Target device (currently ignored)
+        dtype: Optional dtype for the matrix. If None, uses default dtype.
         
     Returns:
-        Identity matrix on CPU
+        Identity matrix on CPU with specified dtype
     """
-    return torch.eye(size)  # Always on CPU
+    # Force CPU-only mode
+    return torch.eye(size, dtype=dtype, device='cpu')

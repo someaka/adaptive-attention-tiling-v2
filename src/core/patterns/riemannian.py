@@ -25,6 +25,7 @@ from .riemannian_base import (
     ChristoffelSymbols,
     CurvatureTensor,
 )
+from ...utils.device import get_device
 
 class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], ValidationMixin):
     """Base implementation of Riemannian geometric structure.
@@ -206,9 +207,8 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         # Compute base metric
         identity = torch.eye(
             self.manifold_dim,
-            device=self.device,
             dtype=self.dtype
-        ).expand(batch_size, -1, -1)
+        ).expand(batch_size, -1, -1).to(device=self.device)
         
         # Add learned perturbation
         perturbation = torch.matmul(
