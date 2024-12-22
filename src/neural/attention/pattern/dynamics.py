@@ -195,7 +195,10 @@ class PatternDynamics:
         current = pattern
         
         for _ in range(steps):
+            # Normalize current pattern
+            current = current / torch.norm(current.to(torch.float32), dim=(-2, -1), keepdim=True).clamp(min=1e-6)
             trajectory.append(current)
+            
             # Apply reaction and diffusion with optional custom reaction term
             if reaction_term is not None:
                 reaction = reaction_term(current)
