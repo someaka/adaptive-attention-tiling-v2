@@ -150,13 +150,32 @@ class HilbertSpace:
     def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> QuantumState:
         """Evolve quantum state under Hamiltonian.
         
+        This method implements quantum time evolution using the Schrödinger equation:
+        |ψ(t)⟩ = exp(-iHt/ℏ)|ψ(0)⟩
+        
+        The evolution includes several key quantum mechanical aspects:
+        1. Unitary Evolution: The evolution operator U(t) = exp(-iHt) preserves the norm 
+           and quantum coherence of the state
+        2. Phase Correction: A geometric phase correction is applied to maintain pattern 
+           orientation in the quantum geometric framework
+        3. Complex Amplitudes: The evolution occurs in the complex Hilbert space using 
+           complex128 precision to ensure numerical stability
+        
+        The implementation uses matrix exponential for exact evolution, rather than 
+        perturbative methods, making it suitable for both short and long time scales.
+        
         Args:
-            initial_state: Initial quantum state
-            hamiltonian: Hamiltonian operator
-            t: Evolution time
+            initial_state: Initial quantum state |ψ(0)⟩
+            hamiltonian: Hamiltonian operator H (must be Hermitian)
+            t: Evolution time (in natural units where ℏ = 1)
             
         Returns:
-            Evolved quantum state
+            Evolved quantum state |ψ(t)⟩
+            
+        Note:
+            The phase correction term exp(iφ) is computed from the overlap between the 
+            initial state and the first basis state of the evolution operator. This 
+            preserves the geometric structure of quantum patterns during evolution.
         """
         # Ensure complex types
         hamiltonian = hamiltonian.to(torch.complex128)
