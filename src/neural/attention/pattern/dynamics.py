@@ -74,23 +74,30 @@ class PatternDynamics:
         Returns:
             Quantum state
         """
-        # Extract amplitude and phase
+        # Ensure state is normalized
+        state = torch.nn.functional.normalize(state, p=2, dim=-1)
+        
+        # Convert to complex and ensure float32
         amplitudes = state.to(torch.complex64)
-        phase = torch.angle(amplitudes)
+        phase = torch.zeros_like(state, dtype=torch.float32)
         
         # Create basis labels based on state shape
         basis_size = state.shape[-1]
         basis_labels = [f"basis_{i}" for i in range(basis_size)]
         
-        # Ensure proper normalization
-        norm = torch.sqrt(torch.sum(torch.abs(amplitudes) ** 2, dim=-1, keepdim=True))
-        amplitudes = amplitudes / (norm + 1e-8)
-        
-        return QuantumState(
+        # Create quantum state
+        quantum_state = QuantumState(
             amplitudes=amplitudes,
             basis_labels=basis_labels,
             phase=phase
         )
+        
+        # Verify normalization
+        norm = quantum_state.norm()
+        if not torch.allclose(norm, torch.tensor(1.0, dtype=torch.float32)):
+            quantum_state.amplitudes = quantum_state.amplitudes / (norm + 1e-8)
+            
+        return quantum_state
         
     def _from_quantum_state(self, quantum_state: QuantumState) -> torch.Tensor:
         """Convert quantum state to classical state.
@@ -101,9 +108,18 @@ class PatternDynamics:
         Returns:
             Classical state tensor
         """
-        # Get the full state vector including phase
-        state = quantum_state.amplitudes * torch.exp(1j * quantum_state.phase)
-        return state.real
+        # Get amplitudes and phase
+        amplitudes = quantum_state.amplitudes
+        phase = quantum_state.phase
+        
+        # Combine amplitude and phase
+        state = amplitudes * torch.exp(1j * phase)
+        
+        # Convert to real and normalize
+        state = state.real.to(torch.float32)
+        state = torch.nn.functional.normalize(state, p=2, dim=-1)
+        
+        return state
 
     def compute_next_state(self, state: torch.Tensor) -> torch.Tensor:
         """Perform one step of pattern dynamics.

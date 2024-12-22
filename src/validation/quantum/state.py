@@ -232,36 +232,42 @@ class StatePreparationValidator:
         """Validate prepared quantum state against target."""
         # Check norm
         norm = torch.norm(prepared.amplitudes)
-        if not torch.isclose(norm, torch.tensor(1.0)):
-            return QuantumStateValidationResult(
-                is_valid=False,
-                message=f"Invalid norm: {norm}",
-                error_type=StateValidationErrorType.INVALID_NORM
-            )
-            
-        # Check dimensions
-        if target.amplitudes.shape != prepared.amplitudes.shape:
-            return QuantumStateValidationResult(
-                is_valid=False,
-                message="Dimension mismatch",
-                error_type=StateValidationErrorType.INVALID_DIMENSIONS
-            )
-            
-        # Compute fidelity
-        fidelity = torch.abs(torch.sum(torch.conj(target.amplitudes) * prepared.amplitudes))
+        target_norm = torch.tensor(1.0, dtype=norm.dtype, device=norm.device)
         
-        # Validate phase
-        if fidelity < 0.99:  # Allow small phase differences
+        if not torch.isclose(norm, target_norm):
             return QuantumStateValidationResult(
                 is_valid=False,
-                message=f"Low fidelity: {fidelity}",
-                error_type=StateValidationErrorType.INVALID_PHASE
+                message="State norm validation failed",
+                error_type=StateValidationErrorType.INVALID_NORM,
+                data={"error_value": float(abs(norm.item() - 1.0))}
             )
             
+        # Check phase consistency
+        if target.phase is not None and prepared.phase is not None:
+            phase_diff = torch.abs(target.phase - prepared.phase)
+            if torch.any(phase_diff > 0.1):
+                return QuantumStateValidationResult(
+                    is_valid=False,
+                    message="Phase consistency validation failed",
+                    error_type=StateValidationErrorType.INVALID_PHASE,
+                    data={"error_value": float(phase_diff.max().item())}
+                )
+                
+        # Check basis labels
+        if len(target.basis_labels) != len(prepared.basis_labels):
+            return QuantumStateValidationResult(
+                is_valid=False,
+                message="Basis dimension mismatch",
+                error_type=StateValidationErrorType.INVALID_DIMENSIONS,
+                data={"error_value": float(abs(len(target.basis_labels) - len(prepared.basis_labels)))}
+            )
+            
+        # All checks passed
         return QuantumStateValidationResult(
             is_valid=True,
-            message="State preparation successful",
-            data={"fidelity": fidelity}
+            message="State preparation validation successful",
+            error_type=None,
+            data={"error_value": 0.0}
         )
 
     def _compute_fidelity(

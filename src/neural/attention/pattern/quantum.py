@@ -78,13 +78,13 @@ class QuantumGeometricTensor:
         # Enable gradient computation
         state_grad = state.detach().requires_grad_(True)
         
-        # Create parameter vector
-        param = torch.zeros(self.dim, device=state.device)
+        # Create parameter vector with matching dtype
+        param = torch.zeros(self.dim, dtype=state.dtype, device=state.device)
         param[param_idx] = 1.0
         
         # Compute derivative using autograd
         derivative = torch.autograd.grad(
-            state_grad.sum(),
+            state_grad,
             state_grad,
             grad_outputs=param,
             create_graph=True

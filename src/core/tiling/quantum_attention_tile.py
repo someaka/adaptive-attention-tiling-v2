@@ -251,98 +251,63 @@ class QuantumMotivicTile(nn.Module):
         return_metrics: bool = True
     ) -> Union[Tensor, Tuple[Tensor, Dict[str, Any]]]:
         """Apply quantum motivic attention.
-
+        
         Args:
             q: Query tensor
             k: Key tensor
             v: Value tensor
             state: Optional state tensor
             return_metrics: Whether to return metrics dictionary
-
+            
         Returns:
             If return_metrics is True:
                 Tuple of (attention output tensor, metrics dictionary)
             Otherwise:
                 Just the attention output tensor
         """
-        batch_size, seq_len, _ = q.shape
-        head_dim = self.hidden_dim // self.num_heads
-
-        # 1. Project through attention layers with quantum structure
-        query = self.query(q).view(batch_size, seq_len, self.num_heads, head_dim)
-        key = self.key(k).view(batch_size, seq_len, self.num_heads, head_dim)
-        value = self.value(v).view(batch_size, seq_len, self.num_heads, head_dim)
-
-        # 2. Transpose for attention computation
-        query = query.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
-
-        # 3. Compute quantum cohomology structure
-        cohomology = self.cohomology_proj(query)
-        cohomology = cohomology.view(
-            batch_size * seq_len, self.motive_rank, self.cohomology_dim
-        )
-
-        # 4. Apply quantum field structure
-        field = self.field_proj(key)
-        field_flat = field.view(batch_size * seq_len, self.hidden_dim)
-
-        # 5. Compute attention scores with quantum evolution
-        attention_weights = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
-        
-        # Apply quantum phase
-        phase = torch.angle(field_flat.view(batch_size, seq_len, -1))
-        phase_factor = torch.exp(1j * phase)
-        attention_weights = attention_weights * phase_factor.unsqueeze(1)
-        
-        # Normalize with quantum structure
-        attention_weights = torch.abs(attention_weights)  # Take magnitude
-        attention_weights = F.softmax(attention_weights, dim=-1)
-        attention_weights = self.dropout_layer(attention_weights)
-
-        # 6. Apply evolved attention to values
-        attention_output = torch.matmul(attention_weights, value)
-        attention_output = attention_output.transpose(1, 2).contiguous()
-        attention_output = attention_output.view(batch_size, seq_len, self.hidden_dim)
-
-        # 7. Project through quantum output
-        attention_output = self.output(attention_output)
-
-        # 8. Apply quantum evolution if state provided
-        if state is not None:
-            # Evolve quantum state
-            evolved_state = attention_output + state * torch.exp(1j * phase_factor.mean(dim=1))
-            attention_output = evolved_state.real
-
-        # 9. Update internal quantum metrics
-        self._update_quantum_metrics(attention_output)
-
-        # 10. Return with optional metrics
-        if return_metrics:
-            metrics: Dict[str, Any] = {}
-            with torch.no_grad():
-                # Add cohomology metrics
-                metrics["cohomology_class"] = cohomology.mean(dim=0).mean(dim=0).detach().cpu().numpy().tolist()
-                
-                # Add quantum metrics
-                metrics.update({
-                    "motive_height": float(self.height_proj(cohomology.mean(dim=0)).mean().item()),
-                    "l_function_value": float(field_flat.norm(p=2, dim=-1).mean().item()),
-                    "adelic_norm": float(cohomology.norm(p=2, dim=-1).mean().item()),
-                    "quantum_entropy": float(-(attention_weights * torch.log(attention_weights + 1e-10)).sum(dim=-1).mean().item())
-                })
-                
-                # Add evolution metrics if state was provided
-                if state is not None:
-                    metrics["state_evolution"] = {
-                        "phase_coherence": float(torch.abs(phase_factor.mean(dim=1)).mean().item()),
-                        "state_norm": float(torch.norm(attention_output).item())
-                    }
+        # Add batch and sequence dimensions if needed
+        if q.dim() == 1:
+            q = q.unsqueeze(0).unsqueeze(0)  # [1, 1, dim]
+        if k.dim() == 1:
+            k = k.unsqueeze(0).unsqueeze(0)  # [1, 1, dim]
+        if v.dim() == 1:
+            v = v.unsqueeze(0).unsqueeze(0)  # [1, 1, dim]
             
-            return attention_output, metrics
+        batch_size, seq_len, _ = q.shape
         
-        return attention_output
+        # Convert to real tensors if complex
+        if q.is_complex():
+            q = q.real.to(torch.float32)
+        if k.is_complex():
+            k = k.real.to(torch.float32)
+        if v.is_complex():
+            v = v.real.to(torch.float32)
+            
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.hidden_dim)
+        
+        # Apply quantum geometric attention
+        if state is not None:
+            # Include quantum state influence
+            state_scores = self.compute_state_attention(state)
+            scores = scores + state_scores
+            
+        # Apply softmax
+        attn = torch.nn.functional.softmax(scores, dim=-1)
+        
+        # Compute output
+        output = torch.matmul(attn, v)
+        
+        if return_metrics:
+            metrics = {
+                "attention_scores": scores.detach(),
+                "attention_weights": attn.detach()
+            }
+            if state is not None:
+                metrics["state_influence"] = state_scores.detach()
+            return output, metrics
+            
+        return output
 
     def _update_quantum_metrics(self, field: torch.Tensor) -> None:
         """Update quantum-specific metrics.
