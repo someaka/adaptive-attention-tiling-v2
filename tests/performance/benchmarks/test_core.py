@@ -24,6 +24,7 @@ from src.core.patterns import (
     ChristoffelSymbols,
     CurvatureTensor,
 )
+from .metrics import BenchmarkMetrics
 
 
 class TestCoreOperations:

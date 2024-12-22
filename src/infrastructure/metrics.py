@@ -10,10 +10,28 @@ import torch
 class ResourceMetrics:
     """Resource utilization metrics."""
     
-    memory_used: float  # Memory usage in bytes
-    memory_available: float  # Available memory in bytes
-    gpu_utilization: Optional[float] = None  # GPU utilization percentage
-    cpu_utilization: Optional[float] = None  # CPU utilization percentage
+    cpu_utilization: float  # CPU utilization percentage
+    memory_used: int  # Memory used in bytes
+    memory_available: int  # Memory available in bytes
+    disk_used: int  # Disk space used in bytes
+    disk_available: int  # Disk space available in bytes
+    network_sent: int  # Network bytes sent
+    network_received: int  # Network bytes received
+    
+    def get_summary(self) -> str:
+        """Get human-readable summary of metrics.
+        
+        Returns:
+            Summary string
+        """
+        summary = [
+            "Resource Metrics:",
+            f"  CPU: {self.cpu_utilization:.1f}%",
+            f"  Memory: {self.memory_used / 1024**2:.1f}MB used, {self.memory_available / 1024**2:.1f}MB available",
+            f"  Disk: {self.disk_used / 1024**2:.1f}MB used, {self.disk_available / 1024**2:.1f}MB available", 
+            f"  Network: {self.network_sent / 1024:.1f}KB sent, {self.network_received / 1024:.1f}KB received"
+        ]
+        return "\n".join(summary)
 
 
 @dataclass
@@ -66,8 +84,6 @@ class InfrastructureMetrics:
         summary.append("Resource Utilization:")
         summary.append(f"  Memory: {self.resources.memory_used/1e6:.1f}MB / "
                       f"{self.resources.memory_available/1e6:.1f}MB")
-        if self.resources.gpu_utilization is not None:
-            summary.append(f"  GPU: {self.resources.gpu_utilization:.1f}%")
         if self.resources.cpu_utilization is not None:
             summary.append(f"  CPU: {self.resources.cpu_utilization:.1f}%")
             

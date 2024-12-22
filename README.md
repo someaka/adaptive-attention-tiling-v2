@@ -170,7 +170,7 @@ src/
 
 tests/
 ├── core/             # Core component tests
-│   ├─�� attention/   # Attention mechanism tests
+│   ├── attention/   # Attention mechanism tests
 │   └── tiling/     # Tiling system tests
 ├── integration/     # Integration tests
 │   └── end_to_end/ # Full system tests
@@ -243,8 +243,11 @@ Test dependencies are managed to ensure proper execution order:
 - Coalesced memory access
 - Workgroup optimization
 
-### Note on GPU Support
-This project currently focuses on CPU-based implementations. We do not support Vulkan or other GPU backends at this time.
+### Hardware Requirements
+
+The project is designed to run efficiently on standard CPU hardware. Minimum requirements:
+- 4GB RAM
+- Multi-core CPU recommended for optimal performance
 
 ### Validation & Metrics
 - Quantum state validation

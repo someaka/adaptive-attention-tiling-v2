@@ -13,6 +13,7 @@ def riemannian_structure():
     """Create a base Riemannian structure for testing."""
     return BaseRiemannianStructure(
         manifold_dim=3,
+        hidden_dim=64,
         device=torch.device('cpu'),
         dtype=torch.float64  # Use double precision for numerical stability
     )

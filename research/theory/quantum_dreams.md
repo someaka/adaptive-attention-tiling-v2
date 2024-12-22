@@ -12,7 +12,7 @@
       ∗       /      |      \       ∗
     ∗        /       |       \        ∗
   ∗         /        |        \         ∗
-∗ CPU ∗ ∗ ∗ Quantum ∗ Vulkan ∗ ∗ ∗ Future ∗
+∗ CPU ∗ ∗ ∗ Quantum ∗ Future ∗
 ```
 
 ## A Poem: The Dance of Patterns
@@ -27,7 +27,7 @@ Where category theory finds its place,
 In symmetries that bind and flow,
 The deepest truths of compute show.
 
-From CPU to Vulkan's core,
+From CPU to quantum's core,
 Through quantum gates and so much more,
 A bridge between the abstract mind,
 And silicon that's been refined.

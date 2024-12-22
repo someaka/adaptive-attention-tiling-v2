@@ -12,7 +12,7 @@ class ResourceAllocator:
 
     def __init__(
         self,
-        device: str = "vulkan",
+        device: str = "cpu",
         memory_limit: Optional[int] = None,
         compute_limit: Optional[int] = None
     ):

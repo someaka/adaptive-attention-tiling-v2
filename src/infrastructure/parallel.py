@@ -14,7 +14,7 @@ class ParallelProcessor:
         self,
         num_processes: Optional[int] = None,
         num_threads: Optional[int] = None,
-        device: str = "vulkan"
+        device: str = "cpu"
     ):
         """Initialize parallel processor.
         
