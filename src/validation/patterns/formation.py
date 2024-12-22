@@ -78,7 +78,7 @@ class SpatialMetrics:
         data_np = _ensure_numpy(data)
         
         # Threshold data
-        binary = data_np > self.threshold
+        binary = np.greater(data_np, self.threshold)
         
         # Create structure for labeling (cross-shaped for 2D)
         structure = np.array([
@@ -385,7 +385,7 @@ class PatternModeAnalyzer:
             # Compute amplitude
             amplitude = np.abs(fft_data[peak])
             
-            if amplitude > self.threshold:
+            if np.greater(amplitude, self.threshold):
                 modes.append(spatial_mode)
                 amplitudes.append(amplitude)
                 

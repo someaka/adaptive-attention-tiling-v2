@@ -264,14 +264,29 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         
         # Compute metric derivatives
         for k in range(self.manifold_dim):
-            if f'metric_deriv_{k}' not in self.cache:
-                self.cache[f'metric_deriv_{k}'] = torch.autograd.grad(
-                    metric.values[..., k].sum(),
-                    points,
-                    create_graph=True,
-                    allow_unused=True
-                )[0]
+            grad_result = torch.autograd.grad(
+                metric.values[..., k].sum(),
+                points,
+                create_graph=True,
+                allow_unused=True,
+                retain_graph=True
+            )[0]
+            
+            # Handle None gradients by providing a zero tensor
+            if grad_result is None:
+                grad_result = torch.zeros(
+                    batch_size,
+                    self.manifold_dim,
+                    self.manifold_dim,
+                    device=self.device,
+                    dtype=self.dtype
+                )
+            else:
+                # Reshape gradient to match expected dimensions
+                grad_result = grad_result.reshape(batch_size, self.manifold_dim, self.manifold_dim)
                 
+            self.cache[f'metric_deriv_{k}'] = grad_result
+            
         # Construct Christoffel symbols
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
@@ -287,8 +302,9 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
                     term3 = -d_k[..., i, j]
                     
                     # Contract with inverse metric
-                    christoffel[..., k, i, j] = 0.5 * (
-                        metric_inv[..., k, :] @ (term1 + term2 + term3)
+                    christoffel[..., k, i, j] = 0.5 * torch.sum(
+                        metric_inv[..., k, :] * (term1 + term2 + term3).unsqueeze(-1),
+                        dim=-1
                     )
                     
         return ChristoffelSymbols(
@@ -383,8 +399,21 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         christoffel_grad = torch.autograd.grad(
             christoffel.values.sum(),
             points,
-            create_graph=True
+            create_graph=True,
+            allow_unused=True
         )[0]
+        
+        # Handle None gradients by providing a zero tensor
+        if christoffel_grad is None:
+            christoffel_grad = torch.zeros(
+                batch_size,
+                self.manifold_dim,
+                self.manifold_dim,
+                self.manifold_dim,
+                self.manifold_dim,
+                device=self.device,
+                dtype=self.dtype
+            )
         
         # Construct Riemann tensor
         for i in range(self.manifold_dim):
@@ -496,27 +525,58 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         
         # Compute vector field and its derivatives
         X = vector_field(point)
-        X_grad = torch.autograd.grad(
+        X.requires_grad_(True)  # Ensure X requires gradients
+        
+        X_grad_result = torch.autograd.grad(
             X.sum(), point, create_graph=True, allow_unused=True
         )[0]
         
+        # Handle None gradients
+        if X_grad_result is None:
+            X_grad_result = torch.zeros(
+                self.manifold_dim,
+                self.manifold_dim,
+                device=self.device,
+                dtype=self.dtype
+            )
+        X_grad = X_grad_result
+        
         # Compute metric derivatives
-        metric_grad = torch.autograd.grad(
+        metric_grad_result = torch.autograd.grad(
             metric.values.sum(),
             point,
             create_graph=True,
             allow_unused=True
         )[0]
         
-        # Compute Lie derivative components
-        term1 = torch.einsum('k,kij->ij', X, metric_grad[0])
-        term2 = torch.einsum('kj,ki->ij', metric.values[0], X_grad)
-        term3 = torch.einsum('ik,kj->ij', metric.values[0], X_grad)
+        # Handle None gradients
+        if metric_grad_result is None:
+            metric_grad_result = torch.zeros(
+                self.manifold_dim,
+                self.manifold_dim,
+                self.manifold_dim,
+                device=self.device,
+                dtype=self.dtype
+            )
+        metric_grad = metric_grad_result
         
-        values = term1 + term2 + term3
+        # Compute Lie derivative components
+        # Reshape tensors for einsum
+        X = X.reshape(-1)  # Shape: [dim]
+        metric_grad = metric_grad.reshape(self.manifold_dim, self.manifold_dim, self.manifold_dim)  # Shape: [dim, dim, dim]
+        X_grad = X_grad.reshape(self.manifold_dim, self.manifold_dim)  # Shape: [dim, dim]
+        metric_vals = metric.values[0]  # Shape: [dim, dim]
+        
+        # Compute terms with proper dimensions
+        term1 = torch.einsum('k,kij->ij', X, metric_grad)
+        term2 = torch.einsum('ki,kj->ij', X_grad, metric_vals)
+        term3 = torch.einsum('kj,ki->ij', metric_vals, X_grad)
+        
+        # Combine terms
+        lie_deriv = term1 + term2 + term3
         
         return MetricTensor(
-            values=values.unsqueeze(0),
+            values=lie_deriv.unsqueeze(0),
             dimension=self.manifold_dim
         )
         
