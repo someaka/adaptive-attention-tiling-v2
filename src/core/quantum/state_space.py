@@ -167,6 +167,10 @@ class HilbertSpace:
             
         # Single time evolution
         evolution_operator = torch.matrix_exp(-1j * hamiltonian * t)
+        # Add phase correction to preserve pattern orientation
+        first_row = evolution_operator[0] if len(evolution_operator.shape) == 2 else evolution_operator[0, 0]
+        phase_correction = torch.exp(1j * torch.angle(torch.vdot(state_vector.squeeze(), first_row)))
+        evolution_operator = evolution_operator * phase_correction
         evolved = torch.matmul(state_vector, evolution_operator.T)
         
         return QuantumState(
@@ -722,13 +726,13 @@ class HilbertSpace:
         Returns:
             Entanglement entropy tensor
         """
-        # Reshape amplitudes into bipartite system
+        # Reshape amplitudes into bipartite system (2 x N/2)
         shape = state.amplitudes.shape
         mid_dim = shape[-1] // 2
-        amplitudes = state.amplitudes.view(-1, mid_dim, mid_dim)
+        amplitudes = state.amplitudes.view(2, mid_dim)
         
         # Compute reduced density matrix
-        rho = torch.einsum('ijk,ijl->ikl', amplitudes, torch.conj(amplitudes))
+        rho = torch.einsum('ij,ik->jk', amplitudes, torch.conj(amplitudes))
         
         # Compute eigenvalues
         eigenvalues = torch.linalg.eigvalsh(rho)

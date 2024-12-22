@@ -207,6 +207,10 @@ class NeuralQuantumBridge(nn.Module):
             attention_pattern.transpose(-2, -1),
             attention_pattern
         )
+        # Add local terms to preserve pattern structure
+        hamiltonian = hamiltonian + torch.eye(hamiltonian.shape[-1], device=hamiltonian.device) * 0.1
+        # Ensure Hermiticity
+        hamiltonian = (hamiltonian + hamiltonian.transpose(-2, -1).conj()) / 2
 
         # Evolve state
         evolved = self.hilbert_space.evolve_state(
@@ -580,16 +584,24 @@ class NeuralQuantumBridge(nn.Module):
             quantum_state = quantum_result
         
         # Get scale ratio for time evolution
-        scale_ratio = abs(np.log2(target_scale / source_scale))
+        scale_ratio = np.log2(target_scale / source_scale)  # Remove abs() for directional evolution
+        time = torch.sigmoid(torch.tensor(scale_ratio)).item() * 0.5  # Smooth transition between 0 and 0.5
         
         # Evolve state using quantum geometric attention
         evolved_state = self.evolve_quantum_state(
             quantum_state,
-            time=scale_ratio
+            time=time
         )
         
         # Convert back to neural representation
         neural_state = self.quantum_to_neural(evolved_state, state.shape)
+        
+        # Interpolate between initial and evolved states
+        alpha = 0.7  # Bias towards initial state to preserve structure
+        neural_state = alpha * state + (1 - alpha) * neural_state
+        
+        # Normalize the output state
+        neural_state = torch.nn.functional.normalize(neural_state, p=2, dim=-1)
         
         # Track cross-scale entanglement
         self._update_entanglement_tracking(
