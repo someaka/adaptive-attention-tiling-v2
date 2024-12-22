@@ -171,7 +171,7 @@ class HilbertSpace:
         first_row = evolution_operator[0] if len(evolution_operator.shape) == 2 else evolution_operator[0, 0]
         phase_correction = torch.exp(1j * torch.angle(torch.vdot(state_vector.squeeze(), first_row)))
         evolution_operator = evolution_operator * phase_correction
-        evolved = torch.matmul(state_vector, evolution_operator.T)
+        evolved = torch.matmul(state_vector, evolution_operator.mT)
         
         return QuantumState(
             amplitudes=evolved.squeeze(),
