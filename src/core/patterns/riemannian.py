@@ -268,7 +268,8 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
                 self.cache[f'metric_deriv_{k}'] = torch.autograd.grad(
                     metric.values[..., k].sum(),
                     points,
-                    create_graph=True
+                    create_graph=True,
+                    allow_unused=True
                 )[0]
                 
         # Construct Christoffel symbols
@@ -496,14 +497,15 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         # Compute vector field and its derivatives
         X = vector_field(point)
         X_grad = torch.autograd.grad(
-            X.sum(), point, create_graph=True
+            X.sum(), point, create_graph=True, allow_unused=True
         )[0]
         
         # Compute metric derivatives
         metric_grad = torch.autograd.grad(
             metric.values.sum(),
             point,
-            create_graph=True
+            create_graph=True,
+            allow_unused=True
         )[0]
         
         # Compute Lie derivative components

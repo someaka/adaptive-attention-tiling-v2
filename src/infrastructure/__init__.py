@@ -1,11 +1,21 @@
-"""Infrastructure components for system integration."""
+"""Infrastructure components for Adaptive Attention Tiling."""
 
 from .base import (
-    DeviceInfo,
-    SystemMonitor
+    CPUOptimizer,
+    MemoryManager,
+    VulkanIntegration,
+    ParallelProcessor,
+    ResourceAllocator,
+    InfrastructureMetrics,
+    ResourceAllocationError,
 )
 
 __all__ = [
-    "DeviceInfo",
-    "SystemMonitor"
+    "CPUOptimizer",
+    "MemoryManager", 
+    "VulkanIntegration",
+    "ParallelProcessor",
+    "ResourceAllocator",
+    "InfrastructureMetrics",
+    "ResourceAllocationError",
 ]
