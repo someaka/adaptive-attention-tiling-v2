@@ -226,7 +226,7 @@ class QuantumGeometricAttention(nn.Module):
 
         # Projections
         self.metric = nn.Parameter(torch.eye(hidden_dim, dtype=self.dtype))
-        self.pattern_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.pattern_proj = nn.Linear(self.manifold_dim, hidden_dim)
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
         """Compute Fisher information metric for states."""
@@ -485,7 +485,7 @@ class QuantumGeometricAttention(nn.Module):
         return torch.count_nonzero(features, dim=-1).float() / features.shape[-1]
 
     def classical_to_quantum(self, x: torch.Tensor) -> torch.Tensor:
-        """Convert classical input to quantum state representation.
+        """Convert classical tensor to quantum state.
         
         Args:
             x: Classical input tensor
@@ -493,8 +493,12 @@ class QuantumGeometricAttention(nn.Module):
         Returns:
             Quantum state tensor
         """
+        # Reshape input to 2D for projection
+        batch_size = x.size(0)
+        x_flat = x.reshape(batch_size, -1)  # Flatten all dimensions except batch
+        
         # Project to quantum state space
-        quantum_proj = self.pattern_proj(x)
+        quantum_proj = self.pattern_proj(x_flat)
         
         # Normalize to unit sphere
         quantum_state = F.normalize(quantum_proj, p=2, dim=-1)
@@ -503,7 +507,8 @@ class QuantumGeometricAttention(nn.Module):
         phase = torch.angle(quantum_state)
         quantum_state = quantum_state * torch.exp(1j * phase).to(dtype=torch.complex64 if self.dtype == torch.float32 else torch.complex128)
         
-        return quantum_state
+        # Return only the real part for compatibility with neural networks
+        return quantum_state.real
 
     def create_attention_parameters(self, batch_size: int, seq_len: int) -> Dict[str, torch.Tensor]:
         """Create attention mechanism parameters.

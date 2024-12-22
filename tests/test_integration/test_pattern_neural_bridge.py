@@ -8,6 +8,8 @@ import pytest
 import torch
 import numpy as np
 from typing import Tuple, Dict, Any
+import torch.nn as nn
+import torch.nn.functional as F
 
 from src.neural.attention.pattern.dynamics import PatternDynamics
 from src.core.patterns.pattern_processor import PatternProcessor
@@ -17,7 +19,7 @@ from src.core.flow.neural import NeuralGeometricFlow
 def setup_components():
     """Setup test components."""
     hidden_dim = 64
-    manifold_dim = 32
+    manifold_dim = 64
     
     dynamics = PatternDynamics(hidden_dim=hidden_dim)
     processor = PatternProcessor(
@@ -121,3 +123,109 @@ def test_gradient_computation(setup_components):
     assert linearized.shape == expected_shape, "Should preserve total size"
     assert not torch.allclose(linearized, pattern.view(batch_size, -1).unsqueeze(-1)), "Should modify pattern"
     assert torch.isfinite(linearized).all(), "Should be numerically stable"
+
+def project_to_manifold(x: torch.Tensor, manifold_dim: int) -> torch.Tensor:
+    """Project input tensor to manifold dimension.
+    
+    Args:
+        x: Input tensor of shape (batch_size, *)
+        manifold_dim: Target manifold dimension
+        
+    Returns:
+        Projected tensor of shape (batch_size, manifold_dim)
+    """
+    batch_size = x.size(0)
+    x_flat = x.view(batch_size, -1)
+    
+    # Project to half the manifold dimension since we'll double it for complex numbers
+    projection = nn.Linear(x_flat.size(1), manifold_dim // 2, dtype=x.dtype, device=x.device)
+    projected = projection(x_flat)
+    
+    # Make it complex by adding zeros for imaginary part
+    projected = torch.cat([projected, torch.zeros_like(projected)], dim=-1)
+    
+    # Ensure output is normalized
+    return F.normalize(projected, p=2, dim=-1)
+
+def test_geometric_attention_integration(setup_components):
+    """Test integration with geometric attention."""
+    dynamics, processor, flow = setup_components
+    
+    # Create test input
+    grid_size = dynamics.size
+    x = torch.randn(4, dynamics.dim, grid_size, grid_size)
+    
+    # Project to manifold dimension
+    x_projected = project_to_manifold(x, flow.manifold_dim)
+    
+    # Compute metric and connection
+    metric = flow.compute_metric(x_projected)
+    connection = flow.compute_connection(metric, x_projected)
+    
+    # Verify shapes
+    assert metric.shape == (x.size(0), flow.manifold_dim, flow.manifold_dim)
+    assert connection.shape == (x.size(0), flow.manifold_dim, flow.manifold_dim, flow.manifold_dim)
+
+def test_pattern_manipulation(setup_components):
+    """Test pattern manipulation operations.
+    
+    This test verifies:
+    1. Pattern evolution
+    2. Pattern transformation
+    3. Pattern structure preservation
+    """
+    dynamics, processor, _ = setup_components
+    
+    # Create test pattern
+    grid_size = dynamics.size
+    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size)
+    
+    # Get pattern evolution
+    results = dynamics(pattern, return_patterns=True)
+    patterns = results["patterns"]
+    assert len(patterns) > 0, "Should produce pattern evolution"
+    
+    # Transform through dynamics
+    next_state = dynamics.compute_next_state(pattern)
+    assert next_state.shape == pattern.shape, "Should preserve shape under transformation"
+    assert not torch.allclose(next_state, pattern), "Should modify pattern content"
+    
+    # Verify pattern structure preservation
+    next_results = dynamics(next_state, return_patterns=True)
+    assert torch.allclose(
+        results["pattern_scores"].norm(),
+        next_results["pattern_scores"].norm(),
+        atol=1e-5
+    ), "Should preserve pattern structure"
+
+def test_training_integration(setup_components):
+    """Test integration with training pipeline."""
+    dynamics, processor, flow = setup_components
+    
+    # Create test batch
+    grid_size = dynamics.size
+    batch = torch.randn(4, dynamics.dim, grid_size, grid_size)
+    
+    # Forward pass through components
+    results = dynamics(batch, return_patterns=True)
+    patterns = results["patterns"]
+    
+    # Project to manifold dimension
+    batch_projected = project_to_manifold(batch, flow.manifold_dim)
+    
+    # Compute geometric quantities
+    metric = flow.compute_metric(batch_projected)
+    connection = flow.compute_connection(metric, batch_projected)
+    
+    # Verify shapes
+    assert metric.shape == (batch.size(0), flow.manifold_dim, flow.manifold_dim)
+    assert connection.shape == (batch.size(0), flow.manifold_dim, flow.manifold_dim, flow.manifold_dim)
+    
+    # Compute loss and check gradients
+    loss = torch.sum(torch.stack([torch.norm(pattern) for pattern in patterns]))
+    loss.backward()
+    
+    # Verify gradient flow
+    for param in flow.parameters():
+        assert param.grad is not None
+        assert not torch.isnan(param.grad).any()

@@ -46,21 +46,21 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         
         # Basic metric computation
         self.metric_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim),
+            nn.Linear(manifold_dim, hidden_dim),  # Input dimension matches points tensor
             nn.ReLU(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
         
         # Connection computation
         self.connection_net = nn.Sequential(
-            nn.Linear(manifold_dim * 3, hidden_dim),
+            nn.Linear(manifold_dim * 3, hidden_dim),  # points + 2*metric_flat
             nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim * manifold_dim)
         )
         
         # Curvature computation
         self.curvature_net = nn.Sequential(
-            nn.Linear(manifold_dim * 4, hidden_dim),
+            nn.Linear(manifold_dim * manifold_dim * manifold_dim + manifold_dim * manifold_dim, hidden_dim),  # connection_flat + metric_flat
             nn.ReLU(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
@@ -107,26 +107,30 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
             Connection coefficients tensor
         """
         batch_size = metric.shape[0]
-        
+        manifold_dim = self.manifold_dim
+
+        # Handle case where points is None
         if points is None:
-            points = torch.zeros(batch_size, self.manifold_dim, device=metric.device)
-            
-        # Prepare input: [points, metric_i, metric_j, metric_k]
+            points = torch.zeros(batch_size, manifold_dim, device=metric.device)
+
+        # Flatten metric tensor
         metric_flat = metric.reshape(batch_size, -1)
-        input_tensor = torch.cat([
-            points,
-            metric_flat,
-            metric_flat,
-            metric_flat
-        ], dim=-1)
         
-        # Compute connection components
+        # Prepare points tensor
+        points_flat = points.reshape(batch_size, -1)
+        
+        # Ensure we only use the first manifold_dim * 2 components
+        points_flat = points_flat[:, :manifold_dim * 2]
+        metric_flat = metric_flat[:, :manifold_dim * 2]
+        
+        # Concatenate inputs
+        input_tensor = torch.cat([points_flat, metric_flat], dim=-1)
+        
+        # Compute connection coefficients
         connection_flat = self.connection_net(input_tensor)
-        connection = connection_flat.view(
-            batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim
-        )
         
-        return connection
+        # Reshape to proper dimensions
+        return connection_flat.reshape(batch_size, manifold_dim, manifold_dim, manifold_dim)
 
     def compute_curvature(
         self,

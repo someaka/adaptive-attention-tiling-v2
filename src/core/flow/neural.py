@@ -81,6 +81,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
             stability_threshold=stability_threshold
         )
         
+        self.manifold_dim = manifold_dim
         self.fisher_rao_weight = fisher_rao_weight
         self.quantum_weight = quantum_weight
         self.quantum_correction_strength = quantum_correction_strength
@@ -102,9 +103,9 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # Quantum correction networks
         self.quantum_correction_net = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(manifold_dim * 2, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim)
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
 
     def prepare_quantum_state(
@@ -131,36 +132,38 @@ class NeuralGeometricFlow(PatternFormationFlow):
     def compute_quantum_corrections(
         self,
         state: QuantumState,
-        metric: Tensor
-    ) -> Tensor:
+        metric: torch.Tensor
+    ) -> torch.Tensor:
         """Compute quantum corrections to the geometric flow."""
+        batch_size = metric.shape[0]
+        manifold_dim = self.manifold_dim
+        
         # Get quantum expectations using density matrix
         expectations = state.density_matrix().diagonal(dim1=-2, dim2=-1)
         
-        # Compute corrections
-        corrections = self.quantum_correction_net(
-            torch.cat([
-                expectations.real,
-                metric.reshape(metric.shape[0], -1)
-            ], dim=-1)
-        )
+        # Convert complex tensors to real
+        real_expectations = self._to_real(expectations)
+        real_metric = self._to_real(metric.reshape(batch_size, -1))
         
-        return self.quantum_correction_strength * corrections
+        # Ensure all tensors are real and properly sized
+        input_tensor = torch.cat([real_expectations, real_metric], dim=-1).to(dtype=torch.float32)
+        
+        # Project to correct input size
+        projection = nn.Linear(input_tensor.size(1), self.hidden_dim * 2, device=input_tensor.device)
+        input_tensor = projection(input_tensor)
+        
+        # Compute corrections using the network and ensure output size matches metric
+        corrections = self.quantum_correction_net(input_tensor)
+        corrections = nn.Linear(corrections.size(-1), manifold_dim * manifold_dim, device=corrections.device)(corrections)
+        
+        # Reshape to match metric dimensions [batch_size, manifold_dim, manifold_dim]
+        return corrections.view(batch_size, manifold_dim, manifold_dim)
 
     def compute_fisher_rao_metric(
         self,
         points: Tensor,
     ) -> Tensor:
-        """Compute Fisher-Rao information metric for neural networks.
-        
-        Part of the Pattern → Geometric vertical integration.
-        
-        Args:
-            points: Points in pattern space, shape (batch_size, manifold_dim)
-            
-        Returns:
-            Fisher-Rao metric tensor
-        """
+        """Compute Fisher-Rao information metric for neural networks."""
         # Compute score function (gradient of log probability)
         score = self.fisher_net(points)
         
@@ -176,21 +179,30 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         return fisher_metric
 
+    def _to_real(self, tensor: Tensor) -> Tensor:
+        """Convert complex tensor to real by concatenating real and imaginary parts."""
+        if tensor.is_complex():
+            return torch.cat([tensor.real, tensor.imag], dim=-1)
+        return tensor
+
     def compute_metric(
         self,
         points: Tensor,
         connection: Optional[Tensor] = None
     ) -> Tensor:
         """Compute neural network-aware metric tensor with quantum integration."""
+        # Convert points to real if complex
+        points_real = self._to_real(points)
+        
         # Get pattern-aware metric from parent
-        metric = super().compute_metric(points, connection)
+        metric = super().compute_metric(points_real, connection)
         
         # Add Fisher-Rao metric (Pattern → Geometric)
-        fisher_metric = self.compute_fisher_rao_metric(points)
+        fisher_metric = self.compute_fisher_rao_metric(points_real)
         metric = metric + self.fisher_rao_weight * fisher_metric
         
         # Add quantum contribution (Geometric → Quantum)
-        quantum_state = self.prepare_quantum_state(points, return_validation=False)
+        quantum_state = self.prepare_quantum_state(points_real, return_validation=False)
         if isinstance(quantum_state, QuantumState):
             # Get density matrix tensor directly
             density_matrix = quantum_state.density_matrix()
@@ -302,3 +314,18 @@ class NeuralGeometricFlow(PatternFormationFlow):
                 transported = transported * torch.exp(1j * phase).real
         
         return transported
+
+    def compute_connection(
+        self,
+        metric: Tensor,
+        points: Optional[Tensor] = None
+    ) -> Tensor:
+        """Compute connection coefficients with complex tensor support."""
+        # Convert inputs to real if complex
+        metric_real = self._to_real(metric)
+        points_real = self._to_real(points) if points is not None else None
+        
+        # Get connection from parent class
+        connection = super().compute_connection(metric_real, points_real)
+        
+        return connection

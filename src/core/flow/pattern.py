@@ -238,14 +238,24 @@ class PatternFormationFlow(BaseGeometricFlow):
         if points is not None:
             # Add diffusion contribution
             batch_size = points.shape[0]
+            manifold_dim = self.manifold_dim
+            
+            # Reshape points for diffusion calculation
+            points_reshaped = points.reshape(batch_size, manifold_dim, -1)
+            
+            # Compute Laplacian
             laplacian = (
-                2 * points -
-                points.roll(1, dims=-1) -
-                points.roll(-1, dims=-1)
+                2 * points_reshaped -
+                points_reshaped.roll(1, dims=-1) -
+                points_reshaped.roll(-1, dims=-1)
             )
-            diffusion = self.diffusion_strength * laplacian.unsqueeze(-1)
+            
+            # Prepare diffusion term with correct dimensions
+            diffusion = self.diffusion_strength * laplacian.unsqueeze(-1).repeat(1, 1, 1, manifold_dim)
+            
+            # Add diffusion term to connection
             connection = connection + diffusion
-        
+            
         return connection
 
     def compute_ricci_tensor(
