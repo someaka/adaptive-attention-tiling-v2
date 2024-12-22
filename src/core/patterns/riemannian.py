@@ -36,6 +36,7 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
     
     Attributes:
         manifold_dim: Dimension of the manifold
+        hidden_dim: Hidden dimension for computations
         device: Computation device
         dtype: Data type for computations
         cache: Cache for intermediate computations
@@ -44,6 +45,7 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
     def __init__(
         self,
         manifold_dim: int,
+        hidden_dim: int,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
@@ -51,13 +53,15 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         
         Args:
             manifold_dim: Dimension of the manifold
-            device: Computation device (defaults to Vulkan)
-            dtype: Data type (defaults to float32)
+            hidden_dim: Hidden dimension for computations
+            device: Computation device (defaults to CPU)
+            dtype: Data type for computations
         """
         super().__init__()
         
         self.manifold_dim = manifold_dim
-        self.device = device or torch.device('vulkan')
+        self.hidden_dim = hidden_dim
+        self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.float32
         
         # Initialize metric as identity plus low-rank perturbation for stability
@@ -625,7 +629,7 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
-        super().__init__(manifold_dim, device, dtype)
+        super().__init__(manifold_dim, pattern_dim, device, dtype)
         self.pattern_dim = pattern_dim
         
     def __call__(self, *args: Any, **kwargs: Any) -> Any:

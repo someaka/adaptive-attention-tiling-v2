@@ -117,7 +117,6 @@ pymongo>=4.5.0
 # System utilities
 psutil>=5.9.0
 memory_profiler>=0.61.0
-vulkan>=1.3.0
 ```
 
 ### Installation
@@ -141,9 +140,8 @@ The project is organized into source code (`src/`) and test (`tests/`) directori
 src/
 ├── core/                  # Core implementation components
 │   ├── attention/        # Geometric attention mechanisms
-│   ├── backends/         # CPU and Vulkan backends
-│   │   ├── cpu/         # CPU-specific optimizations
-│   │   └── vulkan/      # Vulkan compute implementation
+│   ├── backends/         # CPU backend
+│   │   └── cpu/         # CPU-specific optimizations
 │   ├── crystal/         # Crystal structure and scale theory
 │   ├── flow/            # Geometric flow computations
 │   ├── metrics/         # Core metrics and analysis
@@ -172,14 +170,13 @@ src/
 
 tests/
 ├── core/             # Core component tests
-│   ├── attention/   # Attention mechanism tests
+│   ├─�� attention/   # Attention mechanism tests
 │   └── tiling/     # Tiling system tests
 ├── integration/     # Integration tests
 │   └── end_to_end/ # Full system tests
 ├── performance/     # Performance benchmarks
 │   ├── benchmark/  # Benchmark framework
-│   ├── cpu/       # CPU performance tests
-│   └── vulkan/    # Vulkan performance tests
+│   └── cpu/       # CPU performance tests
 ├── test_core/      # Core functionality tests
 │   ├── test_crystal/   # Crystal structure tests
 │   ├── test_patterns/  # Pattern theory tests
@@ -204,7 +201,6 @@ Key test categories:
 
 3. **Performance Tests**: System performance validation
    - CPU optimization
-   - Vulkan compute
    - Memory efficiency
    - Scaling characteristics
 
@@ -241,11 +237,14 @@ Test dependencies are managed to ensure proper execution order:
 ### Performance Optimizations
 - Efficient memory pooling
 - Multi-process/thread support
-- GPU acceleration with Vulkan
+- CPU optimizations
 - Load balancing and distribution
 - Cache-aware computations
 - Coalesced memory access
 - Workgroup optimization
+
+### Note on GPU Support
+This project currently focuses on CPU-based implementations. We do not support Vulkan or other GPU backends at this time.
 
 ### Validation & Metrics
 - Quantum state validation
@@ -260,14 +259,12 @@ Test dependencies are managed to ensure proper execution order:
 
 ### Optimization Goals
 - 2x CPU performance improvement
-- 5x GPU acceleration with Vulkan
 - 50% memory usage reduction
 - <1ms latency for core operations
 
 ### Benchmarking Metrics
 - Memory usage and allocation patterns
 - Computation time for core operations
-- GPU resource utilization
 - Load distribution analysis
 - Pattern formation efficiency
 - Quantum state preparation time
@@ -306,7 +303,6 @@ Test dependencies are managed to ensure proper execution order:
 ### Computational Advances
 - Tensor network methods
 - Quantum algorithms
-- Field theory on GPU
 - Path integral optimization
 - Parallel field computation
 
@@ -326,12 +322,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
 - Performance benchmarks
 - Memory leak detection
 - Validation test suite
-- GPU acceleration tests
 
 ### Benchmarking
 - Core operation latency
 - Memory usage patterns
-- GPU utilization
 - Pattern formation speed
 - Quantum state preparation
 - Validation performance

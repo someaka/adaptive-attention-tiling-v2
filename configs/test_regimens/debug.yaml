@@ -4,7 +4,8 @@ hardware_profile:
   description: "Minimal configuration for debugging"
   target_hardware:
     ram_gb: 4
-    gpu: "none"
+  cpu: "minimal"
+  memory: "minimal"
 
 geometric_tests:
   dimensions: 2     # Absolute minimal dimension

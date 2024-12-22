@@ -11,12 +11,17 @@ This module provides tools for analyzing performance data including:
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+import logging
+import time
+import psutil
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,6 +60,69 @@ class PerformanceAnalyzer:
         self.threshold_regression = threshold_regression
         self.bottlenecks: List[PerformanceBottleneck] = []
         self.regressions: List[RegressionResult] = []
+        self.metrics: Dict[str, Any] = {}
+        self.start_time: float | None = None
+        self.end_time: float | None = None
+
+    def start_analysis(self) -> None:
+        """Start performance analysis."""
+        self.start_time = time.time()
+        self.metrics = {
+            'cpu_percent': psutil.cpu_percent(interval=0.1),
+            'memory_percent': psutil.virtual_memory().percent,
+            'memory_available': psutil.virtual_memory().available,
+            'memory_used': psutil.virtual_memory().used,
+            'start_time': self.start_time
+        }
+
+    def end_analysis(self) -> None:
+        """End performance analysis."""
+        if self.start_time is None:
+            raise RuntimeError("start_analysis() must be called before end_analysis()")
+            
+        self.end_time = time.time()
+        self.metrics.update({
+            'end_time': self.end_time,
+            'duration': self.end_time - self.start_time,
+            'final_cpu_percent': psutil.cpu_percent(interval=0.1),
+            'final_memory_percent': psutil.virtual_memory().percent,
+            'final_memory_available': psutil.virtual_memory().available,
+            'final_memory_used': psutil.virtual_memory().used
+        })
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get collected performance metrics.
+        
+        Returns:
+            Dict of performance metrics
+        """
+        return self.metrics
+
+    def log_metrics(self, level: int = logging.INFO) -> None:
+        """Log performance metrics.
+        
+        Args:
+            level: Logging level
+        """
+        metrics = self.get_metrics()
+        logger.log(level, "Performance Metrics:")
+        for key, value in metrics.items():
+            logger.log(level, f"  {key}: {value}")
+
+    def get_memory_usage(self) -> Mapping[str, int]:
+        """Get current memory usage.
+        
+        Returns:
+            Dict of memory usage statistics
+        """
+        vm = psutil.virtual_memory()
+        return {
+            'total': vm.total,
+            'available': vm.available,
+            'used': vm.used,
+            'free': vm.free,
+            'percent': int(vm.percent)
+        }
 
     def analyze_metrics(self, metrics: Dict[str, Any]) -> List[PerformanceBottleneck]:
         """Analyze performance metrics to detect bottlenecks."""
@@ -81,7 +149,7 @@ class PerformanceAnalyzer:
         # Memory Analysis
         if "memory_usage" in metrics:
             memory_usage = metrics["memory_usage"]
-            total_memory = None  # Vulkan memory info will be handled by the device
+            total_memory = psutil.virtual_memory().total
             if memory_usage and total_memory and memory_usage / total_memory > self.threshold_memory:
                 bottlenecks.append(
                     PerformanceBottleneck(

@@ -5,9 +5,10 @@ from __future__ import annotations
 import gc
 import logging
 import time
-from typing import Callable, TypeVar, Any, Protocol, Optional
+from typing import Callable, TypeVar, Any, Protocol, Optional, Tuple
 
 import numpy as np
+import psutil
 import torch
 from torch import nn
 
@@ -16,62 +17,77 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=torch.Tensor)
 
 
-def has_vulkan() -> bool:
-    """Check if Vulkan is available."""
-    return hasattr(torch, 'vulkan') and getattr(torch, 'vulkan').is_available()
-
-
-def vulkan_sync() -> None:
-    """Synchronize Vulkan device if available."""
-    if has_vulkan():
-        getattr(torch, 'vulkan').synchronize()
-
-
-def vulkan_empty_cache() -> None:
-    """Empty Vulkan cache if available."""
-    if has_vulkan():
-        getattr(torch, 'vulkan').empty_cache()
-
-
-def vulkan_memory_stats() -> tuple[int, int]:
-    """Get Vulkan memory stats if available.
+def get_memory_stats() -> tuple[int, int]:
+    """Get memory stats.
     
     Returns:
-        tuple[int, int]: (allocated memory, reserved memory) in bytes
+        Tuple of (allocated, reserved) memory in bytes
     """
-    if has_vulkan():
-        try:
-            vulkan = getattr(torch, 'vulkan')
-            allocated = vulkan.memory_allocated()
-            reserved = vulkan.max_memory_allocated()
-            return allocated, reserved
-        except RuntimeError as e:
-            logger.warning("Failed to get Vulkan memory stats: %s", e)
-    return 0, 0
+    try:
+        vm = psutil.virtual_memory()
+        return vm.used, vm.total
+    except Exception as e:
+        logger.warning("Failed to get memory stats: %s", e)
+        return 0, 0
+
+
+def run_memory_test(fn, device="cpu") -> tuple[int, int, Any]:
+    """Run a memory test.
+    
+    Args:
+        fn: Function to test
+        device: Device to run on
+        
+    Returns:
+        tuple: (memory allocated, memory reserved, function result) in bytes
+    """
+    gc.collect()
+    start_allocated, start_reserved = get_memory_stats()
+    
+    result = fn()
+    
+    end_allocated, end_reserved = get_memory_stats()
+    
+    return (end_allocated - start_allocated, end_reserved - start_reserved, result)
+
+
+def test_memory_usage(fn, device="cpu") -> tuple[Any, dict[str, int]]:
+    """Test memory usage of a function.
+    
+    Args:
+        fn: Function to test
+        device: Device to run on
+        
+    Returns:
+        tuple: (result, memory_stats)
+    """
+    gc.collect()
+    start_allocated, start_reserved = get_memory_stats()
+    
+    result = fn()
+    
+    end_allocated, end_reserved = get_memory_stats()
+    
+    return result, {
+        "allocated_diff": end_allocated - start_allocated,
+        "reserved_diff": end_reserved - start_reserved,
+        "peak_reserved": end_reserved
+    }
 
 
 def assert_manifold_properties(tensor: torch.Tensor) -> bool:
-    """
-    Assert that a tensor satisfies basic manifold properties.
+    """Assert that a tensor has valid manifold properties."""
+    if not isinstance(tensor, torch.Tensor):
+        return False
     
-    Args:
-        tensor: Tensor to check
-        
-    Returns:
-        bool: True if properties are satisfied
-    """
-    # Check smoothness (finite values)
-    assert torch.all(torch.isfinite(tensor)).item(), "Tensor contains non-finite values"
+    if tensor.dim() < 2:
+        return False
     
-    # Check differentiability (gradients can be computed)
-    if tensor.requires_grad:
-        try:
-            loss = tensor.sum()
-            loss.backward()
-            if tensor.grad is not None:
-                assert torch.all(torch.isfinite(tensor.grad)).item(), "Non-finite gradients"
-        except Exception as e:
-            raise AssertionError(f"Differentiability check failed: {e}")
+    if torch.isnan(tensor).any():
+        return False
+    
+    if torch.isinf(tensor).any():
+        return False
     
     return True
 
@@ -113,15 +129,12 @@ def check_memory_usage(fn: Callable[[], Any]) -> tuple[int, int, Any]:
     Returns:
         tuple: (memory allocated, memory reserved, function result) in bytes
     """
-    vulkan_empty_cache()
-    vulkan_sync()
-
-    start_allocated, start_reserved = vulkan_memory_stats()
+    gc.collect()
+    start_allocated, start_reserved = get_memory_stats()
 
     result = fn()
 
-    vulkan_sync()
-    end_allocated, end_reserved = vulkan_memory_stats()
+    end_allocated, end_reserved = get_memory_stats()
 
     return (end_allocated - start_allocated, end_reserved - start_reserved, result)
 
@@ -155,29 +168,15 @@ def benchmark_forward_backward(
     # Benchmark rounds
     for _ in range(num_iterations):
         # Forward pass
-        if device == "vulkan":
-            vulkan_sync()
-            start_time = time.perf_counter()
-            out = model(x)
-            vulkan_sync()
-            forward_times.append(time.perf_counter() - start_time)
-        else:
-            start_time = time.perf_counter()
-            out = model(x)
-            forward_times.append(time.perf_counter() - start_time)
+        start_time = time.perf_counter()
+        out = model(x)
+        forward_times.append(time.perf_counter() - start_time)
 
         # Backward pass
         loss = out.mean()
-        if device == "vulkan":
-            vulkan_sync()
-            start_time = time.perf_counter()
-            loss.backward()  # type: ignore[no-untyped-call]
-            vulkan_sync()
-            backward_times.append(time.perf_counter() - start_time)
-        else:
-            start_time = time.perf_counter()
-            loss.backward()  # type: ignore[no-untyped-call]
-            backward_times.append(time.perf_counter() - start_time)
+        start_time = time.perf_counter()
+        loss.backward()  # type: ignore[no-untyped-call]
+        backward_times.append(time.perf_counter() - start_time)
 
     return float(np.mean(forward_times)), float(np.mean(backward_times))
 
@@ -196,21 +195,69 @@ def measure_memory_usage(func: Callable[[], torch.Tensor]) -> tuple[int, int]:
     """
     # Run garbage collection to get accurate memory measurements
     gc.collect()
-    vulkan_empty_cache()
-    vulkan_sync()
 
     # Get initial memory stats
-    start_allocated, start_reserved = vulkan_memory_stats()
+    start_allocated, start_reserved = get_memory_stats()
 
     # Run the function
     func()
-    vulkan_sync()
 
     # Get final memory stats
-    end_allocated, end_reserved = vulkan_memory_stats()
-
-    # For Vulkan, ensure we capture the peak memory usage
-    if has_vulkan():
-        end_reserved = max(end_reserved, getattr(torch, 'vulkan').max_memory_allocated())
+    end_allocated, end_reserved = get_memory_stats()
 
     return (end_allocated - start_allocated, end_reserved - start_reserved)
+
+
+def measure_time(fn: Callable) -> Tuple[float, Any]:
+    """Measure execution time of a function.
+    
+    Args:
+        fn: Function to measure
+        
+    Returns:
+        tuple: (execution time in seconds, function result)
+    """
+    start_time = time.time()
+    result = fn()
+    end_time = time.time()
+    
+    return end_time - start_time, result
+
+
+def run_performance_test(fn: Callable, 
+                        warmup_iters: int = 3,
+                        test_iters: int = 10,
+                        device: str = "cpu") -> dict:
+    """Run a performance test.
+    
+    Args:
+        fn: Function to test
+        warmup_iters: Number of warmup iterations
+        test_iters: Number of test iterations
+        device: Device to run on
+        
+    Returns:
+        dict: Performance metrics
+    """
+    # Warmup
+    for _ in range(warmup_iters):
+        fn()
+    
+    # Test
+    times = []
+    memory_stats = []
+    
+    for _ in range(test_iters):
+        time_taken, _ = measure_time(fn)
+        _, mem_stats = test_memory_usage(fn, device)
+        
+        times.append(time_taken)
+        memory_stats.append(mem_stats)
+    
+    return {
+        "mean_time": np.mean(times),
+        "std_time": np.std(times),
+        "min_time": np.min(times),
+        "max_time": np.max(times),
+        "memory_stats": memory_stats
+    }

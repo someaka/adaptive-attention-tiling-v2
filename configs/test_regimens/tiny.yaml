@@ -4,24 +4,20 @@ hardware_profile:
   description: "Configuration for laptops with limited resources"
   target_hardware:
     ram_gb: 16
-    gpu: "integrated"
+    cpu: "minimal"
+    memory: "minimal"
 
 geometric_tests:
-  dimensions: 16  # Reduced from 32
-  num_heads: 4    # Reduced from 8
-  batch_size: 8   # Reduced from 16
-  dtype: "float32"  # Using float32 for speed
-  
-hyperbolic_tests:
-  vector_scales: [0.001, 0.01]  # Reduced test cases
-  test_norms: [0.001, 0.01]
-  precision: "float32"
+  batch_size: 32
+  max_dim: 64
+  num_samples: 500
 
-euclidean_tests:
-  dimensions: 16
-  test_batch_size: 4
+pattern_tests:
+  max_patterns: 64
+  pattern_size: 64
+  num_iterations: 100
 
-parallel_transport:
-  dimensions: 16
-  methods: ["schild", "pole"]
-  test_cases: 2  # Reduced number of test cases 
+performance_tests:
+  warmup_iters: 3
+  test_iters: 10
+  max_batch_size: 64

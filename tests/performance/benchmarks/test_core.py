@@ -13,7 +13,6 @@ import time
 from typing import Tuple, cast
 
 from src.core.attention import AttentionCompute
-from src.core.benchmarks import BenchmarkMetrics
 from src.core.flow import PatternFormationFlow
 from src.core.patterns import PatternEvolution
 from src.core.patterns.riemannian import PatternRiemannianStructure

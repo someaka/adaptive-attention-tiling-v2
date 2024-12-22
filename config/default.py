@@ -6,6 +6,6 @@ from typing import Literal
 class Config:
     """Default configuration."""
 
-    backend: Literal["cpu", "vulkan"] = "cpu"
+    backend: Literal["cpu"] = "cpu"
     tile_size: int = 1024
     precision: Literal["float32", "float16"] = "float32"

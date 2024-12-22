@@ -69,7 +69,7 @@ class OperadicStructureHandler(nn.Module):
         self.preserve_symplectic = preserve_symplectic
         self.preserve_metric = preserve_metric
         
-        self.device = device or torch.device('vulkan')
+        self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.float32
         
         # Initialize operadic structure

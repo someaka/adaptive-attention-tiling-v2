@@ -87,7 +87,7 @@ class PatternProcessor(nn.Module):
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
-        self.device = device if device is not None else torch.device('vulkan')
+        self.device = device if device is not None else torch.device('cpu')
         self.dtype = dtype if dtype is not None else torch.float32
         
         # Initialize quantum bridge

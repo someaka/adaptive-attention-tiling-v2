@@ -152,7 +152,7 @@ def test_computation_scaling():
     Benchmarks:
     - Time complexity with sequence length
     - Parallel processing efficiency
-    - GPU utilization patterns
+    - CPU utilization patterns
     """
     pass
 
@@ -206,17 +206,16 @@ def test_resource_management():
 - Adaptation overhead
 
 ### Hardware Configurations
-- Single GPU
-- Multi-GPU
-- CPU-only
+- Single-threaded
+- Multi-threaded
+- CPU optimizations
 - Mixed precision
 
 ## Test Environment Setup
 
 ### Prerequisites
-- PyTorch with Vulkan support
 - Required memory: 16GB+ RAM
-- GPU: 8GB+ VRAM
+- CPU: 4+ cores
 - Python 3.9+
 
 ### Configuration
@@ -241,8 +240,8 @@ pytest tests/performance/
 pytest tests/performance/ --profile
 
 # Run with specific hardware configuration
-pytest tests/ --gpu  # GPU tests
-pytest tests/ --cpu  # CPU-only tests
+pytest tests/ --threads=1  # Single-threaded
+pytest tests/ --threads=4  # Multi-threaded
 ```
 
 ### CI/CD Integration
@@ -250,3 +249,18 @@ pytest tests/ --cpu  # CPU-only tests
 - Performance regression detection
 - Resource monitoring
 - Test coverage reporting
+
+## Hardware Requirements
+
+### Minimum
+- CPU: 4+ cores
+- RAM: 8GB+
+
+### Recommended
+- CPU: 8+ cores
+- RAM: 16GB+
+
+### Dependencies
+- Python 3.8+
+- PyTorch 2.0+
+- NumPy 1.24+

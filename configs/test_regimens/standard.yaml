@@ -4,24 +4,20 @@ hardware_profile:
   description: "Configuration for workstations with decent resources"
   target_hardware:
     ram_gb: 32
-    gpu: "dedicated"
+    cpu: "standard"
+    memory: "standard"
 
 geometric_tests:
-  dimensions: 32
-  num_heads: 8
-  batch_size: 16
-  dtype: "float64"  # Using double precision for accuracy
-  
-hyperbolic_tests:
-  vector_scales: [0.001, 0.01, 0.1]
-  test_norms: [0.001, 0.01, 0.1]
-  precision: "float64"
+  batch_size: 128
+  max_dim: 256
+  num_samples: 1000
 
-euclidean_tests:
-  dimensions: 32
-  test_batch_size: 16
+pattern_tests:
+  max_patterns: 256
+  pattern_size: 128
+  num_iterations: 200
 
-parallel_transport:
-  dimensions: 32
-  methods: ["schild", "pole"]
-  test_cases: 10 
+performance_tests:
+  warmup_iters: 5
+  test_iters: 20
+  max_batch_size: 256
