@@ -60,26 +60,22 @@ class PatternProcessor(nn.Module):
     
     def __init__(
         self,
-        manifold_dim: int,
-        hidden_dim: int,
+        manifold_dim: int = 3,
+        hidden_dim: int = 16,
         motive_rank: int = 4,
         num_primes: int = 8,
-        num_heads: int = 8,
-        dropout: float = 0.1,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None
+        num_heads: int = 4,
+        dropout: float = 0.1
     ):
         """Initialize pattern processor.
         
         Args:
             manifold_dim: Dimension of base manifold
-            hidden_dim: Hidden dimension for computations
-            motive_rank: Rank of motivic structure
-            num_primes: Number of primes for arithmetic
+            hidden_dim: Hidden layer dimension
+            motive_rank: Rank of motive representation
+            num_primes: Number of prime factors
             num_heads: Number of attention heads
-            dropout: Dropout rate
-            device: Computation device
-            dtype: Data type for computations
+            dropout: Dropout probability
         """
         super().__init__()
         
@@ -87,31 +83,8 @@ class PatternProcessor(nn.Module):
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
-        self.device = device if device is not None else torch.device('cpu')
-        self.dtype = dtype if dtype is not None else torch.float32
         
-        # Initialize quantum bridge
-        self.quantum_bridge = NeuralQuantumBridge(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout
-        )
-        
-        # Initialize pattern flow
-        self.flow = PatternHeatFlow(
-            manifold_dim=manifold_dim,
-            hidden_dim=hidden_dim,
-            dt=0.1,
-            stability_threshold=1e-6,
-            fisher_rao_weight=1.0,
-            quantum_weight=1.0,
-            stress_energy_weight=1.0,
-            heat_diffusion_weight=1.0,
-            num_heads=num_heads,
-            dropout=dropout
-        )
-        
-        # Initialize pattern bundle
+        # Initialize pattern bundle with matching dimensions
         self.pattern_bundle = PatternFiberBundle(
             base_dim=manifold_dim,
             fiber_dim=hidden_dim,
@@ -125,15 +98,12 @@ class PatternProcessor(nn.Module):
             manifold_dim=manifold_dim,
             hidden_dim=hidden_dim,
             motive_rank=motive_rank,
-            num_primes=num_primes,
-            device=self.device,
-            dtype=self.dtype
+            num_primes=num_primes
         )
         
         # Initialize pattern dynamics
         self.pattern_dynamics = PatternDynamics(
-            dt=0.1,
-            device=self.device
+            dt=0.1
         )
         
         # Initialize symplectic structure
@@ -153,8 +123,7 @@ class PatternProcessor(nn.Module):
         self.pattern_evolution = PatternEvolution(
             framework=PatternRiemannianStructure(
                 manifold_dim=manifold_dim,
-                pattern_dim=hidden_dim,
-                device=self.device
+                pattern_dim=hidden_dim
             ),
             learning_rate=0.01,
             momentum=0.9,
@@ -188,32 +157,93 @@ class PatternProcessor(nn.Module):
         # Initialize networks
         self._initialize_networks()
         
+        # Initialize quantum bridge
+        self.quantum_bridge = NeuralQuantumBridge(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout
+        )
+        
+        # Initialize pattern flow
+        self.flow = PatternHeatFlow(
+            manifold_dim=manifold_dim,
+            hidden_dim=hidden_dim,
+            dt=0.1,
+            stability_threshold=1e-6,
+            fisher_rao_weight=1.0,
+            quantum_weight=1.0,
+            stress_energy_weight=1.0,
+            heat_diffusion_weight=1.0,
+            num_heads=num_heads,
+            dropout=dropout
+        )
+        
     def _initialize_networks(self):
         """Initialize neural networks for pattern processing."""
+        # Pattern network: manifold_dim -> hidden_dim -> hidden_dim
         self.pattern_net = nn.Sequential(
             nn.Linear(self.manifold_dim, self.hidden_dim),
             nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim)
+        )
+        
+        # Flow network: hidden_dim -> hidden_dim -> manifold_dim
+        self.flow_net = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.SiLU(),
             nn.Linear(self.hidden_dim, self.manifold_dim)
         )
         
-        self.flow_net = nn.Sequential(
+        # Quantum network: manifold_dim -> hidden_dim -> manifold_dim
+        self.quantum_net = nn.Sequential(
             nn.Linear(self.manifold_dim, self.hidden_dim),
             nn.SiLU(),
             nn.Linear(self.hidden_dim, self.manifold_dim)
         )
         
-        self.quantum_net = nn.Sequential(
-            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
-            nn.Tanh(),
-            nn.Linear(self.hidden_dim, self.manifold_dim)
-        )
+        # Projection layers for dimension matching
+        self.input_proj = nn.Linear(self.manifold_dim, self.hidden_dim)
+        self.output_proj = nn.Linear(self.hidden_dim, self.manifold_dim)
         
+        # Initialize weights
+        for module in [self.pattern_net, self.flow_net, self.quantum_net]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.orthogonal_(layer.weight)
+                    nn.init.zeros_(layer.bias)
+        
+        # Initialize projection layers
+        nn.init.orthogonal_(self.input_proj.weight)
+        nn.init.zeros_(self.input_proj.bias)
+        nn.init.orthogonal_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+        
+    def _project_dimensions(self, x: torch.Tensor, target_dim: int) -> torch.Tensor:
+        """Project tensor to target dimension.
+        
+        Args:
+            x: Input tensor
+            target_dim: Target dimension
+            
+        Returns:
+            Projected tensor
+        """
+        if x.shape[-1] == target_dim:
+            return x
+            
+        if x.shape[-1] < target_dim:
+            # Project up using learned projection
+            return self.input_proj(x)
+        else:
+            # Project down using learned projection
+            return self.output_proj(x)
+            
     def process_pattern(
         self,
-        pattern: Tensor,
+        pattern: torch.Tensor,
         with_quantum: bool = True,
         return_intermediates: bool = False
-    ) -> Union[Tensor, Tuple[Tensor, Dict[str, Any]]]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Process pattern through geometric-quantum pipeline.
         
         Args:
@@ -224,6 +254,9 @@ class PatternProcessor(nn.Module):
         Returns:
             Processed pattern tensor or tuple of (tensor, intermediates)
         """
+        # Project pattern to hidden dimension
+        pattern = self._project_dimensions(pattern, self.hidden_dim)
+        
         # Get pattern bundle structure
         bundle_point = self.pattern_bundle.bundle_projection(pattern)
         
@@ -257,6 +290,9 @@ class PatternProcessor(nn.Module):
         
         # Get pattern formation
         formation = self.pattern_formation.evolve(dynamics, time_steps=1)
+        
+        # Project back to manifold dimension
+        formation = self._project_dimensions(formation, self.manifold_dim)
         
         if not return_intermediates:
             return formation

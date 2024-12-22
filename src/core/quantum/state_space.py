@@ -147,16 +147,16 @@ class HilbertSpace:
         entropy = -torch.sum(eigenvals * torch.log(eigenvals))  # Using natural log
         return entropy.to(torch.float64)
 
-    def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> Union[QuantumState, List[QuantumState]]:
+    def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> QuantumState:
         """Evolve quantum state under Hamiltonian.
         
         Args:
             initial_state: Initial quantum state
             hamiltonian: Hamiltonian operator
-            t: Evolution time or vector of times
+            t: Evolution time
             
         Returns:
-            Evolved quantum state(s)
+            Evolved quantum state
         """
         # Ensure complex types
         hamiltonian = hamiltonian.to(torch.complex128)
@@ -165,27 +165,15 @@ class HilbertSpace:
         if len(state_vector.shape) == 1:
             state_vector = state_vector.unsqueeze(0)
             
-        if isinstance(t, (float, int)):
-            # Single time evolution
-            evolution_operator = torch.matrix_exp(-1j * hamiltonian * t)
-            evolved = torch.matmul(state_vector, evolution_operator.T)
-            return QuantumState(
-                amplitudes=evolved.squeeze(),
-                basis_labels=initial_state.basis_labels,
-                phase=initial_state.phase
-            )
-        else:
-            # Multiple time evolution
-            states = []
-            for time in t:
-                evolution_operator = torch.matrix_exp(-1j * hamiltonian * time)
-                evolved = torch.matmul(state_vector, evolution_operator.T)
-                states.append(QuantumState(
-                    amplitudes=evolved.squeeze(),
-                    basis_labels=initial_state.basis_labels,
-                    phase=initial_state.phase
-                ))
-            return states
+        # Single time evolution
+        evolution_operator = torch.matrix_exp(-1j * hamiltonian * t)
+        evolved = torch.matmul(state_vector, evolution_operator.T)
+        
+        return QuantumState(
+            amplitudes=evolved.squeeze(),
+            basis_labels=initial_state.basis_labels,
+            phase=initial_state.phase
+        )
 
     def measure_observable(self, state: QuantumState, observable: torch.Tensor) -> torch.Tensor:
         """Measure quantum observable on state.
@@ -757,3 +745,81 @@ class HilbertSpace:
         )
         
         return entropy
+
+    def apply_unitary(self, state: QuantumState, unitary: torch.Tensor) -> QuantumState:
+        """Apply unitary operation to quantum state.
+        
+        Args:
+            state: Input quantum state
+            unitary: Unitary operator to apply
+            
+        Returns:
+            Transformed quantum state
+        """
+        # Ensure complex types
+        state_vector = state.amplitudes.to(torch.complex128)
+        unitary = unitary.to(torch.complex128)
+        
+        # Verify unitarity
+        if not torch.allclose(
+            torch.matmul(unitary, unitary.conj().T),
+            torch.eye(unitary.shape[0], dtype=torch.complex128),
+            atol=1e-6
+        ):
+            raise ValueError("Operator is not unitary")
+            
+        # Apply unitary transformation
+        if len(state_vector.shape) == 1:
+            state_vector = state_vector.unsqueeze(0)
+        transformed = torch.matmul(state_vector, unitary.T)
+        
+        return QuantumState(
+            amplitudes=transformed.squeeze(),
+            basis_labels=state.basis_labels,
+            phase=state.phase
+        )
+
+    def measure_state(
+        self,
+        state: QuantumState,
+        measurement: torch.Tensor
+    ) -> Tuple[int, QuantumState]:
+        """Perform projective measurement on quantum state.
+        
+        Args:
+            state: Quantum state to measure
+            measurement: Measurement operator (projector)
+            
+        Returns:
+            Tuple of (measurement result, post-measurement state)
+        """
+        # Ensure complex types
+        state_vector = state.amplitudes.to(torch.complex128)
+        measurement = measurement.to(torch.complex128)
+        
+        # Compute measurement probabilities
+        if len(state_vector.shape) == 1:
+            state_vector = state_vector.unsqueeze(0)
+            
+        probabilities = []
+        for i in range(measurement.shape[0]):
+            projector = measurement[i:i+1].T @ measurement[i:i+1].conj()
+            prob = torch.abs(
+                torch.einsum('bi,ij,bj->b', state_vector.conj(), projector, state_vector)
+            ).real
+            probabilities.append(prob)
+            
+        probabilities = torch.cat(probabilities)
+        
+        # Sample measurement result
+        result = int(torch.multinomial(probabilities, 1).item())
+        
+        # Compute post-measurement state
+        post_state = measurement[result:result+1].T
+        post_state = post_state / torch.sqrt(probabilities[result])
+        
+        return result, QuantumState(
+            amplitudes=post_state.squeeze(),
+            basis_labels=state.basis_labels,
+            phase=state.phase
+        )

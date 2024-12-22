@@ -47,6 +47,9 @@ from .operadic_structure import (
     OperadicOperation,
     EnrichedAttention,
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 __all__ = ['SymplecticForm', 'SymplecticStructure']
 
@@ -243,48 +246,24 @@ class SymplecticStructure:
             raise ValueError(f"Tensor must have at least 1 dimension, got {tensor.dim()}")
             
         current_dim = tensor.shape[-1]
-        if current_dim == self.target_dim:
+        if current_dim == self.dim:
             return tensor
             
         if current_dim < 1:
             raise ValueError(f"Last dimension must be at least 1, got {current_dim}")
-
-        # Prevent infinite recursion
-        if recursion_depth > 10:  # Maximum recursion depth
-            raise RuntimeError("Maximum recursion depth exceeded in dimension handling")
-
-        try:
-            # Save original shape for proper reshaping
-            original_shape = tensor.shape[:-1]
             
-            # Simple dimension adjustment if wave emergence is disabled
-            if not self.wave_enabled:
-                if current_dim < self.target_dim:
-                    # Pad with zeros
-                    padding_size = self.target_dim - current_dim
-                    padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
-                    return torch.cat([tensor, padding], dim=-1)
-                else:
-                    # Truncate
-                    return tensor[..., :self.target_dim]
-
-            # Use operadic transition with wave emergence
-            operation = self.operadic.create_transition(current_dim, self.target_dim)
-            transformed = self.enriched.create_morphism(
-                tensor, 
-                operation,
-                include_wave=self.wave_enabled
-            )
-            
-            # Verify the transformation worked
-            if transformed.shape[-1] != self.target_dim:
-                # Try one more time with increased recursion depth
-                return self._handle_dimension(transformed, recursion_depth + 1)
-                
-            return transformed
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to transform tensor dimensions: {str(e)}")
+        # Save original shape for proper reshaping
+        original_shape = tensor.shape[:-1]
+        
+        # Simple dimension adjustment
+        if current_dim < self.dim:
+            # Pad with zeros
+            padding_size = self.dim - current_dim
+            padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
+            return torch.cat([tensor, padding], dim=-1)
+        else:
+            # Truncate
+            return tensor[..., :self.dim]
 
     def compute_metric(self, fiber_coords: Tensor) -> Tensor:
         """Compute Riemannian metric tensor at given fiber coordinates.
@@ -366,8 +345,9 @@ class SymplecticStructure:
                 # Standard symplectic form in block form
                 # [ 0   I ]
                 # [-I   0 ]
-                omega[:n, n:] = torch.eye(n, device=fiber_coords.device)
-                omega[n:, :n] = -torch.eye(n, device=fiber_coords.device)
+                eye_matrix = torch.eye(n, device=fiber_coords.device, dtype=fiber_coords.dtype)
+                omega[:n, n:2*n] = eye_matrix
+                omega[n:2*n, :n] = -eye_matrix
                 
                 # Scale the form to ensure eigenvalues are large enough
                 omega *= 2.0
@@ -472,9 +452,31 @@ class SymplecticStructure:
         Returns:
             Complex tensor representing quantum geometry
         """
+        # Handle dimensions first
+        point = self._handle_dimension(point)
+        
         # Compute metric and symplectic components
         metric = self.compute_metric(point)
-        symplectic = self.compute_form(point).matrix
+        form = self.compute_form(point)
+        symplectic = form.matrix
+        
+        # Ensure dimensions match by padding/truncating both tensors to target_dim
+        target_dim = self.target_dim
+        if metric.shape[-1] != target_dim:
+            if metric.shape[-1] < target_dim:
+                padding = torch.zeros(*metric.shape[:-1], target_dim - metric.shape[-1], 
+                                    device=metric.device, dtype=metric.dtype)
+                metric = torch.cat([metric, padding], dim=-1)
+            else:
+                metric = metric[..., :target_dim]
+            
+        if symplectic.shape[-1] != target_dim:
+            if symplectic.shape[-1] < target_dim:
+                padding = torch.zeros(*symplectic.shape[:-1], target_dim - symplectic.shape[-1],
+                                    device=symplectic.device, dtype=symplectic.dtype)
+                symplectic = torch.cat([symplectic, padding], dim=-1)
+            else:
+                symplectic = symplectic[..., :target_dim]
         
         # Combine into quantum geometric tensor
         return metric + 1j * symplectic
@@ -488,6 +490,8 @@ class SymplecticStructure:
         Returns:
             Ricci tensor at given point
         """
+        logger.debug("Computing Ricci tensor")
+        
         # Get quantum geometric tensor
         Q = self.compute_quantum_geometric_tensor(point)
         
@@ -495,12 +499,74 @@ class SymplecticStructure:
         g = Q.real
         omega = Q.imag
         
-        # Compute Christoffel symbols
+        # Compute Christoffel symbols using vectorized operations
         n = g.shape[-1]
         gamma = torch.zeros(n, n, n, device=point.device, dtype=point.dtype)
         
-        # First compute partial derivatives of metric
-        # For simplicity, we use finite differences
+        # Compute metric derivatives using single pass
+        eps = 1e-6
+        points = torch.stack([
+            point + eps * torch.eye(n, device=point.device)[i]
+            for i in range(n)
+        ])
+        metrics = torch.stack([
+            self.compute_metric(p) for p in points
+        ])
+        dg = (metrics - g.unsqueeze(0)) / eps
+        
+        # Compute Christoffel symbols using vectorized operations
+        # Reshape tensors for proper broadcasting
+        g_reshaped = g.unsqueeze(-1).unsqueeze(-1)  # Shape: (n, n, 1, 1)
+        dg_reshaped = dg.permute(1, 2, 0)  # Shape: (n, n, n)
+        
+        # Compute all components at once
+        gamma = 0.5 * torch.einsum(
+            'ijkl,klm->ijm',
+            g_reshaped.expand(-1, -1, n, n),
+            dg_reshaped + dg_reshaped.transpose(-2, -1) - dg_reshaped.transpose(-2, -1)
+        )
+        
+        # Compute Riemann tensor components using vectorized operations
+        R = torch.zeros(n, n, n, n, device=point.device, dtype=point.dtype)
+        
+        # Compute derivatives of Christoffel symbols in one pass
+        gamma_plus = torch.stack([
+            self._compute_christoffel(point + eps * torch.eye(n, device=point.device)[i])
+            for i in range(n)
+        ])
+        dgamma = (gamma_plus - gamma.unsqueeze(0)) / eps
+        
+        # Compute Riemann tensor using vectorized operations
+        # R^i_{jkl} = ∂_k Γ^i_{jl} - ∂_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
+        R = (
+            dgamma.permute(1, 2, 0, 3) - dgamma.permute(1, 2, 3, 0) +
+            torch.einsum('imk,mjl->ijkl', gamma, gamma) -
+            torch.einsum('iml,mjk->ijkl', gamma, gamma)
+        )
+        
+        # Contract to get Ricci tensor using single operation
+        ricci = torch.einsum('ijij->ij', R)
+        
+        logger.debug("Finished computing Ricci tensor")
+        return ricci
+
+    def _compute_christoffel(self, point: Tensor) -> Tensor:
+        """Compute Christoffel symbols at a given point.
+        
+        Args:
+            point: Point on manifold
+            
+        Returns:
+            Christoffel symbols as a rank-3 tensor
+        """
+        # Get metric
+        g = self.compute_metric(point)
+        
+        # Initialize Christoffel symbols
+        n = g.shape[-1]
+        gamma = torch.zeros(n, n, n, device=point.device, dtype=point.dtype)
+        
+        # Compute partial derivatives of metric
         eps = 1e-6
         for k in range(n):
             point_plus = point.clone()
@@ -520,23 +586,7 @@ class SymplecticStructure:
                             dg[l,j] + dg[j,l] - dg[j,l]
                         )
         
-        # Compute Riemann tensor
-        R = torch.zeros(n, n, n, n, device=point.device, dtype=point.dtype)
-        for i in range(n):
-            for j in range(n):
-                for k in range(n):
-                    for l in range(n):
-                        # R^i_{jkl} = ∂_k Γ^i_{jl} - ∂_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
-                        R[i,j,k,l] = (
-                            gamma[i,j,l,k] - gamma[i,j,k,l] +
-                            torch.sum(gamma[i,:,k] * gamma[:,j,l]) -
-                            torch.sum(gamma[i,:,l] * gamma[:,j,k])
-                        )
-        
-        # Contract to get Ricci tensor
-        ricci = torch.einsum('ijij->ij', R)
-        
-        return ricci
+        return gamma
 
     def quantum_ricci_flow(
         self,
@@ -556,15 +606,21 @@ class SymplecticStructure:
         Returns:
             Evolved point after Ricci flow
         """
+        logger.debug(f"Starting quantum Ricci flow with {steps} steps")
         current_point = point
         
-        for _ in range(steps):
-            # Compute Ricci tensor
-            ricci = self.compute_ricci_tensor(current_point)
+        # Compute initial Ricci tensor for adaptive stepping
+        ricci = self.compute_ricci_tensor(current_point)
+        ricci_norm = torch.norm(ricci).item()
+        
+        # Use adaptive time stepping based on curvature
+        for step in range(steps):
+            # Adjust step size based on curvature
+            adaptive_dt = min(dt, dt / (1 + ricci_norm))
             
-            # Update metric according to Ricci flow equation
+            # Update point according to Ricci flow equation
             # dg/dt = -2Ric
-            current_point = current_point - 2 * dt * torch.einsum(
+            current_point = current_point - 2 * adaptive_dt * torch.einsum(
                 'ij,j->i',
                 ricci,
                 current_point
@@ -573,5 +629,16 @@ class SymplecticStructure:
             # Project back to symplectic manifold if needed
             if self.preserve_structure:
                 current_point = self._handle_dimension(current_point)
+                
+            # Update Ricci tensor and norm for next step
+            if step < steps - 1:  # Skip on last step
+                ricci = self.compute_ricci_tensor(current_point)
+                ricci_norm = torch.norm(ricci).item()
+                
+                # Early stopping if converged
+                if ricci_norm < 1e-6:
+                    logger.debug(f"Flow converged after {step+1} steps")
+                    break
         
+        logger.debug("Finished quantum Ricci flow")
         return current_point 

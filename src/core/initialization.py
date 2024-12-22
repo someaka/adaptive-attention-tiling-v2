@@ -91,9 +91,7 @@ class InitializationSystem(nn.Module):
             hidden_dim=self.config.hidden_dim,
             motive_rank=self.config.motive_rank,
             num_primes=self.config.num_primes,
-            num_heads=self.config.num_heads,
-            device=self.device,
-            dtype=self.dtype
+            num_heads=self.config.num_heads
         )
 
     def _initialize_quantum_tile(self) -> None:

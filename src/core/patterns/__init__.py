@@ -17,8 +17,11 @@ from .riemannian_base import (
 )
 from .evolution import PatternEvolution
 from .dynamics import PatternDynamics
+from .formation import BifurcationAnalyzer, BifurcationMetrics
 
 __all__ = [
+    'BifurcationAnalyzer',
+    'BifurcationMetrics',
     'FiberBundle',
     'LocalChart',
     'FiberChart',

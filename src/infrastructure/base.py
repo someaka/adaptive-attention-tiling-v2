@@ -8,9 +8,10 @@ This module provides core infrastructure components including:
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Union, Tuple
 import torch
 import multiprocessing as mp
+import numpy as np
 
 
 @dataclass
@@ -47,9 +48,24 @@ class CPUOptimizer:
         """Get thread affinity information."""
         return [{"id": i, "affinity": [i]} for i in range(mp.cpu_count())]
 
-    def optimize(self, func: Callable, data: torch.Tensor) -> torch.Tensor:
-        """Optimize a computation."""
-        return func(data)
+    def optimize(self, func: Callable, data: Union[torch.Tensor, Tuple[torch.Tensor, ...]]) -> torch.Tensor:
+        """Optimize a computation.
+        
+        Args:
+            func: Function to optimize
+            data: Input tensor or tuple of tensors
+        
+        Returns:
+            Optimized result tensor
+        """
+        with self.profile():
+            result = func(data)
+            if self.enable_profiling:
+                self._metrics["last_operation"] = {
+                    "input_size": data[0].size() if isinstance(data, tuple) else data.size(),
+                    "output_size": result.size()
+                }
+            return result
 
     def get_metrics(self) -> Dict[str, float]:
         """Get performance metrics."""
@@ -188,3 +204,44 @@ class InfrastructureMetrics:
             "parallel_metrics": parallel_processor.get_stats(),
             "resource_metrics": resource_allocator.get_status()
         } 
+
+
+class CPUDevice:
+    """CPU device management and operations."""
+    
+    def __init__(self):
+        self.optimizer = CPUOptimizer()
+        self.memory_manager = MemoryManager(pool_size=1024)
+        self.parallel_processor = ParallelProcessor(num_threads=mp.cpu_count())
+    
+    def create_tensor(self, data: Union[List[float], np.ndarray, torch.Tensor]) -> torch.Tensor:
+        """Create a tensor on CPU."""
+        if isinstance(data, torch.Tensor):
+            tensor = data.cpu()
+        elif isinstance(data, np.ndarray):
+            tensor = torch.from_numpy(data)
+        else:
+            tensor = torch.tensor(data)
+        return self.memory_manager.manage_tensor(tensor)
+    
+    def add(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Add two tensors."""
+        return self.optimizer.optimize(lambda t: t[0] + t[1], (x, y))
+    
+    def multiply(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Multiply two tensors."""
+        return self.optimizer.optimize(lambda t: t[0] * t[1], (x, y))
+    
+    def matmul(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Matrix multiplication."""
+        return self.optimizer.optimize(lambda t: torch.matmul(t[0], t[1]), (x, y))
+    
+    def sum(self, x: torch.Tensor, dim: Optional[int] = None) -> torch.Tensor:
+        """Sum tensor along dimension."""
+        return self.optimizer.optimize(lambda t: torch.sum(t, dim=dim), x)
+    
+    def parallel_map(self, func: Callable, data: torch.Tensor) -> torch.Tensor:
+        """Apply function in parallel."""
+        chunks = self.parallel_processor.partition_data(data)
+        results = self.parallel_processor.process_parallel(func, chunks)
+        return self.parallel_processor.merge_results(results) 

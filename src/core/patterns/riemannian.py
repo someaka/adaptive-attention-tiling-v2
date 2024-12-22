@@ -725,6 +725,18 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
         """Get raw Riemann tensor values at given points."""
         riemann = self.compute_curvature(points)
         return riemann.riemann
+        
+    def project_to_base(self, total_space: torch.Tensor) -> torch.Tensor:
+        """Project from total space to base manifold.
+        
+        Args:
+            total_space: Point in total space
+            
+        Returns:
+            Projected point on base manifold
+        """
+        # Simple projection that preserves the first manifold_dim components
+        return total_space[..., :self.manifold_dim]
 
 @runtime_checkable
 class RiemannianFramework(Protocol):

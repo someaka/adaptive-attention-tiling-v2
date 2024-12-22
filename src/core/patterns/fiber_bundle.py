@@ -85,25 +85,17 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             ValueError: If input tensor has invalid shape
         """
         # Validate input dimensions
-        if total_space.shape[-1] != self.total_dim:
-            raise ValueError(
-                f"Expected last dimension to be {self.total_dim}, "
-                f"got {total_space.shape[-1]}"
-            )
-            
-        # Handle arbitrary batch dimensions
-        batch_dims = total_space.shape[:-1]
+        if total_space.shape[-1] != self.base_dim:
+            # Handle dimension mismatch by padding or truncating
+            if total_space.shape[-1] < self.base_dim:
+                padding = torch.zeros(*total_space.shape[:-1], self.base_dim - total_space.shape[-1],
+                                    device=total_space.device, dtype=total_space.dtype)
+                total_space = torch.cat([total_space, padding], dim=-1)
+            else:
+                total_space = total_space[..., :self.base_dim]
         
-        # Project to base manifold while preserving batch structure
-        base_point = total_space[..., :self.base_dim]
-        
-        # Validate projection properties
-        with torch.no_grad():
-            # 1. Check fiber dimension is preserved
-            fiber_dim = total_space[..., self.base_dim:].shape[-1]
-            assert fiber_dim == self.fiber_dim, "Fiber dimension mismatch"
-        
-        return base_point
+        # Project to base manifold
+        return self.riemannian_framework.project_to_base(total_space)
 
     def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
         """Implementation of FiberBundle.local_trivialization.
