@@ -27,6 +27,7 @@ class StateConfig:
     type: StateType
     epsilon: float = 1e-6
     max_entanglement: float = 1.0
+    dtype: torch.dtype = torch.float32
 
 
 class StateManager:
@@ -57,13 +58,13 @@ class StateManager:
         dim = dim or self.config.dim
 
         if self.config.type == StateType.PURE:
-            state = torch.randn(dim, device=self.device)
+            state = torch.randn(dim, device=self.device, dtype=self.config.dtype)
             state = state / torch.norm(state)
         elif self.config.type == StateType.MIXED:
-            state = torch.eye(dim, device=self.device)
+            state = torch.eye(dim, device=self.device, dtype=self.config.dtype)
             state = state / torch.trace(state)
         else:  # ENTANGLED
-            state = torch.randn(dim, dim, device=self.device)
+            state = torch.randn(dim, dim, device=self.device, dtype=self.config.dtype)
             state = state / torch.norm(state)
 
         self.states[key] = state

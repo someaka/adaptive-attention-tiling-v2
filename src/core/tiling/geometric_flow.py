@@ -35,7 +35,8 @@ class GeometricFlow(RiemannianFlow):
         num_charts: int = 4,
         integration_steps: int = 10,
         dt: float = 0.1,
-        stability_threshold: float = 1e-6
+        stability_threshold: float = 1e-6,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize geometric flow.
         
@@ -47,6 +48,7 @@ class GeometricFlow(RiemannianFlow):
             integration_steps: Number of integration steps
             dt: Time step for flow integration
             stability_threshold: Threshold for stability checks
+            dtype: Data type for tensors
         """
         super().__init__(
             manifold_dim=manifold_dim,
@@ -54,29 +56,32 @@ class GeometricFlow(RiemannianFlow):
             num_layers=2,  # Fixed for pattern implementation
             dt=dt,
             stability_threshold=stability_threshold,
-            use_parallel_transport=True
+            use_parallel_transport=True,
+            dtype=dtype
         )
         
         self.motive_rank = motive_rank
         self.num_charts = num_charts
         self.integration_steps = integration_steps
+        self.dtype = dtype
         
         # Initialize arithmetic structure
         self.arithmetic = ArithmeticDynamics(
             hidden_dim=hidden_dim,
-            motive_rank=motive_rank
+            motive_rank=motive_rank,
+            dtype=self.dtype
         )
         
         # Chart embeddings for local coordinates
         self.chart_embedding = nn.Parameter(
-            torch.randn(num_charts, manifold_dim)
+            torch.randn(num_charts, manifold_dim, dtype=self.dtype)
         )
         
         # Hamiltonian structure
         self.hamiltonian = nn.Sequential(
-            nn.Linear(manifold_dim, manifold_dim),
+            nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(manifold_dim, 1)
+            nn.Linear(manifold_dim, 1, dtype=self.dtype)
         )
     
     def compute_ricci_tensor(

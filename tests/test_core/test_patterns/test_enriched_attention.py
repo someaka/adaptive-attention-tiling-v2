@@ -5,7 +5,13 @@ from src.core.patterns.operadic_structure import EnrichedAttention, OperadicOper
 @pytest.fixture
 def enriched_attention():
     """Create an EnrichedAttention instance for testing."""
-    return EnrichedAttention()
+    return EnrichedAttention(
+        base_category="SymplecticVect",
+        wave_enabled=True,
+        _k=2.0,
+        _omega=1.0,
+        dtype=torch.float32
+    )
 
 @pytest.fixture
 def tensor():
@@ -58,6 +64,7 @@ def test_get_position(enriched_attention):
     result = enriched_attention.get_position(wave)
     assert result.shape == wave.shape[:-1] + (16,)
     assert not torch.is_complex(result)
+    assert result.dtype == enriched_attention.dtype
 
     # Test with wave disabled
     enriched_attention.wave_enabled = False
@@ -73,6 +80,7 @@ def test_get_momentum(enriched_attention):
     result = enriched_attention.get_momentum(wave)
     assert result.shape == wave.shape[:-1] + (16,)
     assert not torch.is_complex(result)
+    assert result.dtype == enriched_attention.dtype
 
     # Test with wave disabled
     enriched_attention.wave_enabled = False
@@ -86,17 +94,20 @@ def test_create_morphism(enriched_attention, tensor, operadic_operation):
     result = enriched_attention.create_morphism(tensor, operadic_operation)
     assert result.shape == tensor.shape
     assert torch.is_complex(result)
+    assert result.dtype == torch.complex64
 
     # Test without wave
     result = enriched_attention.create_morphism(tensor, operadic_operation, include_wave=False)
     assert result.shape == tensor.shape
     assert not torch.is_complex(result)
+    assert result.dtype == enriched_attention.dtype
 
     # Test with wave disabled
     enriched_attention.wave_enabled = False
     result = enriched_attention.create_morphism(tensor, operadic_operation)
     assert result.shape == tensor.shape
     assert not torch.is_complex(result)
+    assert result.dtype == enriched_attention.dtype
 
 def test_base_category(enriched_attention):
     """Test base category attribute."""
@@ -110,9 +121,12 @@ def test_wave_parameters(enriched_attention):
     """Test wave parameter attributes."""
     assert enriched_attention._k == 2.0
     assert enriched_attention._omega == 1.0
+    assert enriched_attention.dtype == torch.float32
     
     # Test parameter changes
     enriched_attention._k = 3.0
     enriched_attention._omega = 2.0
+    enriched_attention.dtype = torch.float64
     assert enriched_attention._k == 3.0
-    assert enriched_attention._omega == 2.0 
+    assert enriched_attention._omega == 2.0
+    assert enriched_attention.dtype == torch.float64

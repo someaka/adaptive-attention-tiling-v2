@@ -239,6 +239,7 @@ class PatternFiberBundle(BaseFiberBundle):
         fiber_dim: int = 3,  # SO(3) fiber dimension
         structure_group: str = "SO3",
         device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
         num_primes: int = 8,
         motive_rank: int = 4,
         integration_steps: int = 10,
@@ -249,8 +250,9 @@ class PatternFiberBundle(BaseFiberBundle):
     ):
         """Initialize pattern fiber bundle."""
         # Initialize base bundle and device
-        super().__init__(base_dim, fiber_dim, structure_group)
+        super().__init__(base_dim, fiber_dim, structure_group, device=device, dtype=dtype)
         self.device = device or torch.device('cpu')
+        self.dtype = dtype or torch.float32
         self._structure_group_str = structure_group
         
         # Initialize fiber type manager
@@ -277,12 +279,73 @@ class PatternFiberBundle(BaseFiberBundle):
         self.to(self.device)
 
     def _initialize_components(self) -> None:
-        """Initialize all pattern-specific components."""
+        """Initialize all components of the pattern fiber bundle."""
+        # Initialize Riemannian framework
+        self.riemannian_framework = PatternRiemannianStructure(
+            manifold_dim=self.total_dim,
+            pattern_dim=self.fiber_dim,
+            device=self.device,
+            dtype=self.dtype
+        )
+        
+        # Initialize symplectic structure
+        self.symplectic_structure = SymplecticStructure(
+            dim=self.total_dim,
+            preserve_structure=True,
+            wave_enabled=True
+        )
+        
+        # Initialize pattern formation
+        self.pattern_formation = PatternFormation(
+            dim=self.total_dim,
+            dt=self._config.dt,
+            diffusion_coeff=0.1,
+            reaction_coeff=1.0,
+            preserve_structure=True,
+            wave_enabled=True
+        )
+        
+        # Initialize geometric flow
+        self.geometric_flow = GeometricFlow(
+            hidden_dim=self.total_dim,
+            manifold_dim=self.total_dim,
+            motive_rank=self._config.motive_rank,
+            num_charts=4,
+            integration_steps=self._config.integration_steps,
+            dt=self._config.dt,
+            stability_threshold=self._config.stability_threshold
+        )
+        
+        # Initialize pattern dynamics and evolution
+        self.pattern_dynamics = PatternDynamics(dt=self._config.dt)
+        self.pattern_evolution = PatternEvolution(
+            framework=self.riemannian_framework,
+            learning_rate=self._config.learning_rate,
+            momentum=self._config.momentum
+        )
+        
+        # Initialize operadic structures
+        self.attention_operad = AttentionOperad(
+            base_dim=self.total_dim,
+            preserve_symplectic=True,
+            preserve_metric=True
+        )
+        
+        # Initialize enriched structures
+        self.pattern_transition = PatternTransition(
+            wave_emergence=WaveEmergence(
+                dt=self._config.dt,
+                num_steps=10
+            )
+        )
+        
         # Initialize algebraic structures
         self.height_structure = HeightStructure(num_primes=self._config.num_primes)
-        self.operadic = AttentionOperad(base_dim=self._config.base_dim)
-        self.symplectic = SymplecticStructure(dim=self._config.fiber_dim)
-        self._initialize_basis_matrices()
+        
+        # Initialize fiber metric
+        self.fiber_metric = lambda g1, g2: torch.trace(
+            torch.matmul(g1, g2.transpose(-2, -1))
+        )
         
         # Initialize wave and transition components
         self.wave = WaveEmergence(

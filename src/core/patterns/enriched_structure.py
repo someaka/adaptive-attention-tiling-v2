@@ -36,16 +36,18 @@ class EnrichedTransition(ABC):
 class WaveEmergence:
     """Implements wave equation based emergence of structures."""
     
-    def __init__(self, dt: float = 0.1, num_steps: int = 10):
+    def __init__(self, dt: float = 0.1, num_steps: int = 10, dtype: torch.dtype = torch.float32):
         """Initialize wave emergence structure.
         
         Args:
             dt: Time step for wave evolution
             num_steps: Number of evolution steps
+            dtype: Data type for tensors
         """
         self.dt = dt
         self.num_steps = num_steps
-        
+        self.dtype = dtype
+    
     def evolve_structure(self, pattern: Tensor, direction: Tensor) -> Tensor:
         """Evolve pattern structure using wave equation.
         
@@ -57,8 +59,8 @@ class WaveEmergence:
             Evolved pattern tensor
         """
         # Initialize wave components
-        u = pattern
-        v = torch.zeros_like(pattern)  # Velocity field
+        u = pattern.to(dtype=self.dtype)
+        v = torch.zeros_like(pattern, dtype=self.dtype)  # Velocity field
         
         # Ensure compatible shapes for direction
         if len(direction.shape) == 2 and len(u.shape) == 2:
@@ -95,7 +97,7 @@ class WaveEmergence:
             
             # Normalize
             u = u / torch.norm(u, dim=-1, keepdim=True).clamp(min=1e-6)
-        
+            
         # Restore original shape
         if len(pattern.shape) == 1 and len(u.shape) == 2:
             u = u.squeeze(0)
@@ -133,13 +135,14 @@ class WaveEmergence:
 class PatternTransition(EnrichedTransition):
     """Implements enriched transitions for pattern spaces."""
     
-    def __init__(self, wave_emergence: Optional[WaveEmergence] = None):
+    def __init__(self, wave_emergence: Optional[WaveEmergence] = None, dtype: torch.dtype = torch.float32):
         """Initialize pattern transition structure.
         
         Args:
             wave_emergence: Wave emergence structure for natural transitions
+            dtype: Data type for tensors
         """
-        self.wave = wave_emergence or WaveEmergence()
+        self.wave = wave_emergence or WaveEmergence(dtype=dtype)
         
     def create_morphism(self, source: Tensor, target: Tensor) -> EnrichedMorphism:
         """Create an enriched morphism between pattern spaces.
@@ -157,7 +160,7 @@ class PatternTransition(EnrichedTransition):
         # Ensure proper shape for structure map
         if len(source.shape) == 2:
             # For matrix inputs, create transformation matrix
-            structure = torch.eye(source.shape[0], device=source.device)
+            structure = torch.eye(source.shape[0], device=source.device, dtype=source.dtype)
             evolved = self.wave.evolve_structure(source, direction)
             structure = torch.matmul(evolved, torch.pinverse(source))
         else:

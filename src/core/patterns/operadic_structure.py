@@ -81,7 +81,8 @@ class AttentionOperad(OperadicComposition):
         self,
         base_dim: int = 2,
         preserve_symplectic: bool = True,
-        preserve_metric: bool = True
+        preserve_metric: bool = True,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize attention operad.
         
@@ -89,11 +90,13 @@ class AttentionOperad(OperadicComposition):
             base_dim: Base dimension for attention operations
             preserve_symplectic: Whether to preserve symplectic structure
             preserve_metric: Whether to preserve metric structure
+            dtype: Data type for tensors
         """
         self.base_dim = base_dim
         self.preserve_symplectic = preserve_symplectic
         self.preserve_metric = preserve_metric
-        
+        self.dtype = dtype
+    
     def create_operation(
         self,
         source_dim: int,
@@ -217,17 +220,18 @@ class AttentionOperad(OperadicComposition):
             )
         
         # Create natural transformation using enriched structure
-        source_basis = torch.eye(source_op.source_dim)
-        target_basis = torch.eye(target_op.source_dim)
+        source_basis = torch.eye(source_op.source_dim, dtype=self.dtype)
+        target_basis = torch.eye(target_op.source_dim, dtype=self.dtype)
         
         # Create transformation that respects enriched structure
         transformation = torch.zeros(
             target_op.source_dim,
-            source_op.source_dim
+            source_op.source_dim,
+            dtype=self.dtype
         )
         
         min_dim = min(source_op.source_dim, target_op.source_dim)
-        transformation[:min_dim, :min_dim] = torch.eye(min_dim)
+        transformation[:min_dim, :min_dim] = torch.eye(min_dim, dtype=self.dtype)
         
         return transformation
     
@@ -251,35 +255,35 @@ class AttentionOperad(OperadicComposition):
             Tensor representing the composition morphism
         """
         # Create basis for source and target spaces
-        source_basis = torch.eye(source_dim)
-        target_basis = torch.eye(target_dim)
+        source_basis = torch.eye(source_dim, dtype=self.dtype)
+        target_basis = torch.eye(target_dim, dtype=self.dtype)
         
         # Create transition map using enriched little cubes structure
         if source_dim <= target_dim:
             # Embedding into higher dimension with structure preservation
-            morphism = torch.zeros(target_dim, source_dim)
+            morphism = torch.zeros(target_dim, source_dim, dtype=self.dtype)
             if preserve_structure == 'symplectic':
                 # Preserve symplectic structure in embedding
                 n_source = source_dim // 2
                 n_target = target_dim // 2
-                morphism[:2*n_source:2, :2*n_source:2] = torch.eye(n_source)
-                morphism[1:2*n_source:2, 1:2*n_source:2] = torch.eye(n_source)
+                morphism[:2*n_source:2, :2*n_source:2] = torch.eye(n_source, dtype=self.dtype)
+                morphism[1:2*n_source:2, 1:2*n_source:2] = torch.eye(n_source, dtype=self.dtype)
             else:
                 # Standard embedding
                 morphism[:source_dim, :] = source_basis
         else:
             # Projection to lower dimension with structure preservation
-            morphism = torch.zeros(target_dim, source_dim)
+            morphism = torch.zeros(target_dim, source_dim, dtype=self.dtype)
             if preserve_structure == 'symplectic':
                 # Preserve symplectic structure in projection
                 n_source = source_dim // 2
                 n_target = target_dim // 2
-                morphism[:2*n_target:2, :2*n_target:2] = torch.eye(n_target)
-                morphism[1:2*n_target:2, 1:2*n_target:2] = torch.eye(n_target)
+                morphism[:2*n_target:2, :2*n_target:2] = torch.eye(n_target, dtype=self.dtype)
+                morphism[1:2*n_target:2, 1:2*n_target:2] = torch.eye(n_target, dtype=self.dtype)
             else:
                 # Standard projection
                 morphism[:, :target_dim] = target_basis
-            
+        
         return morphism
     
     def _compose_morphisms(
@@ -393,7 +397,6 @@ class AttentionOperad(OperadicComposition):
             preserve_structure=preserve_structure
         )
 
-@dataclass
 class EnrichedAttention:
     """Enriched attention structure with wave emergence support.
     
@@ -405,11 +408,30 @@ class EnrichedAttention:
         wave_enabled: Whether wave emergence is enabled
         _k: Wave number parameter
         _omega: Angular frequency parameter
+        dtype: Data type for tensors
     """
-    base_category: str = "SymplecticVect"
-    wave_enabled: bool = True
-    _k: float = 2.0
-    _omega: float = 1.0
+    def __init__(
+        self,
+        base_category: str = "SymplecticVect",
+        wave_enabled: bool = True,
+        _k: float = 2.0,
+        _omega: float = 1.0,
+        dtype: torch.dtype = torch.float32
+    ):
+        """Initialize enriched attention structure.
+        
+        Args:
+            base_category: Base category for enrichment
+            wave_enabled: Whether wave emergence is enabled
+            _k: Wave number parameter
+            _omega: Angular frequency parameter
+            dtype: Data type for tensors
+        """
+        self.base_category = base_category
+        self.wave_enabled = wave_enabled
+        self._k = _k
+        self._omega = _omega
+        self.dtype = dtype
     
     def wave_operator(self, tensor: Tensor) -> Tensor:
         """Apply wave operator to tensor.
@@ -424,6 +446,9 @@ class EnrichedAttention:
         """
         if not self.wave_enabled:
             return tensor
+            
+        # Convert tensor to specified dtype
+        tensor = tensor.to(dtype=self.dtype)
             
         # Compute wave phase
         phase = self._k * torch.sum(tensor * tensor, dim=-1, keepdim=True)
@@ -443,6 +468,10 @@ class EnrichedAttention:
         """
         if not self.wave_enabled:
             return position
+            
+        # Convert tensors to specified dtype
+        position = position.to(dtype=self.dtype)
+        momentum = momentum.to(dtype=self.dtype)
             
         # Create Gaussian wave packet
         sigma = 1.0  # Width parameter
@@ -464,7 +493,7 @@ class EnrichedAttention:
             return wave.real
             
         # Extract position as expectation value
-        return wave.real
+        return wave.real.to(dtype=self.dtype)
         
     def get_momentum(self, wave: Tensor) -> Tensor:
         """Extract momentum from wave packet.
@@ -479,7 +508,7 @@ class EnrichedAttention:
             return wave.imag
             
         # Extract momentum as expectation value
-        return -self._k * wave.imag
+        return (-self._k * wave.imag).to(dtype=self.dtype)
         
     def create_morphism(
         self,
@@ -497,11 +526,11 @@ class EnrichedAttention:
         Returns:
             Transformed tensor with enriched structure
         """
+        # Convert pattern to specified dtype
+        pattern = pattern.to(dtype=self.dtype)
+        
         # Apply wave operator if enabled
         if include_wave and self.wave_enabled:
             pattern = self.wave_operator(pattern)
             
-        # Apply operadic operation
-        result = torch.matmul(pattern, operation.composition_law.t())
-        
-        return result
+        return pattern

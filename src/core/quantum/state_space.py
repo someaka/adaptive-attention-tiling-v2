@@ -24,18 +24,29 @@ from src.validation.quantum.state import (
 class HilbertSpace:
     """Quantum Hilbert space implementation."""
     
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, dtype=torch.float32):
         """Initialize Hilbert space.
         
         Args:
             dim: Dimension of Hilbert space
+            dtype: Data type for tensors
         """
         self.dim = dim
+        self.dtype = dtype
         
         # Initialize quantum space components
         self.basis_states = self._initialize_basis()
-        self.hamiltonian = nn.Parameter(torch.eye(dim, dtype=torch.complex128))
+        self.hamiltonian = nn.Parameter(torch.eye(dim, dtype=self._get_complex_dtype()))
         self.observables = self._initialize_observables()
+
+    def _get_complex_dtype(self) -> torch.dtype:
+        """Get corresponding complex dtype."""
+        if self.dtype == torch.float32:
+            return torch.complex64
+        elif self.dtype == torch.float64:
+            return torch.complex128
+        else:
+            raise ValueError(f"Unsupported dtype: {self.dtype}")
 
     def _initialize_basis(self) -> List[str]:
         """Initialize computational basis states.
@@ -51,10 +62,12 @@ class HilbertSpace:
         Returns:
             Dictionary of observable operators
         """
+        complex_dtype = self._get_complex_dtype()
+        
         # Single qubit Pauli matrices
-        sigma_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
-        sigma_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
-        sigma_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
+        sigma_x = torch.tensor([[0, 1], [1, 0]], dtype=complex_dtype)
+        sigma_y = torch.tensor([[0, -1j], [1j, 0]], dtype=complex_dtype)
+        sigma_z = torch.tensor([[1, 0], [0, -1]], dtype=complex_dtype)
         
         # Initialize observables dictionary
         observables = {

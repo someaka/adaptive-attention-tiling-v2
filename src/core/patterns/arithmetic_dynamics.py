@@ -13,7 +13,7 @@ arithmetic structure that can be understood through dynamical
 systems over adelic spaces.
 """
 
-from typing import Dict, List, Tuple, Any, Union
+from typing import Dict, List, Tuple, Any, Union, Optional
 
 import numpy as np
 import torch
@@ -35,6 +35,7 @@ class ArithmeticDynamics(nn.Module):
         num_primes: int = 8,  # Number of prime bases for adelic structure
         height_dim: int = 4,  # Dimension of height space
         quantum_weight: float = 0.1,  # Weight for quantum corrections
+        dtype: Optional[torch.dtype] = None
     ):
         super().__init__()
 
@@ -43,54 +44,55 @@ class ArithmeticDynamics(nn.Module):
         self.num_primes = num_primes
         self.height_dim = height_dim
         self.quantum_weight = quantum_weight
+        self.dtype = dtype if dtype is not None else torch.float32
 
         # Initialize prime bases (first num_primes primes)
         self.register_buffer(
             "prime_bases",
             torch.tensor(
-                [2, 3, 5, 7, 11, 13, 17, 19][:num_primes], dtype=torch.float32
+                [2, 3, 5, 7, 11, 13, 17, 19][:num_primes], dtype=self.dtype
             ),
         )
 
         # Arithmetic structure
-        self.height_map = nn.Linear(hidden_dim, height_dim)
+        self.height_map = nn.Linear(hidden_dim, height_dim, dtype=self.dtype)
 
         # Flow computation
-        self.flow = nn.Linear(height_dim, height_dim)
+        self.flow = nn.Linear(height_dim, height_dim, dtype=self.dtype)
 
         # L-function computation - adjusted for batched inputs
         self.l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, motive_rank)
+            nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
         )
 
         # Adelic projection
-        self.adelic_proj = nn.Linear(hidden_dim, num_primes * motive_rank)
+        self.adelic_proj = nn.Linear(hidden_dim, num_primes * motive_rank, dtype=self.dtype)
 
         # Output projection layers
         self.min_dim = max(4, 2 * motive_rank)  # Define min_dim
-        self.measure_proj = nn.Linear(height_dim, self.min_dim)  # Project to min_dim measure space
-        self.output_proj = nn.Linear(self.min_dim, hidden_dim)  # Project back from min_dim space
+        self.measure_proj = nn.Linear(height_dim, self.min_dim, dtype=self.dtype)  # Project to min_dim measure space
+        self.output_proj = nn.Linear(self.min_dim, hidden_dim, dtype=self.dtype)  # Project back from min_dim space
 
         # Dynamical system parameters
-        self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank))
+        self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank, dtype=self.dtype))
 
         # Quantum correction networks
         self.quantum_height = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, height_dim)
+            nn.Linear(hidden_dim, height_dim, dtype=self.dtype)
         )
         
         self.quantum_l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, motive_rank)
+            nn.Linear(hidden_dim, motive_rank, dtype=self.dtype)
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(self.min_dim, self.min_dim)  # Project within min_dim measure space
+        self.quantum_proj = nn.Linear(self.min_dim, self.min_dim, dtype=self.dtype)  # Project within min_dim measure space
 
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
         """Compute height with quantum corrections.
@@ -322,7 +324,8 @@ class ArithmeticPattern(nn.Module):
     """Pattern detection through arithmetic dynamics."""
 
     def __init__(
-        self, input_dim: int, hidden_dim: int, motive_rank: int = 4, num_layers: int = 3
+        self, input_dim: int, hidden_dim: int, motive_rank: int = 4, num_layers: int = 3,
+        dtype: Optional[torch.dtype] = None
     ):
         super().__init__()
 
@@ -330,6 +333,7 @@ class ArithmeticPattern(nn.Module):
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_layers = num_layers
+        self.dtype = dtype if dtype is not None else torch.float32
 
         # Arithmetic dynamics layers
         self.layers = nn.ModuleList(
@@ -337,13 +341,14 @@ class ArithmeticPattern(nn.Module):
                 ArithmeticDynamics(
                     hidden_dim=hidden_dim if i > 0 else input_dim,
                     motive_rank=motive_rank,
+                    dtype=self.dtype
                 )
                 for i in range(num_layers)
             ]
         )
 
         # Pattern projection
-        self.pattern_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.pattern_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[Dict]]:
         """
@@ -470,3 +475,67 @@ class ModularFormComputer(nn.Module):
         }
         
         return q_coeffs, metrics
+    
+
+
+
+
+
+# class ArithmeticDynamics:
+#     """Implement arithmetic dynamics for attention evolution."""
+
+#     def __init__(self, hidden_dim: int, motive_rank: int, num_primes: int = 8, dtype: Optional[torch.dtype] = None):
+#         self.hidden_dim = hidden_dim
+#         self.motive_rank = motive_rank
+#         self.num_primes = num_primes
+#         self.dtype = dtype if dtype is not None else torch.float32
+
+#         # Project to hidden dimension first using adaptive pooling
+#         self.hidden_proj = nn.Sequential(
+#             nn.AdaptiveAvgPool1d(hidden_dim),  # Handle variable input sizes
+#             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
+#         )
+
+#         # L-function computation
+#         self.l_function = nn.Sequential(
+#             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+#             nn.SiLU(),
+#             nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
+#         )
+
+#         # Flow computation
+#         self.flow = nn.Linear(motive_rank, motive_rank, dtype=self.dtype)
+
+#     def compute_dynamics(self, state: torch.Tensor) -> torch.Tensor:
+#         """Compute one step of arithmetic dynamics.
+        
+#         Args:
+#             state: Input tensor of shape [batch_size, *]
+            
+#         Returns:
+#             Tensor of shape [batch_size, motive_rank]
+#         """
+#         # Ensure input is 2D: [batch_size, features]
+#         if state.dim() == 1:
+#             state = state.unsqueeze(0)
+            
+#         # Flatten all dimensions after batch
+#         batch_size = state.shape[0]
+#         state_flat = state.reshape(batch_size, -1)  # [batch_size, num_features]
+        
+#         # Add channel dimension for adaptive pooling
+#         state_channels = state_flat.unsqueeze(1)  # [batch_size, 1, num_features]
+        
+#         # Project to hidden dimension using adaptive pooling
+#         hidden_state = self.hidden_proj[0](state_channels)  # [batch_size, 1, hidden_dim]
+#         hidden_state = hidden_state.squeeze(1)  # [batch_size, hidden_dim]
+#         hidden_state = self.hidden_proj[1](hidden_state)  # [batch_size, hidden_dim]
+        
+#         # Compute L-function values
+#         l_values = self.l_function(hidden_state)  # [batch_size, motive_rank]
+
+#         # Evolve using flow
+#         evolved = self.flow(l_values)  # [batch_size, motive_rank]
+
+#         return evolved
+

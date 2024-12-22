@@ -25,7 +25,8 @@ class RiemannianFlow(BaseGeometricFlow):
         num_layers: int = 2,
         dt: float = 0.1,
         stability_threshold: float = 1e-6,
-        use_parallel_transport: bool = True
+        use_parallel_transport: bool = True,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize Riemannian flow.
         
@@ -36,13 +37,15 @@ class RiemannianFlow(BaseGeometricFlow):
             dt: Time step for flow integration
             stability_threshold: Threshold for stability checks
             use_parallel_transport: Whether to use parallel transport
+            dtype: Data type for tensors
         """
         super().__init__(
             manifold_dim=manifold_dim,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             dt=dt,
-            stability_threshold=stability_threshold
+            stability_threshold=stability_threshold,
+            dtype=dtype
         )
         
         self.use_parallel_transport = use_parallel_transport

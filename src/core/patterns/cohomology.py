@@ -9,11 +9,12 @@ This module implements the cohomological structure of pattern spaces, integratin
 """
 
 from dataclasses import dataclass
-from typing import List, TypeVar, Protocol, Generic, Optional
+from typing import List, TypeVar, Protocol, Generic, Optional, Dict, Tuple, Any, Union
 
 import torch
 from torch import nn
 
+from .arithmetic_dynamics import ArithmeticDynamics
 from .riemannian import PatternRiemannianStructure
 from .fiber_bundle import BaseFiberBundle
 
@@ -28,11 +29,21 @@ class FiberBundle(Protocol):
 class RiemannianFiberBundle(BaseFiberBundle):
     """Concrete implementation of FiberBundle for Riemannian manifolds."""
     
-    def __init__(self, dimension: int):
-        super().__init__(base_dim=dimension, fiber_dim=dimension)
+    def __init__(
+        self,
+        dimension: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None
+    ):
+        super().__init__(
+            base_dim=dimension,
+            fiber_dim=dimension,
+            device=device,
+            dtype=dtype
+        )
         self.dimension = dimension
-        self.fiber_map = nn.Linear(dimension, dimension)
-        self.connection_map = nn.Linear(dimension, dimension * dimension)
+        self.fiber_map = nn.Linear(dimension, dimension, device=device, dtype=dtype)
+        self.connection_map = nn.Linear(dimension, dimension * dimension, device=device, dtype=dtype)
         
     def get_fiber(self, point: torch.Tensor) -> torch.Tensor:
         """Get fiber at a point."""
@@ -190,14 +201,15 @@ class MotivicCohomology:
         hidden_dim: int,
         motive_rank: int = 4,
         num_primes: int = 8,
+        dtype: Optional[torch.dtype] = None
     ):
         """Initialize motivic cohomology."""
         self.base_space = base_space
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
-        self.height_structure = HeightStructure(num_primes)
-        self.dynamics = ArithmeticDynamics(hidden_dim, motive_rank, num_primes)
+        self.height_structure = HeightStructure(num_primes, dtype)
+        self.dynamics = ArithmeticDynamics(hidden_dim, motive_rank, num_primes, dtype=dtype)
         self.metrics = AdvancedMetricsAnalyzer()
 
     def compute_motive(self, form: ArithmeticForm) -> torch.Tensor:
@@ -354,12 +366,13 @@ class MotivicCohomology:
 class HeightStructure:
     """Represents height functions for arithmetic dynamics."""
 
-    def __init__(self, num_primes: int = 8):
+    def __init__(self, num_primes: int = 8, dtype: Optional[torch.dtype] = None):
         """Initialize height structure with prime bases."""
         self.num_primes = num_primes
+        self.dtype = dtype if dtype is not None else torch.float32
         self.prime_bases = torch.tensor(
             [2, 3, 5, 7, 11, 13, 17, 19][:num_primes],
-            dtype=torch.float32
+            dtype=self.dtype
         )
 
     def compute_height(self, coefficients: torch.Tensor) -> torch.Tensor:
@@ -411,69 +424,16 @@ class HeightStructure:
         )
 
 
-class ArithmeticDynamics:
-    """Implement arithmetic dynamics for attention evolution."""
-
-    def __init__(self, hidden_dim: int, motive_rank: int, num_primes: int = 8):
-        self.hidden_dim = hidden_dim
-        self.motive_rank = motive_rank
-        self.num_primes = num_primes
-
-        # Project to hidden dimension first using adaptive pooling
-        self.hidden_proj = nn.Sequential(
-            nn.AdaptiveAvgPool1d(hidden_dim),  # Handle variable input sizes
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-
-        # L-function computation
-        self.l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.SiLU(),
-            nn.Linear(hidden_dim // 2, motive_rank)
-        )
-
-        # Flow computation
-        self.flow = nn.Linear(motive_rank, motive_rank)
-
-    def compute_dynamics(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute one step of arithmetic dynamics.
-        
-        Args:
-            state: Input tensor of shape [batch_size, *]
-            
-        Returns:
-            Tensor of shape [batch_size, motive_rank]
-        """
-        # Ensure input is 2D: [batch_size, features]
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-            
-        # Flatten all dimensions after batch
-        batch_size = state.shape[0]
-        state_flat = state.reshape(batch_size, -1)  # [batch_size, num_features]
-        
-        # Add channel dimension for adaptive pooling
-        state_channels = state_flat.unsqueeze(1)  # [batch_size, 1, num_features]
-        
-        # Project to hidden dimension using adaptive pooling
-        hidden_state = self.hidden_proj[0](state_channels)  # [batch_size, 1, hidden_dim]
-        hidden_state = hidden_state.squeeze(1)  # [batch_size, hidden_dim]
-        hidden_state = self.hidden_proj[1](hidden_state)  # [batch_size, hidden_dim]
-        
-        # Compute L-function values
-        l_values = self.l_function(hidden_state)  # [batch_size, motive_rank]
-
-        # Evolve using flow
-        evolved = self.flow(l_values)  # [batch_size, motive_rank]
-
-        return evolved
-
 
 class QuantumMotivicCohomology:
     """Integrate motivic cohomology with quantum geometric framework."""
 
     def __init__(
-        self, metric: PatternRiemannianStructure, hidden_dim: int, motive_rank: int = 4
+        self,
+        metric: PatternRiemannianStructure,
+        hidden_dim: int,
+        motive_rank: int = 4,
+        dtype: Optional[torch.dtype] = None
     ):
         """Initialize quantum motivic cohomology.
         
@@ -481,11 +441,19 @@ class QuantumMotivicCohomology:
             metric: Riemannian structure for pattern space
             hidden_dim: Hidden dimension for quantum states
             motive_rank: Rank of the motive
+            dtype: Optional dtype for tensors
         """
         self.metric = metric
-        # Create a RiemannianFiberBundle with the correct dimension
-        base_space = RiemannianFiberBundle(dimension=metric.manifold_dim)
-        self.motivic = MotivicCohomology(base_space, hidden_dim, motive_rank)
+        self.dtype = dtype if dtype is not None else (
+            metric.dtype if hasattr(metric, 'dtype') else torch.float32
+        )
+        # Create a RiemannianFiberBundle with the correct dimension and dtype
+        base_space = RiemannianFiberBundle(
+            dimension=metric.manifold_dim,
+            device=metric.device if hasattr(metric, 'device') else None,
+            dtype=self.dtype
+        )
+        self.motivic = MotivicCohomology(base_space, hidden_dim, motive_rank, dtype=self.dtype)
         self.quantum_structure = self._initialize_quantum()
 
     def _initialize_quantum(self) -> torch.Tensor:
@@ -495,7 +463,7 @@ class QuantumMotivicCohomology:
             Quantum structure matrix of shape [motive_rank × motive_rank]
         """
         # Use motive_rank instead of manifold_dim to match classical motive shape
-        return torch.eye(self.motivic.motive_rank, dtype=torch.float32)
+        return torch.eye(self.motivic.motive_rank, dtype=self.dtype)
 
     def compute_quantum_motive(self, form: ArithmeticForm) -> torch.Tensor:
         """Compute quantum motivic cohomology."""
@@ -568,8 +536,11 @@ class CohomologyGroup:
 class DeRhamCohomology:
     """Compute the de Rham cohomology of the pattern space."""
 
-    def __init__(self, manifold: PatternRiemannianStructure):
+    def __init__(self, manifold: PatternRiemannianStructure, dtype: Optional[torch.dtype] = None):
         self.manifold = manifold
+        self.dtype = dtype if dtype is not None else (
+            manifold.dtype if hasattr(manifold, 'dtype') else torch.float32
+        )
         self.cohomology_groups: List[CohomologyGroup] = []
 
     def compute_cohomology(self, max_degree: int) -> None:
@@ -583,7 +554,11 @@ class DeRhamCohomology:
         # Create a fiber bundle with the same dimension as the manifold
         # Convert manifold dimension to int
         manifold_dim = int(self.manifold.manifold_dim)
-        bundle = RiemannianFiberBundle(manifold_dim)
+        bundle = RiemannianFiberBundle(
+            dimension=manifold_dim,
+            device=self.manifold.device if hasattr(self.manifold, 'device') else None,
+            dtype=self.dtype
+        )
         return CohomologyGroup(k, bundle)
 
     def betti_numbers(self) -> List[int]:
@@ -609,3 +584,20 @@ class Integration:
         """Apply Stokes' theorem to integrate d(form) over domain."""
         d_form = form.exterior_derivative()
         return self.integrate_form(d_form, domain)
+
+
+def _create_bundle(manifold_dim: int, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> RiemannianFiberBundle:
+    """Create a RiemannianFiberBundle with proper device and dtype."""
+    return RiemannianFiberBundle(
+        dimension=manifold_dim,
+        device=device,
+        dtype=dtype
+    )
+
+def _create_test_bundle(manifold_dim: int) -> RiemannianFiberBundle:
+    """Create a test bundle for validation."""
+    return RiemannianFiberBundle(
+        dimension=manifold_dim,
+        device=None,
+        dtype=None
+    )

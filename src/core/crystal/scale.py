@@ -49,18 +49,21 @@ class AnomalyPolynomial:
 class ScaleConnection:
     """Implementation of scale connections."""
 
-    def __init__(self, dim: int, num_scales: int = 4):
+    def __init__(self, dim: int, num_scales: int = 4, dtype=torch.float32):
         self.dim = dim
         self.num_scales = num_scales
+        self.dtype = dtype
 
         # Initialize scale connections
         self.connections = nn.ModuleList(
-            [nn.Linear(dim, dim) for _ in range(num_scales - 1)]
+            [nn.Linear(dim, dim, dtype=dtype) for _ in range(num_scales - 1)]
         )
 
         # Holonomy computation
         self.holonomy_computer = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4), nn.ReLU(), nn.Linear(dim * 4, dim * dim)
+            nn.Linear(dim * 2, dim * 4, dtype=dtype),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim * dim, dtype=dtype)
         )
 
     def connect_scales(
@@ -84,22 +87,23 @@ class ScaleConnection:
 class RenormalizationFlow:
     """Implementation of renormalization group flows."""
 
-    def __init__(self, coupling_dim: int, max_iter: int = 100):
+    def __init__(self, coupling_dim: int, max_iter: int = 100, dtype=torch.float32):
         self.coupling_dim = coupling_dim
         self.max_iter = max_iter
+        self.dtype = dtype
 
         # Beta function network
         self.beta_network = nn.Sequential(
-            nn.Linear(coupling_dim, coupling_dim * 2),
+            nn.Linear(coupling_dim, coupling_dim * 2, dtype=dtype),
             nn.Tanh(),
-            nn.Linear(coupling_dim * 2, coupling_dim),
+            nn.Linear(coupling_dim * 2, coupling_dim, dtype=dtype),
         )
 
         # Fixed point detector
         self.fp_detector = nn.Sequential(
-            nn.Linear(coupling_dim, coupling_dim * 2),
+            nn.Linear(coupling_dim, coupling_dim * 2, dtype=dtype),
             nn.ReLU(),
-            nn.Linear(coupling_dim * 2, 1),
+            nn.Linear(coupling_dim * 2, 1, dtype=dtype),
             nn.Sigmoid(),
         )
 
@@ -160,13 +164,16 @@ class RenormalizationFlow:
 class AnomalyDetector:
     """Detection and analysis of anomalies."""
 
-    def __init__(self, dim: int, max_degree: int = 4):
+    def __init__(self, dim: int, max_degree: int = 4, dtype=torch.float32):
         self.dim = dim
         self.max_degree = max_degree
+        self.dtype = dtype
 
         # Anomaly detection network
         self.detector = nn.Sequential(
-            nn.Linear(dim, dim * 2), nn.ReLU(), nn.Linear(dim * 2, max_degree + 1)
+            nn.Linear(dim, dim * 2, dtype=dtype),
+            nn.ReLU(),
+            nn.Linear(dim * 2, max_degree + 1, dtype=dtype)
         )
 
         # Variable names for polynomials
@@ -206,18 +213,22 @@ class AnomalyDetector:
 class ScaleInvariance:
     """Analysis of scale invariant structures."""
 
-    def __init__(self, dim: int, num_scales: int = 4):
+    def __init__(self, dim: int, num_scales: int = 4, dtype=torch.float32):
         self.dim = dim
         self.num_scales = num_scales
+        self.dtype = dtype
 
         # Scale transformation network
         self.scale_transform = nn.ModuleList(
-            [nn.Linear(dim, dim) for _ in range(num_scales)]
+            [nn.Linear(dim, dim, dtype=dtype) for _ in range(num_scales)]
         )
 
         # Invariant detector
         self.invariant_detector = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4), nn.ReLU(), nn.Linear(dim * 4, 1), nn.Sigmoid()
+            nn.Linear(dim * 2, dim * 4, dtype=dtype),
+            nn.ReLU(),
+            nn.Linear(dim * 4, 1, dtype=dtype),
+            nn.Sigmoid()
         )
 
     def check_invariance(self, state: torch.Tensor, scale_factor: float) -> bool:
@@ -249,16 +260,24 @@ class ScaleInvariance:
 class ScaleCohomology:
     """Analysis of scale cohomology and obstructions."""
 
-    def __init__(self, dim: int, num_scales: int = 4):
-        """Initialize scale cohomology analysis.
-        
-        Args:
-            dim: Dimension of the system
-            num_scales: Number of scales to analyze
-        """
+    def __init__(self, dim: int, num_scales: int = 4, dtype=torch.float32):
         self.dim = dim
         self.num_scales = num_scales
-        
+        self.dtype = dtype
+
+        # Cohomology computation networks
+        self.cocycle_computer = nn.Sequential(
+            nn.Linear(dim * 3, dim * 4, dtype=dtype),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim, dtype=dtype)
+        )
+
+        self.coboundary_computer = nn.Sequential(
+            nn.Linear(dim * 2, dim * 4, dtype=dtype),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim, dtype=dtype)
+        )
+
         # Initialize components
         self.scale_conn = ScaleConnection(dim, num_scales)
         self.rg_flow = RenormalizationFlow(dim)
@@ -396,38 +415,38 @@ class ScaleCohomology:
 class ScaleSystem:
     """Complete scale system for multi-scale analysis."""
 
-    def __init__(self, dim: int, num_scales: int = 4, coupling_dim: int = 4):
-        self.connection = ScaleConnection(dim, num_scales)
-        self.rg_flow = RenormalizationFlow(coupling_dim)
-        self.anomaly = AnomalyDetector(dim)
-        self.invariance = ScaleInvariance(dim, num_scales)
-        self.cohomology = ScaleCohomology(dim, num_scales)
+    def __init__(self, dim: int, num_scales: int = 4, coupling_dim: int = 4, dtype=torch.float32):
+        self.connection = ScaleConnection(dim, num_scales, dtype=dtype)
+        self.rg_flow = RenormalizationFlow(coupling_dim, dtype=dtype)
+        self.anomaly = AnomalyDetector(dim, dtype=dtype)
+        self.invariance = ScaleInvariance(dim, num_scales, dtype=dtype)
+        self.cohomology = ScaleCohomology(dim, num_scales, dtype=dtype)
 
     def analyze_scales(
-        self, states: List[torch.Tensor], couplings: torch.Tensor
-    ) -> Tuple[RGFlow, List[AnomalyPolynomial], List[Tuple[torch.Tensor, float]], Dict[str, Any]]:
-        """Complete multi-scale analysis."""
-        # Compute RG flow
-        fixed_points, stability = self.rg_flow.find_fixed_points(couplings)
-        flow_lines = self.rg_flow.compute_flow_lines(couplings)
+        self, states: List[torch.Tensor], scale_factors: List[float]
+    ) -> Dict[str, Any]:
+        """Analyze multi-scale structure."""
+        results = {}
 
-        rg_flow = RGFlow(
-            beta_function=self.rg_flow.beta_function,
-            fixed_points=fixed_points,
-            stability=stability,
-            flow_lines=flow_lines,
+        # Analyze RG flow
+        fixed_points, stability = self.rg_flow.find_fixed_points(states[0])
+        results["fixed_points"] = fixed_points
+        results["stability"] = stability
+
+        # Find scale invariant structures
+        invariants = self.invariance.find_invariant_structures(
+            torch.stack(states)
         )
+        results["invariants"] = invariants
 
         # Detect anomalies
         anomalies = []
         for state in states:
             anomalies.extend(self.anomaly.detect_anomalies(state))
+        results["anomalies"] = anomalies
 
-        # Find scale invariant structures
-        invariants = self.invariance.find_invariant_structures(torch.stack(states))
+        # Compute cohomology
+        cohomology = self.cohomology.analyze_cohomology(states, scale_factors)
+        results["cohomology"] = cohomology
 
-        # Analyze cohomology
-        scales = [1.0] * len(states)  # Default scales
-        cohomology_results = self.cohomology.analyze_cohomology(states, scales)
-
-        return rg_flow, anomalies, invariants, cohomology_results
+        return results

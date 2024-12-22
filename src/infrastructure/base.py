@@ -3,9 +3,8 @@
 This module provides core infrastructure components including:
 1. CPU optimization
 2. Memory management 
-3. Vulkan integration
-4. Parallel processing
-5. Resource allocation
+3. Parallel processing
+4. Resource allocation
 """
 
 from dataclasses import dataclass
@@ -21,14 +20,6 @@ class MemoryStats:
     total_cached: int
     peak_allocated: int
     active_blocks: int
-
-
-@dataclass
-class DeviceInfo:
-    """Vulkan device information."""
-    compute_support: bool
-    memory_types: List[str]
-    queue_families: List[str]
 
 
 class ResourceAllocationError(Exception):
@@ -101,42 +92,6 @@ class MemoryManager:
     def cleanup(self):
         """Clean up memory resources."""
         self._allocated = 0
-
-
-class VulkanIntegration:
-    """Vulkan compute integration."""
-
-    def __init__(self):
-        self._device_info = DeviceInfo(
-            compute_support=True,
-            memory_types=["DEVICE_LOCAL", "HOST_VISIBLE"],
-            queue_families=["COMPUTE", "TRANSFER"]
-        )
-        self._queue_status = "idle"
-
-    def get_device_info(self) -> DeviceInfo:
-        """Get Vulkan device information."""
-        return self._device_info
-
-    def create_buffer(self, data: torch.Tensor) -> Any:
-        """Create a Vulkan buffer from tensor data."""
-        return data.clone()
-
-    def compute(self, shader_code: str, buffer: Any, workgroup_size: int = 256) -> Any:
-        """Execute a compute shader."""
-        return buffer
-
-    def download_buffer(self, buffer: Any) -> torch.Tensor:
-        """Download data from a Vulkan buffer."""
-        return buffer if isinstance(buffer, torch.Tensor) else torch.tensor(buffer)
-
-    def wait_idle(self):
-        """Wait for device to be idle."""
-        self._queue_status = "idle"
-
-    def get_queue_status(self) -> str:
-        """Get current queue status."""
-        return self._queue_status
 
 
 class ParallelProcessor:
@@ -213,7 +168,6 @@ class InfrastructureMetrics:
     """Infrastructure performance metrics."""
     cpu_metrics: Dict[str, float]
     memory_metrics: Dict[str, float]
-    vulkan_metrics: Dict[str, float]
     parallel_metrics: Dict[str, float]
     resource_metrics: Dict[str, float]
 
@@ -222,7 +176,6 @@ class InfrastructureMetrics:
         cls,
         cpu_optimizer: CPUOptimizer,
         memory_manager: MemoryManager,
-        vulkan_integration: VulkanIntegration,
         parallel_processor: ParallelProcessor,
         resource_allocator: ResourceAllocator
     ) -> Dict[str, Dict[str, float]]:
@@ -231,9 +184,6 @@ class InfrastructureMetrics:
             "cpu_metrics": cpu_optimizer.get_metrics(),
             "memory_metrics": {
                 "total_allocated": memory_manager.get_memory_stats().total_allocated
-            },
-            "vulkan_metrics": {
-                "queue_status": vulkan_integration.get_queue_status() == "idle"
             },
             "parallel_metrics": parallel_processor.get_stats(),
             "resource_metrics": resource_allocator.get_status()

@@ -72,6 +72,7 @@ class PatternFormationFlow(BaseGeometricFlow):
         reaction_strength: float = 1.0,
         motive_rank: int = 4,
         num_primes: int = 8,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize pattern formation flow.
         
@@ -84,6 +85,7 @@ class PatternFormationFlow(BaseGeometricFlow):
             reaction_strength: Strength of reaction term
             motive_rank: Rank for motivic structure
             num_primes: Number of primes for height structure
+            dtype: Data type for tensors
         """
         super().__init__(
             manifold_dim=manifold_dim,
@@ -95,12 +97,12 @@ class PatternFormationFlow(BaseGeometricFlow):
         # Pattern dynamics parameters
         self.diffusion_strength = diffusion_strength
         self.reaction_strength = reaction_strength
+        self.motive_rank = motive_rank
+        self.num_primes = num_primes
+        self.dtype = dtype
         
-        # Initialize device
-        try:
-            device = torch.device('vulkan')
-        except:
-            device = torch.device('cpu')
+
+        device = torch.device('cpu')
         
         # Initialize pattern-specific components
         self.pattern_dynamics = PatternDynamics(
@@ -151,10 +153,12 @@ class PatternFormationFlow(BaseGeometricFlow):
         # Initialize wave and transition components
         self.wave = WaveEmergence(
             dt=dt,
-            num_steps=self._EVOLUTION_TIME_STEPS
+            num_steps=self._EVOLUTION_TIME_STEPS,
+            dtype=dtype
         )
         self.transition = PatternTransition(
-            wave_emergence=self.wave
+            wave_emergence=self.wave,
+            dtype=dtype
         )
         
         # Initialize reaction and diffusion networks

@@ -59,81 +59,67 @@ from src.utils.memory_management import register_tensor, optimize_memory, clear_
 
 
 class ParallelTransport(nn.Module):
-    """Parallel transport methods on Riemannian manifolds."""
+    """Parallel transport for geometric attention."""
 
-    def __init__(self, dim: int, method: Literal["schild", "pole"] = "schild"):
+    def __init__(self, dim: int, method: str = "euclidean", dtype: torch.dtype = torch.float32):
+        """Initialize parallel transport.
+        
+        Args:
+            dim: Dimension of the space
+            method: Transport method ("euclidean", "schild", or "pole")
+            dtype: Data type for tensors
+        """
         super().__init__()
         self.dim = dim
-        self.method = method
-
-    def forward(
-        self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor,
-        connection: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Transport vector v from x to y."""
-        # Handle same point case
-        if torch.allclose(x, y):
-            return v
-
-        if self.method == "schild":
-            return self.schild_ladder(v, x, y, connection)
-        return self.pole_ladder(v, x, y)
-
-    def schild_ladder(
-        self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor,
-        connection: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Schild's ladder parallel transport with improved stability."""
-        # Handle zero vector case
-        if torch.allclose(v, torch.zeros_like(v)):
-            return torch.zeros_like(v)
-
-        # Handle same point case
-        if torch.allclose(x, y):
-            return v
-
-        # Compute midpoint with improved averaging
-        m = 0.5 * (x + y)
-
-        if connection is not None:
-            # Transport v to m using connection with stability
-            v_m = v - 0.5 * torch.einsum("ijk,j,k->i", connection, y - x, v)
-            
-            # Transport from m to y with stability
-            return v_m - 0.5 * torch.einsum("ijk,j,k->i", connection, y - m, v_m)
+        self.dtype = dtype
+        self.method = method.lower()
         
-        # Default transport without connection
+        if self.method not in ["euclidean", "schild", "pole"]:
+            raise ValueError(f"Unknown transport method: {method}")
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Apply parallel transport.
+        
+        Args:
+            x: Starting point
+            y: Ending point
+            v: Vector to transport
+            
+        Returns:
+            Transported vector
+        """
+        if self.method == "euclidean":
+            return self._euclidean_transport(x, y, v)
+        elif self.method == "schild":
+            return self._schild_transport(x, y, v)
+        else:  # pole
+            return self._pole_transport(x, y, v)
+            
+    def _euclidean_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Simple Euclidean parallel transport."""
         return v
-
-    def pole_ladder(
-        self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor
-    ) -> torch.Tensor:
-        """Pole ladder parallel transport with improved stability."""
-        # Handle zero vector case
-        if torch.allclose(v, torch.zeros_like(v)):
-            return torch.zeros_like(v)
-
-        # Handle same point case
-        if torch.allclose(x, y):
-            return v
-
-        # Compute geodesic midpoint with improved stability
-        m = 0.5 * (x + y)
-
-        # Compute pole point with proper normalization
-        v_norm = torch.norm(v, dim=-1, keepdim=True)
-        v_normalized = v / (v_norm + 1e-8)
-        p = m + v_normalized
-
-        # Double reflection with improved numerics and stability
-        v1 = 2 * (p - x)
-        v2 = 2 * (y - p)
-
-        # Preserve norm of original vector
-        result = v2 - v1
-        result = result * (torch.norm(v) / torch.norm(result).clamp(min=1e-8))
-
-        return result
+        
+    def _schild_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Schild's ladder parallel transport."""
+        # Compute midpoint between x and y
+        mid = 0.5 * (x + y)
+        
+        # Project v onto the tangent space at mid
+        v_mid = v - torch.sum(v * mid, dim=-1, keepdim=True) * mid
+        
+        # Transport to y
+        return v_mid - torch.sum(v_mid * y, dim=-1, keepdim=True) * y
+        
+    def _pole_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Pole ladder parallel transport."""
+        # Compute the pole point
+        pole = x + y
+        
+        # Project v onto the tangent space at pole
+        v_pole = v - torch.sum(v * pole, dim=-1, keepdim=True) * pole
+        
+        # Transport to y
+        return v_pole - torch.sum(v_pole * y, dim=-1, keepdim=True) * y
 
 
 class HyperbolicExponential(nn.Module):
@@ -181,18 +167,20 @@ class HyperbolicExponential(nn.Module):
     4. Ensure output points lie exactly on hyperboloid
     """
     
-    def __init__(self, dim: int, curvature: float = -1.0):
+    def __init__(self, dim: int, curvature: float = -1.0, dtype: torch.dtype = torch.float32):
         """Initialize exponential map.
         
         Args:
             dim: Dimension of the hyperbolic space
             curvature: Sectional curvature (default: -1.0)
+            dtype: Data type for tensors
         """
         super().__init__()
         self.dim = dim
-        self.curvature = nn.Parameter(torch.tensor(curvature), requires_grad=False)
+        self.curvature = nn.Parameter(torch.tensor(curvature, dtype=dtype), requires_grad=False)
         self.eps = 1e-8
         self.max_norm = 20.0  # Maximum norm for numerical stability
+        self.dtype = dtype
         
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski inner product with careful handling of time component."""
@@ -269,57 +257,22 @@ class HyperbolicExponential(nn.Module):
 
 
 class HyperbolicLogarithm(nn.Module):
-    """Logarithm map for hyperbolic space.
-    
-    This class implements the logarithm map in the hyperboloid model of hyperbolic space.
-    The logarithm map is the inverse of the exponential map: given two points x,y on the
-    hyperboloid, it returns the initial velocity v of the geodesic from x to y.
-    
-    Mathematical Framework:
-    ---------------------
-    1. Hyperboloid Model:
-       H^n = {x ∈ ℝ^{n+1} | ⟨x,x⟩_M = -1, x₀ > 0}
-       where ⟨·,·⟩_M is the Minkowski inner product
-    
-    2. Minkowski Inner Product:
-       ⟨x,y⟩_M = -x₀y₀ + ∑ᵢ₌₁ⁿ xᵢyᵢ
-    
-    3. Hyperbolic Distance:
-       d(x,y) = arccosh(-⟨x,y⟩_M)
-    
-    4. Logarithm Map Formula:
-       log_x(y) = d(x,y) * (y + ⟨x,y⟩_M x) / √⟨y + ⟨x,y⟩_M x, y + ⟨x,y⟩_M x⟩_M
-    
-    5. Projection to Tangent Space:
-       P_T(v) = v + ⟨x,v⟩_M x
-    
-    Properties:
-    ----------
-    1. log_x(x) = 0
-    2. log_x(exp_x(v)) = v for v ∈ T_xH^n
-    3. exp_x(log_x(y)) = y for y ∈ H^n
-    4. ‖log_x(y)‖ = d(x,y)
-    
-    Numerical Considerations:
-    ----------------------
-    1. Close points (d(x,y) ≤ eps): Use first-order approximation
-    2. Large distances (d(x,y) ≥ 20): Apply scaling to prevent overflow
-    3. Ensure output vectors lie exactly in tangent space
-    4. Handle edge cases (identical points, antipodal points)
-    """
-    
-    def __init__(self, dim: int, curvature: float = -1.0):
+    """Logarithm map for hyperbolic space."""
+
+    def __init__(self, dim: int, curvature: float = -1.0, dtype: torch.dtype = torch.float32):
         """Initialize logarithm map.
         
         Args:
             dim: Dimension of the hyperbolic space
             curvature: Sectional curvature (default: -1.0)
+            dtype: Data type for tensors
         """
         super().__init__()
         self.dim = dim
-        self.curvature = nn.Parameter(torch.tensor(curvature), requires_grad=False)
+        self.curvature = nn.Parameter(torch.tensor(curvature, dtype=dtype), requires_grad=False)
         self.eps = 1e-8
         self.max_dist = 20.0  # Maximum distance for numerical stability
+        self.dtype = dtype
         
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski inner product with careful handling of time component."""
@@ -393,9 +346,16 @@ class HyperbolicLogarithm(nn.Module):
 class EuclideanExponential(nn.Module):
     """Exponential map for Euclidean space."""
 
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, dtype: torch.dtype = torch.float32):
+        """Initialize exponential map.
+        
+        Args:
+            dim: Dimension of the space
+            dtype: Data type for tensors
+        """
         super().__init__()
         self.dim = dim
+        self.dtype = dtype
 
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Apply exponential map."""
@@ -405,9 +365,16 @@ class EuclideanExponential(nn.Module):
 class EuclideanLogarithm(nn.Module):
     """Logarithmic map for Euclidean space."""
 
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, dtype: torch.dtype = torch.float32):
+        """Initialize logarithm map.
+        
+        Args:
+            dim: Dimension of the space
+            dtype: Data type for tensors
+        """
         super().__init__()
         self.dim = dim
+        self.dtype = dtype
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Apply logarithm map."""
@@ -453,7 +420,7 @@ class GeometricStructures(nn.Module):
             self.register_module('log_map', EuclideanLogarithm(dim))
 
         # Parallel transport with improved method
-        self.register_module('transport', ParallelTransport(dim, method=parallel_transport_method))
+        self.register_module('transport', ParallelTransport(dim, dtype=torch.float32))
 
     def compute_sectional_curvature(
         self, x: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor
@@ -491,7 +458,7 @@ class GeometricStructures(nn.Module):
             curve[t + 1] = self.exp_map.forward(curve[t], velocity * dt)
 
             # Parallel transport velocity
-            velocity = self.transport.forward(velocity, curve[t], curve[t + 1])
+            velocity = self.transport.forward(curve[t], curve[t + 1], velocity)
 
         return curve
 
@@ -522,7 +489,7 @@ class GeometricStructures(nn.Module):
         self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
         """Parallel transport vectors v from x to y."""
-        return self.transport.forward(v, x, y)
+        return self.transport.forward(x, y, v)
 
     def compute_exponential_map(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Map point from tangent space to manifold."""

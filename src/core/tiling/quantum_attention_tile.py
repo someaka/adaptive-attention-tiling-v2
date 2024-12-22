@@ -111,6 +111,7 @@ class QuantumMotivicTile(nn.Module):
         resolution: float = 1.0,
         cohomology_dim: int = 8,  # Dimension of cohomological structure
         motive_rank: int = 4,  # Rank of quantum motive
+        dtype: torch.dtype = torch.float32
     ) -> None:
         """Initialize quantum motivic attention tile."""
         super(QuantumMotivicTile, self).__init__()
@@ -121,6 +122,7 @@ class QuantumMotivicTile(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.resolution = resolution
+        self.dtype = dtype
 
         # Quantum motivic structure
         self.cohomology_dim = cohomology_dim
@@ -140,7 +142,7 @@ class QuantumMotivicTile(nn.Module):
 
         # Initialize metrics
         self._metrics = {
-            "cohomology_class": torch.zeros(cohomology_dim),
+            "cohomology_class": torch.zeros(cohomology_dim, dtype=self.dtype),
             "motive_height": 0.0,
             "l_function_value": 0.0,
             "adelic_norm": 0.0,
@@ -187,10 +189,10 @@ class QuantumMotivicTile(nn.Module):
 
     def _initialize_quantum_structure(self) -> None:
         """Initialize quantum motivic structure."""
-        # Initialize with proper scaling
-        nn.init.xavier_uniform_(self.cohomology_proj.weight)
-        nn.init.xavier_uniform_(self.field_proj.weight)
-        nn.init.xavier_uniform_(self.height_proj.weight)
+        # Initialize with proper scaling and dtype
+        nn.init.xavier_uniform_(self.cohomology_proj.weight.to(dtype=self.dtype))
+        nn.init.xavier_uniform_(self.field_proj.weight.to(dtype=self.dtype))
+        nn.init.xavier_uniform_(self.height_proj.weight.to(dtype=self.dtype))
 
     def forward(
         self,
@@ -350,17 +352,17 @@ class QuantumMotivicTile(nn.Module):
         """
         with torch.no_grad():
             # Compute quantum entropy (bounded between 0.1 and 5.0)
-            probs = torch.softmax(field, dim=-1)
+            probs = torch.softmax(field.to(dtype=self.dtype), dim=-1)
             entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
             entropy = float(entropy.mean().item())
             self._metrics["quantum_entropy"] = max(0.1, min(5.0, entropy))
 
             # Compute L-function value (normalized)
-            l_value = float(torch.norm(field, p=2).item()) / (field.size(-1) ** 0.5)
+            l_value = float(torch.norm(field.to(dtype=self.dtype), p=2).item()) / (field.size(-1) ** 0.5)
             self._metrics["l_function_value"] = max(0.01, l_value)
 
             # Compute adelic norm (bounded)
-            adelic = float(torch.norm(field, p=float("inf")).item())
+            adelic = float(torch.norm(field.to(dtype=self.dtype), p=float("inf")).item())
             self._metrics["adelic_norm"] = max(0.1, min(1.0, adelic))
 
             # Update motive height (bounded between 0 and 10.0)

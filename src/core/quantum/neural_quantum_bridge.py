@@ -41,13 +41,15 @@ class NeuralQuantumBridge(nn.Module):
         hidden_dim: int,
         num_heads: int = 8,
         dropout: float = 0.1,
+        dtype: torch.dtype = torch.float32
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.dtype = dtype
 
         # Quantum infrastructure
-        self.hilbert_space = HilbertSpace(dim=hidden_dim)
+        self.hilbert_space = HilbertSpace(dim=hidden_dim, dtype=dtype)
         self.state_validator = StateValidator()
         self.state_preparation = StatePreparationValidator()
 
@@ -57,7 +59,8 @@ class NeuralQuantumBridge(nn.Module):
                 dim=hidden_dim,
                 type=StateType.PURE,
                 epsilon=1e-6,
-                max_entanglement=1.0
+                max_entanglement=1.0,
+                dtype=dtype
             ),
             device=None  # Will be set in forward pass
         )
@@ -68,32 +71,36 @@ class NeuralQuantumBridge(nn.Module):
             fiber_dim=hidden_dim,
             structure_group="O(n)",
             motive_rank=4,
-            num_primes=8
+            num_primes=8,
+            dtype=dtype
         )
 
         # Scale cohomology system
         self.scale_system = ScaleSystem(
             dim=hidden_dim,
             num_scales=4,
-            coupling_dim=hidden_dim
+            coupling_dim=hidden_dim,
+            dtype=dtype
         )
 
         # Create Riemannian fiber bundle for motivic cohomology
-        self.riemannian_bundle = RiemannianFiberBundle(dimension=hidden_dim)
+        self.riemannian_bundle = RiemannianFiberBundle(dimension=hidden_dim, dtype=dtype)
 
         # Motivic structure system
         self.motivic_system = MotivicCohomology(
             base_space=self.riemannian_bundle,  # Use Riemannian bundle as base space
             hidden_dim=hidden_dim,
             motive_rank=4,
-            num_primes=8
+            num_primes=8,
+            dtype=dtype
         )
 
         # Quantum attention components
         self.quantum_attention = QuantumGeometricAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            dropout=dropout
+            dropout=dropout,
+            dtype=dtype
         )
 
         self.quantum_tile = QuantumMotivicTile(
@@ -103,7 +110,8 @@ class NeuralQuantumBridge(nn.Module):
             dropout=dropout,
             resolution=1.0,
             cohomology_dim=8,
-            motive_rank=4
+            motive_rank=4,
+            dtype=dtype
         )
 
     def neural_to_quantum(
@@ -316,9 +324,9 @@ class NeuralQuantumBridge(nn.Module):
             evolved_coords_batch = evolved_coordinates[-1].unsqueeze(0)
             scale_results = self.scale_system.analyze_scales(
                 states=[evolved_coords_batch],
-                couplings=couplings
+                scale_factors=[current_scale, target_scale]
             )
-            rg_flow, anomalies = scale_results[0], scale_results[1]
+            rg_flow, anomalies = scale_results["fixed_points"], scale_results["anomalies"]
             
             # Apply scale transformation using connection
             evolved_coords_scaled = self.scale_system.connection.connect_scales(
@@ -383,7 +391,7 @@ class NeuralQuantumBridge(nn.Module):
         # Analyze scales
         rg_flow, anomalies, invariants, cohomology_results = self.scale_system.analyze_scales(
             states=states,
-            couplings=couplings
+            scale_factors=[1.0]  # Default scale factor for single state
         )
         
         return {
@@ -413,7 +421,7 @@ class NeuralQuantumBridge(nn.Module):
         # Analyze evolution and convert to dict
         rg_flow, anomalies, invariants, cohomology_results = self.scale_system.analyze_scales(
             states=states,
-            couplings=couplings
+            scale_factors=[1.0] * len(states)  # One scale factor per state
         )
         
         return {

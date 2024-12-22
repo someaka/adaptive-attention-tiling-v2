@@ -63,9 +63,6 @@ class EnrichedOperator(WaveOperator, Protocol):
     base_category: str
     wave_enabled: bool
 
-# Update the type hint
-EnrichedAttention = EnrichedAttention  # type: type[EnrichedOperator]
-
 @dataclass
 class SymplecticForm:
     """Symplectic form on a manifold with enriched structure.
@@ -181,7 +178,8 @@ class SymplecticStructure:
         self,
         dim: int,
         preserve_structure: bool = True,
-        wave_enabled: bool = True
+        wave_enabled: bool = True,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize symplectic structure with enriched features.
         
@@ -189,6 +187,7 @@ class SymplecticStructure:
             dim: Dimension of the manifold (can be odd or even)
             preserve_structure: Whether to preserve symplectic structure
             wave_enabled: Whether to enable wave emergence behavior
+            dtype: Data type for tensors
             
         Raises:
             ValueError: If dimension is less than 2
@@ -199,6 +198,7 @@ class SymplecticStructure:
         self.dim = dim
         self.preserve_structure = preserve_structure
         self.wave_enabled = wave_enabled
+        self.dtype = dtype
         
         # Target dimension is always even to maintain symplectic properties
         self.target_dim = dim if dim % 2 == 0 else dim + 1
@@ -207,13 +207,16 @@ class SymplecticStructure:
         self.operadic = AttentionOperad(
             base_dim=dim,
             preserve_symplectic=preserve_structure,
-            preserve_metric=True
+            preserve_metric=True,
+            dtype=dtype
         )
         
         # Initialize enriched attention structure
-        # Create instance with default values first
-        self.enriched = EnrichedAttention()
-        # Then update the fields we want to change
+        self.enriched = EnrichedAttention(
+            base_category="SymplecticVect",
+            wave_enabled=wave_enabled,
+            dtype=dtype
+        )
         self.enriched.wave_enabled = wave_enabled
 
     def _handle_dimension(self, tensor: Tensor, recursion_depth: int = 0) -> Tensor:

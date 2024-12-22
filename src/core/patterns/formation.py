@@ -32,7 +32,8 @@ class BifurcationAnalyzer:
         window_size: int = 10,
         symplectic: Optional[SymplecticStructure] = None,
         preserve_structure: bool = True,
-        wave_enabled: bool = True
+        wave_enabled: bool = True,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize bifurcation analyzer with geometric structure.
         
@@ -42,11 +43,13 @@ class BifurcationAnalyzer:
             symplectic: Optional symplectic structure for Hamiltonian dynamics
             preserve_structure: Whether to preserve geometric structure
             wave_enabled: Whether to enable wave packet evolution
+            dtype: Data type for tensors
         """
         self.threshold = threshold
         self.window_size = window_size
         self.preserve_structure = preserve_structure
         self.wave_enabled = wave_enabled
+        self.dtype = dtype
         
         # Initialize geometric structures
         if symplectic is None:
@@ -54,20 +57,26 @@ class BifurcationAnalyzer:
             self.symplectic = SymplecticStructure(
                 dim=2,
                 preserve_structure=preserve_structure,
-                wave_enabled=wave_enabled
+                wave_enabled=wave_enabled,
+                dtype=dtype
             )
         else:
             self.symplectic = symplectic
             
         # Initialize enriched structure for wave behavior
-        self.enriched = EnrichedAttention()
+        self.enriched = EnrichedAttention(
+            base_category="SymplecticVect",
+            wave_enabled=wave_enabled,
+            dtype=dtype
+        )
         self.enriched.wave_enabled = wave_enabled
         
         # Initialize operadic structure for transitions
         self.operadic = AttentionOperad(
             base_dim=2,
             preserve_symplectic=preserve_structure,
-            preserve_metric=True
+            preserve_metric=True,
+            dtype=dtype
         )
         
     def detect_bifurcations(

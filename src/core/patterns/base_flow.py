@@ -24,7 +24,8 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         hidden_dim: Optional[int] = None,
         num_layers: int = 2,
         dt: float = 0.1,
-        stability_threshold: float = 1e-6
+        stability_threshold: float = 1e-6,
+        dtype: torch.dtype = torch.float32
     ):
         """Initialize base geometric flow.
         
@@ -34,6 +35,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             num_layers: Number of layers in flow network
             dt: Time step for flow integration
             stability_threshold: Threshold for stability checks
+            dtype: Data type for tensors
         """
         super().__init__()
         
@@ -42,12 +44,13 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         self.num_layers = num_layers
         self.dt = dt
         self.stability_threshold = stability_threshold
+        self.dtype = dtype
         
         # Initialize basic flow network
         self.flow_layers = nn.ModuleList([
-            nn.Linear(manifold_dim, self.hidden_dim),
+            nn.Linear(manifold_dim, self.hidden_dim, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(self.hidden_dim, manifold_dim)
+            nn.Linear(self.hidden_dim, manifold_dim, dtype=self.dtype)
         ])
         
         # Initialize metric computation

@@ -21,7 +21,9 @@ def config() -> ScaleTransitionConfig:
         max_scale=4.0,
         num_scales=4,
         dim=64,
-        use_quantum_bridge=True
+        use_quantum_bridge=True,
+        hidden_dim=64,
+        dtype=torch.complex64
     )
 
 

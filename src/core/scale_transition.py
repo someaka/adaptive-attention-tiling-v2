@@ -23,13 +23,14 @@ from .quantum.neural_quantum_bridge import NeuralQuantumBridge
 @dataclass
 class ScaleTransitionConfig:
     """Configuration for scale transitions."""
-    
+
     min_scale: float = 0.25
     max_scale: float = 4.0
     num_scales: int = 4
     dim: int = 64
     use_quantum_bridge: bool = True
     hidden_dim: int = 64
+    dtype: torch.dtype = torch.float32  # Data type for tensors
 
 
 class ScaleTransitionLayer(nn.Module):
@@ -42,29 +43,33 @@ class ScaleTransitionLayer(nn.Module):
         # Initialize scale system
         self.scale_system = ScaleSystem(
             dim=config.dim,
-            num_scales=config.num_scales
+            num_scales=config.num_scales,
+            dtype=config.dtype
         )
         
         # Initialize quantum bridge if enabled
         self.quantum_bridge = (
-            NeuralQuantumBridge(hidden_dim=config.hidden_dim)
+            NeuralQuantumBridge(
+                hidden_dim=config.hidden_dim,
+                dtype=config.dtype
+            )
             if config.use_quantum_bridge
             else None
         )
         
         # Scale transition networks
         self.scale_up = nn.ModuleList([
-            nn.Linear(config.dim, config.dim)
+            nn.Linear(config.dim, config.dim, dtype=config.dtype)
             for _ in range(config.num_scales - 1)
         ])
         
         self.scale_down = nn.ModuleList([
-            nn.Linear(config.dim, config.dim)
+            nn.Linear(config.dim, config.dim, dtype=config.dtype)
             for _ in range(config.num_scales - 1)
         ])
         
         # Scale normalization
-        self.scale_norm = nn.LayerNorm(config.dim)
+        self.scale_norm = nn.LayerNorm(config.dim, dtype=config.dtype)
     
     def transition_up(
         self, 

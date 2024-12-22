@@ -41,16 +41,11 @@ def fiber_dim():
 
 
 @pytest.fixture
-def base_bundle(test_config):
+def base_bundle(test_config, fiber_dim):
     """Create base implementation instance."""
-    dim = test_config["geometric_tests"]["dimensions"]
-    fiber_dim = 3  # Standard SO(3) fiber dimension
-    total_dim = dim + fiber_dim
-    return BaseFiberBundle(
-        base_dim=dim,
-        fiber_dim=fiber_dim,
-        structure_group="SO3"
-    )
+    base_dim = test_config["geometric_tests"]["dimensions"]
+    dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
+    return BaseFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim, dtype=dtype)
 
 
 @pytest.fixture
@@ -59,11 +54,13 @@ def pattern_bundle(test_config):
     dim = test_config["geometric_tests"]["dimensions"]
     fiber_dim = 3  # Standard SO(3) fiber dimension
     total_dim = dim + fiber_dim
+    dtype = getattr(torch, test_config["geometric_tests"]["dtype"])
     return PatternFiberBundle(
         base_dim=dim,
         fiber_dim=fiber_dim,
         structure_group="O(n)",
-        device=torch.device("cpu")
+        device=torch.device("cpu"),
+        dtype=dtype
     )
 
 

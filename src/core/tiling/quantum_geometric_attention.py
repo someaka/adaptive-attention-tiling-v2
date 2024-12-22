@@ -145,80 +145,87 @@ class QuantumGeometricAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int = 8,
-        dropout: float = 0.1,
-        motive_rank: int = 4,
-        manifold_dim: int = 8,
-        num_layers: int = 3,
-        tile_size: int = 16,
+        tile_size: int = 64,
         manifold_type: str = "hyperbolic",
         curvature: float = -1.0,
+        dropout: float = 0.1,
+        manifold_dim: Optional[int] = None,
+        motive_rank: int = 4,
+        num_layers: int = 1,
+        dtype: torch.dtype = torch.float32
     ):
+        """Initialize quantum geometric attention.
+        
+        Args:
+            hidden_dim: Hidden dimension
+            num_heads: Number of attention heads
+            tile_size: Size of attention tiles
+            manifold_type: Type of manifold geometry
+            curvature: Manifold curvature
+            dropout: Dropout rate
+            manifold_dim: Manifold dimension (defaults to hidden_dim)
+            motive_rank: Rank of motivic structure
+            num_layers: Number of attention layers
+            dtype: Data type for tensors
+        """
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
-        self.tile_size = tile_size
         self.manifold_type = manifold_type
         self.curvature = curvature
-        self.dropout = nn.Dropout(dropout)
-        self.motive_rank = motive_rank
-        self.manifold_dim = manifold_dim
+        self.manifold_dim = manifold_dim or hidden_dim
+        self.dtype = dtype
         self.num_layers = num_layers
+        self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
-
-        # QKV projection
-        self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3)
-        self.to_out = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Dropout(dropout)
-        )
-
-        # Initialize tiles for each attention head
-        self.tiles = nn.ModuleList([
-            QuantumMotivicTile(
-                size=tile_size,
-                hidden_dim=self.head_dim,  # Use head_dim instead of hidden_dim
-                num_heads=1,  # Each tile handles one head
-                dropout=dropout,
-                resolution=1.0,
-                cohomology_dim=manifold_dim,
-                motive_rank=motive_rank
-            )
-            for _ in range(num_heads)
-        ])
+        self.dropout = nn.Dropout(dropout)
 
         # Initialize components
-        self.attention = QuantumMotivicTile(
-            size=tile_size,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            resolution=1.0,  # Default resolution
-            cohomology_dim=manifold_dim,
-            motive_rank=motive_rank
-        )
+        self.attention_layers = nn.ModuleList([
+            QuantumMotivicTile(
+                size=tile_size,
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                resolution=1.0,  # Default resolution
+                cohomology_dim=self.manifold_dim,
+                motive_rank=motive_rank,
+                dtype=self.dtype
+            )
+            for _ in range(num_layers)
+        ])
         self.flow = GeometricFlow(
             hidden_dim=hidden_dim,
-            manifold_dim=manifold_dim
+            manifold_dim=self.manifold_dim,
+            dtype=self.dtype
         )
         self.arithmetic = ArithmeticPattern(
             input_dim=hidden_dim,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
+            motive_rank=motive_rank,
+            dtype=self.dtype
+        )
+
+        # Projections for attention
+        self.to_qkv = nn.Linear(hidden_dim, 3 * hidden_dim, dtype=self.dtype)
+        self.to_out = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
+            nn.Dropout(dropout)
         )
 
         # Geometric structures
         if manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(hidden_dim, curvature)
-            self.log_map = HyperbolicLogarithm(hidden_dim, curvature)
+            self.exp_map = HyperbolicExponential(hidden_dim, curvature, dtype=self.dtype)
+            self.log_map = HyperbolicLogarithm(hidden_dim, curvature, dtype=self.dtype)
         else:
-            self.exp_map = EuclideanExponential(hidden_dim)
-            self.log_map = EuclideanLogarithm(hidden_dim)
+            self.exp_map = EuclideanExponential(hidden_dim, dtype=self.dtype)
+            self.log_map = EuclideanLogarithm(hidden_dim, dtype=self.dtype)
 
         # Parallel transport
-        self.transport = ParallelTransport(hidden_dim)
+        self.transport = ParallelTransport(hidden_dim, dtype=self.dtype)
 
         # Projections
-        self.metric = nn.Parameter(torch.eye(hidden_dim))
+        self.metric = nn.Parameter(torch.eye(hidden_dim, dtype=self.dtype))
         self.pattern_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
@@ -315,84 +322,85 @@ class QuantumGeometricAttention(nn.Module):
             Tuple of (output tensor, optional metrics dictionary)
         """
         batch_size, seq_len, _ = x.shape
-        
-        # Project to Q, K, V
-        qkv = self.to_qkv(x)
-        qkv = qkv.chunk(3, dim=-1)
-        q, k, v = map(
-            lambda t: t.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2),
-            qkv
-        )
-        
-        # Initialize metrics
         metrics: Dict[str, Any] = {} if return_metrics else {}
         
-        # Apply geometric flow to queries and keys
-        q_flowed, q_metrics = self.flow(q.reshape(-1, self.head_dim))
-        k_flowed, k_metrics = self.flow(k.reshape(-1, self.head_dim))
-        
-        # Reshape back to attention dimensions
-        q_flowed = q_flowed.view(batch_size, self.num_heads, seq_len, self.head_dim)
-        k_flowed = k_flowed.view(batch_size, self.num_heads, seq_len, self.head_dim)
-        
-        if return_metrics:
-            metrics['q_flow'] = q_metrics
-            metrics['k_flow'] = k_metrics
-        
-        # Initialize attention scores
-        dots = torch.zeros(
-            batch_size,
-            self.num_heads,
-            seq_len,
-            seq_len,
-            device=x.device,
-            dtype=x.dtype
-        )
-        
-        # Process each head with its corresponding tile
-        for h, tile in enumerate(self.tiles):
-            # Extract head-specific tensors
-            q_h = q_flowed[:, h]  # Shape: (batch_size, seq_len, head_dim)
-            k_h = k_flowed[:, h]  # Shape: (batch_size, seq_len, head_dim)
-            v_h = v[:, h]        # Shape: (batch_size, seq_len, head_dim)
+        # Process through each attention layer
+        current = x
+        for i, attention_layer in enumerate(self.attention_layers):
+            # Project to Q, K, V
+            qkv = self.to_qkv(current)
+            qkv = qkv.chunk(3, dim=-1)
+            q, k, v = map(
+                lambda t: t.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2),
+                qkv
+            )
             
-            # Process through tile
-            head_dots, tile_metrics = tile(q_h, k_h, v_h)  # Unpack tuple return
-            dots[:, h] = head_dots
+            # Apply geometric flow to queries and keys
+            q_flowed, q_metrics = self.flow(q.reshape(-1, self.head_dim))
+            k_flowed, k_metrics = self.flow(k.reshape(-1, self.head_dim))
+            
+            # Reshape back to attention dimensions
+            q_flowed = q_flowed.view(batch_size, self.num_heads, seq_len, self.head_dim)
+            k_flowed = k_flowed.view(batch_size, self.num_heads, seq_len, self.head_dim)
             
             if return_metrics:
-                metrics[f'tile_{h}'] = tile_metrics
+                metrics[f'layer_{i}_q_flow'] = q_metrics
+                metrics[f'layer_{i}_k_flow'] = k_metrics
+            
+            # Initialize attention scores
+            dots = torch.zeros(
+                batch_size,
+                self.num_heads,
+                seq_len,
+                seq_len,
+                device=x.device,
+                dtype=x.dtype
+            )
+            
+            # Process through attention layer
+            head_dots, layer_metrics = attention_layer(q_flowed, k_flowed, v)
+            dots = head_dots
+            
+            if return_metrics:
+                metrics[f'layer_{i}_attention'] = layer_metrics
+            
+            # Apply attention mask if provided
+            if mask is not None:
+                dots = dots.masked_fill(mask[:, None, None, :] == 0, float('-inf'))
+            
+            # Compute attention weights
+            attn = F.softmax(dots * self.scale, dim=-1)
+            attn = self.dropout(attn)
+            
+            # Apply attention to values
+            out = torch.matmul(attn, v)
+            
+            # Reshape and project output
+            out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
+            out = self.to_out(out)
+            
+            # Add residual connection and update current
+            current = current + out
+            
+            if return_metrics:
+                metrics[f'layer_{i}_output'] = {
+                    'norm': current.norm().item(),
+                    'mean': current.mean().item(),
+                    'std': current.std().item()
+                }
         
-        # Apply attention mask if provided
-        if mask is not None:
-            dots = dots.masked_fill(mask[:, None, None, :] == 0, float('-inf'))
-        
-        # Compute attention weights
-        attn = F.softmax(dots * self.scale, dim=-1)
-        attn = self.dropout(attn)
-        
-        # Apply attention to values
-        out = torch.matmul(attn, v)
-        
-        # Reshape and project output
-        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
-        out = self.to_out(out)
-        
-        if return_metrics:
-            metrics['attention'] = attn.detach()
-        
-        return out, metrics if return_metrics else None
+        return current, metrics if return_metrics else None
 
     def prepare_attention_state(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> AttentionState:
         """Prepare attention state with optional mask."""
         if mask is None:
-            mask = torch.ones(x.shape[:-1], device=x.device)
+            mask = torch.ones(x.shape[:-1], device=x.device, dtype=self.dtype)
         
         # Initialize quantum and geometric states
-        quantum_state = torch.zeros_like(x)
-        geometric_state = torch.zeros_like(x)
+        quantum_state = torch.zeros_like(x, dtype=self.dtype)
+        geometric_state = torch.zeros_like(x, dtype=self.dtype)
         
         return AttentionState(
             quantum_state=quantum_state,
@@ -493,7 +501,7 @@ class QuantumGeometricAttention(nn.Module):
         
         # Add quantum phase
         phase = torch.angle(quantum_state)
-        quantum_state = quantum_state * torch.exp(1j * phase)
+        quantum_state = quantum_state * torch.exp(1j * phase).to(dtype=torch.complex64 if self.dtype == torch.float32 else torch.complex128)
         
         return quantum_state
 

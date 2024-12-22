@@ -3,7 +3,6 @@
 from .base import (
     CPUOptimizer,
     MemoryManager,
-    VulkanIntegration,
     ParallelProcessor,
     ResourceAllocator,
     InfrastructureMetrics,
@@ -13,7 +12,6 @@ from .base import (
 __all__ = [
     "CPUOptimizer",
     "MemoryManager", 
-    "VulkanIntegration",
     "ParallelProcessor",
     "ResourceAllocator",
     "InfrastructureMetrics",

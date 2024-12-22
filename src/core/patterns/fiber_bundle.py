@@ -31,6 +31,8 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         base_dim: int,
         fiber_dim: int,
         structure_group: Optional[str] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         """Initialize fiber bundle.
         
@@ -38,19 +40,23 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             base_dim: Dimension of base manifold
             fiber_dim: Dimension of fiber
             structure_group: Name of structure group (e.g. 'SO3', 'U1')
+            device: Device to place tensors on
+            dtype: Data type for tensors
         """
         super().__init__()  # Initialize nn.Module
         self.base_dim = base_dim
         self._fiber_dim = fiber_dim  # Store as protected attribute
         self.total_dim = base_dim + fiber_dim
         self.structure_group = structure_group
+        self.device = device or torch.device('cpu')
+        self.dtype = dtype or torch.float32
 
         # Initialize bundle metric
-        self.metric = torch.eye(self.total_dim)
+        self.metric = torch.eye(self.total_dim, device=self.device, dtype=self.dtype)
 
         # Initialize connection form
         # Shape: (base_dim, fiber_dim, fiber_dim)
-        self.connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim)
+        self.connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim, device=self.device, dtype=self.dtype)
 
     @property
     def fiber_dim(self) -> int:
