@@ -61,11 +61,11 @@ class ArithmeticDynamics(nn.Module):
         self.height_map = nn.Linear(hidden_dim, height_dim, dtype=self.dtype)
         self.flow = nn.Linear(height_dim, height_dim, dtype=self.dtype)
         
-        # Initialize L-function network
+        # Initialize L-function network to output motive_rank dimensions
         self.l_function = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, height_dim, dtype=self.dtype)
+            nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
         )
 
         # Adelic projection
@@ -76,7 +76,7 @@ class ArithmeticDynamics(nn.Module):
         self.measure_proj = nn.Linear(height_dim, self.min_dim, dtype=self.dtype)  # Project to min_dim measure space
         self.output_proj = nn.Linear(self.min_dim, hidden_dim, dtype=self.dtype)  # Project back from min_dim space
 
-        # Quantum correction networks
+        # Quantum correction networks - ensure same output size as l_function
         self.quantum_height = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
             nn.SiLU(),
@@ -86,7 +86,7 @@ class ArithmeticDynamics(nn.Module):
         self.quantum_l_function = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, motive_rank, dtype=self.dtype)
+            nn.Linear(hidden_dim, motive_rank, dtype=self.dtype)  # Match l_function output size
         )
 
         # Quantum correction projection
@@ -114,11 +114,25 @@ class ArithmeticDynamics(nn.Module):
         """Compute height with quantum corrections.
         
         Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
+            x: Input tensor of shape [..., hidden_dim] or [..., N] where N != hidden_dim
             
         Returns:
-            Height tensor of shape [batch_size, height_dim]
+            Height tensor of shape [..., height_dim]
         """
+        # Save original shape for later reshaping
+        original_shape = x.shape
+        
+        # Reshape input to [-1, hidden_dim] if last dimension doesn't match
+        if x.shape[-1] != self.hidden_dim:
+            # Flatten all but last dimension
+            flat_shape = (-1, x.shape[-1])
+            x = x.reshape(flat_shape)
+            # Project to hidden_dim using adaptive pooling
+            x = torch.nn.functional.adaptive_avg_pool1d(
+                x.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+        
         # Classical height
         classical_height = self.height_map(x)
         
@@ -126,17 +140,38 @@ class ArithmeticDynamics(nn.Module):
         quantum_correction = self.quantum_height(x)
         
         # Combine with quantum weight
-        return classical_height + self.quantum_weight * quantum_correction
+        result = classical_height + self.quantum_weight * quantum_correction
+        
+        # Reshape result to match input shape except for last dimension
+        if len(original_shape) > 2:
+            new_shape = original_shape[:-1] + (self.height_dim,)
+            result = result.reshape(new_shape)
+            
+        return result
 
     def compute_l_function(self, x: torch.Tensor) -> torch.Tensor:
         """Compute L-function with quantum corrections.
         
         Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
+            x: Input tensor of shape [..., hidden_dim] or [..., N] where N != hidden_dim
             
         Returns:
-            L-function values of shape [batch_size, motive_rank]
+            L-function values of shape [..., motive_rank]
         """
+        # Save original shape for later reshaping
+        original_shape = x.shape
+        
+        # Reshape input to [-1, hidden_dim] if last dimension doesn't match
+        if x.shape[-1] != self.hidden_dim:
+            # Flatten all but last dimension
+            flat_shape = (-1, x.shape[-1])
+            x = x.reshape(flat_shape)
+            # Project to hidden_dim using adaptive pooling
+            x = torch.nn.functional.adaptive_avg_pool1d(
+                x.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+        
         # Classical L-function
         classical_l = self.l_function(x)
         
@@ -144,22 +179,46 @@ class ArithmeticDynamics(nn.Module):
         quantum_correction = self.quantum_l_function(x)
         
         # Combine with quantum weight
-        return classical_l + self.quantum_weight * quantum_correction
+        result = classical_l + self.quantum_weight * quantum_correction
+        
+        # Reshape result to match input shape except for last dimension
+        if len(original_shape) > 2:
+            new_shape = original_shape[:-1] + (self.motive_rank,)
+            result = result.reshape(new_shape)
+            
+        return result
 
     def compute_dynamics(self, x: torch.Tensor) -> torch.Tensor:
         """Compute arithmetic dynamics with quantum corrections.
         
         Args:
-            x: Input tensor of shape [batch_size, hidden_dim]
+            x: Input tensor of shape [..., hidden_dim] or [..., N] where N != hidden_dim
             
         Returns:
-            Evolved tensor of shape [batch_size, hidden_dim]
+            Evolved tensor of shape [..., hidden_dim]
         """
+        # Save original shape and size for later reshaping
+        original_shape = x.shape
+        original_size = x.shape[-1]
+        
+        # Reshape input to [-1, hidden_dim] if last dimension doesn't match
+        if x.shape[-1] != self.hidden_dim:
+            # Flatten all but last dimension
+            flat_shape = (-1, x.shape[-1])
+            x_flat = x.reshape(flat_shape)
+            # Project to hidden_dim using adaptive pooling
+            x_hidden = torch.nn.functional.adaptive_avg_pool1d(
+                x_flat.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+        else:
+            x_hidden = x
+        
         # Compute height
-        height = self.compute_height(x)  # [batch_size, height_dim]
+        height = self.compute_height(x_hidden)  # [batch_size, height_dim]
         
         # Compute L-function
-        l_values = self.compute_l_function(x)  # [batch_size, motive_rank]
+        l_values = self.compute_l_function(x_hidden)  # [batch_size, motive_rank]
         
         # Project to measure space
         measure = self.measure_proj(height)  # [batch_size, min_dim]
@@ -171,10 +230,21 @@ class ArithmeticDynamics(nn.Module):
         # Project back to input space
         output = self.output_proj(quantum_correction)  # [batch_size, hidden_dim]
         
+        # Project output back to original size if needed
+        if original_size != self.hidden_dim:
+            output = torch.nn.functional.adaptive_avg_pool1d(
+                output.unsqueeze(1),  # Add channel dimension
+                output_size=original_size
+            ).squeeze(1)  # Remove channel dimension
+        
         # Add residual connection with stability factor
         alpha = 0.1  # Small factor for stability
         output = (1 - alpha) * x + alpha * output
         
+        # Reshape result to match input shape
+        if len(original_shape) > 2:
+            output = output.reshape(original_shape)
+            
         return output
 
     def forward(

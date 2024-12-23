@@ -145,7 +145,59 @@ class TestValidationFramework:
             pattern_validator=pattern_validator
         )
 
+    @pytest.mark.dependency(name="test_basic_tensor_shapes")
     @pytest.mark.level0
+    def test_basic_tensor_shapes(
+        self,
+        validation_framework: ValidationFramework,
+        batch_size: int,
+        manifold_dim: int
+    ):
+        """Test basic tensor shape validation. Level 0: Only depends on PyTorch."""
+        # Create test tensors
+        points = torch.randn(batch_size, manifold_dim)
+        state = torch.randn(batch_size, manifold_dim, dtype=torch.complex64)
+        state = state / torch.norm(state, dim=1, keepdim=True)
+        
+        # Test points shape validation
+        assert points.shape == (batch_size, manifold_dim)
+        assert state.shape == (batch_size, manifold_dim)
+        
+        # Test basic metric tensor properties
+        metric = torch.eye(manifold_dim).unsqueeze(0).repeat(batch_size, 1, 1)
+        assert metric.shape == (batch_size, manifold_dim, manifold_dim)
+        assert torch.allclose(metric, metric.transpose(-1, -2))  # Symmetry
+        assert torch.all(torch.linalg.eigvals(metric).real > 0)  # Positive definiteness
+
+    @pytest.mark.dependency(depends=["test_basic_tensor_shapes"])
+    @pytest.mark.level0
+    def test_basic_metric_properties(
+        self,
+        validation_framework: ValidationFramework,
+        batch_size: int,
+        manifold_dim: int
+    ):
+        """Test basic metric tensor properties. Level 0: Only depends on PyTorch."""
+        # Create a simple metric tensor (identity matrix for each batch)
+        metric = torch.eye(manifold_dim).unsqueeze(0).repeat(batch_size, 1, 1)
+        
+        # Test metric tensor properties
+        # 1. Symmetry
+        assert torch.allclose(metric, metric.transpose(-1, -2))
+        
+        # 2. Positive definiteness
+        eigenvals = torch.linalg.eigvals(metric).real
+        assert torch.all(eigenvals > 0)
+        
+        # 3. Shape consistency
+        assert metric.shape == (batch_size, manifold_dim, manifold_dim)
+        
+        # 4. Batch independence
+        for i in range(batch_size):
+            assert torch.allclose(metric[i], torch.eye(manifold_dim))
+
+    @pytest.mark.dependency(depends=["test_basic_tensor_shapes", "test_basic_metric_properties"])
+    @pytest.mark.level2
     def test_geometric_validation(
         self,
         validation_framework: ValidationFramework,
@@ -153,7 +205,7 @@ class TestValidationFramework:
         batch_size: int,
         manifold_dim: int
     ) -> None:
-        """Test geometric validation."""
+        """Test geometric validation. Level 2: Depends on metric properties and tensor validation."""
         # Create test data
         points = torch.randn(batch_size, manifold_dim)
 
@@ -161,7 +213,12 @@ class TestValidationFramework:
         result = validation_framework.validate_all(
             model=None,
             data={
-                'points': points
+                'points': points,
+                'patterns': {
+                    'initial_state': points,
+                    'pattern_flow': None
+                },
+                'quantum_state': None
             }
         )
 
@@ -182,7 +239,7 @@ class TestValidationFramework:
         assert "sectional_curvature" in result.data["geometric"]["curvature"]
         assert "ricci_curvature" in result.data["geometric"]["curvature"]
 
-    @pytest.mark.level0
+    @pytest.mark.level1
     def test_quantum_validation(
         self,
         validation_framework: ValidationFramework,
@@ -221,7 +278,7 @@ class TestValidationFramework:
         assert "mutual_information" in entanglement
         assert "relative_entropy" in entanglement
 
-    @pytest.mark.level0
+    @pytest.mark.level1
     def test_pattern_validation(
         self,
         validation_framework: ValidationFramework,

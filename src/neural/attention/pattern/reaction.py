@@ -169,3 +169,34 @@ class ReactionSystem:
             fixed_point = new_fixed_point
         
         return fixed_point.to(state.dtype)
+
+    def compute_reaction(
+        self,
+        state: torch.Tensor,
+        reaction_term: Optional[Callable] = None
+    ) -> torch.Tensor:
+        """Compute reaction term for a given state.
+        
+        This method computes the reaction term without applying it to the state.
+        For applying the reaction term, use apply_reaction instead.
+        
+        Args:
+            state: Input tensor [batch, channels, height, width]
+            reaction_term: Optional custom reaction term function
+            
+        Returns:
+            Reaction term tensor [batch, channels, height, width]
+        """
+        if reaction_term is None:
+            reaction_term = self.reaction_term
+        
+        # Convert to double for numerical stability
+        orig_dtype = state.dtype
+        state = state.to(torch.float64)
+        
+        # Compute reaction term with gradient clipping
+        with torch.no_grad():
+            reaction = self._wrap_reaction_term(reaction_term, state)
+            reaction = torch.clamp(reaction, min=-10.0, max=10.0)
+        
+        return reaction.to(orig_dtype)

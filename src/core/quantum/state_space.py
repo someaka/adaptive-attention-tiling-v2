@@ -40,13 +40,20 @@ class HilbertSpace:
         self.observables = self._initialize_observables()
 
     def _get_complex_dtype(self) -> torch.dtype:
-        """Get corresponding complex dtype."""
-        if self.dtype == torch.float32:
+        """Get corresponding complex dtype.
+        
+        This method ensures we have the appropriate complex dtype:
+        - float32 -> complex64
+        - float64 -> complex128
+        - complex64 -> complex64
+        - complex128 -> complex128
+        """
+        if self.dtype in [torch.float32, torch.complex64]:
             return torch.complex64
-        elif self.dtype == torch.float64:
+        elif self.dtype in [torch.float64, torch.complex128]:
             return torch.complex128
         else:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
+            raise ValueError(f"Unsupported dtype: {self.dtype}. Must be one of: float32, float64, complex64, complex128")
 
     def _initialize_basis(self) -> List[str]:
         """Initialize computational basis states.

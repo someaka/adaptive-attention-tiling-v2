@@ -16,181 +16,111 @@ Benchmark tests compare our implementation against baseline models and existing 
 
 ## Test Organization
 
-### 1. Core Tiling System (`tests/unit/test_tiling.py`)
+### Test Levels
 
-#### Tile Operations
-```python
-def test_tile_creation():
-    """Test tile initialization with various sizes and resolutions.
+The test suite is organized into hierarchical levels based on functionality and dependencies:
 
-    Ensures:
-    - Correct dimension handling
-    - Proper state initialization
-    - Memory allocation efficiency
-    """
-    pass
+#### Level 0: Core Functionality (33 tests)
+- Basic functionality tests
+- Helper functions
+- Setup and initialization
+- No dependencies on other tests
 
-def test_tile_subdivision():
-    """Test tile subdivision logic and boundary conditions.
+#### Level 1: Component Tests
 
-    Ensures:
-    - Correct splitting based on information density
-    - Preservation of data during subdivision
-    - Proper handling of minimum tile sizes
-    """
-    pass
+##### Level 1.0: Geometric Operations (139 tests)
+- Metric tensors
+- Geometric distances
+- Projections
+- Depends on Level 0
 
-def test_tile_merging():
-    """Test merging of adjacent tiles.
+##### Level 1.1: Quantum Operations (72 tests)
+- Quantum states
+- Measurements
+- Entanglement
+- Depends on Level 0 and Level 1.0
 
-    Ensures:
-    - Correct state combination
-    - Boundary preservation
-    - Performance optimization validation
-    """
-    pass
+##### Level 1.2: Pattern Operations (186 tests)
+- Pattern flows
+- Diffusion systems
+- Reaction systems
+- Depends on Level 0 and Level 1.0
 
-def test_tile_state_management():
-    """Test state preservation during tile operations.
+##### Level 1.3: Neural Network Operations (18 tests)
+- Attention mechanisms
+- Network layers
+- Neural computations
+- Depends on Level 0 and Level 1.0
 
-    Ensures:
-    - State consistency during operations
-    - Memory efficiency
-    - Proper cleanup of unused states
-    """
-    pass
+##### Level 1.4: Validation Operations (47 tests)
+- Verification functions
+- Assertions
+- System checks
+- Depends on Level 0 and Level 1.0
+
+#### Level 2: Integration Tests (39 tests)
+- End-to-end tests
+- Performance tests
+- Advanced features
+- Depends on all Level 1.x tests
+
+## Running Tests by Level
+
+To run tests at a specific level:
+```bash
+# Run level 0 tests
+python -m pytest -v -m "level0"
+
+# Run level 1.0 tests (geometric)
+python -m pytest -v -m "level10"
+
+# Run level 1.1 tests (quantum)
+python -m pytest -v -m "level11"
+
+# Run level 1.2 tests (pattern)
+python -m pytest -v -m "level12"
+
+# Run level 1.3 tests (neural)
+python -m pytest -v -m "level13"
+
+# Run level 1.4 tests (validation)
+python -m pytest -v -m "level14"
+
+# Run level 2 tests (integration)
+python -m pytest -v -m "level20"
+
+# Run all tests in dependency order
+python -m pytest -v -m "level0 or level10 or level11 or level12 or level13 or level14 or level20" --order-dependencies
 ```
 
-#### Information Density Metrics
-```python
-def test_density_calculation():
-    """Test information density computation.
+## Test Categories
 
-    Ensures:
-    - Accurate density estimation
-    - Handling of different input types
-    - Performance on varying sequence lengths
-    """
-    pass
+Tests are also marked with categories:
+- `core`: Core functionality tests
+- `geometric`: Geometric operations
+- `attention`: Attention mechanism
+- `tiling`: Tiling operations
+- `integration`: Integration tests
+- `performance`: Performance tests
+- `memory`: Memory management tests
 
-def test_density_thresholds():
-    """Test adaptive threshold mechanisms.
-
-    Ensures:
-    - Dynamic threshold adjustment
-    - Stability of splitting/merging decisions
-    - Resource utilization optimization
-    """
-    pass
+To run tests by category:
+```bash
+python -m pytest -v -m "geometric"  # Run geometric tests
+python -m pytest -v -m "attention"  # Run attention tests
+# etc.
 ```
 
-### 2. Mamba Integration (`tests/unit/test_mamba.py`)
+## Test Dependencies
 
-#### State Space Operations
-```python
-def test_state_initialization():
-    """Test state space initialization with different dimensions.
+Tests are organized with explicit dependencies using the `pytest-dependency` plugin. The dependency graph ensures that:
 
-    Ensures:
-    - Correct state dimensionality
-    - Proper parameter initialization
-    - Memory efficiency
-    """
-    pass
+1. Level 0 tests run first (no dependencies)
+2. Level 1.x tests depend on Level 0 tests in their module
+3. Level 2 tests depend on relevant Level 1.x tests
+4. Within each level, tests can have additional dependencies on other tests at the same level
 
-def test_state_resizing():
-    """Test dynamic resizing of state spaces.
-
-    Ensures:
-    - State preservation during resizing
-    - Computational efficiency
-    - Memory reallocation optimization
-    """
-    pass
-
-def test_selective_computation():
-    """Test selective state updates.
-
-    Ensures:
-    - Correct update propagation
-    - Optimization of computation paths
-    - Maintenance of global consistency
-    """
-    pass
-```
-
-### 3. Performance Tests (`tests/performance/`)
-
-#### Memory Usage
-```python
-def test_memory_scaling():
-    """Test memory usage with increasing sequence lengths.
-
-    Benchmarks:
-    - Peak memory usage
-    - Memory growth patterns
-    - Garbage collection efficiency
-    """
-    pass
-
-def test_memory_efficiency():
-    """Test memory efficiency of tiling operations.
-
-    Benchmarks:
-    - Memory overhead of tiling
-    - State management efficiency
-    - Cache utilization
-    """
-    pass
-```
-
-#### Computational Performance
-```python
-def test_computation_scaling():
-    """Test computational complexity scaling.
-
-    Benchmarks:
-    - Time complexity with sequence length
-    - Parallel processing efficiency
-    - CPU utilization patterns
-    """
-    pass
-
-def test_adaptive_overhead():
-    """Test overhead of adaptive mechanisms.
-
-    Benchmarks:
-    - Cost of density calculations
-    - Tiling decision overhead
-    - Overall system efficiency
-    """
-    pass
-```
-
-### 4. Integration Tests (`tests/integration/`)
-
-#### System Integration
-```python
-def test_end_to_end_flow():
-    """Test complete system pipeline.
-
-    Ensures:
-    - Correct component interaction
-    - Data flow integrity
-    - Error handling and recovery
-    """
-    pass
-
-def test_resource_management():
-    """Test system-wide resource management.
-
-    Ensures:
-    - Proper resource allocation
-    - System stability under load
-    - Resource cleanup
-    """
-    pass
-```
+Dependencies are automatically managed based on the test levels and module structure.
 
 ## Benchmarking Framework
 
