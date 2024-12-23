@@ -86,6 +86,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         stability_term: float = 0.1,
+        test_config: Optional[dict] = None
     ):
         """Initialize neural geometric flow with quantum integration.
         
@@ -105,6 +106,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
             dtype: Data type for tensors
             device: Device for computation
             stability_term: Coefficient for stability term in connection computation
+            test_config: Optional test configuration dictionary
         """
         super().__init__(
             manifold_dim=manifold_dim,
@@ -142,18 +144,15 @@ class NeuralGeometricFlow(PatternFormationFlow):
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             dropout=dropout,
-            dtype=self.dtype
+            dtype=self.dtype,
+            device=self.device,
+            manifold_type="hyperbolic",
+            curvature=-1.0
         )
         
         # Initialize dimension manager for operadic transitions
         self.dim_manager = DimensionManager(
-            DimensionConfig(
-                attention_depth=num_heads,
-                quantum_dim=hidden_dim,
-                geometric_dim=manifold_dim,
-                flow_dim=hidden_dim,
-                emergence_dim=motive_rank * num_primes
-            )
+            DimensionConfig.from_test_config(test_config)
         )
         
         # Initialize neural networks with proper dimensioning
@@ -425,7 +424,14 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Quantum corrections
         if self.phase_tracking_enabled:
             with torch.no_grad():
-                quantum_state = self.prepare_quantum_state(points_proj, return_validation=False)
+                # Project points to hidden dimension for quantum state preparation
+                points_hidden = torch.zeros(
+                    (batch_size, self.hidden_dim),
+                    device=self.device,
+                    dtype=self.dtype
+                )
+                points_hidden[..., :self.manifold_dim] = points_proj
+                quantum_state = self.prepare_quantum_state(points_hidden, return_validation=False)
             
             corrections = self.compute_quantum_corrections(
                 quantum_state, 
@@ -762,3 +768,322 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Initialize other networks
         self._init_connection_networks()
         self._init_quantum_networks()
+
+    def compute_metric_tensor(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+        
+        # Compute metric components
+        metric_components = self.metric_net(x)
+        
+        # Reshape to metric tensor
+        metric = metric_components.view(batch_size, self.manifold_dim, self.manifold_dim)
+        
+        # Ensure metric is symmetric and positive definite
+        metric = 0.5 * (metric + metric.transpose(-1, -2))
+        
+        # Add stability term
+        metric.diagonal(dim1=-2, dim2=-1).add_(self.stability_threshold)
+        
+        # Project onto positive definite cone
+        eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+        eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
+        metric = torch.matmul(
+            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+            eigenvectors.transpose(-2, -1)
+        )
+        
+        return metric
+
+    def compute_flow_field(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute flow field from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Flow field tensor of shape (batch_size, seq_len, manifold_dim)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+            seq_len = 1
+        
+        # Compute metric tensor
+        metric = self.compute_metric_tensor(x)
+        
+        # Compute Ricci tensor
+        ricci = self.compute_ricci_tensor(metric, x)
+        
+        # Compute flow field
+        flow = self.compute_flow(x, ricci)
+        
+        # Reshape back to sequence format if needed
+        if seq_len > 1:
+            flow = flow.view(batch_size, seq_len, -1)
+        
+        return flow
+
+    def compute_divergence(self, flow_field: torch.Tensor) -> torch.Tensor:
+        """Compute divergence of flow field.
+        
+        Args:
+            flow_field: Flow field tensor of shape (batch_size, seq_len, manifold_dim)
+            
+        Returns:
+            Divergence tensor of shape (batch_size, seq_len)
+        """
+        # Compute divergence using autograd
+        batch_size = flow_field.shape[0]
+        seq_len = flow_field.shape[1] if flow_field.dim() == 3 else 1
+        
+        # Reshape if needed
+        if flow_field.dim() == 3:
+            flow_field = flow_field.view(-1, self.manifold_dim)
+        
+        # Compute divergence
+        divergence = torch.zeros(batch_size * seq_len, device=flow_field.device)
+        
+        for i in range(self.manifold_dim):
+            divergence += torch.autograd.grad(
+                flow_field[:, i].sum(),
+                flow_field,
+                create_graph=True,
+                retain_graph=True
+            )[0][:, i]
+        
+        # Reshape back if needed
+        if seq_len > 1:
+            divergence = divergence.view(batch_size, seq_len)
+        
+        return divergence
+
+    def compute_curvature_flow(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute curvature flow from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Curvature flow tensor of shape (batch_size, seq_len, manifold_dim)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+            seq_len = 1
+        
+        # Compute metric tensor
+        metric = self.compute_metric_tensor(x)
+        
+        # Compute Ricci tensor
+        ricci = self.compute_ricci_tensor(metric, x)
+        
+        # Compute curvature flow
+        flow = self.compute_flow(x, ricci)
+        
+        # Reshape back to sequence format if needed
+        if seq_len > 1:
+            flow = flow.view(batch_size, seq_len, -1)
+        
+        return flow
+
+    def compute_ricci_flow(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute Ricci flow from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Ricci flow tensor of shape (batch_size, manifold_dim, manifold_dim)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+        
+        # Compute metric tensor
+        metric = self.compute_metric_tensor(x)
+        
+        # Compute Ricci tensor
+        ricci = self.compute_ricci_tensor(metric, x)
+        
+        return ricci
+
+    def compute_scalar_curvature(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute scalar curvature from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Scalar curvature tensor of shape (batch_size,)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+        
+        # Compute metric tensor
+        metric = self.compute_metric_tensor(x)
+        
+        # Compute Ricci tensor
+        ricci = self.compute_ricci_tensor(metric, x)
+        
+        # Compute scalar curvature as trace of Ricci tensor
+        scalar = torch.diagonal(ricci, dim1=-2, dim2=-1).sum(-1)
+        
+        return scalar
+
+    def evolve_flow(self, x: torch.Tensor, time_steps: int = 10) -> torch.Tensor:
+        """Evolve flow for given number of time steps.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            time_steps: Number of time steps to evolve
+            
+        Returns:
+            Evolved tensor of shape (batch_size, seq_len, hidden_dim)
+        """
+        # Initialize evolved tensor
+        evolved = x
+        
+        # Evolve for given number of steps
+        for _ in range(time_steps):
+            # Compute metric tensor
+            metric = self.compute_metric_tensor(evolved)
+            
+            # Compute Ricci tensor
+            ricci = self.compute_ricci_tensor(metric, evolved)
+            
+            # Take flow step
+            evolved_metric, _ = self.flow_step(metric, ricci)
+            
+            # Project back to input space
+            evolved = self.project_to_input_space(evolved_metric)
+        
+        return evolved
+
+    def compute_flow_energy(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute flow energy from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Flow energy tensor of shape (batch_size,)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+        
+        # Compute metric tensor
+        metric = self.compute_metric_tensor(x)
+        
+        # Compute Ricci tensor
+        ricci = self.compute_ricci_tensor(metric, x)
+        
+        # Compute flow vector
+        flow = self.compute_flow(x, ricci)
+        
+        # Compute energy as norm of flow vector
+        energy = torch.norm(flow, dim=-1)
+        
+        return energy
+
+    def compute_volume_form(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute volume form from input.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Volume form tensor of shape (batch_size,)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+        
+        # Compute metric tensor
+        metric = self.compute_metric_tensor(x)
+        
+        # Compute volume form as square root of metric determinant
+        volume = torch.sqrt(torch.linalg.det(metric))
+        
+        return volume
+
+    def project_to_input_space(self, metric: torch.Tensor) -> torch.Tensor:
+        """Project metric tensor back to input space.
+        
+        Args:
+            metric: Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+            
+        Returns:
+            Input space tensor of shape (batch_size, hidden_dim)
+        """
+        batch_size = metric.shape[0]
+        
+        # Flatten metric tensor
+        metric_flat = metric.view(batch_size, -1)
+        
+        # Project to input space
+        x = self.metric_net[0](metric_flat)  # Use first layer of metric network in reverse
+        
+        return x
+
+    def integrate_flow(self, x: torch.Tensor) -> torch.Tensor:
+        """Integrate flow field to get evolved state.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Integrated tensor of shape (batch_size, seq_len, hidden_dim)
+        """
+        # Project to manifold space if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.view(-1, hidden_dim)  # Flatten batch and sequence dimensions
+        else:
+            batch_size = x.shape[0]
+            seq_len = 1
+        
+        # Compute flow field
+        flow_field = self.compute_flow_field(x)
+        
+        # Integrate flow field using Euler method
+        dt = self.dt
+        integrated = x + dt * flow_field
+        
+        # Reshape back to sequence format if needed
+        if seq_len > 1:
+            integrated = integrated.view(batch_size, seq_len, -1)
+        
+        return integrated

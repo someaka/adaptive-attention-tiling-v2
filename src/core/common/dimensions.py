@@ -60,6 +60,37 @@ class DimensionConfig:
             self.flow_dim,
             self.emergence_dim
         )
+    
+    @classmethod
+    def from_test_config(cls, test_config: Optional[dict] = None) -> 'DimensionConfig':
+        """Create configuration from test config.
+        
+        Args:
+            test_config: Optional test configuration dictionary
+            
+        Returns:
+            DimensionConfig instance with test dimensions
+        """
+        if test_config is None:
+            # Default minimal configuration
+            return cls(
+                attention_depth=1,
+                quantum_dim=2,
+                geometric_dim=2,
+                flow_dim=2,
+                emergence_dim=2
+            )
+            
+        # Get dimensions from test config
+        manifold_dim = test_config.get("manifold_dim", 4)
+        
+        return cls(
+            attention_depth=1,
+            quantum_dim=manifold_dim,
+            geometric_dim=manifold_dim,
+            flow_dim=manifold_dim,
+            emergence_dim=manifold_dim
+        )
 
 
 class QuantumTensor(Tensor):

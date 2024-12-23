@@ -41,15 +41,52 @@ class NeuralQuantumBridge(nn.Module):
         hidden_dim: int,
         num_heads: int = 8,
         dropout: float = 0.1,
-        dtype: torch.dtype = torch.float32
+        manifold_type: str = "hyperbolic",
+        curvature: float = -1.0,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
     ):
+        """Initialize neural quantum bridge.
+        
+        Args:
+            hidden_dim: Hidden dimension size
+            num_heads: Number of attention heads
+            dropout: Dropout probability
+            manifold_type: Type of manifold to use
+            curvature: Manifold curvature
+            dtype: Data type to use
+            device: Device for computation
+        """
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
+        self.manifold_dim = hidden_dim // 2  # Manifold dimension is half of hidden dimension
         self.dtype = dtype
-
+        self.device = device or torch.device('cpu')
+        
+        # Initialize quantum geometric attention
+        self.quantum_attention = QuantumGeometricAttention(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            manifold_type=manifold_type,
+            curvature=curvature,
+            manifold_dim=self.manifold_dim,
+            num_layers=3,
+            tile_size=8,
+            motive_rank=4,
+            dtype=dtype,
+            device=device
+        )
+        
+        # Initialize normalization layers
+        self.layer_norm = nn.LayerNorm(hidden_dim, device=self.device)
+        self.manifold_norm = nn.LayerNorm(self.manifold_dim, device=self.device)
+        
         # Quantum infrastructure
-        self.hilbert_space = HilbertSpace(dim=hidden_dim, dtype=dtype)
+        self.hilbert_space = HilbertSpace(
+            dim=self.manifold_dim,  # Use manifold_dim instead of fixed dimension
+            dtype=self.dtype
+        )
         self.state_validator = StateValidator()
         self.state_preparation = StatePreparationValidator()
 
@@ -95,14 +132,7 @@ class NeuralQuantumBridge(nn.Module):
             dtype=dtype
         )
 
-        # Quantum attention components
-        self.quantum_attention = QuantumGeometricAttention(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            dtype=dtype
-        )
-
+        # Initialize quantum tile
         self.quantum_tile = QuantumMotivicTile(
             size=hidden_dim,
             hidden_dim=hidden_dim,
@@ -122,7 +152,7 @@ class NeuralQuantumBridge(nn.Module):
         """Convert neural state to quantum state.
         
         Args:
-            x: Neural state tensor
+            x: Neural state tensor of shape (batch_size, hidden_dim)
             return_validation: Whether to return validation result
             
         Returns:
@@ -134,14 +164,18 @@ class NeuralQuantumBridge(nn.Module):
             self.state_manager.device = x.device
 
         # Normalize input
-        x_norm = F.normalize(x, p=2, dim=-1)
-
+        x_norm = self.layer_norm(x)
+        
+        # Project to manifold dimension
+        x_manifold = x_norm[..., :self.manifold_dim]
+        x_manifold = self.manifold_norm(x_manifold)
+        
         # Convert to quantum amplitudes
-        amplitudes = self.quantum_attention.classical_to_quantum(x_norm)
-
+        amplitudes = self.quantum_attention.classical_to_quantum(x_manifold)
+        
         # Prepare quantum state
         state = self.hilbert_space.prepare_state(amplitudes)
-
+        
         if return_validation:
             # Validate state preparation
             validation = self.state_preparation.validate_preparation(

@@ -2,267 +2,160 @@
 
 import pytest
 import os
-from typing import Dict, Set
+from typing import Dict, Set, List
+import re
+import torch
+from src.core.flow.neural import NeuralGeometricFlow
+import yaml
 
-def get_test_level(item, items) -> int:
-    """Determine test level based on dependencies and location."""
+def get_test_dependencies(item, items) -> List[str]:
+    """Determine test dependencies based on file location and content."""
     path = str(item.fspath)
     name = item.name.lower()
-
-    # Level 0: Core functionality tests
-    if any(pattern in path for pattern in [
-        "tests/core/",
-        "tests/unit/",
-        "/test_helpers.py",
-        "/test_basic",
-        "_basic_test"
-    ]) or any(pattern in name for pattern in [
-        "basic",
-        "helper",
-        "init",
-        "setup"
-    ]):
-        return 0
-
-    # Level 1.0: Basic geometric operations
-    if any(pattern in path for pattern in [
-        "/test_geometric.py",
-        "geometric/test_",
-        "_geometric_",
-        "/test_metric",
-        "/test_tensor"
-    ]) or any(pattern in name for pattern in [
-        "metric",
-        "tensor",
-        "distance",
-        "projection"
-    ]):
-        return 10
-
-    # Level 1.1: Quantum operations
-    if any(pattern in path for pattern in [
-        "/test_quantum",
-        "quantum/test_",
-        "_quantum_",
-        "/test_state"
-    ]) or any(pattern in name for pattern in [
-        "quantum",
-        "state",
-        "measurement",
-        "entangle"
-    ]):
-        return 11
-
-    # Level 1.2: Pattern operations
-    if any(pattern in path for pattern in [
-        "/test_pattern",
-        "pattern/test_",
-        "_pattern_",
-        "/test_flow"
-    ]) or any(pattern in name for pattern in [
-        "pattern",
-        "flow",
-        "diffusion",
-        "reaction"
-    ]):
-        return 12
-
-    # Level 1.3: Neural network operations
-    if any(pattern in path for pattern in [
-        "/test_neural",
-        "neural/test_",
-        "_neural_",
-        "/test_attention"
-    ]) or any(pattern in name for pattern in [
-        "neural",
-        "attention",
-        "network",
-        "layer"
-    ]):
-        return 13
-
-    # Level 1.4: Validation operations
-    if any(pattern in path for pattern in [
-        "/test_validation",
-        "validation/test_",
-        "_validation_",
-        "/test_verify"
-    ]) or any(pattern in name for pattern in [
-        "validation",
-        "verify",
-        "check",
-        "assert"
-    ]):
-        return 14
-
-    # Level 2: Integration and complex tests
-    if any(pattern in path for pattern in [
-        "tests/test_integration/",
-        "tests/performance/",
-        "/test_end_to_end",
-        "_integration",
-        "_advanced"
-    ]) or any(pattern in name for pattern in [
-        "integration",
-        "end_to_end",
-        "performance",
-        "advanced"
-    ]):
-        return 20
-
-    # Default to level 1.0 if no clear pattern match
-    return 10
-
-def get_dependencies(item, items) -> Set[str]:
-    """Get dependencies for a test based on its level and module."""
-    level = get_test_level(item, items)
-    if level == 0:
-        return set()
-        
-    # Get all tests from previous level in the same module or its dependencies
-    module_path = os.path.dirname(str(item.fspath))
+    
+    # Core dependencies - these are always required
     deps = set()
     
-    for other in items:
-        other_level = get_test_level(other, items)
-        other_path = os.path.dirname(str(other.fspath))
+    # Add dependencies based on test content
+    with open(path, 'r') as f:
+        content = f.read()
         
-        # Add dependency if:
-        # 1. Test is from previous level or same major level but lower minor level
-        # 2. Test is in same module or a core module
-        if ((other_level < level // 10 * 10) or  # Previous major level
-            (other_level // 10 == level // 10 and other_level < level)) and (  # Same major level, lower minor
-            other_path == module_path or
-            "tests/core/" in str(other.fspath) or
-            "tests/unit/" in str(other.fspath)
-        ):
-            if other.cls:
-                deps.add(f"{other.cls.__name__}::{other.name}")
-            else:
-                deps.add(other.name)
+        # Find all test functions that this test might depend on
+        test_refs = re.findall(r'test_\w+', content)
+        for ref in test_refs:
+            if ref != item.name:  # Don't add self as dependency
+                deps.add(ref)
                 
-    return deps
+        # Find all test classes that this test might depend on
+        class_refs = re.findall(r'Test\w+', content)
+        for ref in class_refs:
+            if item.cls and ref != item.cls.__name__:  # Don't add self as dependency
+                deps.add(ref)
+    
+    # Add dependencies based on directory structure
+    if "tests/core/attention/" in path:
+        deps.add("test_minkowski_inner_product")  # Base geometric operation
+        
+    if "tests/core/tiling/" in path:
+        deps.add("test_tile_dimensions")  # Base tiling operation
+        
+    if "test_geometric" in path or "geometric" in name:
+        deps.add("test_minkowski_inner_product")
+        
+    if "test_quantum" in path or "quantum" in name:
+        deps.add("test_geometric_distance")
+        
+    if "test_pattern" in path or "pattern" in name:
+        deps.add("test_quantum_state")
+        
+    if "test_validation" in path:
+        deps.add("test_basic_tensor_shapes")
+        
+    # Remove any non-existent dependencies
+    valid_deps = set()
+    for dep in deps:
+        for test_item in items:
+            if dep in str(test_item.nodeid):
+                valid_deps.add(dep)
+                break
+                
+    return list(valid_deps)
 
-def pytest_configure(config):
-    """Configure custom markers."""
-    # Category markers
-    config.addinivalue_line(
-        "markers",
-        "core: mark test as part of core functionality"
-    )
-    config.addinivalue_line(
-        "markers",
-        "geometric: mark test as part of geometric operations"
-    )
-    config.addinivalue_line(
-        "markers",
-        "attention: mark test as part of attention mechanism"
-    )
-    config.addinivalue_line(
-        "markers",
-        "tiling: mark test as part of tiling operations"
-    )
-    config.addinivalue_line(
-        "markers",
-        "integration: mark test as integration test"
-    )
-    config.addinivalue_line(
-        "markers",
-        "performance: mark test as performance test"
-    )
-    config.addinivalue_line(
-        "markers",
-        "memory: mark test as memory test"
-    )
-
-    # Level markers
-    config.addinivalue_line(
-        "markers",
-        "level0: mark test as level 0 (fundamental)"
-    )
-    config.addinivalue_line(
-        "markers",
-        "level10: mark test as level 1.0 (basic geometric operations)"
-    )
-    config.addinivalue_line(
-        "markers",
-        "level11: mark test as level 1.1 (quantum operations)"
-    )
-    config.addinivalue_line(
-        "markers",
-        "level12: mark test as level 1.2 (pattern operations)"
-    )
-    config.addinivalue_line(
-        "markers",
-        "level13: mark test as level 1.3 (neural network operations)"
-    )
-    config.addinivalue_line(
-        "markers",
-        "level14: mark test as level 1.4 (validation operations)"
-    )
-    config.addinivalue_line(
-        "markers",
-        "level20: mark test as level 2.0 (integration and complex tests)"
-    )
-
-def pytest_collection_modifyitems(items):
-    """Add markers based on test location and dependencies."""
-    # First pass: Add basic markers and determine levels
+def pytest_collection_modifyitems(session, config, items):
+    """Automatically handle test dependencies."""
+    # Build dependency graph
+    dependency_graph = {}
+    
+    # First pass: Collect all test names
+    test_names = {
+        item.nodeid: item for item in items
+    }
+    
+    # Second pass: Build dependency graph
     for item in items:
-        # Add markers based on directory structure
-        if "tests/core/" in str(item.fspath):
-            item.add_marker(pytest.mark.core)
-            
-        if "tests/core/attention/" in str(item.fspath):
-            item.add_marker(pytest.mark.geometric)
-            item.add_marker(pytest.mark.attention)
-            
-        if "tests/core/tiling/" in str(item.fspath):
-            item.add_marker(pytest.mark.tiling)
-            
-        if "tests/test_integration/" in str(item.fspath):
-            item.add_marker(pytest.mark.integration)
-            
-        if "tests/performance/" in str(item.fspath):
-            item.add_marker(pytest.mark.performance)
-            
-        if "tests/test_memory/" in str(item.fspath):
-            item.add_marker(pytest.mark.memory)
-
-        # Add markers based on test names
-        if "geometric" in item.name:
-            item.add_marker(pytest.mark.geometric)
-            
-        if "attention" in item.name:
-            item.add_marker(pytest.mark.attention)
-            
-        if "memory" in item.name:
-            item.add_marker(pytest.mark.memory)
-            
-        if "performance" in item.name:
-            item.add_marker(pytest.mark.performance)
-
-        # Determine and add level marker
-        level = get_test_level(item, items)
-        item.add_marker(getattr(pytest.mark, f"level{level}"))
-
-    # Second pass: Add dependencies based on levels
-    for item in items:
-        # Get test name with class if it's a method
-        if item.cls:
-            test_name = f"{item.cls.__name__}::{item.name}"
-        else:
-            test_name = item.name
-            
-        # Add dependency marker with automatically determined dependencies
-        deps = get_dependencies(item, items)
+        deps = get_test_dependencies(item, items)
         if deps:
-            item.add_marker(pytest.mark.dependency(name=test_name, depends=list(deps)))
+            dependency_graph[item.nodeid] = [
+                dep_id for dep_id in test_names
+                if any(dep in dep_id for dep in deps)
+            ]
+    
+    # Third pass: Add dependency markers
+    for item in items:
+        if item.nodeid in dependency_graph:
+            item.add_marker(
+                pytest.mark.dependency(
+                    depends=dependency_graph[item.nodeid]
+                )
+            )
         else:
-            item.add_marker(pytest.mark.dependency(name=test_name))
+            item.add_marker(pytest.mark.dependency())
+            
+    # Fourth pass: Order tests based on dependencies
+    ordered_items = []
+    visited = set()
+    
+    def visit(item):
+        if item.nodeid in visited:
+            return
+        visited.add(item.nodeid)
+        for dep_id in dependency_graph.get(item.nodeid, []):
+            if dep_id not in visited and dep_id in test_names:
+                visit(test_names[dep_id])
+        ordered_items.append(item)
+    
+    for item in items:
+        visit(item)
+        
+    items[:] = ordered_items
 
 @pytest.fixture(autouse=True)
-def run_order():
-    """Define test run order based on dependencies."""
-    # Tests will run in order based on their level markers and dependencies
-    pass 
+def cleanup_after_test():
+    """Cleanup after each test."""
+    yield
+    # Add any cleanup code here if needed
+
+@pytest.fixture
+def manifold_dim():
+    """Manifold dimension for tests."""
+    return 4  # Increased from 2 to match the test requirements
+
+@pytest.fixture
+def hidden_dim(manifold_dim):
+    """Hidden dimension for tests."""
+    return manifold_dim * 2  # Double the manifold dimension for proper scaling
+
+@pytest.fixture
+def flow(manifold_dim, hidden_dim, test_config):
+    """Create flow system fixture."""
+    return NeuralGeometricFlow(
+        manifold_dim=manifold_dim,
+        hidden_dim=hidden_dim,
+        dt=0.1,
+        stability_threshold=1e-6,
+        fisher_rao_weight=1.0,
+        quantum_weight=1.0,
+        num_heads=8,
+        dropout=0.1,
+        test_config=test_config
+    )
+
+@pytest.fixture
+def points(batch_size, manifold_dim):
+    """Create random points in position space."""
+    return torch.randn(batch_size, manifold_dim, requires_grad=True)
+
+@pytest.fixture
+def batch_size():
+    """Batch size for tests."""
+    return 10  # Increased from 4 to test with larger batches
+
+@pytest.fixture
+def test_config():
+    """Load test configuration based on environment."""
+    config_name = os.environ.get("TEST_REGIME", "debug")
+    config_path = f"configs/test_regimens/{config_name}.yaml"
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return config

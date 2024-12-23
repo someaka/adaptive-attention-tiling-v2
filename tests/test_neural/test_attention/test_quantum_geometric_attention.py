@@ -35,14 +35,19 @@ class TestQuantumGeometricAttention:
     """Test suite for quantum geometric attention."""
 
     @pytest.fixture
-    def hidden_dim(self) -> int:
+    def manifold_dim(self) -> int:
+        """Return manifold dimension for tests."""
+        return 4  # Base dimension for tests
+
+    @pytest.fixture
+    def hidden_dim(self, manifold_dim) -> int:
         """Return hidden dimension for tests."""
-        return 64
+        return manifold_dim * 2  # Hidden dim is double the manifold dim
 
     @pytest.fixture
     def num_heads(self) -> int:
         """Return number of attention heads for tests."""
-        return 8
+        return 4  # Reduced from 8 to better match smaller dimensions
 
     @pytest.fixture
     def batch_size(self) -> int:
@@ -52,26 +57,26 @@ class TestQuantumGeometricAttention:
     @pytest.fixture
     def seq_length(self) -> int:
         """Return sequence length for tests."""
-        return 32
+        return 8  # Reduced from 32 to better match test scale
 
     @pytest.fixture
-    def attention_layer(self, hidden_dim, num_heads):
+    def attention_layer(self, hidden_dim, manifold_dim, num_heads):
         """Create a test attention layer."""
         return QuantumGeometricAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             dropout=0.1,
             motive_rank=4,
-            manifold_dim=8,
+            manifold_dim=manifold_dim,  # Explicitly pass manifold_dim
             num_layers=3,
-            tile_size=16,
+            tile_size=8,  # Reduced from 16 to match smaller scale
         )
 
     @pytest.fixture
-    def geometric_structures(self, hidden_dim):
+    def geometric_structures(self, manifold_dim):
         """Create geometric structures for testing."""
         return GeometricStructures(
-            dim=hidden_dim,
+            dim=manifold_dim,  # Use manifold_dim instead of hidden_dim
             manifold_type="hyperbolic",
             curvature=-1.0,
             parallel_transport_method="schild",
@@ -83,13 +88,13 @@ class TestQuantumGeometricAttention:
         return PatternDynamics(
             dim=hidden_dim,
             num_heads=num_heads,
-            num_patterns=64,
+            num_patterns=32,  # Reduced from 64 to match smaller scale
             temperature=0.1,
             adaptation_rate=0.01,
         )
 
     def test_attention_state_preparation(
-        self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
+        self, attention_layer, batch_size, seq_length, hidden_dim, manifold_dim, num_heads
     ):
         """Test attention state preparation and properties."""
         # Create input tensor
@@ -106,7 +111,8 @@ class TestQuantumGeometricAttention:
 
         # Test state dimensions
         assert state.quantum_state.shape[0] == batch_size, "Batch dimension preserved"
-        assert state.quantum_state.shape[1] == attention_layer.num_heads, "Head dimension correct"
+        assert state.quantum_state.shape[1] == num_heads, "Head dimension correct"
+        assert state.quantum_state.shape[-1] == manifold_dim, "Manifold dimension correct"
 
         # Test state normalization
         norms = state.quantum_state.norm(dim=-1)
@@ -196,22 +202,27 @@ class TestQuantumGeometricAttention:
         assert metrics.curvature is not None, "Should compute flow curvature"
 
     def test_quantum_classical_interface(
-        self, attention_layer, batch_size, seq_length, hidden_dim
+        self, attention_layer, batch_size, seq_length, hidden_dim, manifold_dim
     ):
         """Test quantum-classical information interface."""
-        # Create classical input
-        classical_input = torch.randn(batch_size, seq_length, hidden_dim)
+        # Create classical input with manifold dimension
+        classical_input = torch.randn(batch_size, seq_length, manifold_dim)
 
         # Convert to quantum state
         quantum_state = attention_layer.classical_to_quantum(classical_input)
 
         # Test quantum state properties
+        assert quantum_state.shape[-1] == manifold_dim, "Should preserve manifold dimension"
         assert attention_layer.is_valid_quantum_state(
             quantum_state
         ), "Should be valid quantum state"
 
         # Convert back to classical
         classical_output = attention_layer.quantum_to_classical(quantum_state)
+
+        # Test shape preservation
+        assert classical_output.shape == classical_input.shape, "Should preserve input shape"
+        assert classical_output.shape[-1] == manifold_dim, "Should preserve manifold dimension"
 
         # Test information preservation
         assert torch.allclose(
@@ -225,13 +236,14 @@ class TestQuantumGeometricAttention:
         assert quantum_state.grad is not None, "Should allow gradient flow"
 
     def test_multi_head_integration(
-        self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
+        self, attention_layer, batch_size, seq_length, hidden_dim, manifold_dim, num_heads
     ):
         """Test multi-head attention integration."""
-        # Create per-head inputs
+        # Create per-head inputs with manifold dimension
+        head_dim = manifold_dim  # Each head operates on manifold dimension
         head_states = [
-            torch.randn(batch_size, seq_length, hidden_dim // attention_layer.num_heads)
-            for _ in range(attention_layer.num_heads)
+            torch.randn(batch_size, seq_length, head_dim)
+            for _ in range(num_heads)
         ]
 
         # Integrate heads
@@ -246,7 +258,8 @@ class TestQuantumGeometricAttention:
 
         # Test head separation
         separated = attention_layer.separate_heads(integrated)
-        assert len(separated) == attention_layer.num_heads, "Should recover all heads"
+        assert len(separated) == num_heads, "Should recover all heads"
+        assert all(s.shape[-1] == manifold_dim for s in separated), "Each head should have manifold dimension"
 
         # Test head independence
         head_correlations = attention_layer.compute_head_correlations(separated)
@@ -313,19 +326,19 @@ class TestQuantumGeometricAttention:
         ), "Connection should have correct shape"
 
     def test_manifold_curvature(
-        self, attention_layer, batch_size, seq_length, hidden_dim
+        self, attention_layer, batch_size, seq_length, hidden_dim, manifold_dim
     ):
         """Test attention manifold curvature properties."""
-        # Create local patch of attention states
-        states = torch.randn(batch_size, seq_length, hidden_dim)
+        # Create local patch of attention states with manifold dimension
+        states = torch.randn(batch_size, seq_length, manifold_dim)
 
         # Compute metric tensor
         metric = attention_layer.compute_metric_tensor(states)
         assert metric.shape == (
             batch_size,
-            hidden_dim,
-            hidden_dim,
-        ), "Metric tensor should have correct shape"
+            manifold_dim,
+            manifold_dim,
+        ), "Metric tensor should have manifold dimensions"
 
         # Test Riemann curvature
         riemann = attention_layer.compute_riemann_tensor(states)
@@ -335,7 +348,7 @@ class TestQuantumGeometricAttention:
         ), "Riemann tensor should be antisymmetric in last indices"
 
         # Test sectional curvature
-        planes = torch.randn(batch_size, hidden_dim, 2)  # Random 2-planes
+        planes = torch.randn(batch_size, manifold_dim, 2)  # Random 2-planes in manifold
         sectional = attention_layer.compute_sectional_curvature(states, planes)
         assert sectional.shape == (batch_size,), "Sectional curvature should be scalar"
 
@@ -343,9 +356,9 @@ class TestQuantumGeometricAttention:
         ricci = attention_layer.compute_ricci_tensor(states)
         assert ricci.shape == (
             batch_size,
-            hidden_dim,
-            hidden_dim,
-        ), "Ricci tensor should have correct shape"
+            manifold_dim,
+            manifold_dim,
+        ), "Ricci tensor should have manifold dimensions"
 
         # Test scalar curvature
         scalar = attention_layer.compute_scalar_curvature(states)
