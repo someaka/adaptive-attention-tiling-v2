@@ -148,17 +148,56 @@ class TestNeuralGeometricFlow:
             assert isinstance(quantum_tensor, QuantumTensor)
 
     def test_metric_computation(self, neural_flow, batch_size, device):
-        """Test metric tensor computation."""
+        """Test Riemannian metric tensor computation.
+        
+        A proper Riemannian metric must satisfy:
+        1. Symmetry: g_ij = g_ji
+        2. Positive definiteness: v^T g v > 0 for all nonzero vectors v
+        3. Non-degeneracy: det(g) > 0
+        4. Smoothness: eigenvalues should be well-conditioned
+        """
+        # Generate test points on the manifold
         points = torch.randn(batch_size, neural_flow.manifold_dim, device=device)
+        points = points / torch.norm(points, dim=-1, keepdim=True)  # Normalize points
+        
+        # Compute metric without any artificial regularization
         metric = neural_flow.compute_metric(points)
         
-        # Verify shape and symmetry
-        assert metric.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
-        assert torch.allclose(metric, metric.transpose(-1, -2), rtol=1e-4, atol=1e-4)
+        # 1. Check shape
+        assert metric.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim), \
+            f"Expected shape {(batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)}, got {metric.shape}"
         
-        # Verify positive definiteness with a small tolerance
+        # 2. Check symmetry with tight tolerance
+        sym_diff = torch.abs(metric - metric.transpose(-2, -1))
+        max_sym_diff = sym_diff.max().item()
+        assert max_sym_diff < 1e-7, f"Metric not symmetric, max difference: {max_sym_diff}"
+        
+        # 3. Check positive definiteness via eigenvalues
         eigenvalues = torch.linalg.eigvalsh(metric)  # Use eigvalsh for symmetric matrices
-        assert torch.all(eigenvalues > -1e-6)  # Allow for small numerical errors
+        min_eigenvalue = eigenvalues.min().item()
+        assert min_eigenvalue > 1e-7, f"Metric not positive definite, min eigenvalue: {min_eigenvalue}"
+        
+        # 4. Check non-degeneracy via determinant
+        determinants = torch.linalg.det(metric)
+        min_det = determinants.min().item()
+        assert min_det > 1e-7, f"Metric is degenerate, min determinant: {min_det}"
+        
+        # 5. Check conditioning (ratio of largest to smallest eigenvalue)
+        max_eigenvalue = eigenvalues.max().item()
+        condition_number = max_eigenvalue / min_eigenvalue
+        assert condition_number < 1e4, f"Metric poorly conditioned, condition number: {condition_number}"
+        
+        # 6. Test metric action on vectors
+        # Generate random vectors
+        vectors = torch.randn(batch_size, neural_flow.manifold_dim, device=device)
+        vectors = vectors / torch.norm(vectors, dim=-1, keepdim=True)
+        
+        # Compute quadratic form g(v,v)
+        metric_action = torch.einsum('bij,bi,bj->b', metric, vectors, vectors)
+        
+        # Check positivity of quadratic form
+        min_action = metric_action.min().item()
+        assert min_action > 0, f"Metric action not positive, min value: {min_action}"
 
     def test_flow_step(self, neural_flow, batch_size, device):
         """Test geometric flow step."""

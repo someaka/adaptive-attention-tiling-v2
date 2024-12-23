@@ -141,12 +141,23 @@ class NeuralGeometricFlow(PatternFormationFlow):
         self.projection_dim = hidden_dim * 2
         self.connection_dim = manifold_dim * manifold_dim * manifold_dim
         
-        # Initialize metric network
+        # Calculate number of parameters for lower triangular matrix
+        n = manifold_dim
+        self.n_metric_params = n * (n + 1) // 2  # Number of elements in lower triangular matrix
+        
+        # Initialize metric network with proper output dimension
         self.metric_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim, dtype=self.dtype, device=self.device),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=self.dtype, device=self.device)
+            nn.Linear(hidden_dim, self.n_metric_params, dtype=self.dtype, device=self.device)
         )
+        
+        # Initialize weights to ensure positive definiteness
+        nn.init.orthogonal_(self.metric_net[0].weight)
+        nn.init.zeros_(self.metric_net[0].bias)
+        nn.init.orthogonal_(self.metric_net[-1].weight)
+        nn.init.constant_(self.metric_net[-1].bias, 0.1)  # Small positive bias for stability
         
         # Initialize quantum bridge with proper configuration
         self.quantum_bridge = NeuralQuantumBridge(
@@ -428,35 +439,29 @@ class NeuralGeometricFlow(PatternFormationFlow):
             "points"
         )
         
-        # Project points through metric network
+        # Project points through metric network to get lower triangular part
         metric_features = self.metric_net(points)
         
-        # Reshape to metric tensor
-        metric = metric_features.view(batch_size, self.manifold_dim, self.manifold_dim)
+        # Reshape to lower triangular matrix
+        n = self.manifold_dim
+        L = torch.zeros(batch_size, n, n, device=points.device, dtype=points.dtype)
+        tril_indices = torch.tril_indices(n, n)
         
-        # Ensure symmetry
-        metric = 0.5 * (metric + metric.transpose(-2, -1))
+        # Add small positive values to diagonal for stability
+        diag_indices = torch.arange(n, device=points.device)
+        L[:, diag_indices, diag_indices] = torch.exp(metric_features[:, :n])  # Ensure positive diagonal
         
-        # Add fixed regularization for numerical stability
-        eye = torch.eye(
-            self.manifold_dim,
-            device=points.device,
-            dtype=points.dtype
-        ).unsqueeze(0).expand(batch_size, -1, -1)
+        # Fill rest of lower triangular part
+        off_diag_mask = torch.tril(torch.ones(n, n), diagonal=-1).bool()
+        off_diag_indices = torch.where(off_diag_mask)
+        L[:, off_diag_indices[0], off_diag_indices[1]] = metric_features[:, n:]
         
-        metric = metric + 5e-2 * eye  # Increased regularization
-        
-        # Project onto positive definite cone with increased minimum eigenvalue
-        eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-        eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
-        metric = torch.matmul(
-            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-            eigenvectors.transpose(-2, -1)
-        )
+        # Construct positive definite metric using L L^T
+        metric = torch.matmul(L, L.transpose(-2, -1))
         
         # Normalize by determinant to ensure unit volume
         det = torch.linalg.det(metric).unsqueeze(-1).unsqueeze(-1)
-        metric = metric / (det + 1e-8).abs().pow(1/self.manifold_dim)
+        metric = metric / (det + 1e-8).pow(1/self.manifold_dim)
         
         return self._to_tensor_type(metric, MetricTensor)
 
@@ -488,25 +493,41 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Get pattern flow step from parent
         new_metric, base_metrics = super().flow_step(metric_tensor, ricci_tensor, timestep)
         
-        # Compute determinants before and after
-        det_before = torch.linalg.det(metric_tensor)
-        det_after = torch.linalg.det(new_metric)
-        
         # Scale metric to preserve volume
         with torch.no_grad():
+            # Add regularization to prevent ill-conditioning
+            eye = torch.eye(
+                self.manifold_dim,
+                device=metric.device,
+                dtype=metric.dtype
+            ).unsqueeze(0).expand(batch_size, -1, -1)
+            new_metric = new_metric + 1e-3 * eye  # Increased regularization
+            
             # Compute scale factor with clamping to prevent extreme values
+            det_before = torch.linalg.det(metric_tensor)
+            det_after = torch.linalg.det(new_metric)
             scale = (det_before / (det_after + 1e-8)).pow(1/self.manifold_dim)
             scale = torch.clamp(scale, min=0.1, max=10.0)  # Prevent extreme scaling
             scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
             new_metric = new_metric * scale
             
             # Project onto positive definite cone with increased minimum eigenvalue
-            eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
-            eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
-            new_metric = torch.matmul(
-                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                eigenvectors.transpose(-2, -1)
-            )
+            try:
+                eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+                eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
+                new_metric = torch.matmul(
+                    torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+                    eigenvectors.transpose(-2, -1)
+                )
+            except RuntimeError:
+                # If eigendecomposition fails, add more regularization
+                new_metric = new_metric + 1e-2 * eye
+                eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+                eigenvalues = torch.clamp(eigenvalues, min=1e-2)
+                new_metric = torch.matmul(
+                    torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+                    eigenvectors.transpose(-2, -1)
+                )
             
             # Verify and fix volume preservation
             det_final = torch.linalg.det(new_metric)
@@ -1294,8 +1315,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
                     condition_number=float(cond[i].item()),
                     min_eigenvalue=float(min_eigenval[i].item()),
                     location=points[i] if points is not None else None,
-                    curvature=self.compute_curvature(metric[i:i+1])[0]
-                )
+                    curvature=self.compute_curvature(metric[i:i+1])[0])
         
         # If no singularity found, return first point as non-singular
         return BaseSingularityInfo(
@@ -1304,5 +1324,4 @@ class NeuralGeometricFlow(PatternFormationFlow):
             condition_number=float(cond[0].item()),
             min_eigenvalue=float(min_eigenval[0].item()),
             location=points[0] if points is not None else None,
-            curvature=self.compute_curvature(metric[0:1])[0]
-        )
+            curvature=self.compute_curvature(metric[0:1])[0])
