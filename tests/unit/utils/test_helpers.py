@@ -51,8 +51,8 @@ def run_memory_test(fn, device="cpu") -> tuple[int, int, Any]:
     return (end_allocated - start_allocated, end_reserved - start_reserved, result)
 
 
-def test_memory_usage(fn, device="cpu") -> tuple[Any, dict[str, int]]:
-    """Test memory usage of a function.
+def measure_memory_usage(fn, device="cpu") -> tuple[Any, dict[str, int]]:
+    """Measure memory usage of a function.
     
     Args:
         fn: Function to test
@@ -181,33 +181,6 @@ def benchmark_forward_backward(
     return float(np.mean(forward_times)), float(np.mean(backward_times))
 
 
-def measure_memory_usage(func: Callable[[], torch.Tensor]) -> tuple[int, int]:
-    """Measure memory usage of a function.
-
-    Args:
-    ----
-        func: Function to measure memory usage of.
-
-    Returns:
-    -------
-        Tuple of (allocated memory, reserved memory).
-
-    """
-    # Run garbage collection to get accurate memory measurements
-    gc.collect()
-
-    # Get initial memory stats
-    start_allocated, start_reserved = get_memory_stats()
-
-    # Run the function
-    func()
-
-    # Get final memory stats
-    end_allocated, end_reserved = get_memory_stats()
-
-    return (end_allocated - start_allocated, end_reserved - start_reserved)
-
-
 def measure_time(fn: Callable) -> Tuple[float, Any]:
     """Measure execution time of a function.
     
@@ -239,25 +212,18 @@ def run_performance_test(fn: Callable,
     Returns:
         dict: Performance metrics
     """
-    # Warmup
+    # Run warmup iterations
     for _ in range(warmup_iters):
         fn()
-    
-    # Test
-    times = []
-    memory_stats = []
-    
-    for _ in range(test_iters):
-        time_taken, _ = measure_time(fn)
-        _, mem_stats = test_memory_usage(fn, device)
         
-        times.append(time_taken)
-        memory_stats.append(mem_stats)
+    # Run test iterations and measure memory
+    result, memory_stats = measure_memory_usage(fn, device)
+    
+    # Measure time
+    time_taken, _ = measure_time(fn)
     
     return {
-        "mean_time": np.mean(times),
-        "std_time": np.std(times),
-        "min_time": np.min(times),
-        "max_time": np.max(times),
-        "memory_stats": memory_stats
+        "time": time_taken,
+        "memory": memory_stats,
+        "iterations": test_iters
     }

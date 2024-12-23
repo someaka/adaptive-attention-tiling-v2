@@ -16,8 +16,8 @@ def test_inputs(batch_size: int = 32, seq_len: int = 128, hidden_dim: int = 64) 
     """Generate test inputs."""
     return torch.randn(batch_size, seq_len, hidden_dim)
 
-class TestAttentionTile:
-    """Test attention tile implementation."""
+class AttentionTileFixture:
+    """Fixture for testing attention tile implementation."""
     
     def __init__(self, input_dim: int, hidden_dim: int, device: str = "cpu"):
         self.input_dim = input_dim
@@ -40,16 +40,19 @@ class TestAttentionTile:
         # Implementation here
         return inputs.to(device=self.device)
 
-def test_attention_tile_cpu(test_inputs):
+@pytest.fixture
+def attention_tile(device: str) -> AttentionTileFixture:
+    """Create an attention tile fixture."""
+    return AttentionTileFixture(input_dim=128, hidden_dim=128, device=device)
+
+def test_attention_tile_cpu(attention_tile, test_inputs):
     """Test attention tile on CPU."""
-    tile = TestAttentionTile(input_dim=128, hidden_dim=128)
-    output = tile.process(test_inputs)
+    output = attention_tile.process(test_inputs)
     assert output.shape == test_inputs.shape
 
-def test_state_management(test_inputs):
+def test_state_management(attention_tile, test_inputs):
     """Test state management across operations."""
-    tile = TestAttentionTile(input_dim=128, hidden_dim=128)
     state = torch.randn(1, 128, 128)
-    tile.state = state
-    assert tile.state is not None
-    assert torch.allclose(tile.state, state.to(device=tile.device))
+    attention_tile.state = state
+    assert attention_tile.state is not None
+    assert torch.allclose(attention_tile.state, state.to(device=attention_tile.device))

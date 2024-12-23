@@ -61,6 +61,8 @@ def hyperbolic_log(dim):
     del log
     cleanup_tensors()
 
+@pytest.mark.order(1)
+@pytest.mark.geometric
 def test_minkowski_inner_product(hyperbolic_exp, dim, batch_size):
     """Test Minkowski inner product computation."""
     # Create test vectors with explicit cleanup
@@ -85,6 +87,8 @@ def test_minkowski_inner_product(hyperbolic_exp, dim, batch_size):
     del x, y, inner, time_part, space_part, expected
     cleanup_tensors()
 
+@pytest.mark.order(2)
+@pytest.mark.geometric
 def test_project_to_hyperboloid(hyperbolic_exp, dim, batch_size):
     """Test projection onto hyperboloid."""
     # Create test points with explicit cleanup
@@ -107,6 +111,8 @@ def test_project_to_hyperboloid(hyperbolic_exp, dim, batch_size):
     del x, x_proj, inner
     cleanup_tensors()
 
+@pytest.mark.order(3)
+@pytest.mark.geometric
 def test_exp_log_inverse(hyperbolic_exp, hyperbolic_log, dim, batch_size):
     """Test that exp and log are inverse operations."""
     # Create test point and tangent vector with smaller magnitudes
@@ -131,6 +137,8 @@ def test_exp_log_inverse(hyperbolic_exp, hyperbolic_log, dim, batch_size):
     # Test recovery of tangent vector with looser tolerances
     assert torch.allclose(v, v_recovered, rtol=1e-3, atol=1e-3)
 
+@pytest.mark.order(4)
+@pytest.mark.geometric
 def test_parallel_transport(geometric_structures, dim, batch_size):
     """Test parallel transport operations."""
     # Create test points and vector

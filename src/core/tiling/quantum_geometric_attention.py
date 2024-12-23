@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any, cast
 import torch
 import torch.nn.functional as F
 from torch import nn
+import math
 
 from ..attention.geometric import (
     HyperbolicExponential,
@@ -145,57 +146,101 @@ class QuantumGeometricAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int = 8,
-        tile_size: int = 64,
+        dropout: float = 0.1,
         manifold_type: str = "hyperbolic",
         curvature: float = -1.0,
-        dropout: float = 0.1,
-        manifold_dim: Optional[int] = None,
+        manifold_dim: int = 8,
+        num_layers: int = 3,
+        tile_size: int = 8,
         motive_rank: int = 4,
-        num_layers: int = 1,
         dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
     ):
         """Initialize quantum geometric attention.
         
         Args:
-            hidden_dim: Hidden dimension
+            hidden_dim: Hidden dimension size
             num_heads: Number of attention heads
-            tile_size: Size of attention tiles
-            manifold_type: Type of manifold geometry
+            dropout: Dropout probability
+            manifold_type: Type of manifold to use
             curvature: Manifold curvature
-            dropout: Dropout rate
-            manifold_dim: Manifold dimension (defaults to hidden_dim)
-            motive_rank: Rank of motivic structure
+            manifold_dim: Manifold dimension
             num_layers: Number of attention layers
-            dtype: Data type
+            tile_size: Size of attention tiles
+            motive_rank: Rank of motivic structure
+            dtype: Data type to use
             device: Device for computation
         """
         super().__init__()
-        
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.manifold_type = manifold_type
-        self.curvature = curvature
-        self.manifold_dim = manifold_dim or hidden_dim
         self.head_dim = hidden_dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.manifold_dim = manifold_dim
         self.dtype = dtype
         self.device = device or torch.device('cpu')
         
-        # Initialize attention layers
+        # Initialize projections
+        self.manifold_proj = nn.Linear(hidden_dim, manifold_dim, device=self.device)
+        self.manifold_proj_inv = nn.Linear(manifold_dim, hidden_dim, device=self.device)
+        self.pattern_proj = nn.Linear(manifold_dim, hidden_dim, device=self.device)
+        self.pattern_proj_inv = nn.Linear(hidden_dim, manifold_dim, device=self.device)
+        
+        # Initialize weights with simple projections
+        with torch.no_grad():
+            # Create projection matrices
+            P = torch.eye(hidden_dim, device=self.device)[:manifold_dim]  # Take first manifold_dim rows
+            P_inv = P.t()  # Transpose for inverse projection
+            
+            # Scale the projections to preserve norm approximately
+            scale = math.sqrt(hidden_dim / manifold_dim)
+            
+            # Assign weights
+            self.manifold_proj.weight.data = P * scale
+            self.manifold_proj_inv.weight.data = P_inv / scale
+            self.pattern_proj.weight.data = P_inv / scale
+            self.pattern_proj_inv.weight.data = P * scale
+            
+            # Zero out biases
+            self.manifold_proj.bias.data.zero_()
+            self.manifold_proj_inv.bias.data.zero_()
+            self.pattern_proj.bias.data.zero_()
+            self.pattern_proj_inv.bias.data.zero_()
+            
+            # Verify initialization by checking reconstruction
+            x = torch.randn(10, hidden_dim, device=self.device)
+            x = x / x.norm(dim=-1, keepdim=True)  # Normalize input
+            
+            # Store original scale for later restoration
+            self.original_scale = x.norm(dim=-1, keepdim=True)
+            
+            # Test manifold projections
+            x_manifold = self.manifold_proj(x)
+            x_reconstructed = self.manifold_proj_inv(x_manifold)
+            
+            # Test pattern projections
+            x_pattern = self.pattern_proj(x_manifold)
+            x_pattern_reconstructed = self.pattern_proj_inv(x_pattern)
+            
+            # Print debug information
+            print(f"Original norm: {x.norm(dim=-1).mean()}")
+            print(f"Manifold norm: {x_manifold.norm(dim=-1).mean()}")
+            print(f"Reconstructed norm: {x_reconstructed.norm(dim=-1).mean()}")
+            print(f"Pattern norm: {x_pattern.norm(dim=-1).mean()}")
+            print(f"Pattern reconstructed norm: {x_pattern_reconstructed.norm(dim=-1).mean()}")
+            
+            # Check reconstruction error
+            manifold_error = (x - x_reconstructed).norm(dim=-1).mean()
+            pattern_error = (x_manifold - x_pattern_reconstructed).norm(dim=-1).mean()
+            
+            print(f"Manifold reconstruction error: {manifold_error}")
+            print(f"Pattern reconstruction error: {pattern_error}")
+            
+            assert manifold_error < 0.1, "Manifold projections should preserve information"
+            assert pattern_error < 0.1, "Pattern projections should preserve information"
+        
         self.dropout = nn.Dropout(dropout)
         self.attention_layers = nn.ModuleList([
-            QuantumMotivicTile(
-                size=tile_size,
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                dropout=dropout,
-                resolution=1.0,  # Default resolution
-                cohomology_dim=self.manifold_dim,
-                motive_rank=motive_rank,
-                dtype=dtype
-            )
-            for _ in range(num_layers)
+            nn.Linear(manifold_dim, hidden_dim, device=self.device) for _ in range(num_layers)
         ])
         
         # Initialize geometric flow
@@ -203,7 +248,7 @@ class QuantumGeometricAttention(nn.Module):
             hidden_dim=hidden_dim,
             manifold_dim=self.manifold_dim,
             dtype=dtype
-        )
+        ).to(self.device)
         
         # Initialize arithmetic pattern
         self.arithmetic = ArithmeticPattern(
@@ -211,39 +256,55 @@ class QuantumGeometricAttention(nn.Module):
             hidden_dim=hidden_dim,
             motive_rank=motive_rank,
             dtype=dtype
-
-        )
+        ).to(self.device)
         
         # Initialize attention projections
-        self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3, dtype=dtype, device=device)
+        self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3, dtype=dtype, device=self.device)
         self.to_out = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=self.device),
             nn.Dropout(dropout)
         )
         
         # Initialize geometric maps
         if manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(hidden_dim, curvature, dtype=dtype)
-            self.log_map = HyperbolicLogarithm(hidden_dim, curvature, dtype=dtype)
+            self.exp_map = HyperbolicExponential(hidden_dim, curvature, dtype=dtype).to(self.device)
+            self.log_map = HyperbolicLogarithm(hidden_dim, curvature, dtype=dtype).to(self.device)
         else:
-            self.exp_map = EuclideanExponential(hidden_dim, dtype=dtype)
-            self.log_map = EuclideanLogarithm(hidden_dim, dtype=dtype)
+            self.exp_map = EuclideanExponential(hidden_dim, dtype=dtype).to(self.device)
+            self.log_map = EuclideanLogarithm(hidden_dim, dtype=dtype).to(self.device)
 
         # Parallel transport
-        self.transport = ParallelTransport(hidden_dim, dtype=dtype)
+        self.transport = ParallelTransport(hidden_dim, dtype=dtype).to(self.device)
 
         # Projections
-        self.metric = nn.Parameter(torch.eye(hidden_dim, dtype=dtype))
-        self.pattern_proj = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype)
+        self.metric = nn.Parameter(torch.eye(hidden_dim, dtype=dtype, device=self.device))
+        self.pattern_proj = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype, device=self.device)
         
+        # Initialize projections with near-orthogonal weights
+        self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, device=self.device)
+        self.pattern_proj = nn.Linear(self.manifold_dim, hidden_dim, device=self.device)
+        self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, device=self.device)
+        self.pattern_proj_inv = nn.Linear(hidden_dim, self.manifold_dim, device=self.device)
+        
+        # Initialize weights to be approximately inverse
+        nn.init.orthogonal_(self.manifold_proj.weight)
+        nn.init.orthogonal_(self.pattern_proj.weight)
+        self.manifold_proj_inv.weight.data = self.manifold_proj.weight.t()
+        self.pattern_proj_inv.weight.data = self.pattern_proj.weight.t()
+        
+        # Initialize biases to zero
+        nn.init.zeros_(self.manifold_proj.bias)
+        nn.init.zeros_(self.pattern_proj.bias)
+        nn.init.zeros_(self.manifold_proj_inv.bias)
+        nn.init.zeros_(self.pattern_proj_inv.bias)
+
         # Move all components to device
-        device = device or torch.device('cpu')
-        self.exp_map = self.exp_map.to(device)
-        self.log_map = self.log_map.to(device)
-        self.transport = self.transport.to(device)
-        self.metric = nn.Parameter(self.metric.to(device))
-        self.pattern_proj = self.pattern_proj.to(device)
-        self.to(device)
+        self.exp_map = self.exp_map.to(self.device)
+        self.log_map = self.log_map.to(self.device)
+        self.transport = self.transport.to(self.device)
+        self.metric = nn.Parameter(self.metric.to(self.device))
+        self.pattern_proj = self.pattern_proj.to(self.device)
+        self.to(self.device)
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
         """Compute Fisher information metric for states."""
@@ -505,27 +566,85 @@ class QuantumGeometricAttention(nn.Module):
         """Convert classical tensor to quantum state.
         
         Args:
-            x: Classical input tensor
+            x: Classical input tensor of shape (batch_size, num_heads, seq_len, head_dim)
+                or (batch_size, seq_len, hidden_dim)
             
         Returns:
-            Quantum state tensor
+            Quantum state tensor with preserved dimensions
         """
-        # Reshape input to 2D for projection
-        batch_size = x.size(0)
-        x_flat = x.reshape(batch_size, -1)  # Flatten all dimensions except batch
+        # Handle both multi-head and flat input formats
+        if len(x.shape) == 4:
+            batch_size, num_heads, seq_len, head_dim = x.shape
+            # Reshape to (batch_size * num_heads, seq_len, head_dim)
+            x_reshaped = x.transpose(1, 2).reshape(batch_size * num_heads, seq_len, head_dim)
+        else:
+            batch_size, seq_len, hidden_dim = x.shape
+            x_reshaped = x
+            
+        # Store original scale for later restoration in quantum_to_classical
+        self.original_scale = x_reshaped.norm(dim=-1, keepdim=True)
+        assert torch.all(self.original_scale > 0), "Original scale should be positive"
         
-        # Project to quantum state space
-        quantum_proj = self.pattern_proj(x_flat)
+        # Project to manifold dimension first
+        x_manifold = self.manifold_proj(x_reshaped)
+        assert x_manifold.shape[-1] == self.manifold_dim, f"Expected manifold dim {self.manifold_dim}, got {x_manifold.shape[-1]}"
         
-        # Normalize to unit sphere
+        # Project to quantum state space while preserving sequence structure
+        quantum_proj = self.pattern_proj(x_manifold)
+        assert quantum_proj.shape[-1] == self.hidden_dim, f"Expected hidden dim {self.hidden_dim}, got {quantum_proj.shape[-1]}"
+        
+        # Normalize each sequence position to unit sphere
         quantum_state = F.normalize(quantum_proj, p=2, dim=-1)
+        assert torch.allclose(quantum_state.norm(dim=-1), torch.ones_like(quantum_state.norm(dim=-1))), "Quantum state should have unit norm"
         
-        # Add quantum phase
+        # Add quantum phase while preserving sequence structure
         phase = torch.angle(quantum_state)
         quantum_state = quantum_state * torch.exp(1j * phase).to(dtype=torch.complex64 if self.dtype == torch.float32 else torch.complex128)
+        assert torch.allclose(quantum_state.abs().norm(dim=-1), torch.ones_like(quantum_state.abs().norm(dim=-1))), "Quantum state should preserve unit norm after phase"
         
+        # Reshape back to multi-head format if needed
+        if len(x.shape) == 4:
+            quantum_state = quantum_state.view(batch_size, seq_len, num_heads, -1).transpose(1, 2)
+            
         # Return only the real part for compatibility with neural networks
         return quantum_state.real
+
+    def quantum_to_classical(self, quantum_state: torch.Tensor) -> torch.Tensor:
+        """Convert quantum state back to classical tensor.
+        
+        Args:
+            quantum_state: Quantum state tensor from classical_to_quantum
+            
+        Returns:
+            Classical tensor with original dimensions
+        """
+        # Handle both multi-head and flat input formats
+        if len(quantum_state.shape) == 4:
+            batch_size, num_heads, seq_len, _ = quantum_state.shape
+            # Reshape to (batch_size * num_heads, seq_len, hidden_dim)
+            x_reshaped = quantum_state.transpose(1, 2).reshape(batch_size * num_heads, seq_len, self.hidden_dim)
+        else:
+            x_reshaped = quantum_state
+            
+        assert torch.allclose(x_reshaped.abs().norm(dim=-1), torch.ones_like(x_reshaped.abs().norm(dim=-1))), "Input quantum state should have unit norm"
+            
+        # Restore original scale before projections
+        x_scaled = x_reshaped * self.original_scale
+        assert torch.allclose(x_scaled.norm(dim=-1), self.original_scale.squeeze(-1)), "Scale should be restored correctly"
+            
+        # Project back from quantum state space
+        classical_proj = self.pattern_proj_inv(x_scaled)
+        assert classical_proj.shape[-1] == self.manifold_dim, f"Expected manifold dim {self.manifold_dim}, got {classical_proj.shape[-1]}"
+        
+        # Project back from manifold
+        classical_output = self.manifold_proj_inv(classical_proj)
+        assert classical_output.shape[-1] == (self.head_dim if len(quantum_state.shape) == 4 else self.hidden_dim), "Incorrect output dimension"
+        
+        # Reshape back to multi-head format if needed
+        if len(quantum_state.shape) == 4:
+            classical_output = classical_output.view(batch_size, seq_len, num_heads, -1).transpose(1, 2)
+            
+        return classical_output
 
     def create_attention_parameters(self, batch_size: int, seq_len: int) -> Dict[str, torch.Tensor]:
         """Create attention mechanism parameters.
@@ -685,6 +804,30 @@ class QuantumGeometricAttention(nn.Module):
             stability=stability,
             sparsity=sparsity
         )
+
+    def is_valid_quantum_state(self, state: torch.Tensor) -> bool:
+        """Check if tensor represents a valid quantum state.
+        
+        Args:
+            state: Tensor to check
+            
+        Returns:
+            True if state is valid quantum state
+        """
+        # Check normalization
+        norms = state.norm(dim=-1)
+        if not torch.allclose(norms, torch.ones_like(norms), rtol=1e-5):
+            return False
+            
+        # Check shape compatibility
+        if len(state.shape) not in [3, 4]:  # (batch, seq, dim) or (batch, heads, seq, dim)
+            return False
+            
+        # Check dimension compatibility
+        if state.shape[-1] != self.hidden_dim:
+            return False
+            
+        return True
 
 
 class QuantumGeometricTransformer(nn.Module):

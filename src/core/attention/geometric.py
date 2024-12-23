@@ -332,8 +332,8 @@ class HyperbolicLogarithm(nn.Module):
         # Project to ensure we're exactly in the tangent space
         v = self.project_to_tangent(x, v)
         
-        # Normalize to exact distance
-        v_norm = torch.sqrt(torch.sum(v[..., 1:] * v[..., 1:]))  # Use same norm as test
+        # Use Minkowski norm for consistency with exponential map
+        v_norm = torch.sqrt(torch.clamp(self.minkowski_inner(v, v), min=self.eps))
         v = torch.einsum('...,...d->...d', dist / v_norm, v)
         
         # Scale back if we scaled down
