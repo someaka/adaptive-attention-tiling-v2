@@ -274,8 +274,8 @@ class TestGeometricFlow:
     @pytest.mark.dependency(depends=["TestGeometricFlow::test_ricci_tensor"])
     def test_flow_computation(self, flow, points, metric):
         """Test flow vector computation."""
-        ricci = flow.compute_ricci_tensor(metric, points)
-        flow_vector = flow.compute_flow(points, ricci)
+        ricci = flow.compute_ricci_tensor(metric)
+        flow_vector = flow.compute_flow_vector(points, ricci, metric)
         assert isinstance(flow_vector, torch.Tensor)
         assert flow_vector.shape == points.shape
 

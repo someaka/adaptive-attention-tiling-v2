@@ -827,17 +827,14 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Compute metric tensor
         metric = self.compute_metric_tensor(x)
         
-        # Compute Ricci tensor
-        ricci = self.compute_ricci_tensor(metric, x)
-        
-        # Compute flow field
-        flow = self.compute_flow(x, ricci)
+        # Compute flow field using metric
+        flow_field = self.compute_flow(metric)  # Default time=0.0
         
         # Reshape back to sequence format if needed
         if seq_len > 1:
-            flow = flow.view(batch_size, seq_len, -1)
+            flow_field = flow_field.view(batch_size, seq_len, -1)
         
-        return flow
+        return flow_field
 
     def compute_divergence(self, flow_field: torch.Tensor) -> torch.Tensor:
         """Compute divergence of flow field.
@@ -894,10 +891,10 @@ class NeuralGeometricFlow(PatternFormationFlow):
         metric = self.compute_metric_tensor(x)
         
         # Compute Ricci tensor
-        ricci = self.compute_ricci_tensor(metric, x)
+        ricci = self.compute_ricci_tensor(metric)
         
         # Compute curvature flow
-        flow = self.compute_flow(x, ricci)
+        flow = self.compute_flow(metric)  # Default time=0.0
         
         # Reshape back to sequence format if needed
         if seq_len > 1:
@@ -925,7 +922,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
         metric = self.compute_metric_tensor(x)
         
         # Compute Ricci tensor
-        ricci = self.compute_ricci_tensor(metric, x)
+        ricci = self.compute_ricci_tensor(metric)
         
         return ricci
 
@@ -949,7 +946,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
         metric = self.compute_metric_tensor(x)
         
         # Compute Ricci tensor
-        ricci = self.compute_ricci_tensor(metric, x)
+        ricci = self.compute_ricci_tensor(metric)
         
         # Compute scalar curvature as trace of Ricci tensor
         scalar = torch.diagonal(ricci, dim1=-2, dim2=-1).sum(-1)
@@ -1005,10 +1002,10 @@ class NeuralGeometricFlow(PatternFormationFlow):
         metric = self.compute_metric_tensor(x)
         
         # Compute Ricci tensor
-        ricci = self.compute_ricci_tensor(metric, x)
+        ricci = self.compute_ricci_tensor(metric)
         
         # Compute flow vector
-        flow = self.compute_flow(x, ricci)
+        flow = self.compute_flow(metric)  # Default time=0.0
         
         # Compute energy as norm of flow vector
         energy = torch.norm(flow, dim=-1)
@@ -1087,3 +1084,76 @@ class NeuralGeometricFlow(PatternFormationFlow):
             integrated = integrated.view(batch_size, seq_len, -1)
         
         return integrated
+
+    def compute_flow_vector(self, points: torch.Tensor, ricci: torch.Tensor, metric: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute flow vector field.
+        
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            ricci: Ricci tensor of shape (batch_size, manifold_dim) or (batch_size, manifold_dim, manifold_dim)
+            metric: Optional metric tensor
+            
+        Returns:
+            Flow vector field of shape (batch_size, manifold_dim)
+        """
+        batch_size = points.shape[0]
+        
+        # Ensure Ricci tensor has correct shape
+        if len(ricci.shape) == 2:
+            # Convert vector to diagonal matrix
+            ricci_matrix = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, 
+                                     device=points.device)
+            ricci_matrix.diagonal(dim1=1, dim2=2)[:] = ricci
+            ricci = ricci_matrix
+        
+        # Compute metric at current points if not provided
+        if metric is None:
+            metric = self.compute_metric_tensor(points)
+        
+        # Add regularization for numerical stability
+        eye = torch.eye(self.manifold_dim, device=points.device).unsqueeze(0)
+        metric_reg = metric + eye * 1e-6
+        
+        # Compute inverse metric
+        metric_inv = torch.linalg.inv(metric_reg)
+        
+        # Contract tensors to get flow vector
+        flow = torch.einsum('bij,bjk->bik', metric_inv, ricci)
+        flow_vector = torch.diagonal(flow, dim1=1, dim2=2)
+        
+        # Normalize flow
+        flow_norm = torch.norm(flow_vector, dim=1, keepdim=True)
+        flow_vector = flow_vector / (flow_norm + 1e-8)
+        
+        # Scale flow to prevent instability
+        flow_vector = flow_vector * 0.1
+        
+        return flow_vector
+
+    def compute_flow(self, metric: torch.Tensor, time: float = 0.0) -> torch.Tensor:
+        """Compute the geometric flow for the given metric tensor.
+        
+        Args:
+            metric: The metric tensor to compute flow for.
+            time: The time parameter for flow evolution.
+            
+        Returns:
+            The computed flow tensor.
+        """
+        # Compute Ricci tensor from metric
+        ricci = self.compute_ricci_tensor(metric)
+        
+        # Get points from metric if needed
+        if self.points is None:
+            batch_size = metric.shape[0]
+            points = torch.zeros(batch_size, self.manifold_dim, device=metric.device)
+        else:
+            points = self.points
+        
+        # Compute flow vector using Ricci tensor
+        flow_vector = self.compute_flow_vector(points, ricci, metric)
+        
+        # Apply time scaling
+        flow_vector = flow_vector * float(time) if time != 0.0 else flow_vector
+        
+        return flow_vector
