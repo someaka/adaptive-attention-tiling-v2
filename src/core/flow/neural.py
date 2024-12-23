@@ -32,7 +32,7 @@ from ..quantum.types import QuantumState
 from ...validation.quantum.state import QuantumStateValidationResult
 
 # Local imports - dimension management
-from ..common.dimensions import DimensionManager, DimensionConfig
+from src.core.common.dimensions import DimensionManager, DimensionConfig
 
 # Enable torchtyping
 patch_typeguard()
@@ -67,7 +67,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
        - Geometric flow preservation
        - Scale connection handling
        
-    2. Geometric → Quantum
+    2. Geometric ��� Quantum
        - Quantum state preparation
        - Geometric phase tracking
        - Entanglement management

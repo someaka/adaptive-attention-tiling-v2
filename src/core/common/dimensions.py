@@ -91,6 +91,19 @@ class DimensionConfig:
             flow_dim=manifold_dim,
             emergence_dim=manifold_dim
         )
+        
+    def max_dimension(self) -> int:
+        """Compute maximum dimension across all components.
+        
+        Returns:
+            Maximum dimension
+        """
+        return max(
+            self.quantum_dim,
+            self.geometric_dim,
+            self.flow_dim,
+            self.emergence_dim
+        )
 
 
 class QuantumTensor(Tensor):
@@ -191,10 +204,22 @@ class DimensionManager(nn.Module):
         Raises:
             ValueError: If dimension is insufficient
         """
+        if not isinstance(tensor, Tensor):
+            raise ValueError(f"Expected torch.Tensor, got {type(tensor)}")
+            
+        if tensor.dim() < 2:
+            raise ValueError(f"Expected at least 2D tensor, got {tensor.dim()}D")
+            
         if tensor.shape[-1] < self.min_dim:
             raise ValueError(
                 f"Tensor dimension {tensor.shape[-1]} below minimum {self.min_dim}"
             )
+            
+        if tensor.shape[-1] > self.config.max_dimension():
+            raise ValueError(
+                f"Tensor dimension {tensor.shape[-1]} above maximum {self.config.max_dimension()}"
+            )
+            
         return True
         
     def project(

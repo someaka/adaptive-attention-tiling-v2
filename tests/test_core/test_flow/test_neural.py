@@ -53,13 +53,14 @@ def dimension_config(manifold_dim, hidden_dim):
 
 
 @pytest.fixture
-def neural_flow(manifold_dim, hidden_dim):
+def neural_flow(manifold_dim, hidden_dim, dimension_config):
     """Create test neural geometric flow."""
     return NeuralGeometricFlow(
         manifold_dim=manifold_dim,
         hidden_dim=hidden_dim,
         dtype=torch.float32,
-        device=torch.device('cpu')
+        device=torch.device('cpu'),
+        test_config={"manifold_dim": manifold_dim, "hidden_dim": hidden_dim}
     )
 
 
@@ -89,6 +90,7 @@ class MockQuantumState(QuantumState):
 class TestNeuralGeometricFlow:
     """Test neural geometric flow implementation."""
 
+    @pytest.mark.dependency(name="test_tensor_types", depends=["test_dimension_validation"])
     def test_tensor_types(self, neural_flow, batch_size, device):
         """Test tensor type conversions."""
         # Create test tensors with consistent dimensions
@@ -108,26 +110,33 @@ class TestNeuralGeometricFlow:
         expected_mean = mean_value.clone().detach()
         assert torch.allclose(geometric_tensor.mean(), expected_mean)
 
+    @pytest.mark.dependency(name="test_dimension_validation")
     def test_dimension_validation(self, neural_flow, batch_size, device):
         """Test dimension validation."""
-        # Test with valid dimensions
-        valid_tensor = torch.randn(batch_size, neural_flow.hidden_dim, device=device)
+        # Test with valid dimensions - use manifold_dim instead of hidden_dim
+        valid_tensor = torch.randn(batch_size, neural_flow.manifold_dim, device=device)
         assert neural_flow.dim_manager.verify_dimension(valid_tensor)
         
-        # Test with invalid dimensions
+        # Test with invalid dimensions - too small
         invalid_tensor = torch.randn(batch_size, neural_flow.manifold_dim // 2, device=device)
         with pytest.raises(ValueError, match="Tensor dimension .* below minimum"):
             neural_flow.dim_manager.verify_dimension(invalid_tensor)
+            
+        # Test with invalid dimensions - too large
+        large_tensor = torch.randn(batch_size, neural_flow.manifold_dim * 2, device=device)
+        with pytest.raises(ValueError, match="Tensor dimension .* above maximum"):
+            neural_flow.dim_manager.verify_dimension(large_tensor)
             
         # Test projection with invalid dimensions
         with pytest.raises(ValueError):
             neural_flow.dim_manager.validate_and_project(
                 invalid_tensor,
-                target_dim=neural_flow.hidden_dim,
+                target_dim=neural_flow.manifold_dim,  # Use manifold_dim instead of hidden_dim
                 dtype=torch.float32,
                 device=device
             )
 
+    @pytest.mark.dependency(name="test_quantum_corrections", depends=["test_tensor_types"])
     def test_quantum_corrections_types(self, neural_flow, batch_size, device):
         """Test quantum corrections with tensor types."""
         # Create test instances with proper dimensions
@@ -147,6 +156,7 @@ class TestNeuralGeometricFlow:
             quantum_tensor = neural_flow.dim_manager.to_quantum_tensor(state_matrix)
             assert isinstance(quantum_tensor, QuantumTensor)
 
+    @pytest.mark.dependency(name="test_metric_computation", depends=["test_tensor_types"])
     def test_metric_computation(self, neural_flow, batch_size, device):
         """Test Riemannian metric tensor computation.
         
@@ -199,6 +209,7 @@ class TestNeuralGeometricFlow:
         min_action = metric_action.min().item()
         assert min_action > 0, f"Metric action not positive, min value: {min_action}"
 
+    @pytest.mark.dependency(name="test_flow_step", depends=["test_metric_computation"])
     def test_flow_step(self, neural_flow, batch_size, device):
         """Test geometric flow step."""
         # Utiliser un batch_size réduit mais les dimensions complètes du modèle
@@ -232,6 +243,7 @@ class TestNeuralGeometricFlow:
         assert flow_metrics.metric_determinant.shape == (test_batch_size,)
         assert flow_metrics.ricci_scalar.shape == (test_batch_size,)
 
+    @pytest.mark.dependency(name="test_geometric_operations", depends=["test_metric_computation"])
     def test_geometric_operations(self, neural_flow, batch_size, device):
         """Test geometric operations."""
         # Create test points with correct dimensions
