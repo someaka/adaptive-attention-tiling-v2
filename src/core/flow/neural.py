@@ -9,7 +9,8 @@ from __future__ import annotations
 
 # Standard library imports
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast, TypeVar, Generic
+from dataclasses import dataclass
 
 # PyTorch imports
 import torch
@@ -23,7 +24,7 @@ from typeguard import typechecked
 
 # Local imports - core functionality
 from .pattern import PatternFormationFlow
-from .protocol import FlowMetrics, QuantumFlowMetrics
+from .protocol import FlowMetrics, QuantumFlowMetrics, SingularityInfo as BaseSingularityInfo
 
 # Local imports - quantum components
 from ..quantum.neural_quantum_bridge import NeuralQuantumBridge
@@ -44,6 +45,13 @@ BatchTensor = TensorType["batch_size", "manifold_dim"]
 MetricTensor = TensorType["batch_size", "manifold_dim", "manifold_dim"]
 ConnectionTensor = TensorType["batch_size", "manifold_dim", "manifold_dim", "manifold_dim"]
 CurvatureTensor = TensorType["batch_size", "manifold_dim", "manifold_dim"]
+
+@dataclass
+class SingularityInfo:
+    """Information about a detected singularity."""
+    index: int
+    point: Optional[torch.Tensor]
+    eigenvalues: torch.Tensor
 
 class NeuralGeometricFlow(PatternFormationFlow):
     """Neural network-specific implementation of geometric flow.
@@ -398,69 +406,57 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         return self._to_tensor_type(geometric_tensor, MetricTensor)
 
-    def compute_metric(self, points: BatchTensor) -> MetricTensor:
-        """Compute Riemannian metric tensor at given points."""
+    def compute_metric(
+        self,
+        points: torch.Tensor,
+        connection: Optional[torch.Tensor] = None
+    ) -> MetricTensor:
+        """Compute metric tensor at points.
+        
+        Args:
+            points: Points tensor of shape [batch_size, manifold_dim]
+            connection: Optional connection coefficients
+            
+        Returns:
+            Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
+        """
+        # Validate input dimensions
         batch_size = points.shape[0]
-        
-        # Use dimension manager for validation and projection
-        points_proj = self.dim_manager.validate_and_project(
+        self._validate_dimensions(
             points,
-            target_dim=self.manifold_dim,
-            dtype=self.dtype,
-            device=self.device
-        )
-        points_proj = self._to_tensor_type(points_proj, BatchTensor)
-        
-        # Pre-allocate output tensor
-        metric = torch.empty(
-            (batch_size, self.manifold_dim, self.manifold_dim),
-            device=self.device,
-            dtype=self.dtype
+            [batch_size, self.manifold_dim],
+            "points"
         )
         
-        # Base metric computation
-        base_metric = self.metric_net(points_proj)
-        metric.copy_(self.dim_manager.reshape_to_metric(base_metric, batch_size))
+        # Project points through metric network
+        metric_features = self.metric_net(points)
         
-        # Quantum corrections
-        if self.phase_tracking_enabled:
-            with torch.no_grad():
-                # Project points to hidden dimension for quantum state preparation
-                points_hidden = torch.zeros(
-                    (batch_size, self.hidden_dim),
-                    device=self.device,
-                    dtype=self.dtype
-                )
-                points_hidden[..., :self.manifold_dim] = points_proj
-                quantum_state = self.prepare_quantum_state(points_hidden, return_validation=False)
-            
-            corrections = self.compute_quantum_corrections(
-                quantum_state, 
-                self._to_tensor_type(metric, MetricTensor)
-            )
-            metric.add_(corrections, alpha=self.quantum_correction_strength)
-            
-        # Fisher-Rao contribution
-        fisher_metric = self.compute_fisher_rao_metric(points_proj)
-        metric.add_(fisher_metric, alpha=self.fisher_rao_weight)
+        # Reshape to metric tensor
+        metric = metric_features.view(batch_size, self.manifold_dim, self.manifold_dim)
         
-        # Ensure metric properties
-        metric.add_(metric.transpose(-2, -1).clone())
-        metric.mul_(0.5)
-        
-        # Add stability term
-        metric.diagonal(dim1=-2, dim2=-1).add_(self.stability_threshold)
-        
-        # Force symmetry
+        # Ensure symmetry
         metric = 0.5 * (metric + metric.transpose(-2, -1))
         
-        # Project onto positive definite cone
+        # Add fixed regularization for numerical stability
+        eye = torch.eye(
+            self.manifold_dim,
+            device=points.device,
+            dtype=points.dtype
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+        
+        metric = metric + 5e-2 * eye  # Increased regularization
+        
+        # Project onto positive definite cone with increased minimum eigenvalue
         eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-        eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
+        eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
         metric = torch.matmul(
             torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
             eigenvectors.transpose(-2, -1)
         )
+        
+        # Normalize by determinant to ensure unit volume
+        det = torch.linalg.det(metric).unsqueeze(-1).unsqueeze(-1)
+        metric = metric / (det + 1e-8).abs().pow(1/self.manifold_dim)
         
         return self._to_tensor_type(metric, MetricTensor)
 
@@ -492,11 +488,34 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Get pattern flow step from parent
         new_metric, base_metrics = super().flow_step(metric_tensor, ricci_tensor, timestep)
         
-        # Apply neural weight space normalization efficiently
+        # Compute determinants before and after
+        det_before = torch.linalg.det(metric_tensor)
+        det_after = torch.linalg.det(new_metric)
+        
+        # Scale metric to preserve volume
         with torch.no_grad():
-            norm = torch.diagonal(new_metric, dim1=-2, dim2=-1).sum(-1)
-            norm = torch.sqrt(norm).unsqueeze(-1).unsqueeze(-1).add_(1e-8)
-            new_metric.div_(norm)
+            # Compute scale factor with clamping to prevent extreme values
+            scale = (det_before / (det_after + 1e-8)).pow(1/self.manifold_dim)
+            scale = torch.clamp(scale, min=0.1, max=10.0)  # Prevent extreme scaling
+            scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
+            new_metric = new_metric * scale
+            
+            # Project onto positive definite cone with increased minimum eigenvalue
+            eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+            eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
+            new_metric = torch.matmul(
+                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+                eigenvectors.transpose(-2, -1)
+            )
+            
+            # Verify and fix volume preservation
+            det_final = torch.linalg.det(new_metric)
+            if not torch.allclose(det_before, det_final, rtol=1e-4):
+                # Apply one more correction if needed
+                scale = (det_before / (det_final + 1e-8)).pow(1/self.manifold_dim)
+                scale = torch.clamp(scale, min=0.1, max=10.0)
+                scale = scale.view(-1, 1, 1)
+                new_metric = new_metric * scale
         
         # Initialize quantum metrics efficiently
         device = metric.device
@@ -1102,12 +1121,12 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         return integrated
 
-    def compute_flow(self, metric: torch.Tensor, time: float = 0.0) -> torch.Tensor:
+    def compute_flow(self, metric: torch.Tensor, time: Union[float, torch.Tensor] = 0.0) -> torch.Tensor:
         """Compute the geometric flow for the given metric tensor.
     
         Args:
             metric: The metric tensor to compute flow for.
-            time: The time parameter for flow evolution.
+            time: The time parameter for flow evolution. Can be a float or tensor.
     
         Returns:
             The computed flow vector with shape (batch_size, manifold_dim).
@@ -1122,7 +1141,15 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Apply time scaling if time tensor has any non-zero values
         if isinstance(time, torch.Tensor):
             if torch.nonzero(time).numel() > 0:
-                flow_vector = flow_vector * time.unsqueeze(-1)
+                # Reshape time tensor to match flow_vector dimensions
+                if time.dim() == 3:  # [batch_size, manifold_dim, manifold_dim]
+                    # Take diagonal to match flow_vector shape
+                    time = torch.diagonal(time, dim1=-2, dim2=-1)  # Shape: [batch_size, manifold_dim]
+                elif time.dim() == 2:  # [batch_size, manifold_dim]
+                    pass  # Already in correct shape
+                else:
+                    time = time.view(flow_vector.shape)
+                flow_vector = flow_vector * time
         elif time != 0:
             flow_vector = flow_vector * time
     
@@ -1181,3 +1208,101 @@ class NeuralGeometricFlow(PatternFormationFlow):
         curvature = 0.5 * (curvature - curvature.transpose(-2, -1))
         
         return self._to_tensor_type(curvature, CurvatureTensor)
+
+    def compute_mean_curvature(
+        self,
+        metric: Union[torch.Tensor, MetricTensor],
+        points: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Compute mean curvature from metric tensor.
+        
+        Args:
+            metric: Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
+            points: Optional points tensor
+            
+        Returns:
+            Mean curvature tensor of shape [batch_size, manifold_dim]
+        """
+        # Convert to tensor type if needed
+        metric_tensor = self._to_tensor_type(metric, MetricTensor)
+        
+        # Compute Ricci tensor
+        ricci = self.compute_ricci_tensor(metric_tensor, points)
+        
+        # Mean curvature is trace of Ricci tensor divided by manifold dimension
+        mean_curvature = torch.diagonal(ricci, dim1=-2, dim2=-1) / self.manifold_dim
+        
+        return mean_curvature
+
+    def detect_singularities(
+        self,
+        metric: torch.Tensor,
+        points: Optional[torch.Tensor] = None,
+        threshold: float = 1e-6
+    ) -> BaseSingularityInfo[torch.Tensor]:
+        """Detect flow singularities.
+        
+        Args:
+            metric: Metric tensor
+            points: Optional points tensor
+            threshold: Detection threshold
+            
+        Returns:
+            Singularity information
+        """
+        batch_size = metric.shape[0]
+        
+        # Reshape metric if needed
+        if len(metric.shape) == 2:
+            metric = metric.view(batch_size, self.manifold_dim, self.manifold_dim)
+        
+        # Add small regularization for numerical stability
+        metric_reg = metric + torch.eye(
+            self.manifold_dim,
+            device=metric.device,
+            dtype=metric.dtype
+        ).unsqueeze(0) * 1e-8
+        
+        # Check metric determinant
+        det = torch.linalg.det(metric_reg)
+        
+        # Compute condition number using SVD
+        try:
+            U, S, Vh = torch.linalg.svd(metric_reg)
+            cond = S.max(dim=1)[0] / (S.min(dim=1)[0] + 1e-8)
+        except:
+            # If SVD fails, metric is likely singular
+            cond = torch.ones(batch_size, device=metric.device) * float('inf')
+        
+        # Check eigenvalues
+        try:
+            eigenvals = torch.linalg.eigvals(metric_reg).real
+            min_eigenval = torch.min(eigenvals, dim=1)[0]
+        except:
+            # If eigendecomposition fails, assume singular
+            min_eigenval = torch.zeros(batch_size, device=metric.device)
+        
+        # Find first singularity
+        for i in range(batch_size):
+            if (abs(det[i]) < threshold or  # Near-zero determinant
+                cond[i] > 1.0/threshold or  # Poor conditioning
+                min_eigenval[i] < threshold):  # Near-zero eigenvalue
+                
+                return BaseSingularityInfo(
+                    index=i,
+                    determinant=float(det[i].item()),
+                    condition_number=float(cond[i].item()),
+                    min_eigenvalue=float(min_eigenval[i].item()),
+                    location=points[i] if points is not None else None,
+                    curvature=self.compute_curvature(metric[i:i+1])[0]
+                )
+        
+        # If no singularity found, return first point as non-singular
+        return BaseSingularityInfo(
+            index=0,
+            determinant=float(det[0].item()),
+            condition_number=float(cond[0].item()),
+            min_eigenvalue=float(min_eigenval[0].item()),
+            location=points[0] if points is not None else None,
+            curvature=self.compute_curvature(metric[0:1])[0]
+        )
