@@ -1,0 +1,66 @@
+- [x] tests/core/attention/test_geometric.py
+- [x] tests/core/tiling/test_strategies.py
+- [ ] tests/metrics/test_metrics_integration.py
+- [ ] tests/performance/benchmarks/test_core.py
+- [ ] tests/performance/cpu/test_algorithms.py
+- [x] tests/performance/cpu/test_memory_management.py
+- [ ] tests/performance/cpu/test_memory.py
+- [x] tests/performance/cpu/test_vectorization.py
+- [x] tests/test_core/test_cpu_operations.py
+- [ ] tests/test_core/test_crystal/test_refraction.py
+- [ ] tests/test_core/test_crystal/test_scale.py
+- [x] tests/test_core/test_flow/test_neural.py
+- [x] tests/test_core/test_pattern_processing.py
+- [ ] tests/test_core/test_patterns/test_arithmetic_dynamics.py
+- [x] tests/test_core/test_patterns/test_cohomology.py
+- [ ] tests/test_core/test_patterns/test_enriched_attention.py
+- [ ] tests/test_core/test_patterns/test_fiber_bundle.py
+- [x] tests/test_core/test_patterns/test_fiber_types.py
+- [x] tests/test_core/test_patterns/test_motivic_integration.py
+- [x] tests/test_core/test_patterns/test_operadic_structure.py
+- [ ] tests/test_core/test_patterns/test_pattern_fiber_bundle_operadic.py
+- [ ] tests/test_core/test_patterns/test_pattern_processor.py
+- [x] tests/test_core/test_patterns/test_riemannian.py
+- [ ] tests/test_core/test_patterns/test_symplectic.py
+- [x] tests/test_core/test_quantum_state.py
+- [ ] tests/test_core/test_quantum/test_neural_quantum_bridge.py
+- [ ] tests/test_core/test_quantum/test_path_integral.py
+- [ ] tests/test_core/test_quantum/test_state_space.py
+- [ ] tests/test_core/test_scale_transition.py
+- [ ] tests/test_integration/test_cross_validation.py
+- [ ] tests/test_integration/test_end_to_end.py
+- [ ] tests/test_integration/test_pattern_neural_bridge.py
+- [ ] tests/test_integration/test_quantum_pattern_bridge.py
+- [ ] tests/test_memory/test_memory_management.py
+- [ ] tests/test_neural/test_attention/test_exponential.py
+- [ ] tests/test_neural/test_attention/test_geometric.py
+- [ ] tests/test_neural/test_attention/test_hyperboloid.py
+- [ ] tests/test_neural/test_attention/test_logarithm.py
+- [ ] tests/test_neural/test_attention/test_minkowski.py
+- [ ] tests/test_neural/test_attention/test_pattern_dynamics.py
+- [ ] tests/test_neural/test_attention/test_pattern/test_bifurcation.py
+- [ ] tests/test_neural/test_attention/test_pattern/test_control.py
+- [ ] tests/test_neural/test_attention/test_pattern/test_diffusion_properties.py
+- [ ] tests/test_neural/test_attention/test_pattern/test_quantum.py
+- [ ] tests/test_neural/test_attention/test_pattern/test_reaction_diffusion.py
+- [ ] tests/test_neural/test_attention/test_pattern/test_stability.py
+- [ ] tests/test_neural/test_attention/test_quantum_geometric_attention.py
+- [ ] tests/test_neural/test_flow/test_geometric_flow.py
+- [ ] tests/test_neural/test_flow/test_hamiltonian.py
+- [ ] tests/test_neural/test_flow/test_tensor_shapes.py
+- [x] tests/test_utils/test_hardware/test_hardware_utils.py
+- [ ] tests/test_utils/test_helpers.py
+- [ ] tests/test_validation/test_debug_flow.py
+- [ ] tests/test_validation/test_flow_validation.py
+- [ ] tests/test_validation/test_framework_motivic.py
+- [ ] tests/test_validation/test_framework.py
+- [ ] tests/test_validation/test_metric_validation.py
+- [ ] tests/test_validation/test_model_geometric.py
+- [ ] tests/test_validation/test_motivic.py
+- [ ] tests/test_validation/test_pattern_flow.py
+- [ ] tests/test_validation/test_pattern_formation.py
+- [ ] tests/test_validation/test_pattern_stability.py
+- [ ] tests/test_validation/test_state_validation.py
+- [ ] tests/test_validation/test_symplectic_validation.py
+- [ ] tests/unit/utils/test_helpers.py
+- [ ] tests/utils/test_helpers.py

@@ -6,7 +6,7 @@ from unittest.mock import patch
 import psutil
 import torch
 
-from ..hardware_utils import get_hardware_info, get_memory_info
+from src.core.utils.hardware_utils import get_hardware_info, get_memory_info
 
 
 def test_get_hardware_info():
@@ -33,4 +33,4 @@ def test_get_memory_info():
         info = get_memory_info()
         assert info["total"] == 16 * 1024**3
         assert info["available"] == 8 * 1024**3
-        assert info["used"] == 8 * 1024**3
+        assert info["used"] == 8 * 1024**3 

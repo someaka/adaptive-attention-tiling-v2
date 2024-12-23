@@ -45,11 +45,15 @@ class SymmetryDetector:
         self.lattice = lattice
         self.tolerance = tolerance
 
+        # Calculate input size based on pattern dimension
+        pattern_size = lattice.dim * 2  # Each point has dim coordinates
+        hidden_size = pattern_size * 2
+
         # Initialize symmetry detection networks
         self.point_detector = nn.Sequential(
-            nn.Linear(lattice.dim**2, lattice.dim * 4),
+            nn.Linear(pattern_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(lattice.dim * 4, lattice.dim**2),
+            nn.Linear(hidden_size, lattice.dim**2),
         )
 
         self.translation_detector = nn.Sequential(
@@ -62,8 +66,17 @@ class SymmetryDetector:
         """Detect point symmetries in crystal pattern."""
         operations = []
 
-        # Analyze pattern structure
-        pattern_features = pattern.reshape(-1)
+        # Always add identity operation
+        identity = SymmetryOperation(
+            matrix=torch.eye(self.lattice.dim),
+            translation=torch.zeros(self.lattice.dim),
+            order=1,
+            type="identity"
+        )
+        operations.append(identity)
+
+        # Analyze pattern structure - take first two points for symmetry detection
+        pattern_features = pattern[:2].reshape(-1)
         symmetry_matrices = self.point_detector(pattern_features)
         symmetry_matrices = symmetry_matrices.reshape(
             -1, self.lattice.dim, self.lattice.dim
@@ -71,6 +84,10 @@ class SymmetryDetector:
 
         # Identify valid symmetry operations
         for matrix in symmetry_matrices:
+            # Skip if too close to identity (to avoid duplicates)
+            if torch.allclose(matrix, torch.eye(self.lattice.dim), atol=self.tolerance):
+                continue
+
             # Check if operation preserves lattice
             if torch.allclose(
                 matrix @ self.lattice.direct_vectors,
@@ -122,17 +139,31 @@ class LatticeDetector:
         self.dim = dim
         self.max_vectors = max_vectors
 
+        # Calculate input size based on actual pattern size
+        input_size = dim * max_vectors  # Each point has dim coordinates
+        hidden_size = input_size * 2
+
         # Lattice detection network
         self.detector = nn.Sequential(
-            nn.Linear(dim * max_vectors, dim * max_vectors * 2),
+            nn.Linear(input_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(dim * max_vectors * 2, dim * dim),
+            nn.Linear(hidden_size, dim * dim),
         )
 
     def detect_lattice(self, points: torch.Tensor) -> BravaisLattice:
         """Detect Bravais lattice from point pattern."""
-        # Extract lattice vectors
-        features = points[: self.max_vectors].reshape(-1)
+        if points.shape[1] != self.dim:
+            raise ValueError(f"Expected points with dimension {self.dim}, got {points.shape[1]}")
+            
+        # Pad or truncate to max_vectors
+        if len(points) > self.max_vectors:
+            points = points[:self.max_vectors]
+        elif len(points) < self.max_vectors:
+            padding = torch.zeros((self.max_vectors - len(points), self.dim))
+            points = torch.cat([points, padding], dim=0)
+        
+        # Extract lattice vectors and reshape
+        features = points.reshape(-1)
         basis_matrix = self.detector(features)
         basis_matrix = basis_matrix.reshape(self.dim, self.dim)
 

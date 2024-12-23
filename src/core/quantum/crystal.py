@@ -47,6 +47,16 @@ class BravaisLattice:
             return torch.eye(self.dim)
         if self.lattice_type == "hexagonal" and self.dim == 2:
             return torch.tensor([[1.0, 0.0], [0.5, np.sqrt(3) / 2]])
+        if self.lattice_type == "triclinic":
+            # For triclinic, we use a general lattice with no special symmetry
+            # For 2D: slightly deformed square lattice
+            if self.dim == 2:
+                return torch.tensor([[1.0, 0.1], [0.1, 1.0]])
+            # For 3D: slightly deformed cubic lattice
+            elif self.dim == 3:
+                return torch.tensor([[1.0, 0.1, 0.1], [0.1, 1.0, 0.1], [0.1, 0.1, 1.0]])
+            else:
+                return torch.eye(self.dim) + 0.1 * torch.ones(self.dim, self.dim)
         raise ValueError(f"Unsupported lattice type: {self.lattice_type}")
 
     def _compute_reciprocal_lattice(self) -> torch.Tensor:
@@ -108,6 +118,29 @@ class BrillouinZone:
                 "K": torch.tensor([2 * np.pi / 3, 2 * np.pi / 3]),
                 "M": torch.tensor([np.pi, 0]),
             }
+        if self.lattice.lattice_type == "triclinic":
+            # For triclinic, we use a minimal set of high-symmetry points
+            if self.lattice.dim == 2:
+                return {
+                    "Γ": torch.zeros(2),
+                    "X": torch.tensor([np.pi, 0]),
+                    "Y": torch.tensor([0, np.pi]),
+                    "M": torch.tensor([np.pi, np.pi]),
+                }
+            elif self.lattice.dim == 3:
+                return {
+                    "Γ": torch.zeros(3),
+                    "X": torch.tensor([np.pi, 0, 0]),
+                    "Y": torch.tensor([0, np.pi, 0]),
+                    "Z": torch.tensor([0, 0, np.pi]),
+                    "R": torch.tensor([np.pi, np.pi, np.pi]),
+                }
+            else:
+                # For higher dimensions, just use gamma point and diagonal point
+                return {
+                    "Γ": torch.zeros(self.lattice.dim),
+                    "M": torch.full((self.lattice.dim,), np.pi),
+                }
         return {}
 
     def compute_band_structure(self, k_points: torch.Tensor) -> torch.Tensor:
