@@ -152,7 +152,8 @@ class QuantumGeometricAttention(nn.Module):
         manifold_dim: Optional[int] = None,
         motive_rank: int = 4,
         num_layers: int = 1,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None
     ):
         """Initialize quantum geometric attention.
         
@@ -166,21 +167,23 @@ class QuantumGeometricAttention(nn.Module):
             manifold_dim: Manifold dimension (defaults to hidden_dim)
             motive_rank: Rank of motivic structure
             num_layers: Number of attention layers
-            dtype: Data type for tensors
+            dtype: Data type
+            device: Device for computation
         """
         super().__init__()
+        
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.manifold_type = manifold_type
         self.curvature = curvature
         self.manifold_dim = manifold_dim or hidden_dim
-        self.dtype = dtype
-        self.num_layers = num_layers
         self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
+        self.dtype = dtype
+        self.device = device or torch.device('cpu')
+        
+        # Initialize attention layers
         self.dropout = nn.Dropout(dropout)
-
-        # Initialize components
         self.attention_layers = nn.ModuleList([
             QuantumMotivicTile(
                 size=tile_size,
@@ -190,43 +193,57 @@ class QuantumGeometricAttention(nn.Module):
                 resolution=1.0,  # Default resolution
                 cohomology_dim=self.manifold_dim,
                 motive_rank=motive_rank,
-                dtype=self.dtype
+                dtype=dtype
             )
             for _ in range(num_layers)
         ])
+        
+        # Initialize geometric flow
         self.flow = GeometricFlow(
             hidden_dim=hidden_dim,
             manifold_dim=self.manifold_dim,
-            dtype=self.dtype
+            dtype=dtype
         )
+        
+        # Initialize arithmetic pattern
         self.arithmetic = ArithmeticPattern(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
             motive_rank=motive_rank,
-            dtype=self.dtype
-        )
+            dtype=dtype
 
-        # Projections for attention
-        self.to_qkv = nn.Linear(hidden_dim, 3 * hidden_dim, dtype=self.dtype)
+        )
+        
+        # Initialize attention projections
+        self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3, dtype=dtype, device=device)
         self.to_out = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device),
             nn.Dropout(dropout)
         )
-
-        # Geometric structures
+        
+        # Initialize geometric maps
         if manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(hidden_dim, curvature, dtype=self.dtype)
-            self.log_map = HyperbolicLogarithm(hidden_dim, curvature, dtype=self.dtype)
+            self.exp_map = HyperbolicExponential(hidden_dim, curvature, dtype=dtype)
+            self.log_map = HyperbolicLogarithm(hidden_dim, curvature, dtype=dtype)
         else:
-            self.exp_map = EuclideanExponential(hidden_dim, dtype=self.dtype)
-            self.log_map = EuclideanLogarithm(hidden_dim, dtype=self.dtype)
+            self.exp_map = EuclideanExponential(hidden_dim, dtype=dtype)
+            self.log_map = EuclideanLogarithm(hidden_dim, dtype=dtype)
 
         # Parallel transport
-        self.transport = ParallelTransport(hidden_dim, dtype=self.dtype)
+        self.transport = ParallelTransport(hidden_dim, dtype=dtype)
 
         # Projections
-        self.metric = nn.Parameter(torch.eye(hidden_dim, dtype=self.dtype))
-        self.pattern_proj = nn.Linear(self.manifold_dim, hidden_dim)
+        self.metric = nn.Parameter(torch.eye(hidden_dim, dtype=dtype))
+        self.pattern_proj = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype)
+        
+        # Move all components to device
+        device = device or torch.device('cpu')
+        self.exp_map = self.exp_map.to(device)
+        self.log_map = self.log_map.to(device)
+        self.transport = self.transport.to(device)
+        self.metric = nn.Parameter(self.metric.to(device))
+        self.pattern_proj = self.pattern_proj.to(device)
+        self.to(device)
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
         """Compute Fisher information metric for states."""

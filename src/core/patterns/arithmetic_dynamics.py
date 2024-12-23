@@ -46,25 +46,26 @@ class ArithmeticDynamics(nn.Module):
         self.quantum_weight = quantum_weight
         self.dtype = dtype if dtype is not None else torch.float32
 
-        # Initialize prime bases (first num_primes primes)
+        # Initialize prime bases
         self.register_buffer(
-            "prime_bases",
-            torch.tensor(
-                [2, 3, 5, 7, 11, 13, 17, 19][:num_primes], dtype=self.dtype
-            ),
+            "primes",
+            torch.tensor(self._get_first_n_primes(num_primes), dtype=self.dtype)
         )
 
-        # Arithmetic structure
+        # Initialize coupling matrix as a learnable parameter
+        self.coupling = nn.Parameter(
+            torch.randn(num_primes, height_dim, dtype=self.dtype) / np.sqrt(num_primes * height_dim)
+        )
+
+        # Initialize networks
         self.height_map = nn.Linear(hidden_dim, height_dim, dtype=self.dtype)
-
-        # Flow computation
         self.flow = nn.Linear(height_dim, height_dim, dtype=self.dtype)
-
-        # L-function computation - adjusted for batched inputs
+        
+        # Initialize L-function network
         self.l_function = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
+            nn.Linear(hidden_dim // 2, height_dim, dtype=self.dtype)
         )
 
         # Adelic projection
@@ -74,9 +75,6 @@ class ArithmeticDynamics(nn.Module):
         self.min_dim = max(4, 2 * motive_rank)  # Define min_dim
         self.measure_proj = nn.Linear(height_dim, self.min_dim, dtype=self.dtype)  # Project to min_dim measure space
         self.output_proj = nn.Linear(self.min_dim, hidden_dim, dtype=self.dtype)  # Project back from min_dim space
-
-        # Dynamical system parameters
-        self.coupling = nn.Parameter(torch.randn(num_primes, motive_rank, dtype=self.dtype))
 
         # Quantum correction networks
         self.quantum_height = nn.Sequential(
@@ -93,6 +91,24 @@ class ArithmeticDynamics(nn.Module):
 
         # Quantum correction projection
         self.quantum_proj = nn.Linear(self.min_dim, self.min_dim, dtype=self.dtype)  # Project within min_dim measure space
+
+    @staticmethod
+    def _get_first_n_primes(n: int) -> List[int]:
+        """Get first n prime numbers.
+        
+        Args:
+            n: Number of primes to return
+            
+        Returns:
+            List of first n primes
+        """
+        primes = []
+        num = 2
+        while len(primes) < n:
+            if all(num % p != 0 for p in primes):
+                primes.append(num)
+            num += 1
+        return primes
 
     def compute_height(self, x: torch.Tensor) -> torch.Tensor:
         """Compute height with quantum corrections.
@@ -175,10 +191,10 @@ class ArithmeticDynamics(nn.Module):
             Processed tensor and metrics dictionary
         """
         batch_size, seq_len, _ = x.shape
+        metrics = {}
 
-        # Project to height space with quantum corrections
-        x_flat = x.reshape(-1, self.hidden_dim)
-        height_coords = self.compute_height(x_flat)
+        # Project to height space
+        height_coords = self.height_map(x.reshape(-1, self.hidden_dim))
         height_coords = height_coords.view(batch_size, seq_len, self.height_dim)
 
         # Initialize trajectory storage
@@ -187,42 +203,34 @@ class ArithmeticDynamics(nn.Module):
 
         # Apply dynamics
         for _ in range(steps):
-            # Compute flow
-            flow_field = self.flow(height_coords.reshape(-1, self.height_dim))
-            flow_field = flow_field.view(batch_size, seq_len, self.height_dim)
-
+            # Compute base flow
+            base_flow = self.flow(height_coords.reshape(-1, self.height_dim))
+            base_flow = base_flow.view(batch_size, seq_len, self.height_dim)
+            
+            # Apply coupling with explicit gradient path
+            # [num_primes, height_dim] x [batch, seq, height_dim] -> [batch, seq, height_dim]
+            coupled_flow = torch.einsum('ph,bsh->bsh', self.coupling, base_flow)
+            
+            # Add L-function contribution
+            l_values = self.l_function(x.reshape(-1, self.hidden_dim))
+            l_values = l_values.view(batch_size, seq_len, self.height_dim)
+            
+            # Combine flows with L-function values
+            flow_field = coupled_flow + 0.1 * l_values
+            
             # Update using exponential map
             height_coords = height_coords + flow_field
 
             if return_trajectory:
                 trajectory.append(height_coords.clone())
 
-        # Compute L-function value with quantum corrections
-        l_value = self.compute_l_function(x_flat)
-        l_value = l_value.view(batch_size, seq_len, -1)
+        # Store metrics
+        metrics['height_norm'] = torch.norm(height_coords)
+        metrics['flow_norm'] = torch.norm(flow_field)
+        metrics['l_values_norm'] = torch.norm(l_values)
+        metrics['coupling_norm'] = torch.norm(self.coupling)
 
-        # Compute adelic projection
-        adelic = self.adelic_proj(x_flat)
-        adelic = adelic.view(batch_size, seq_len, self.num_primes, self.motive_rank)
-
-        # Project through measure space and back to input space
-        measure = self.measure_proj(height_coords.reshape(-1, self.height_dim))
-        output = self.output_proj(measure)
-        output = output.view(batch_size, seq_len, self.hidden_dim)
-
-        # Gather metrics
-        metrics = {
-            "height": self.compute_height(x_flat).mean().item(),
-            "l_value": l_value.norm(dim=-1).mean().item(),
-            "flow_magnitude": flow_field.norm(dim=-1).mean().item(),
-            "adelic_norm": adelic.norm(dim=(-1, -2)).mean().item(),
-            "quantum_correction": self.quantum_weight * self.quantum_height(x_flat).norm().item()
-        }
-
-        if return_trajectory:
-            metrics["trajectory"] = torch.stack(trajectory, dim=1)
-
-        return output, metrics
+        return height_coords, metrics
 
     def compute_modular_form(self, x: torch.Tensor) -> torch.Tensor:
         """Compute approximate modular form.

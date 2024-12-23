@@ -189,9 +189,12 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         # Compute curvature
         curvature = self.compute_curvature(metric, connection)
         
-        # Contract to get Ricci tensor
-        ricci = torch.einsum('...ij->...', curvature)
-        ricci = ricci.view(metric.shape[0], self.manifold_dim, self.manifold_dim)
+        # Contract to get Ricci tensor using proper indices
+        ricci = torch.einsum('...ijk->...ij', curvature)
+        
+        # Ensure proper shape
+        if ricci.dim() < 3:
+            ricci = ricci.unsqueeze(-1).expand(-1, -1, self.manifold_dim)
         
         return ricci
 

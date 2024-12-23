@@ -18,7 +18,7 @@ def load_test_config(profile: str | None = None) -> Dict[str, Any]:
     
     Args:
         profile: The hardware profile to load ('tiny', 'standard', or 'server').
-                If None, uses PYTEST_PROFILE environment variable or falls back to 'tiny'.
+                If None, uses PYTEST_PROFILE environment variable or falls back to 'debug'.
         
     Returns:
         Dict containing the test configuration
@@ -27,7 +27,7 @@ def load_test_config(profile: str | None = None) -> Dict[str, Any]:
         ValueError: If the profile doesn't exist
     """
     if profile is None:
-        profile = os.environ.get("PYTEST_PROFILE", "tiny")
+        profile = os.environ.get("PYTEST_PROFILE", "debug")
     
     config_path = get_config_dir() / f"{profile}.yaml"
     

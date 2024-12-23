@@ -56,13 +56,29 @@ class QuantumState:
         # For a pure state, density matrix is |ψ⟩⟨ψ|
         if len(self.amplitudes.shape) == 1:
             return torch.outer(self.amplitudes, self.amplitudes.conj())
+        
         # For batched states
         batch_size = self.amplitudes.shape[0]
-        state_dim = self.amplitudes.shape[1]
-        rho = torch.zeros((batch_size, state_dim, state_dim), dtype=torch.complex64, device=self.amplitudes.device)
-        for i in range(batch_size):
-            rho[i] = torch.outer(self.amplitudes[i], self.amplitudes[i].conj())
-        return rho
+        if len(self.amplitudes.shape) == 3:
+            # Handle case where amplitudes have sequence dimension
+            seq_len = self.amplitudes.shape[1]
+            state_dim = self.amplitudes.shape[2]
+            rho = torch.zeros((batch_size, seq_len, state_dim, state_dim), 
+                             dtype=torch.complex64, 
+                             device=self.amplitudes.device)
+            for i in range(batch_size):
+                for j in range(seq_len):
+                    rho[i, j] = torch.outer(self.amplitudes[i, j], self.amplitudes[i, j].conj())
+            return rho
+        else:
+            # Regular batch case
+            state_dim = self.amplitudes.shape[1]
+            rho = torch.zeros((batch_size, state_dim, state_dim), 
+                             dtype=torch.complex64, 
+                             device=self.amplitudes.device)
+            for i in range(batch_size):
+                rho[i] = torch.outer(self.amplitudes[i], self.amplitudes[i].conj())
+            return rho
 
     def inner_product(self, other: 'QuantumState') -> torch.Tensor:
         """Compute inner product with another state."""

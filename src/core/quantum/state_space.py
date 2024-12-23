@@ -186,14 +186,31 @@ class HilbertSpace:
             
         # Single time evolution
         evolution_operator = torch.matrix_exp(-1j * hamiltonian * t)
+        
         # Add phase correction to preserve pattern orientation
         first_row = evolution_operator[0] if len(evolution_operator.shape) == 2 else evolution_operator[0, 0]
-        phase_correction = torch.exp(1j * torch.angle(torch.vdot(state_vector.squeeze(), first_row)))
-        evolution_operator = evolution_operator * phase_correction
-        evolved = torch.matmul(state_vector, evolution_operator.mT)
+        
+        # Handle batch dimension properly
+        if len(state_vector.shape) > 2:
+            state_vector = state_vector.reshape(-1, state_vector.shape[-1])
+        
+        # Compute phase correction for each state in the batch
+        phase_corrections = []
+        for state in state_vector:
+            phase_correction = torch.exp(1j * torch.angle(torch.vdot(state, first_row)))
+            phase_corrections.append(phase_correction)
+        phase_correction = torch.stack(phase_corrections)
+        
+        # Apply evolution and phase correction
+        evolved_state = torch.matmul(state_vector, evolution_operator.transpose(-2, -1))
+        evolved_state = evolved_state * phase_correction.unsqueeze(-1)
+        
+        # Restore original shape if needed
+        if len(initial_state.amplitudes.shape) > 2:
+            evolved_state = evolved_state.view(initial_state.amplitudes.shape)
         
         return QuantumState(
-            amplitudes=evolved.squeeze(),
+            amplitudes=evolved_state,
             basis_labels=initial_state.basis_labels,
             phase=initial_state.phase
         )

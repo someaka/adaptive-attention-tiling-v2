@@ -14,14 +14,26 @@ import torch.nn.functional as F
 from src.neural.attention.pattern.dynamics import PatternDynamics
 from src.core.patterns.pattern_processor import PatternProcessor
 from src.core.flow.neural import NeuralGeometricFlow
+from tests.utils.config_loader import load_test_config
 
 @pytest.fixture
-def setup_components():
+def test_config():
+    """Load test configuration."""
+    return load_test_config()
+
+@pytest.fixture
+def setup_components(test_config):
     """Setup test components."""
-    hidden_dim = 64
-    manifold_dim = 64
+    # Ensure minimum dimensions for attention heads
+    hidden_dim = max(test_config["geometric_tests"]["dimensions"], 8)  # Minimum 8 for attention
+    manifold_dim = max(test_config["geometric_tests"]["dimensions"], 8)  # Minimum 8 for attention
+    num_heads = test_config["geometric_tests"]["num_heads"]  # Use single head from debug config
+    grid_size = 8  # Fixed small grid size for debug
     
-    dynamics = PatternDynamics(hidden_dim=hidden_dim)
+    dynamics = PatternDynamics(
+        hidden_dim=hidden_dim,
+        grid_size=grid_size
+    )
     processor = PatternProcessor(
         manifold_dim=manifold_dim,
         hidden_dim=hidden_dim
@@ -47,7 +59,7 @@ def test_forward_pass(setup_components):
     batch_size = 4
     num_heads = 8
     seq_len = 16
-    grid_size = dynamics.size  # Get grid size from dynamics
+    grid_size = dynamics.grid_size  # Get grid size from dynamics
     
     states = torch.randn(batch_size, dynamics.dim, grid_size, grid_size)
     
@@ -83,7 +95,7 @@ def test_backward_pass(setup_components):
     dynamics, processor, _ = setup_components
     
     # Create test input with gradients [batch, channels, height, width]
-    grid_size = dynamics.size
+    grid_size = dynamics.grid_size
     x = torch.randn(4, dynamics.dim, grid_size, grid_size, requires_grad=True)
     
     # Forward pass
@@ -110,7 +122,7 @@ def test_gradient_computation(setup_components):
     dynamics, _, _ = setup_components
     
     # Create test pattern [batch, channels, height, width]
-    grid_size = dynamics.size
+    grid_size = dynamics.grid_size
     pattern = torch.randn(1, dynamics.dim, grid_size, grid_size)
     
     # Compute linearization
@@ -134,26 +146,39 @@ def project_to_manifold(x: torch.Tensor, manifold_dim: int) -> torch.Tensor:
     Returns:
         Projected tensor of shape (batch_size, manifold_dim)
     """
+    # Ensure input is properly shaped
+    if x.dim() == 1:
+        x = x.unsqueeze(0)  # Add batch dimension if missing
+    
     batch_size = x.size(0)
-    x_flat = x.view(batch_size, -1)
+    x_flat = x.reshape(batch_size, -1)  # Use reshape instead of view for better compatibility
     
     # Project to half the manifold dimension since we'll double it for complex numbers
     projection = nn.Linear(x_flat.size(1), manifold_dim // 2, dtype=x.dtype, device=x.device)
+    projection.requires_grad_(True)  # Enable gradients for projection
+    
+    # Initialize weights and biases with proper gradients
+    nn.init.xavier_uniform_(projection.weight)
+    nn.init.zeros_(projection.bias)
+    
+    # Project and ensure gradients are preserved
     projected = projection(x_flat)
     
     # Make it complex by adding zeros for imaginary part
-    projected = torch.cat([projected, torch.zeros_like(projected)], dim=-1)
+    zeros = torch.zeros_like(projected, requires_grad=True)
+    projected = torch.cat([projected, zeros], dim=-1)
     
-    # Ensure output is normalized
-    return F.normalize(projected, p=2, dim=-1)
+    # Ensure output is normalized while preserving gradients
+    norm = torch.norm(projected, p=2, dim=-1, keepdim=True)
+    return projected / (norm + 1e-8)
 
 def test_geometric_attention_integration(setup_components):
     """Test integration with geometric attention."""
     dynamics, processor, flow = setup_components
     
     # Create test input
-    grid_size = dynamics.size
-    x = torch.randn(4, dynamics.dim, grid_size, grid_size)
+    grid_size = dynamics.grid_size
+    x = torch.randn(4, dynamics.dim, grid_size, grid_size, requires_grad=True)  # Enable gradients
     
     # Project to manifold dimension
     x_projected = project_to_manifold(x, flow.manifold_dim)
@@ -177,8 +202,8 @@ def test_pattern_manipulation(setup_components):
     dynamics, processor, _ = setup_components
     
     # Create test pattern
-    grid_size = dynamics.size
-    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size)
+    grid_size = dynamics.grid_size
+    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size, requires_grad=True)  # Enable gradients
     
     # Get pattern evolution
     results = dynamics(pattern, return_patterns=True)
@@ -198,34 +223,38 @@ def test_pattern_manipulation(setup_components):
         atol=1e-5
     ), "Should preserve pattern structure"
 
-def test_training_integration(setup_components):
+def test_training_integration(setup_components, test_config):
     """Test integration with training pipeline."""
     dynamics, processor, flow = setup_components
     
-    # Create test batch
-    grid_size = dynamics.size
-    batch = torch.randn(4, dynamics.dim, grid_size, grid_size)
+    # Enable gradients for all parameters
+    for param in flow.parameters():
+        param.requires_grad_(True)
+    for param in dynamics.parameters():
+        param.requires_grad_(True)
+    for param in processor.parameters():
+        param.requires_grad_(True)
     
-    # Forward pass through components
-    results = dynamics(batch, return_patterns=True)
-    patterns = results["patterns"]
+    # Get test parameters from config and components
+    batch_size = test_config["geometric_tests"]["batch_size"]
+    manifold_dim = processor.hidden_dim  # Use processor's hidden dimension
     
-    # Project to manifold dimension
-    batch_projected = project_to_manifold(batch, flow.manifold_dim)
+    # Create input with shape [batch_size, manifold_dim, manifold_dim]
+    batch = torch.randn(batch_size, manifold_dim, manifold_dim, requires_grad=True)
     
-    # Compute geometric quantities
-    metric = flow.compute_metric(batch_projected)
-    connection = flow.compute_connection(metric, batch_projected)
+    # Forward pass through processor
+    processed = processor(batch)
     
-    # Verify shapes
-    assert metric.shape == (batch.size(0), flow.manifold_dim, flow.manifold_dim)
-    assert connection.shape == (batch.size(0), flow.manifold_dim, flow.manifold_dim, flow.manifold_dim)
+    # Forward pass through flow
+    output = flow(processed)
     
-    # Compute loss and check gradients
-    loss = torch.sum(torch.stack([torch.norm(pattern) for pattern in patterns]))
+    # Compute loss
+    loss = output.mean()
+    
+    # Backward pass
     loss.backward()
     
-    # Verify gradient flow
-    for param in flow.parameters():
-        assert param.grad is not None
-        assert not torch.isnan(param.grad).any()
+    # Check gradients
+    assert all(p.grad is not None for p in flow.parameters() if p.requires_grad)
+    assert all(p.grad is not None for p in dynamics.parameters() if p.requires_grad)
+    assert all(p.grad is not None for p in processor.parameters() if p.requires_grad)

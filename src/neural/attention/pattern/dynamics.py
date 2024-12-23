@@ -21,7 +21,7 @@ from .diffusion import DiffusionSystem
 from .reaction import ReactionSystem
 
 
-class PatternDynamics:
+class PatternDynamics(nn.Module):
     """Complete pattern dynamics system with quantum integration."""
 
     def __init__(
@@ -45,6 +45,7 @@ class PatternDynamics:
             hidden_dim (int, optional): Hidden layer dimension. Defaults to 64.
             quantum_enabled (bool, optional): Enable quantum features. Defaults to False.
         """
+        super().__init__()
         self.size = grid_size
         self.dim = space_dim
         self.dt = dt

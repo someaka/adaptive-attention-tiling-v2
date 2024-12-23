@@ -31,9 +31,6 @@ def test_cpu_memory_management():
     large_tensor = device.create_tensor(np.random.randn(1000, 1000))
     assert large_tensor.shape == (1000, 1000)
     
-    # Test memory cleanup
-    del large_tensor
-    torch.cuda.empty_cache()  # Force cleanup
 
 def test_cpu_thread_pool():
     """Test thread pool operations."""

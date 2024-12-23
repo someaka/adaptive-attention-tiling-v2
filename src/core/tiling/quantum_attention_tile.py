@@ -251,62 +251,64 @@ class QuantumMotivicTile(nn.Module):
         return_metrics: bool = True
     ) -> Union[Tensor, Tuple[Tensor, Dict[str, Any]]]:
         """Apply quantum motivic attention.
-        
+
         Args:
             q: Query tensor
             k: Key tensor
             v: Value tensor
             state: Optional state tensor
             return_metrics: Whether to return metrics dictionary
-            
+
         Returns:
             If return_metrics is True:
                 Tuple of (attention output tensor, metrics dictionary)
             Otherwise:
                 Just the attention output tensor
         """
-        # Add batch and sequence dimensions if needed
+        # Add batch dimension if needed
         if q.dim() == 1:
-            q = q.unsqueeze(0).unsqueeze(0)  # [1, 1, dim]
+            q = q.unsqueeze(0)  # [1, dim]
         if k.dim() == 1:
-            k = k.unsqueeze(0).unsqueeze(0)  # [1, 1, dim]
+            k = k.unsqueeze(0)  # [1, dim]
         if v.dim() == 1:
-            v = v.unsqueeze(0).unsqueeze(0)  # [1, 1, dim]
-            
+            v = v.unsqueeze(0)  # [1, dim]
+        
+        # Add sequence dimension if needed
+        if q.dim() == 2:
+            q = q.unsqueeze(1)  # [batch, 1, dim]
+        if k.dim() == 2:
+            k = k.unsqueeze(1)  # [batch, 1, dim]
+        if v.dim() == 2:
+            v = v.unsqueeze(1)  # [batch, 1, dim]
+
         batch_size, seq_len, _ = q.shape
-        
-        # Convert to real tensors if complex
-        if q.is_complex():
-            q = q.real.to(torch.float32)
-        if k.is_complex():
-            k = k.real.to(torch.float32)
-        if v.is_complex():
-            v = v.real.to(torch.float32)
-            
+
+        # Convert complex tensors to real for attention computation
+        q_real = q.real if q.is_complex() else q
+        k_real = k.real if k.is_complex() else k
+        v_real = v.real if v.is_complex() else v
+
         # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.hidden_dim)
+        scores = torch.einsum('bik,bjk->bij', q_real, k_real) / math.sqrt(q_real.size(-1))
         
-        # Apply quantum geometric attention
-        if state is not None:
-            # Include quantum state influence
-            state_scores = self.compute_state_attention(state)
-            scores = scores + state_scores
-            
         # Apply softmax
-        attn = torch.nn.functional.softmax(scores, dim=-1)
+        attn = F.softmax(scores, dim=-1)
         
         # Compute output
-        output = torch.matmul(attn, v)
+        output = torch.einsum('bij,bjk->bik', attn, v_real)
+        
+        # Convert back to complex if input was complex
+        if q.is_complex():
+            output = output.to(q.dtype)
         
         if return_metrics:
             metrics = {
-                "attention_scores": scores.detach(),
-                "attention_weights": attn.detach()
+                'attention_scores': scores,
+                'attention_weights': attn,
+                'output_norm': torch.norm(output)
             }
-            if state is not None:
-                metrics["state_influence"] = state_scores.detach()
             return output, metrics
-            
+        
         return output
 
     def _update_quantum_metrics(self, field: torch.Tensor) -> None:
