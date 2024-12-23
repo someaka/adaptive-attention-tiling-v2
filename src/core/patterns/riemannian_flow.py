@@ -84,11 +84,18 @@ class RiemannianFlow(BaseGeometricFlow):
             )
         else:
             # Compute standard Christoffel symbols
-            # First compute inverse metric
+            # First compute inverse metric with stability check
+            eigvals, eigvecs = torch.linalg.eigh(metric)
+            if torch.min(eigvals) <= self.stability_threshold:
+                eigvals = torch.clamp(eigvals, min=self.stability_threshold)
+                metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1)
+            
             metric_inv = torch.inverse(metric)
             
-            # Compute metric derivatives (approximate)
-            eps = 1e-6
+            # Compute metric derivatives with adaptive epsilon
+            metric_scale = torch.norm(metric, dim=(-2, -1), keepdim=True)
+            eps = self.stability_threshold * torch.sqrt(metric_scale)
+            
             eye = torch.eye(self.manifold_dim, device=metric.device)
             metric_derivs = torch.zeros(
                 batch_size,
@@ -108,23 +115,26 @@ class RiemannianFlow(BaseGeometricFlow):
             
             for k in range(self.manifold_dim):
                 shift = eps * eye[k]
-                metric_plus = self.compute_metric(points + shift[None])
-                metric_minus = self.compute_metric(points - shift[None])
-                metric_derivs[..., k] = (metric_plus - metric_minus) / (2 * eps)
+                # Forward difference with stability scaling
+                metric_derivs[..., k] = (
+                    self.compute_metric(points + shift.unsqueeze(0)) -
+                    metric
+                ) / (eps + self.stability_threshold)
             
-            # Compute Christoffel symbols
-            christoffel = torch.zeros_like(metric_derivs)
+            # Compute Christoffel symbols with stability
+            christoffel = 0.5 * torch.einsum(
+                'bim,bmjk->bijk',
+                metric_inv,
+                metric_derivs + 
+                metric_derivs.transpose(-2, -1).transpose(-3, -2) -
+                metric_derivs.transpose(-3, -1)
+            )
             
-            for i in range(self.manifold_dim):
-                for j in range(self.manifold_dim):
-                    for k in range(self.manifold_dim):
-                        for l in range(self.manifold_dim):
-                            christoffel[:, i, j, k] += 0.5 * metric_inv[:, i, l] * (
-                                metric_derivs[:, j, k, l] +
-                                metric_derivs[:, k, j, l] -
-                                metric_derivs[:, l, j, k]
-                            )
-        
+            # Add stability regularization
+            christoffel_norm = torch.norm(christoffel, dim=(-3, -2, -1), keepdim=True)
+            if torch.any(christoffel_norm > 1.0 / self.stability_threshold):
+                christoffel = christoffel * (1.0 / self.stability_threshold) / christoffel_norm
+                
         return christoffel
     
     def compute_ricci_tensor(
@@ -143,10 +153,10 @@ class RiemannianFlow(BaseGeometricFlow):
         """
         batch_size = metric.shape[0]
         
-        # Get Christoffel symbols
+        # Get Christoffel symbols with stability
         christoffel = self.compute_christoffel(metric)
         
-        # Compute Riemann curvature components
+        # Compute Riemann curvature components with stability
         riemann = torch.zeros(
             batch_size,
             self.manifold_dim,
@@ -156,33 +166,32 @@ class RiemannianFlow(BaseGeometricFlow):
             device=metric.device
         )
         
-        # R^i_jkl component
-        for i in range(self.manifold_dim):
-            for j in range(self.manifold_dim):
-                for k in range(self.manifold_dim):
-                    for l in range(self.manifold_dim):
-                        # Sum over contracted index
-                        for m in range(self.manifold_dim):
-                            riemann[:, i, j, k, l] += (
-                                christoffel[:, i, k, m] * christoffel[:, m, j, l] -
-                                christoffel[:, i, l, m] * christoffel[:, m, j, k]
-                            )
+        # Compute R^i_jkl component using einsum for better stability
+        # First term: Γ^i_km Γ^m_jl
+        term1 = torch.einsum('bikm,bmjl->bijkl', christoffel, christoffel)
         
-        # Contract to get Ricci tensor
-        ricci = torch.zeros(
-            batch_size,
-            self.manifold_dim,
-            self.manifold_dim,
-            device=metric.device
-        )
+        # Second term: Γ^i_lm Γ^m_jk
+        term2 = torch.einsum('bilm,bmjk->bijkl', christoffel, christoffel)
         
-        # Contract using einsum instead of generator
-        ricci = torch.einsum('bijkj->bij', riemann)
+        # Combine terms with stability check
+        riemann = term1 - term2
         
-        if connection is not None:
-            # Modify Ricci tensor using connection
-            ricci = ricci + torch.einsum('...ij,...jk->...ik', connection, metric)
+        # Normalize if too large
+        riemann_norm = torch.norm(riemann, dim=(-4, -3, -2, -1), keepdim=True)
+        if torch.any(riemann_norm > 1.0 / self.stability_threshold):
+            riemann = riemann * (1.0 / self.stability_threshold) / riemann_norm
         
+        # Contract to get Ricci tensor using einsum
+        ricci = torch.einsum('bijkj->bik', riemann)
+        
+        # Symmetrize Ricci tensor
+        ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
+        
+        # Scale Ricci tensor for stability in flow
+        ricci_norm = torch.norm(ricci, dim=(-2, -1), keepdim=True)
+        if torch.any(ricci_norm > 1.0):
+            ricci = ricci / ricci_norm
+            
         return ricci
     
     def parallel_transport(

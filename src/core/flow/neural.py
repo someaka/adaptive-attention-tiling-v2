@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 BatchTensor = TensorType["batch_size", "manifold_dim"]
 MetricTensor = TensorType["batch_size", "manifold_dim", "manifold_dim"]
 ConnectionTensor = TensorType["batch_size", "manifold_dim", "manifold_dim", "manifold_dim"]
+CurvatureTensor = TensorType["batch_size", "manifold_dim", "manifold_dim"]
 
 class NeuralGeometricFlow(PatternFormationFlow):
     """Neural network-specific implementation of geometric flow.
@@ -732,8 +733,24 @@ class NeuralGeometricFlow(PatternFormationFlow):
         """Compute stability term for connection computation."""
         batch_size = points.shape[0]
         
-        # Use dimension manager for flattening
-        metric_flat = self.dim_manager.reshape_to_flat(metric)
+        # Ensure points has correct shape
+        if points.shape[-1] != self.manifold_dim:
+            points = self._to_tensor_type(
+                points.view(batch_size, -1)[:, :self.manifold_dim],
+                BatchTensor
+            )
+        
+        # Flatten metric tensor correctly
+        metric_flat = metric.view(batch_size, -1)
+        if metric_flat.shape[-1] != self.manifold_dim * self.manifold_dim:
+            # Pad or truncate to correct size
+            target_size = self.manifold_dim * self.manifold_dim
+            if metric_flat.shape[-1] < target_size:
+                padding = torch.zeros(batch_size, target_size - metric_flat.shape[-1], device=metric.device)
+                metric_flat = torch.cat([metric_flat, padding], dim=-1)
+            else:
+                metric_flat = metric_flat[:, :target_size]
+        metric_flat = self._to_tensor_type(metric_flat, BatchTensor)
         
         # Compute stability features
         stability_features = torch.cat([
@@ -1085,75 +1102,82 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         return integrated
 
-    def compute_flow_vector(self, points: torch.Tensor, ricci: torch.Tensor, metric: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Compute flow vector field.
-        
-        Args:
-            points: Points tensor of shape (batch_size, manifold_dim)
-            ricci: Ricci tensor of shape (batch_size, manifold_dim) or (batch_size, manifold_dim, manifold_dim)
-            metric: Optional metric tensor
-            
-        Returns:
-            Flow vector field of shape (batch_size, manifold_dim)
-        """
-        batch_size = points.shape[0]
-        
-        # Ensure Ricci tensor has correct shape
-        if len(ricci.shape) == 2:
-            # Convert vector to diagonal matrix
-            ricci_matrix = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, 
-                                     device=points.device)
-            ricci_matrix.diagonal(dim1=1, dim2=2)[:] = ricci
-            ricci = ricci_matrix
-        
-        # Compute metric at current points if not provided
-        if metric is None:
-            metric = self.compute_metric_tensor(points)
-        
-        # Add regularization for numerical stability
-        eye = torch.eye(self.manifold_dim, device=points.device).unsqueeze(0)
-        metric_reg = metric + eye * 1e-6
-        
-        # Compute inverse metric
-        metric_inv = torch.linalg.inv(metric_reg)
-        
-        # Contract tensors to get flow vector
-        flow = torch.einsum('bij,bjk->bik', metric_inv, ricci)
-        flow_vector = torch.diagonal(flow, dim1=1, dim2=2)
-        
-        # Normalize flow
-        flow_norm = torch.norm(flow_vector, dim=1, keepdim=True)
-        flow_vector = flow_vector / (flow_norm + 1e-8)
-        
-        # Scale flow to prevent instability
-        flow_vector = flow_vector * 0.1
-        
-        return flow_vector
-
     def compute_flow(self, metric: torch.Tensor, time: float = 0.0) -> torch.Tensor:
         """Compute the geometric flow for the given metric tensor.
-        
+    
         Args:
             metric: The metric tensor to compute flow for.
             time: The time parameter for flow evolution.
-            
+    
         Returns:
-            The computed flow tensor.
+            The computed flow vector with shape (batch_size, manifold_dim).
         """
         # Compute Ricci tensor from metric
         ricci = self.compute_ricci_tensor(metric)
-        
-        # Get points from metric if needed
-        if self.points is None:
-            batch_size = metric.shape[0]
-            points = torch.zeros(batch_size, self.manifold_dim, device=metric.device)
-        else:
-            points = self.points
-        
+    
         # Compute flow vector using Ricci tensor
-        flow_vector = self.compute_flow_vector(points, ricci, metric)
-        
-        # Apply time scaling
-        flow_vector = flow_vector * float(time) if time != 0.0 else flow_vector
-        
+        # Take the diagonal elements as the flow vector components
+        flow_vector = -torch.diagonal(ricci, dim1=-2, dim2=-1)  # Shape: [batch_size, manifold_dim]
+    
+        # Apply time scaling if time tensor has any non-zero values
+        if isinstance(time, torch.Tensor):
+            if torch.nonzero(time).numel() > 0:
+                flow_vector = flow_vector * time.unsqueeze(-1)
+        elif time != 0:
+            flow_vector = flow_vector * time
+    
         return flow_vector
+
+    def compute_curvature(
+        self,
+        metric: Union[torch.Tensor, MetricTensor],
+        connection: Optional[Union[torch.Tensor, ConnectionTensor]] = None
+    ) -> Union[torch.Tensor, CurvatureTensor]:
+        """Compute curvature tensor.
+        
+        Args:
+            metric: Metric tensor
+            connection: Optional connection coefficients
+            
+        Returns:
+            Curvature tensor
+        """
+        batch_size = metric.shape[0]
+        
+        if connection is None:
+            connection = self.compute_connection(self._to_tensor_type(metric, MetricTensor))
+        
+        # Prepare input: [connection_flat, metric_flat]
+        connection_flat = connection.reshape(batch_size, -1)
+        metric_flat = metric.reshape(batch_size, -1)
+        
+        # Calculate expected dimensions
+        connection_dim = self.manifold_dim * self.manifold_dim * self.manifold_dim
+        metric_dim = self.manifold_dim * self.manifold_dim
+        
+        # Pad or truncate tensors to match expected dimensions
+        if connection_flat.shape[-1] < connection_dim:
+            padding = torch.zeros(batch_size, connection_dim - connection_flat.shape[-1], device=connection_flat.device)
+            connection_flat = torch.cat([connection_flat, padding], dim=-1)
+        else:
+            connection_flat = connection_flat[:, :connection_dim]
+        
+        if metric_flat.shape[-1] < metric_dim:
+            padding = torch.zeros(batch_size, metric_dim - metric_flat.shape[-1], device=metric_flat.device)
+            metric_flat = torch.cat([metric_flat, padding], dim=-1)
+        else:
+            metric_flat = metric_flat[:, :metric_dim]
+        
+        # Concatenate tensors
+        input_tensor = torch.cat([connection_flat, metric_flat], dim=-1)
+        
+        # Compute curvature components
+        curvature_flat = self.curvature_net(input_tensor)
+        curvature = curvature_flat.view(
+            batch_size, self.manifold_dim, self.manifold_dim
+        )
+        
+        # Ensure antisymmetry
+        curvature = 0.5 * (curvature - curvature.transpose(-2, -1))
+        
+        return self._to_tensor_type(curvature, CurvatureTensor)

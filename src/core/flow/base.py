@@ -220,6 +220,23 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         # Evolve metric: g(t+dt) = g(t) - 2*Ric(g(t))*dt
         new_metric = metric - 2 * timestep * ricci
         
+        # Ensure positive definiteness by eigenvalue decomposition
+        eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+        min_eigenvalue = eigenvalues.min(dim=-1, keepdim=True)[0]
+        
+        # Add small positive constant to negative eigenvalues
+        eigenvalues = torch.where(
+            eigenvalues < self.stability_threshold,
+            eigenvalues + self.stability_threshold - min_eigenvalue,
+            eigenvalues
+        )
+        
+        # Reconstruct metric with positive eigenvalues
+        new_metric = torch.matmul(
+            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+            eigenvectors.transpose(-2, -1)
+        )
+        
         # Compute flow metrics
         metrics = FlowMetrics(
             flow_magnitude=float(torch.norm(ricci).item()),

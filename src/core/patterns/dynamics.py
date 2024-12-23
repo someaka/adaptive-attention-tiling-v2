@@ -125,7 +125,31 @@ class PatternDynamics:
         Returns:
             Dictionary of energy components
         """
-        raise NotImplementedError
+        # Get pattern dimensions
+        *batch_dims, height, width = state.shape
+        
+        # Compute kinetic energy (using squared gradients)
+        gradients = torch.gradient(state)
+        kinetic = 0.5 * sum(torch.sum(grad * grad, dim=tuple(range(len(batch_dims)))) 
+                           for grad in gradients)
+        
+        # Compute potential energy (using pattern amplitude)
+        potential = 0.5 * torch.sum(state * state, dim=tuple(range(len(batch_dims))))
+        
+        # Compute total energy
+        total = kinetic + potential
+        
+        # Convert to tensors if needed
+        kinetic = torch.as_tensor(kinetic, device=state.device)
+        potential = torch.as_tensor(potential, device=state.device)
+        total = torch.as_tensor(total, device=state.device)
+        
+        # Return energy components
+        return {
+            'kinetic': kinetic,
+            'potential': potential,
+            'total': total
+        }
         
     def compute_conserved_quantities(
         self,

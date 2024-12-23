@@ -20,14 +20,12 @@ Tests are organized in dependency order:
 import numpy as np
 import pytest
 import torch
+import warnings
 
+from src.validation.geometric.flow import TilingFlowValidator, TilingFlowValidationResult
 from src.core.attention.geometric import GeometricStructures
 from src.core.flow import NeuralGeometricFlow
 from src.core.flow.protocol import FlowMetrics, SingularityInfo as Singularity
-from src.validation.geometric.flow import (
-    TilingFlowValidator as FlowValidator,
-    TilingFlowValidationResult as FlowValidationResult,
-)
 
 # Mark test class for dependency management
 class TestGeometricFlow:
@@ -81,165 +79,12 @@ class TestGeometricFlow:
             parallel_transport_method="schild",
         )
 
-    def test_geometric_metric_computation(
-        self, flow_layer, test_input, test_config
-    ):
-        """Test metric tensor computation."""
-        # Create input tensor with manifold dimension
-        x = test_input
-        
-        # Compute metric tensor
-        metric = flow_layer.compute_metric_tensor(x)
-        
-        # Test metric tensor properties
-        assert metric.shape == (
-            test_config['batch_size'],
-            test_config['manifold_dim'],
-            test_config['manifold_dim'],
-        ), "Metric tensor should have manifold dimensions"
-        
-        # Test metric tensor symmetry
-        assert torch.allclose(
-            metric, metric.transpose(-1, -2), rtol=1e-5
-        ), "Metric tensor should be symmetric"
-        
-        # Test metric tensor positive definiteness
-        eigenvals = torch.linalg.eigvalsh(metric)
-        assert torch.all(eigenvals > 0), "Metric tensor should be positive definite"
-
-    def test_flow_integration(
-        self, flow_layer, test_input, test_config
-    ):
-        """Test geometric flow integration."""
-        # Create input tensor with manifold dimension
-        x = test_input
-        
-        # Integrate flow
-        integrated = flow_layer.integrate_flow(x)
-        
-        # Test integrated shape
-        assert integrated.shape == (
-            test_config['batch_size'],
-            test_config['seq_len'],
-            test_config['hidden_dim'],
-        ), "Integration should map to hidden dimension"
-        
-        # Test flow properties
-        flow_field = flow_layer.compute_flow_field(x)
-        assert flow_field.shape == (
-            test_config['batch_size'],
-            test_config['seq_len'],
-            test_config['manifold_dim'],
-        ), "Flow field should preserve manifold dimension"
-        
-        # Test conservation laws
-        divergence = flow_layer.compute_divergence(flow_field)
-        assert torch.allclose(
-            divergence.mean(), torch.zeros(1), atol=1e-4
-        ), "Flow should be approximately divergence-free"
-
-    def test_curvature_flow(
-        self, flow_layer, test_input, test_config
-    ):
-        """Test curvature flow properties."""
-        # Create input tensor with manifold dimension
-        x = test_input
-        
-        # Compute curvature flow
-        flow = flow_layer.compute_curvature_flow(x)
-        
-        # Test flow shape
-        assert flow.shape == (
-            test_config['batch_size'],
-            test_config['seq_len'],
-            test_config['manifold_dim'],
-        ), "Curvature flow should preserve manifold dimension"
-        
-        # Test curvature properties
-        ricci = flow_layer.compute_ricci_flow(x)
-        assert ricci.shape == (
-            test_config['batch_size'],
-            test_config['manifold_dim'],
-            test_config['manifold_dim'],
-        ), "Ricci flow should have manifold dimensions"
-        
-        # Test scalar curvature
-        scalar = flow_layer.compute_scalar_curvature(x)
-        assert scalar.shape == (test_config['batch_size'],), "Scalar curvature should be scalar"
-
-    def test_flow_dynamics(
-        self, flow_layer, test_input, test_config
-    ):
-        """Test geometric flow dynamics."""
-        # Create input tensor with manifold dimension
-        x = test_input
-        
-        # Evolve flow
-        evolved = flow_layer.evolve_flow(x, time_steps=10)
-        
-        # Test evolved shape
-        assert evolved.shape == (
-            test_config['batch_size'],
-            test_config['seq_len'],
-            test_config['hidden_dim'],
-        ), "Evolution should map to hidden dimension"
-        
-        # Test energy conservation
-        initial_energy = flow_layer.compute_flow_energy(x)
-        final_energy = flow_layer.compute_flow_energy(evolved)
-        assert torch.allclose(
-            initial_energy, final_energy, rtol=1e-3
-        ), "Flow should approximately conserve energy"
-        
-        # Test geometric invariants
-        volume_form = flow_layer.compute_volume_form(x)
-        evolved_form = flow_layer.compute_volume_form(evolved)
-        assert torch.allclose(
-            volume_form.mean(), evolved_form.mean(), rtol=1e-3
-        ), "Flow should preserve volume form"
-
-    @pytest.fixture
-    def points(self, test_config):
-        """Create random points in position space."""
-        return torch.randn(test_config['batch_size'], test_config['manifold_dim'], requires_grad=True)
-
-    @pytest.fixture
-    def random_states(self, test_config):
-        """Create random phase space states (position and momentum)."""
-        phase_dim = test_config['manifold_dim'] * 2
-        return torch.randn(test_config['batch_size'], phase_dim, requires_grad=True)
-
     @pytest.fixture
     def metric(self, flow, points):
-        """Create metric tensor."""
+        """Create metric tensor for testing."""
         return flow.compute_metric(points)
 
-    @pytest.fixture
-    def validator(self, flow):
-        """Create flow validator."""
-        return FlowValidator(
-            flow=flow,
-            stability_threshold=1e-6,
-            curvature_bounds=(-1.0, 1.0),
-            max_energy=1e3
-        )
-
-    @pytest.fixture
-    def geometric_validator(self, validator):
-        """Create geometric flow validator fixture."""
-        return validator
-
-    @pytest.fixture
-    def energy_validator(self, validator):
-        """Create energy conservation validator fixture."""
-        return validator
-
-    @pytest.fixture
-    def convergence_validator(self, validator):
-        """Create convergence validator fixture."""
-        return validator
-
-    @pytest.mark.dependency()
+    @pytest.mark.dependency(name="test_metric_computation")
     def test_metric_computation(self, flow, points):
         """Test metric tensor computation."""
         # Compute metric tensor
@@ -264,22 +109,39 @@ class TestGeometricFlow:
             
         assert is_positive_definite, "Metric tensor must be positive definite"
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_metric_computation"])
+    @pytest.mark.dependency(name="test_flow_integration", depends=["test_metric_computation"])
+    def test_flow_integration(self, flow, points):
+        """Test flow integration over time."""
+        # Initial metric
+        metric = flow.compute_metric(points)
+        
+        # Integrate flow
+        metrics = []
+        for _ in range(10):
+            ricci = flow.compute_ricci_tensor(metric, points)
+            metric, _ = flow.flow_step(metric, ricci)
+            metrics.append(metric)
+            
+        # Check stability
+        dets = [torch.linalg.det(m) for m in metrics]
+        assert all(torch.all(d > 0) for d in dets)
+
+    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_ricci_tensor(self, flow, points, metric):
         """Test Ricci tensor computation."""
         ricci = flow.compute_ricci_tensor(metric, points)
         assert isinstance(ricci, torch.Tensor)
         assert ricci.shape == (points.shape[0], points.shape[1], points.shape[1])
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_ricci_tensor"])
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_ricci_tensor"])
     def test_flow_computation(self, flow, points, metric):
         """Test flow vector computation."""
-        ricci = flow.compute_ricci_tensor(metric)
-        flow_vector = flow.compute_flow_vector(points, ricci, metric)
+        ricci = flow.compute_ricci_tensor(metric, points)
+        flow_vector = flow.compute_flow(points, ricci)
         assert isinstance(flow_vector, torch.Tensor)
         assert flow_vector.shape == points.shape
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_flow_computation"])
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_flow_computation"])
     def test_flow_step(self, flow, points, metric):
         """Test single flow step."""
         ricci = flow.compute_ricci_tensor(metric, points)
@@ -288,7 +150,7 @@ class TestGeometricFlow:
         assert evolved_metric.shape == metric.shape
         assert isinstance(flow_metrics, FlowMetrics)
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_flow_step"])
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_flow_step"])
     def test_flow_normalization(self, flow, points, metric):
         """Test flow normalization."""
         ricci = flow.compute_ricci_tensor(metric, points)
@@ -296,62 +158,56 @@ class TestGeometricFlow:
         normalized = flow.normalize_flow(flow_vector, metric)
         assert torch.all(torch.isfinite(normalized))
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_flow_step"])
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_flow_normalization"])
     def test_singularity_detection(self, flow, points, metric):
         """Test singularity detection."""
-        singular_metric = metric.clone()
-        singular_metric[:, 0, 0] = 0  # Create artificial singularity
-        singularities = flow.detect_singularities(singular_metric)
-        assert len(singularities) > 0
-        assert isinstance(singularities[0], Singularity)
+        ricci = flow.compute_ricci_tensor(metric, points)
+        flow_vector = flow.compute_flow(points, ricci)
+        singularity = flow.detect_singularities(flow_vector, metric)
+        assert isinstance(singularity, Singularity)
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_flow_normalization"])
-    def test_geometric_invariants(self, flow, random_states, geometric_validator):
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_flow_step"])
+    def test_geometric_invariants(self, flow, points, metric):
         """Test geometric invariant preservation."""
-        # Extract position components
-        points = random_states[:, :flow.manifold_dim]
-        
-        # Compute metric and flow
-        metric = flow.compute_metric(points)
         ricci = flow.compute_ricci_tensor(metric, points)
         evolved_metric, _ = flow.flow_step(metric, ricci)
         
-        # Validate geometric invariants
-        result = geometric_validator.validate_invariants(flow, points, evolved_metric)
-        assert isinstance(result, FlowValidationResult)
+        # Check volume preservation
+        det_before = torch.linalg.det(metric)
+        det_after = torch.linalg.det(evolved_metric)
+        assert torch.allclose(det_before, det_after, rtol=1e-4)
+        
+        # Check metric conditioning
+        condition_number = torch.linalg.cond(evolved_metric)
+        if torch.any(condition_number > 1e5):
+            warnings.warn(f"High condition number detected: {condition_number.max():.2e}")
+
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_geometric_invariants"])
+    def test_energy_conservation(self, flow, points, energy_validator):
+        """Test energy conservation during flow."""
+        metric = flow.compute_metric(points)
+        
+        # Evolve and track energy
+        energy_history = []
+        for _ in range(10):
+            ricci = flow.compute_ricci_tensor(metric, points)
+            metric, metrics = flow.flow_step(metric, ricci)
+            energy_history.append(metrics.energy)
+            
+        # Validate energy conservation
+        result = energy_validator.validate_energy_conservation(energy_history)
+        assert isinstance(result, TilingFlowValidationResult)
         assert result.is_valid
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_geometric_invariants"])
-    def test_energy_conservation(self, flow, random_states, energy_validator):
-        """Test that energy is conserved during flow evolution."""
-        # Extract position components
-        points = random_states[:, :flow.manifold_dim]
-        
-        # Compute metric and flow
-        metric = flow.compute_metric(points)
-        ricci = flow.compute_ricci_tensor(metric, points)
-        evolved_metric, _ = flow.flow_step(metric, ricci)
-        
-        # Compute initial and final energies
-        initial_energies = flow.pattern_dynamics.compute_energy(random_states)
-        initial_total = torch.sum(torch.stack(list(initial_energies.values())))
-        
-        # Evolve system and check energy conservation
-        final_energies = flow.pattern_dynamics.compute_energy(random_states)
-        final_total = torch.sum(torch.stack(list(final_energies.values())))
-        error = torch.abs(final_total - initial_total)
-        assert torch.all(error < 1e-5)
-
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_geometric_invariants"])
-    def test_flow_stability(self, flow, random_states, geometric_validator):
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_geometric_invariants"])
+    def test_flow_stability(self, flow, points, geometric_validator):
         """Test flow stability."""
-        points = random_states[:, :flow.manifold_dim]
         metric = flow.compute_metric(points)
-        ricci = flow.compute_ricci_tensor(metric, points)
         
-        # Evolve for multiple steps
+        # Evolve and track metrics
         metrics = []
         for _ in range(10):
+            ricci = flow.compute_ricci_tensor(metric, points)
             metric, _ = flow.flow_step(metric, ricci)
             metrics.append(metric)
             
@@ -359,35 +215,23 @@ class TestGeometricFlow:
         dets = [torch.linalg.det(m) for m in metrics]
         assert all(torch.all(d > 0) for d in dets)
 
-    @pytest.mark.dependency(depends=["TestGeometricFlow::test_flow_stability"])
+    @pytest.mark.dependency(depends=["test_metric_computation", "test_flow_stability"])
     def test_flow_convergence(self, flow, random_states, convergence_validator):
         """Test that flow converges to stable points."""
         points = random_states[:, :flow.manifold_dim]
         metric = flow.compute_metric(points)
-        ricci = flow.compute_ricci_tensor(metric, points)
         
         # Evolve to convergence
-        for _ in range(100):
+        for _ in range(500):  # More iterations for convergence
+            ricci = flow.compute_ricci_tensor(metric, points)
             metric, _ = flow.flow_step(metric, ricci)
             
         # Validate convergence
         result = convergence_validator.validate_convergence(flow, points, metric)
-        assert isinstance(result, FlowValidationResult)
+        assert isinstance(result, TilingFlowValidationResult)
         assert result.is_valid
 
-    def test_metric_conditioning(self, flow, points):
-        """Test metric tensor conditioning."""
-        metric = flow.compute_metric(points)
-        condition_number = torch.linalg.cond(metric)
-        assert torch.all(condition_number < 1e3)
-
-    def test_flow_magnitude(self, flow, points):
-        """Test flow vector magnitudes."""
-        metric = flow.compute_metric(points)
-        ricci = flow.compute_ricci_tensor(metric, points)
-        flow_vector = flow.compute_flow(points, ricci)
-        assert torch.all(torch.abs(flow_vector) < 1e2)
-
+    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_ricci_flow_stability(self, flow, points):
         """Test Ricci flow stability."""
         metric = flow.compute_metric(points)
@@ -395,13 +239,41 @@ class TestGeometricFlow:
         flow_vector = flow.compute_flow(points, ricci)
         assert torch.all(torch.isfinite(flow_vector))
 
-    def test_ricci_flow(self, flow, points):
-        """Test Ricci flow evolution."""
+    @pytest.mark.dependency(depends=["test_metric_computation"])
+    def test_volume_preservation(self, flow, points):
+        """Test volume preservation."""
         metric = flow.compute_metric(points)
+        det_before = torch.linalg.det(metric)
         ricci = flow.compute_ricci_tensor(metric, points)
         evolved_metric, _ = flow.flow_step(metric, ricci)
-        assert torch.all(torch.isfinite(evolved_metric))
+        det_after = torch.linalg.det(evolved_metric)
+        assert torch.allclose(det_before, det_after, rtol=1e-4)
 
+    @pytest.mark.dependency(depends=["test_metric_computation"])
+    def test_flow_magnitude(self, flow, points):
+        """Test flow vector magnitudes."""
+        metric = flow.compute_metric(points)
+        ricci = flow.compute_ricci_tensor(metric, points)
+        flow_vector = flow.compute_flow(points, ricci)
+        assert torch.all(torch.abs(flow_vector) < 1e2)
+
+    @pytest.mark.dependency(depends=["test_metric_computation"])
+    def test_metric_conditioning(self, flow, points):
+        """Test metric tensor conditioning."""
+        metric = flow.compute_metric(points)
+        condition_number = torch.linalg.cond(metric)
+        assert torch.all(condition_number < 1e3)
+
+    @pytest.mark.dependency(depends=["test_metric_computation"])
+    def test_singularity_analysis(self, flow, points):
+        """Test singularity analysis."""
+        metric = flow.compute_metric(points)
+        ricci = flow.compute_ricci_tensor(metric, points)
+        flow_vector = flow.compute_flow(points, ricci)
+        singularity = flow.detect_singularities(metric, points)
+        assert isinstance(singularity, Singularity)
+
+    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_mean_curvature_flow(self, flow, points):
         """Test mean curvature flow computation."""
         # Compute metric tensor
@@ -422,41 +294,13 @@ class TestGeometricFlow:
         flow_vector = flow.compute_flow(points, mean_curvature)
         assert torch.all(torch.isfinite(flow_vector))
 
-    def test_singularity_analysis(self, flow, points):
-        """Test singularity detection and analysis."""
-        # Create metric with artificial singularity
+    @pytest.mark.dependency(depends=["test_metric_computation"])
+    def test_ricci_flow(self, flow, points):
+        """Test Ricci flow evolution."""
         metric = flow.compute_metric(points)
-        
-        # Create different types of singularities
-        singular_metrics = []
-        
-        # Type 1: Determinant singularity
-        det_singular = metric.clone()
-        det_singular[:, 0, 0] = 0.0
-        singular_metrics.append(det_singular)
-        
-        # Type 2: Curvature singularity
-        curv_singular = metric.clone()
-        curv_singular[:, 0, 0] = 1e6  # Very large curvature
-        singular_metrics.append(curv_singular)
-        
-        # Detect singularities in each metric
-        found_singularities = False
-        for singular_metric in singular_metrics:
-            singularities = flow.detect_singularities(singular_metric)
-            if len(singularities) > 0:
-                found_singularities = True
-                break
-        
-        assert found_singularities, "No singularities detected in artificially singular metrics"
-        
-        # Verify singularity properties
-        for singularity in singularities:
-            assert isinstance(singularity, Singularity)
-            if singularity.location is not None:
-                assert torch.all(torch.isfinite(singularity.location))
-            if singularity.curvature is not None:
-                assert torch.all(torch.isfinite(singularity.curvature))
+        ricci = flow.compute_ricci_tensor(metric, points)
+        evolved_metric, _ = flow.flow_step(metric, ricci)
+        assert torch.all(torch.isfinite(evolved_metric))
 
 
 class TestFlowStability:

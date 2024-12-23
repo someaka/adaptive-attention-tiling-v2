@@ -145,14 +145,14 @@ class NeuralQuantumBridge(nn.Module):
         )
 
     def neural_to_quantum(
-        self, 
+        self,
         x: torch.Tensor,
         return_validation: bool = False
     ) -> Union[QuantumState, Tuple[QuantumState, QuantumStateValidationResult]]:
         """Convert neural state to quantum state.
         
         Args:
-            x: Neural state tensor of shape (batch_size, hidden_dim)
+            x: Neural state tensor of shape (batch_size, hidden_dim) or (batch_size, manifold_dim)
             return_validation: Whether to return validation result
             
         Returns:
@@ -162,6 +162,14 @@ class NeuralQuantumBridge(nn.Module):
         # Ensure state manager is on correct device
         if self.state_manager.device != x.device:
             self.state_manager.device = x.device
+
+        # Reshape input if needed
+        if x.shape[-1] != self.hidden_dim:
+            # Pad or project to hidden_dim
+            batch_size = x.shape[0]
+            x_padded = torch.zeros(batch_size, self.hidden_dim, device=x.device)
+            x_padded[..., :x.shape[-1]] = x.view(batch_size, -1)
+            x = x_padded
 
         # Normalize input
         x_norm = self.layer_norm(x)

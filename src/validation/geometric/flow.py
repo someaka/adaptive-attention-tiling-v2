@@ -521,3 +521,52 @@ class TilingFlowValidator:
                 message=f"Error validating geometric flow: {str(e)}",
                 data={"error": str(e)}
             )
+
+    def validate_convergence(
+        self, flow: GeometricFlow, points: torch.Tensor, metric: torch.Tensor
+    ) -> TilingFlowValidationResult:
+        """Validate convergence of the geometric flow.
+        
+        Args:
+            flow: Geometric flow to validate
+            points: Points to validate at
+            metric: Current metric tensor
+            
+        Returns:
+            Validation result for flow convergence
+        """
+        try:
+            # Compute Ricci tensor and flow magnitude
+            ricci = flow.compute_ricci_tensor(metric, points)
+            flow_vector = flow.compute_flow(points, ricci)
+            flow_magnitude = torch.linalg.vector_norm(flow_vector, dim=-1)
+            
+            # Check if flow has converged
+            max_flow = float(flow_magnitude.max())
+            mean_flow = float(flow_magnitude.mean())
+            is_converged = max_flow < self.stability_threshold
+            
+            validation_data = {
+                'max_flow': max_flow,
+                'mean_flow': mean_flow,
+                'threshold': self.stability_threshold,
+                'flow_magnitude': flow_magnitude
+            }
+            
+            message = (
+                f"Flow convergence validation {'passed' if is_converged else 'failed'}: "
+                f"max_flow={max_flow:.2e}, mean_flow={mean_flow:.2e}"
+            )
+            
+            return TilingFlowValidationResult(
+                is_valid=is_converged,
+                message=message,
+                data=validation_data
+            )
+            
+        except Exception as e:
+            return TilingFlowValidationResult(
+                is_valid=False,
+                message=f"Error validating flow convergence: {str(e)}",
+                data={"error": str(e)}
+            )
