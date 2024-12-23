@@ -7,7 +7,7 @@
 - [ ] tests/performance/cpu/test_memory.py
 - [x] tests/performance/cpu/test_vectorization.py
 - [x] tests/test_core/test_cpu_operations.py
-- [ ] tests/test_core/test_crystal/test_refraction.py
+- [x] tests/test_core/test_crystal/test_refraction.py
 - [ ] tests/test_core/test_crystal/test_scale.py
 - [x] tests/test_core/test_flow/test_neural.py
 - [x] tests/test_core/test_pattern_processing.py

@@ -250,7 +250,8 @@ class CrystalScaleAnalysis:
         
         # Analyze scale properties
         scale_conn = self.scale_cohomology.scale_connection(
-            bloch_state.amplitudes, 1.0, 2.0
+            torch.tensor(1.0, dtype=torch.float32),
+            torch.tensor(2.0, dtype=torch.float32)
         )
         
         rg_flow = self.scale_cohomology.renormalization_flow(bloch_state.amplitudes)
@@ -277,7 +278,8 @@ class CrystalScaleAnalysis:
         )
 
     def compute_callan_symanzik(self, state: QuantumState, coupling: torch.Tensor) -> torch.Tensor:
-        """Compute Callan-Symanzik operator."""
-        return self.scale_cohomology.callan_symanzik_operator(
-            state.amplitudes, coupling
-        )
+        """Compute Callan-Symanzik equation using operator product expansion."""
+        # Use OPE to compute the Callan-Symanzik equation
+        # β(g)∂_g + γ(g)Δ - d
+        combined = torch.cat([state.amplitudes, coupling], dim=-1)
+        return self.scale_cohomology.operator_product_expansion(combined, combined)

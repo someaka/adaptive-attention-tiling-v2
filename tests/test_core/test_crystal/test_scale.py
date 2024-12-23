@@ -44,7 +44,7 @@ class TestScaleCohomology:
         connection = scale_system.scale_connection(scale1, scale2)
 
         # Test connection properties
-        assert connection.shape == (
+        assert connection.connection_map.shape == (
             space_dim,
             space_dim,
         ), "Connection should be matrix-valued"
@@ -55,7 +55,22 @@ class TestScaleCohomology:
             c12 = scale_system.scale_connection(s1, s2)
             c23 = scale_system.scale_connection(s2, s3)
             c13 = scale_system.scale_connection(s1, s3)
-            return torch.allclose(c13, c23 @ c12, rtol=1e-4)
+            
+            # Debug prints
+            print("\nConnection c12:")
+            print(c12.connection_map)
+            print("\nConnection c23:")
+            print(c23.connection_map)
+            print("\nConnection c13:")
+            print(c13.connection_map)
+            print("\nComposed c23 @ c12:")
+            print(c23.connection_map @ c12.connection_map)
+            
+            return torch.allclose(
+                c13.connection_map,
+                c23.connection_map @ c12.connection_map,
+                rtol=1e-4
+            )
 
         scale3 = torch.tensor(4.0)
         assert test_compatibility(
@@ -68,7 +83,17 @@ class TestScaleCohomology:
             connection = scale_system.scale_connection(scale, scale + epsilon)
             generator = scale_system.connection_generator(scale)
             expected = torch.eye(space_dim) + epsilon * generator
-            return torch.allclose(connection, expected, rtol=1e-3)
+            
+            # Debug prints
+            print("\nInfinitesimal test:")
+            print("Connection map:")
+            print(connection.connection_map)
+            print("\nGenerator:")
+            print(generator)
+            print("\nExpected (I + eps*generator):")
+            print(expected)
+            
+            return torch.allclose(connection.connection_map, expected, rtol=1e-3)
 
         assert test_infinitesimal(
             scale1, 1e-3
