@@ -441,28 +441,36 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Make metric symmetric
         metric = 0.5 * (metric + metric.transpose(-2, -1))
         
-        # Add regularization term to ensure non-degeneracy
+        # Add initial regularization term
         eye = torch.eye(
             self.manifold_dim,
             device=points.device,
             dtype=points.dtype
         ).unsqueeze(0).expand(batch_size, -1, -1)
-        metric = metric + 1e-3 * eye  # Add small positive diagonal term
+        metric = metric + 1e-3 * eye
         
-        # Project onto positive definite cone with increased minimum eigenvalue
+        # Project onto positive definite cone with strong minimum eigenvalue
         eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-        eigenvalues = torch.clamp(eigenvalues, min=1e-3)  # Increased minimum eigenvalue
+        eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
         metric = torch.matmul(
             torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
             eigenvectors.transpose(-2, -1)
         )
         
+        # Add final regularization to ensure stability
+        metric = metric + 1e-3 * eye
+        
         # Normalize by determinant to ensure unit volume
         det = torch.linalg.det(metric).unsqueeze(-1).unsqueeze(-1)
         metric = metric / (det + 1e-8).pow(1/self.manifold_dim)
         
-        # Add final regularization to ensure stability
-        metric = metric + 1e-6 * eye
+        # Final projection to ensure minimum eigenvalue after normalization
+        eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+        eigenvalues = torch.clamp(eigenvalues, min=1e-6)  # Ensure minimum eigenvalue after normalization
+        metric = torch.matmul(
+            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+            eigenvectors.transpose(-2, -1)
+        )
         
         return self._to_tensor_type(metric, MetricTensor)
 
@@ -512,6 +520,9 @@ class NeuralGeometricFlow(PatternFormationFlow):
             scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
             new_metric = new_metric * scale
             
+            # Ensure final metric is symmetric
+            new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+            
             # Project onto positive definite cone with increased minimum eigenvalue
             try:
                 eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
@@ -538,6 +549,9 @@ class NeuralGeometricFlow(PatternFormationFlow):
                 scale = torch.clamp(scale, min=0.1, max=10.0)
                 scale = scale.view(-1, 1, 1)
                 new_metric = new_metric * scale
+                
+                # Ensure final metric is symmetric
+                new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
         
         # Initialize quantum metrics efficiently
         device = metric.device
