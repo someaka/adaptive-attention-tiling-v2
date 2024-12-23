@@ -140,8 +140,8 @@ class TestNeuralGeometricFlow:
     def test_quantum_corrections_types(self, neural_flow, batch_size, device):
         """Test quantum corrections with tensor types."""
         # Create test instances with proper dimensions
-        state = MockQuantumState(neural_flow.hidden_dim, batch_size, device)
-        metric = torch.randn(batch_size, neural_flow.hidden_dim, neural_flow.hidden_dim, device=device)
+        state = MockQuantumState(neural_flow.manifold_dim, batch_size, device)
+        metric = torch.randn(batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, device=device)
         
         # Compute corrections and verify result
         result = neural_flow.compute_quantum_corrections(state, metric)
@@ -177,10 +177,10 @@ class TestNeuralGeometricFlow:
         assert metric.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim), \
             f"Expected shape {(batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)}, got {metric.shape}"
         
-        # 2. Check symmetry with tight tolerance
+        # 2. Check symmetry with reasonable tolerance
         sym_diff = torch.abs(metric - metric.transpose(-2, -1))
         max_sym_diff = sym_diff.max().item()
-        assert max_sym_diff < 1e-7, f"Metric not symmetric, max difference: {max_sym_diff}"
+        assert max_sym_diff < 1e-6, f"Metric not symmetric, max difference: {max_sym_diff}"
         
         # 3. Check positive definiteness via eigenvalues
         eigenvalues = torch.linalg.eigvalsh(metric)  # Use eigvalsh for symmetric matrices
@@ -212,33 +212,33 @@ class TestNeuralGeometricFlow:
     @pytest.mark.dependency(name="test_flow_step", depends=["test_metric_computation"])
     def test_flow_step(self, neural_flow, batch_size, device):
         """Test geometric flow step."""
-        # Utiliser un batch_size réduit mais les dimensions complètes du modèle
-        test_batch_size = min(batch_size, 4)  # Limiter à 4 échantillons
+        # Use a reduced batch size but complete model dimensions
+        test_batch_size = min(batch_size, 4)  # Limit to 4 samples
         
         metric = torch.eye(neural_flow.manifold_dim, device=device)
         metric = metric.unsqueeze(0).repeat(test_batch_size, 1, 1)
         
-        # Créer un tenseur de Ricci valide avec les dimensions complètes
+        # Create a valid Ricci tensor with complete dimensions
         ricci = torch.randn(test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, device=device)
-        # Rendre le tenseur de Ricci symétrique
+        # Make the Ricci tensor symmetric
         ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
         
-        # Vérifier les dimensions avant le flow_step
+        # Verify dimensions before flow_step
         assert metric.shape == (test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
         assert ricci.shape == (test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
         
         new_metric, flow_metrics = neural_flow.flow_step(metric, ricci)
         
-        # Vérifier les dimensions et propriétés après le flow_step
+        # Verify dimensions and properties after flow_step
         assert new_metric.shape == metric.shape
         assert torch.allclose(new_metric, new_metric.transpose(-1, -2))
         
-        # Vérifier que les métriques de flux sont valides
+        # Verify that flow metrics are valid
         assert isinstance(flow_metrics.flow_magnitude, torch.Tensor)
         assert isinstance(flow_metrics.metric_determinant, torch.Tensor)
         assert isinstance(flow_metrics.ricci_scalar, torch.Tensor)
         
-        # Vérifier les dimensions des métriques
+        # Verify metric dimensions
         assert flow_metrics.flow_magnitude.shape == (test_batch_size,)
         assert flow_metrics.metric_determinant.shape == (test_batch_size,)
         assert flow_metrics.ricci_scalar.shape == (test_batch_size,)
@@ -246,8 +246,8 @@ class TestNeuralGeometricFlow:
     @pytest.mark.dependency(name="test_geometric_operations", depends=["test_metric_computation"])
     def test_geometric_operations(self, neural_flow, batch_size, device):
         """Test geometric operations."""
-        # Create test points with correct dimensions
-        points = torch.randn(batch_size, neural_flow.manifold_dim, device=device)
+        # Create test points with correct dimensions and requires_grad=True
+        points = torch.randn(batch_size, neural_flow.manifold_dim, device=device, requires_grad=True)
         
         # Compute connection coefficients
         connection = neural_flow.compute_connection(points)

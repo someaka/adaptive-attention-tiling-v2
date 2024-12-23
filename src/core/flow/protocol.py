@@ -16,22 +16,22 @@ T = TypeVar('T')  # Generic type for tensor-like objects
 class FlowMetrics:
     """Metrics computed during flow evolution."""
     
-    flow_magnitude: float
+    flow_magnitude: Union[float, Tensor]
     """Magnitude of the flow vector field."""
     
-    metric_determinant: float
+    metric_determinant: Union[float, Tensor]
     """Determinant of the metric tensor."""
     
-    ricci_scalar: float
+    ricci_scalar: Union[float, Tensor]
     """Scalar curvature."""
     
-    energy: float
+    energy: Union[float, Tensor]
     """Total energy of the system."""
     
-    singularity: float
+    singularity: Union[float, Tensor]
     """Measure of singularity formation."""
     
-    normalized_flow: float
+    normalized_flow: Union[float, Tensor]
     """Normalized flow magnitude."""
 
 @dataclass
@@ -52,37 +52,65 @@ class QuantumFlowMetrics(FlowMetrics):
     
     def __init__(
         self,
-        flow_magnitude: float,
-        metric_determinant: float,
-        ricci_scalar: float,
-        energy: float,
-        singularity: float,
-        normalized_flow: float,
+        flow_magnitude: Union[float, Tensor],
+        metric_determinant: Union[float, Tensor],
+        ricci_scalar: Union[float, Tensor],
+        energy: Union[float, Tensor],
+        singularity: Union[float, Tensor],
+        normalized_flow: Union[float, Tensor],
         quantum_entropy: Union[float, Tensor, None],
         berry_phase: Optional[Union[float, Tensor]] = None,
         mean_curvature: Optional[Union[float, Tensor]] = None,
         quantum_corrections: Optional[Union[float, Tensor]] = None,
         device: Optional[torch.device] = None
     ):
-        super().__init__(
-            flow_magnitude=flow_magnitude,
-            metric_determinant=metric_determinant,
-            ricci_scalar=ricci_scalar,
-            energy=energy,
-            singularity=singularity,
-            normalized_flow=normalized_flow
-        )
-        
-        # Convert quantum metrics to tensors if they're not None
+        # Get device from input tensors or default to CPU
         device = device or (
-            quantum_entropy.device if isinstance(quantum_entropy, Tensor)
+            flow_magnitude.device if isinstance(flow_magnitude, Tensor)
+            else metric_determinant.device if isinstance(metric_determinant, Tensor)
+            else ricci_scalar.device if isinstance(ricci_scalar, Tensor)
+            else energy.device if isinstance(energy, Tensor)
+            else singularity.device if isinstance(singularity, Tensor)
+            else normalized_flow.device if isinstance(normalized_flow, Tensor)
+            else quantum_entropy.device if isinstance(quantum_entropy, Tensor)
             else berry_phase.device if isinstance(berry_phase, Tensor)
             else mean_curvature.device if isinstance(mean_curvature, Tensor)
             else quantum_corrections.device if isinstance(quantum_corrections, Tensor)
             else torch.device('cpu')
         )
         
-        # Convert quantum_entropy to tensor
+        # Convert base metrics to tensors
+        self.flow_magnitude = (
+            flow_magnitude if isinstance(flow_magnitude, Tensor)
+            else torch.tensor(float(flow_magnitude), device=device)
+        )
+        
+        self.metric_determinant = (
+            metric_determinant if isinstance(metric_determinant, Tensor)
+            else torch.tensor(float(metric_determinant), device=device)
+        )
+        
+        self.ricci_scalar = (
+            ricci_scalar if isinstance(ricci_scalar, Tensor)
+            else torch.tensor(float(ricci_scalar), device=device)
+        )
+        
+        self.energy = (
+            energy if isinstance(energy, Tensor)
+            else torch.tensor(float(energy), device=device)
+        )
+        
+        self.singularity = (
+            singularity if isinstance(singularity, Tensor)
+            else torch.tensor(float(singularity), device=device)
+        )
+        
+        self.normalized_flow = (
+            normalized_flow if isinstance(normalized_flow, Tensor)
+            else torch.tensor(float(normalized_flow), device=device)
+        )
+        
+        # Convert quantum metrics to tensors
         self.quantum_entropy = (
             quantum_entropy if isinstance(quantum_entropy, Tensor)
             else torch.tensor(float(quantum_entropy), device=device) if quantum_entropy is not None
