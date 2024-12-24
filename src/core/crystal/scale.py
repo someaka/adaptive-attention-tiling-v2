@@ -826,28 +826,78 @@ class ScaleCohomology:
             _dt=0.01  # Base time step for evolution
         )
 
-    def fixed_points(self, observable: torch.Tensor) -> List[torch.Tensor]:
-        """Find fixed points using cohomological methods and improved convergence."""
-        if callable(observable):
-            # If observable is a function, create a tensor from its evaluation
-            x = torch.zeros(self.dim, dtype=self.dtype)
-            observable_tensor = observable(x).unsqueeze(0)
-        else:
-            observable_tensor = observable
-
-        points = observable_tensor + 0.1 * torch.randn(10, self.dim, dtype=self.dtype)
-        fixed_points, _ = self.rg_flow.find_fixed_points(points)
-        return fixed_points
+    def fixed_points(self, beta_function: Union[Callable[[torch.Tensor], torch.Tensor], torch.Tensor]) -> List[torch.Tensor]:
+        """Find fixed points of the beta function.
+        
+        Uses gradient descent to find points where beta(x) = 0.
+        
+        Args:
+            beta_function: Either a callable beta function or a tensor to find fixed points for
+            
+        Returns:
+            List of fixed points found
+        """
+        if not callable(beta_function):
+            # If beta_function is a tensor, create a simple beta function for it
+            tensor = beta_function
+            beta_function = lambda x: x - tensor
+        
+        # Try several initial points
+        initial_points = [
+            torch.zeros(4),  # Origin
+            torch.ones(4),   # Unit point
+            torch.randn(4),  # Random point
+            -torch.ones(4),  # Negative unit point
+        ]
+        
+        fixed_points = []
+        for x0 in initial_points:
+            x = x0.clone().requires_grad_(True)
+            optimizer = torch.optim.Adam([x], lr=0.1)
+            
+            # Minimize |beta(x)|^2
+            for _ in range(1000):
+                optimizer.zero_grad()
+                beta = beta_function(x)
+                loss = torch.sum(beta**2)
+                loss.backward()
+                optimizer.step()
+                
+                if loss.item() < 1e-6:
+                    # Found a fixed point
+                    fixed_points.append(x.detach().clone())
+                    break
+        
+        # Remove duplicates (points within small distance of each other)
+        unique_points = []
+        for fp in fixed_points:
+            is_unique = True
+            for up in unique_points:
+                if torch.norm(fp - up) < 1e-4:
+                    is_unique = False
+                    break
+            if is_unique:
+                unique_points.append(fp)
+        
+        return unique_points
 
     def fixed_point_stability(self, fixed_point: torch.Tensor, beta_function: Callable[[torch.Tensor], torch.Tensor]) -> str:
         """Analyze stability of a fixed point."""
         # Compute Jacobian at fixed point
         x = fixed_point.requires_grad_(True)
         beta = beta_function(x)
-        grad = torch.autograd.grad(beta.sum(), x)[0]
-        eigenvalues = torch.linalg.eigvals(grad)
         
-        # Classify stability based on eigenvalue signs
+        # Compute full Jacobian matrix
+        dim = x.shape[0]
+        jacobian = torch.zeros((dim, dim), dtype=x.dtype)
+        for i in range(dim):
+            grad = torch.autograd.grad(beta[i], x, retain_graph=True)[0]
+            jacobian[i] = grad
+        
+        # Compute eigenvalues of Jacobian
+        eigenvalues = torch.linalg.eigvals(jacobian)
+        
+        # Analyze stability based on eigenvalue real parts
         if torch.all(eigenvalues.real < 0):
             return "stable"
         elif torch.all(eigenvalues.real > 0):
@@ -860,11 +910,19 @@ class ScaleCohomology:
         # Compute Jacobian at fixed point
         x = fixed_point.requires_grad_(True)
         beta = beta_function(x)
-        grad = torch.autograd.grad(beta.sum(), x)[0]
-        eigenvalues = torch.linalg.eigvals(grad)
+        
+        # Compute full Jacobian matrix
+        dim = x.shape[0]
+        jacobian = torch.zeros((dim, dim), dtype=x.dtype)
+        for i in range(dim):
+            grad = torch.autograd.grad(beta[i], x, retain_graph=True)[0]
+            jacobian[i] = grad
+        
+        # Compute eigenvalues of Jacobian
+        eigenvalues = torch.linalg.eigvals(jacobian)
         
         # Critical exponents are related to eigenvalues
-        return [-ev.real.item() for ev in eigenvalues]
+        return [float(ev.real) for ev in eigenvalues]
 
     def anomaly_polynomial(self, state: torch.Tensor) -> List[AnomalyPolynomial]:
         """Compute anomaly polynomials using differential forms and cohomology."""
@@ -968,19 +1026,19 @@ class ScaleCohomology:
             return "cubic"
         return f"degree_{degree}"
 
-    def callan_symanzik_operator(self, beta: Callable[[torch.Tensor], torch.Tensor], 
-                              gamma: Callable[[torch.Tensor], torch.Tensor]) -> Callable:
+    def callan_symanzik_operator(
+        self, 
+        beta: Callable[[torch.Tensor], torch.Tensor],
+        gamma: Callable[[torch.Tensor], torch.Tensor]
+    ) -> Callable:
         """Compute Callan-Symanzik operator β(g)∂_g + γ(g)Δ - d.
         
-        The Callan-Symanzik operator describes how correlation functions
-        change under scale transformations.
-        
         Args:
-            beta: Beta function β(g) describing coupling evolution
+            beta: Beta function β(g)
             gamma: Anomalous dimension γ(g)
             
         Returns:
-            Callable that applies the CS operator to correlation functions
+            Callan-Symanzik operator as a callable
         """
         def cs_operator(correlation: Callable, x1: torch.Tensor, x2: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
             # Compute β(g)∂_g term
