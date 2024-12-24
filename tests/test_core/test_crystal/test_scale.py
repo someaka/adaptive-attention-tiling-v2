@@ -113,15 +113,93 @@ class TestScaleCohomology:
         scales = flow.scale_points()
         assert len(scales) > 0, "Flow should have scale points"
 
+        # Test basic evolution
+        def test_basic_evolution(t):
+            """Test basic evolution for time t."""
+            flow_t = flow.evolve(t)
+            assert flow_t.observable is not None, "Evolution should preserve observable"
+            assert not torch.isnan(flow_t.observable).any(), "Evolution produced NaN values"
+            return flow_t
+
+        # Test composition of small steps
+        def test_step_composition(dt, n_steps):
+            """Test if evolution by dt n times equals evolution by dt*n."""
+            flow_small = flow
+            print("\nTesting step composition:")
+            print(f"Initial observable: {flow_small.observable}")
+            
+            # Evolve in small steps
+            for i in range(n_steps):
+                flow_small = flow_small.evolve(dt)
+                print(f"After step {i+1}: {flow_small.observable}")
+                if torch.isnan(flow_small.observable).any():
+                    print(f"NaN detected at step {i+1}")
+                    return False
+            
+            # Evolve in one large step
+            flow_large = flow.evolve(dt * n_steps)
+            print(f"Large step result: {flow_large.observable}")
+            
+            # Compare results
+            are_close = torch.allclose(
+                flow_small.observable, flow_large.observable, rtol=1e-4
+            )
+            if not are_close:
+                print("Step composition test failed:")
+                print(f"Small steps result: {flow_small.observable}")
+                print(f"Large step result: {flow_large.observable}")
+                print(f"Difference: {torch.abs(flow_small.observable - flow_large.observable).max().item()}")
+            return are_close
+
+        # Test metric consistency
+        def test_metric_consistency(t):
+            """Test if metric evolution is consistent."""
+            flow_t = flow.evolve(t)
+            if flow_t._metric is not None:
+                eigenvals = torch.linalg.eigvals(flow_t._metric).real
+                return torch.all(eigenvals > 0)
+            return True
+
+        # Test beta function consistency
+        def test_beta_consistency(t):
+            """Test if beta function evolution is consistent."""
+            flow_t = flow.evolve(t)
+            obs = flow_t.observable
+            beta = flow_t.beta_function(obs)
+            return not torch.isnan(beta).any()
+
+        # Run diagnostic tests
+        assert test_basic_evolution(0.1), "Basic evolution failed"
+        assert test_step_composition(0.1, 5), "Step composition failed"
+        assert test_metric_consistency(0.5), "Metric consistency failed"
+        assert test_beta_consistency(0.5), "Beta function consistency failed"
+
         # Test semigroup property
         def test_semigroup(t1, t2):
             """Test semigroup property of RG flow."""
             flow_t1 = flow.evolve(t1)
             flow_t2 = flow.evolve(t2)
             flow_sum = flow.evolve(t1 + t2)
-            return torch.allclose(
-                flow_sum.observable, flow_t2.apply(flow_t1.observable), rtol=1e-4
+
+            # Test intermediate results
+            assert not torch.isnan(flow_t1.observable).any(), "t1 evolution produced NaN"
+            assert not torch.isnan(flow_t2.observable).any(), "t2 evolution produced NaN"
+            assert not torch.isnan(flow_sum.observable).any(), "Combined evolution produced NaN"
+
+            # Test application
+            applied = flow_t2.apply(flow_t1.observable)
+            assert not torch.isnan(applied).any(), "Application produced NaN"
+
+            # Compare results
+            are_close = torch.allclose(
+                flow_sum.observable, applied, rtol=1e-4
             )
+            if not are_close:
+                print(f"Semigroup test failed:")
+                print(f"flow_sum.observable: {flow_sum.observable}")
+                print(f"flow_t2.apply(flow_t1.observable): {applied}")
+                print(f"Difference: {torch.abs(flow_sum.observable - applied).max().item()}")
+            return are_close
 
         assert test_semigroup(0.5, 0.5), "Flow should satisfy semigroup property"
 
@@ -464,3 +542,118 @@ class TestScaleCohomology:
                 dimension=space_dim
             )
             assert len(log_terms) > 0, "Critical state should have log corrections"
+
+    def test_beta_function_consistency(self, scale_system):
+        """Test if beta function is consistent under composition."""
+        # Create test observable
+        def test_observable(x: torch.Tensor) -> torch.Tensor:
+            return torch.sum(x**2)
+        
+        # Compute RG flow
+        flow = scale_system.renormalization_flow(test_observable)
+        
+        # Test beta function at different points
+        x = torch.ones(4) * 2.0
+        beta1 = flow.beta_function(x)
+        
+        # Evolve x and compute beta
+        x_evolved = x + 0.1 * beta1
+        beta2 = flow.beta_function(x_evolved)
+        
+        # The beta function should change smoothly
+        diff = torch.norm(beta2 - beta1)
+        print(f"\nBeta function test:")
+        print(f"Initial beta: {beta1}")
+        print(f"Evolved beta: {beta2}")
+        print(f"Difference: {diff}")
+        assert diff < 1.0, "Beta function changed too abruptly"
+
+    def test_metric_evolution(self, scale_system):
+        """Test if metric evolution is consistent."""
+        # Create test observable
+        def test_observable(x: torch.Tensor) -> torch.Tensor:
+            return torch.sum(x**2)
+        
+        # Compute RG flow
+        flow = scale_system.renormalization_flow(test_observable)
+        
+        # Get initial metric
+        x = torch.ones(4) * 2.0
+        metric1 = flow._compute_metric(x)
+        
+        # Evolve and get new metric
+        beta = flow.beta_function(x)
+        x_evolved = x + 0.1 * beta
+        metric2 = flow._compute_metric(x_evolved)
+        
+        # Check metric properties
+        print(f"\nMetric evolution test:")
+        print(f"Initial metric eigenvalues: {torch.linalg.eigvals(metric1).real}")
+        print(f"Evolved metric eigenvalues: {torch.linalg.eigvals(metric2).real}")
+        
+        # Metrics should be positive definite
+        assert torch.all(torch.linalg.eigvals(metric1).real > 0), "Initial metric not positive definite"
+        assert torch.all(torch.linalg.eigvals(metric2).real > 0), "Evolved metric not positive definite"
+        
+        # Metric should change smoothly
+        diff = torch.norm(metric2 - metric1)
+        print(f"Metric difference: {diff}")
+        assert diff < 1.0, "Metric changed too abruptly"
+
+    def test_scale_factor_composition(self, scale_system):
+        """Test if scale factors compose properly."""
+        # Create test observable
+        def test_observable(x: torch.Tensor) -> torch.Tensor:
+            return torch.sum(x**2)
+        
+        # Compute RG flow
+        flow = scale_system.renormalization_flow(test_observable)
+        
+        # Test scale factor composition
+        x = torch.ones(4) * 2.0
+        
+        # Evolve in two small steps
+        x_evolved, scale1 = flow._integrate_beta(x, 0.1)
+        x_evolved2, scale2 = flow._integrate_beta(x_evolved, 0.1)
+        combined_small = scale1 * scale2
+        
+        # Evolve in one large step
+        _, scale_large = flow._integrate_beta(x, 0.2)
+        
+        # Compare results
+        print(f"\nScale factor composition test:")
+        print(f"Small step 1: {scale1}")
+        print(f"Small step 2: {scale2}")
+        print(f"Combined small steps: {combined_small}")
+        print(f"Large step: {scale_large}")
+        print(f"Difference: {abs(combined_small - scale_large)}")
+        assert abs(combined_small - scale_large) < 0.1, "Scale factors don't compose properly"
+
+    def test_state_evolution_linearity(self, scale_system):
+        """Test if state evolution respects linearity."""
+        # Create test observable
+        def test_observable(x: torch.Tensor) -> torch.Tensor:
+            return torch.sum(x**2)
+        
+        # Compute RG flow
+        flow = scale_system.renormalization_flow(test_observable)
+        
+        # Test two different states
+        x1 = torch.ones(4) * 2.0
+        x2 = torch.ones(4) * 3.0
+        
+        # Evolve states separately
+        evolved_x1, _ = flow._integrate_beta(x1, 0.1)
+        evolved_x2, _ = flow._integrate_beta(x2, 0.1)
+        
+        # Evolve their sum
+        sum_evolved, _ = flow._integrate_beta(x1 + x2, 0.1)
+        
+        # Compare results
+        print(f"\nLinearity test:")
+        print(f"Evolved x1: {evolved_x1}")
+        print(f"Evolved x2: {evolved_x2}")
+        print(f"Sum of evolved: {evolved_x1 + evolved_x2}")
+        print(f"Evolved sum: {sum_evolved}")
+        print(f"Difference: {torch.norm(evolved_x1 + evolved_x2 - sum_evolved)}")
+        assert torch.allclose(evolved_x1 + evolved_x2, sum_evolved, rtol=1e-4), "Evolution doesn't respect linearity"
