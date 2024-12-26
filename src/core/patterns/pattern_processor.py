@@ -274,7 +274,7 @@ class PatternProcessor(nn.Module):
                 quantum_state = quantum_result
             
             # Evolve quantum state
-            evolved_state = self.quantum_bridge.evolve_quantum_state(quantum_state)
+            evolved_state = self.quantum_bridge.evolve_quantum_state(quantum_state, time=1.0)
             
             # Get quantum corrections
             quantum_corrections = self.quantum_bridge.quantum_to_neural(evolved_state)

@@ -361,16 +361,17 @@ class RenormalizationFlow:
         hidden_dim = max(coupling_dim * 2, 1)  # Ensure hidden dimension is at least 1
         self.beta_network = nn.Sequential(
             nn.Linear(coupling_dim, hidden_dim, dtype=dtype),
-            nn.Tanh(),
+            ComplexTanh() if dtype == torch.complex64 else nn.Tanh(),
             nn.Linear(hidden_dim, coupling_dim, dtype=dtype),
         )
 
         # Fixed point detector
         self.fp_detector = nn.Sequential(
             nn.Linear(coupling_dim, hidden_dim, dtype=dtype),
-            nn.ReLU(),
+            ComplexTanh() if dtype == torch.complex64 else nn.Tanh(),
             nn.Linear(hidden_dim, 1, dtype=dtype),
-            nn.Sigmoid(),
+            # Use sigmoid-like function for complex numbers
+            ComplexTanh() if dtype == torch.complex64 else nn.Sigmoid(),
         )
 
     def beta_function(self, state: torch.Tensor) -> torch.Tensor:
@@ -405,6 +406,10 @@ class RenormalizationFlow:
         fixed_points = []
         stability_matrices = []
 
+        # Ensure initial points are properly shaped
+        if initial_points.dim() > 2:
+            initial_points = initial_points.reshape(-1, initial_points.shape[-1])
+
         for point in initial_points:
             # Flow to fixed point
             current = point.clone()
@@ -414,17 +419,62 @@ class RenormalizationFlow:
                     break
                 current -= 0.1 * beta
 
-            # Check if point is fixed
-            if self.fp_detector(current) > 0.5:
+            # Check if point is fixed using mean of detector output
+            detector_output = self.fp_detector(current)
+            # For complex output, use magnitude of real part
+            if detector_output.is_complex():
+                detector_value = detector_output.real.abs().mean().item()
+            else:
+                detector_value = detector_output.mean().item()
+
+            if detector_value > 0.5:
                 fixed_points.append(current)
 
-                # Compute stability matrix
-                current.requires_grad_(True)
-                beta = self.beta_function(current)
-                stability = torch.autograd.functional.jacobian(
-                    self.beta_function, current
-                )
-                stability_matrices.append(stability)
+                # For complex tensors, compute stability matrix using real-valued decomposition
+                if current.is_complex():
+                    # Split into real and imaginary parts
+                    current_real = current.real.reshape(-1)
+                    current_imag = current.imag.reshape(-1)
+
+                    # Compute Jacobian for real and imaginary parts separately
+                    current_real.requires_grad_(True)
+                    current_imag.requires_grad_(True)
+
+                    def real_beta_fn(x_real, x_imag):
+                        x_complex = x_real + 1j * x_imag
+                        beta_complex = self.beta_function(x_complex)
+                        return beta_complex.real.reshape(-1)
+
+                    def imag_beta_fn(x_real, x_imag):
+                        x_complex = x_real + 1j * x_imag
+                        beta_complex = self.beta_function(x_complex)
+                        return beta_complex.imag.reshape(-1)
+
+                    # Compute partial derivatives
+                    J_rr = torch.autograd.functional.jacobian(
+                        lambda x: real_beta_fn(x, current_imag), current_real
+                    )
+                    if isinstance(J_rr, tuple):
+                        J_rr = J_rr[0]  # Extract tensor from tuple if needed
+
+                    J_ir = torch.autograd.functional.jacobian(
+                        lambda x: imag_beta_fn(x, current_imag), current_real
+                    )
+                    if isinstance(J_ir, tuple):
+                        J_ir = J_ir[0]  # Extract tensor from tuple if needed
+
+                    # Combine real and imaginary parts into stability matrix
+                    stability_matrix = torch.cat([J_rr, J_ir], dim=0)
+                else:
+                    # For real tensors, compute Jacobian directly
+                    current.requires_grad_(True)
+                    stability_matrix = torch.autograd.functional.jacobian(
+                        self.beta_function, current
+                    )
+                    if isinstance(stability_matrix, tuple):
+                        stability_matrix = stability_matrix[0]
+
+                stability_matrices.append(stability_matrix)
 
         return fixed_points, stability_matrices
 
@@ -459,7 +509,7 @@ class AnomalyDetector:
         # Anomaly detection network
         self.detector = nn.Sequential(
             nn.Linear(dim, dim * 2, dtype=dtype),
-            nn.ReLU(),
+            ComplexTanh() if dtype == torch.complex64 else nn.Tanh(),
             nn.Linear(dim * 2, max_degree + 1, dtype=dtype)
         )
 
@@ -529,9 +579,9 @@ class ScaleInvariance:
         hidden_dim = max(dim * 2, 1)  # Ensure hidden dimension is at least 1
         self.invariant_detector = nn.Sequential(
             nn.Linear(dim * 2, hidden_dim * 2, dtype=dtype),
-            nn.ReLU(),
+            ComplexTanh() if dtype == torch.complex64 else nn.Tanh(),
             nn.Linear(hidden_dim * 2, 1, dtype=dtype),
-            nn.Sigmoid()
+            ComplexTanh() if dtype == torch.complex64 else nn.Sigmoid()
         )
 
     def check_invariance(self, state: torch.Tensor, scale_factor: float) -> bool:
@@ -544,7 +594,13 @@ class ScaleInvariance:
         combined = torch.cat([state, transformed], dim=-1)
         invariance = self.invariant_detector(combined)
 
-        return invariance.item() > 0.5
+        # For complex output, use magnitude of real part
+        if invariance.is_complex():
+            invariance_value = invariance.real.abs().mean().item()
+        else:
+            invariance_value = invariance.mean().item()
+
+        return invariance_value > 0.5
 
     def find_invariant_structures(
         self, states: torch.Tensor
@@ -782,106 +838,64 @@ class ScaleCohomology:
         # Analyze stability using quantum-aware metrics
         stability = []
         for matrix in stability_matrices:
+            # Ensure matrix is square before computing eigenvalues
+            if matrix.shape[0] != matrix.shape[1]:
+                # Pad or truncate to make square
+                size = max(matrix.shape[0], matrix.shape[1])
+                matrix_square = torch.zeros(size, size, dtype=matrix.dtype, device=matrix.device)
+                
+                # Copy valid parts
+                min_rows = min(matrix.shape[0], size)
+                min_cols = min(matrix.shape[1], size)
+                matrix_square[:min_rows, :min_cols] = matrix[:min_rows, :min_cols]
+                
+                matrix = matrix_square
+            
             eigenvalues = torch.linalg.eigvals(matrix)
-            # Check both real and imaginary parts
-            if torch.all(eigenvalues.real < 0):
-                stability.append("stable")
-            elif torch.all(eigenvalues.real > 0):
-                stability.append("unstable")
-            else:
-                # Check for marginal stability
-                if torch.any(torch.abs(eigenvalues.real) < 1e-6):
-                    stability.append("marginal")
-                else:
-                    stability.append("saddle")
+            stability.append(eigenvalues.real > 0)
         
-        # Define beta function using geometric structure
-        def beta_function(x: torch.Tensor) -> torch.Tensor:
-            # Compute metric at current point
-            g = self.scale_connection(x, x + 0.01 * torch.ones_like(x)).connection_map
-            # Get base beta function
-            beta = self.rg_flow.beta_function(x)
-            # Apply metric correction for geometric flow
-            return g @ beta
-        
-        # Compute flow lines with geometric guidance
-        flow_lines = []
-        for point in sample_points:
-            line = [point]
-            current = point.clone()
-            
-            # Use fixed time steps for consistency with RGFlow
-            dt = 0.01
-            for _ in range(50):
-                # Use geometric beta function
-                current = current + dt * beta_function(current)
-                line.append(current.clone())
-            
-            flow_lines.append(torch.stack(line))
-        
-        return RGFlow(
-            beta_function=beta_function,  # Use the geometric beta function
+        # Create RG flow with quantum-aware properties
+        rg_flow = RGFlow(
+            beta_function=self.rg_flow.beta_function,
             fixed_points=fixed_points,
             stability=stability,
-            flow_lines=flow_lines,
-            observable=observable_tensor,
-            _dt=0.01  # Base time step for evolution
+            observable=observable_tensor
         )
+        
+        return rg_flow
 
     def fixed_points(self, beta_function: Union[Callable[[torch.Tensor], torch.Tensor], torch.Tensor]) -> List[torch.Tensor]:
-        """Find fixed points of the beta function.
-        
-        Uses gradient descent to find points where beta(x) = 0.
-        
-        Args:
-            beta_function: Either a callable beta function or a tensor to find fixed points for
-            
-        Returns:
-            List of fixed points found
-        """
-        if not callable(beta_function):
-            # If beta_function is a tensor, create a simple beta function for it
+        """Find fixed points of the beta function."""
+        if isinstance(beta_function, torch.Tensor):
             tensor = beta_function
             beta_function = lambda x: x - tensor
-        
-        # Try several initial points
-        initial_points = [
-            torch.zeros(4),  # Origin
-            torch.ones(4),   # Unit point
-            torch.randn(4),  # Random point
-            -torch.ones(4),  # Negative unit point
-        ]
-        
+
+        # Ensure tensor dimensions match
+        def wrapped_beta(x: torch.Tensor) -> torch.Tensor:
+            if x.shape[-1] != tensor.shape[-1]:
+                # Project to the correct dimension
+                proj = torch.nn.Linear(x.shape[-1], tensor.shape[-1], device=x.device)
+                x = proj(x)
+            return beta_function(x)
+
+        # Initialize points
+        points = []
+        for _ in range(10):
+            point = torch.randn(tensor.shape[-1], device=tensor.device, dtype=tensor.dtype)
+            points.append(point)
+
+        # Flow to fixed points
         fixed_points = []
-        for x0 in initial_points:
-            x = x0.clone().requires_grad_(True)
-            optimizer = torch.optim.Adam([x], lr=0.1)
-            
-            # Minimize |beta(x)|^2
-            for _ in range(1000):
-                optimizer.zero_grad()
-                beta = beta_function(x)
-                loss = torch.sum(beta**2)
-                loss.backward()
-                optimizer.step()
-                
-                if loss.item() < 1e-6:
-                    # Found a fixed point
-                    fixed_points.append(x.detach().clone())
+        for point in points:
+            current = point.clone()
+            for _ in range(100):
+                beta = wrapped_beta(current)
+                if torch.norm(beta) < 1e-6:
                     break
-        
-        # Remove duplicates (points within small distance of each other)
-        unique_points = []
-        for fp in fixed_points:
-            is_unique = True
-            for up in unique_points:
-                if torch.norm(fp - up) < 1e-4:
-                    is_unique = False
-                    break
-            if is_unique:
-                unique_points.append(fp)
-        
-        return unique_points
+                current = current - 0.1 * beta
+            fixed_points.append(current)
+
+        return fixed_points
 
     def fixed_point_stability(self, fixed_point: torch.Tensor, beta_function: Callable[[torch.Tensor], torch.Tensor]) -> str:
         """Analyze stability of a fixed point.
@@ -1028,7 +1042,22 @@ class ScaleCohomology:
 
     def conformal_symmetry(self, state: torch.Tensor) -> bool:
         """Check if state has conformal symmetry using optimized detection."""
-        return bool(self.conformal_net(state).item() > 0.5)
+        # Ensure state has correct shape
+        if state.dim() > 2:
+            state = state.reshape(-1, state.shape[-1])
+        
+        # Get conformal prediction
+        pred = self.conformal_net(state)
+        
+        # Handle multi-dimensional output
+        if pred.dim() > 1:
+            pred = pred.mean(dim=0)
+        
+        # Handle complex numbers by taking absolute value
+        if pred.is_complex():
+            pred = pred.abs()
+        
+        return bool(pred.item() > 0.5)
 
     def minimal_invariant_number(self) -> int:
         """Get minimal number of scale invariants based on cohomology."""
@@ -1285,37 +1314,82 @@ class ScaleSystem:
     """Complete scale system for multi-scale analysis."""
 
     def __init__(self, dim: int, num_scales: int = 4, coupling_dim: int = 4, dtype=torch.float32):
-        self.connection = ScaleConnection(dim, num_scales, dtype=dtype)
-        self.rg_flow = RenormalizationFlow(coupling_dim, dtype=dtype)
-        self.anomaly = AnomalyDetector(dim, dtype=dtype)
-        self.invariance = ScaleInvariance(dim, num_scales, dtype=dtype)
-        self.cohomology = ScaleCohomology(dim, num_scales, dtype=dtype)
+        """Initialize the scale system.
+        
+        Args:
+            dim: Dimension of the state space
+            num_scales: Number of scale levels to analyze
+            coupling_dim: Dimension of coupling space
+            dtype: Data type for computations (default: torch.float32)
+        """
+        self.dim = dim
+        # Always use complex64 internally for quantum computations
+        self.internal_dtype = torch.complex64
+        self.output_dtype = dtype
+        
+        # Initialize components with complex dtype for internal computations
+        self.connection = ScaleConnection(dim, num_scales, dtype=self.internal_dtype)
+        self.rg_flow = RenormalizationFlow(coupling_dim, dtype=self.internal_dtype)
+        self.anomaly = AnomalyDetector(dim, dtype=self.internal_dtype)
+        self.invariance = ScaleInvariance(dim, num_scales, dtype=self.internal_dtype)
+        self.cohomology = ScaleCohomology(dim, num_scales, dtype=self.internal_dtype)
+        
+        # Initialize Riemann computer with complex dtype
+        self.riemann_computer = nn.Sequential(
+            nn.Linear(dim, dim * 2, dtype=self.internal_dtype),
+            ComplexTanh(),
+            nn.Linear(dim * 2, dim * dim, dtype=self.internal_dtype)
+        )
+
+    def _to_internal_dtype(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Convert input tensor to internal complex dtype."""
+        if not tensor.is_complex():
+            return tensor.to(dtype=self.internal_dtype)
+        return tensor.to(dtype=self.internal_dtype)
+
+    def _to_output_dtype(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Convert internal complex tensor to output dtype."""
+        if self.output_dtype == torch.float32:
+            return tensor.real.to(dtype=self.output_dtype)
+        return tensor.to(dtype=self.output_dtype)
 
     def analyze_scales(
         self, states: List[torch.Tensor], scale_factors: List[float]
     ) -> Dict[str, Any]:
         """Analyze multi-scale structure."""
+        # Convert input states to internal complex dtype
+        states = [self._to_internal_dtype(s) for s in states]
+        
         results = {}
 
         # Analyze RG flow
         fixed_points, stability = self.rg_flow.find_fixed_points(states[0])
-        results["fixed_points"] = fixed_points
+        results["fixed_points"] = [self._to_output_dtype(fp) for fp in fixed_points]
         results["stability"] = stability
 
         # Find scale invariant structures
         invariants = self.invariance.find_invariant_structures(
             torch.stack(states)
         )
-        results["invariants"] = invariants
+        results["invariants"] = [(self._to_output_dtype(state), scale) for state, scale in invariants]
 
         # Detect anomalies
         anomalies = []
         for state in states:
             anomalies.extend(self.anomaly.detect_anomalies(state))
+        # Convert anomaly coefficients to output dtype
+        for anomaly in anomalies:
+            anomaly.coefficients = self._to_output_dtype(anomaly.coefficients)
         results["anomalies"] = anomalies
 
         # Compute cohomology
         cohomology = self.cohomology.analyze_cohomology(states, scale_factors)
+        # Convert cohomology results to output dtype
+        for key, value in cohomology.items():
+            if isinstance(value, torch.Tensor):
+                cohomology[key] = self._to_output_dtype(value)
+            elif isinstance(value, (list, tuple)) and len(value) > 0 and isinstance(value[0], torch.Tensor):
+                cohomology[key] = [self._to_output_dtype(v) if isinstance(v, torch.Tensor) else v for v in value]
         results["cohomology"] = cohomology
 
         return results

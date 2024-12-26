@@ -70,3 +70,45 @@ class AttentionCompute(nn.Module):
             Attention output [batch, heads, seq_len, dim]
         """
         return torch.matmul(scores, value)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        """Forward pass for attention computation.
+        
+        Args:
+            query: Query tensor [batch, seq_len, dim]
+            key: Key tensor [batch, seq_len, dim]
+            value: Value tensor [batch, seq_len, dim]
+            mask: Optional attention mask
+            scale: Optional scaling factor. If None, uses 1/sqrt(dim)
+            
+        Returns:
+            Attention output [batch, seq_len, dim]
+        """
+        # Add head dimension if not present
+        if query.dim() == 3:
+            query = query.unsqueeze(1)
+            key = key.unsqueeze(1)
+            value = value.unsqueeze(1)
+
+        # Compute default scale if not provided
+        if scale is None:
+            scale = float(1.0 / torch.sqrt(torch.tensor(query.size(-1), dtype=query.dtype)))
+
+        # Compute attention scores
+        scores = self.compute_scores(query, key, mask, scale)
+
+        # Compute attention output
+        output = self.compute_output(scores, value)
+
+        # Remove head dimension if it was added
+        if output.size(1) == 1:
+            output = output.squeeze(1)
+
+        return output

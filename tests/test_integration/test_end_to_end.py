@@ -4,7 +4,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 import numpy as np
-import torch.cuda
 import gc
 import psutil
 import os
@@ -54,8 +53,6 @@ def cleanup_memory():
     """Clean up memory based on configuration."""
     if TEST_CONFIG["clear_memory"]:
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -142,11 +139,20 @@ def state_manager():
 def log_tensor_info(name: str, tensor: torch.Tensor):
     """Log tensor shape, dtype, and basic statistics."""
     if TEST_CONFIG["debug"]["log_shapes"]:
-        logger.debug(
-            f"{name} - Shape: {tensor.shape}, Dtype: {tensor.dtype}, "
-            f"Mean: {tensor.mean().item():.3f}, Std: {tensor.std().item():.3f}, "
-            f"Min: {tensor.min().item():.3f}, Max: {tensor.max().item():.3f}"
-        )
+        if tensor.dtype in [torch.complex64, torch.complex128]:
+            # For complex tensors, compute stats on absolute values
+            abs_tensor = torch.abs(tensor)
+            logger.debug(
+                f"{name} - Shape: {tensor.shape}, Dtype: {tensor.dtype}, "
+                f"Mean Abs: {abs_tensor.mean().item():.3f}, Std Abs: {abs_tensor.std().item():.3f}, "
+                f"Min Abs: {abs_tensor.min().item():.3f}, Max Abs: {abs_tensor.max().item():.3f}"
+            )
+        else:
+            logger.debug(
+                f"{name} - Shape: {tensor.shape}, Dtype: {tensor.dtype}, "
+                f"Mean: {tensor.mean().item():.3f}, Std: {tensor.std().item():.3f}, "
+                f"Min: {tensor.min().item():.3f}, Max: {tensor.max().item():.3f}"
+            )
 
 
 def check_tensor_valid(name: str, tensor: torch.Tensor) -> bool:
@@ -308,7 +314,10 @@ class TestEndToEnd:
                 })
             
             assert isinstance(quantum_state, QuantumState)
-            assert torch.allclose(quantum_state.norm(), torch.tensor(1.0))
+            assert torch.allclose(quantum_state.norm(), torch.tensor(1.0, dtype=quantum_state.norm().dtype))
+            
+            # Check quantum state properties
+            assert quantum_tensor.shape[-1] == 4  # manifold_dim is 4
             
             # Clear intermediate tensors
             del attention_out
@@ -329,7 +338,7 @@ class TestEndToEnd:
                 if flow_step >= TEST_CONFIG["debug"]["max_flow_steps"]:
                     raise TimeoutError("Maximum flow steps exceeded")
             
-            evolved_state = neural_bridge.evolve_quantum_state(quantum_state)
+            evolved_state = neural_bridge.evolve_quantum_state(quantum_state, time=1.0)
             
             logger.debug(f"Quantum evolution took {time.time() - start_time:.2f}s")
             
@@ -347,7 +356,7 @@ class TestEndToEnd:
                 })
             
             assert isinstance(evolved_state, QuantumState)
-            assert torch.allclose(evolved_state.norm(), torch.tensor(1.0))
+            assert torch.allclose(evolved_state.norm(), torch.tensor(1.0, dtype=evolved_state.norm().dtype))
             
             # Clear intermediate tensors
             del quantum_state
@@ -379,7 +388,7 @@ class TestEndToEnd:
             attention_norm = torch.linalg.vector_norm(test_input, dim=-1)
             final_norm = torch.linalg.vector_norm(final_out, dim=-1)
             norm_ratio = final_norm / attention_norm
-            assert torch.allclose(norm_ratio, torch.tensor(1.0), rtol=TEST_CONFIG["evolution"]["rtol"])
+            assert torch.allclose(norm_ratio, torch.tensor(1.0, dtype=norm_ratio.dtype), rtol=TEST_CONFIG["evolution"]["rtol"])
             
             logger.info("Attention quantum flow test completed successfully")
             
@@ -461,7 +470,9 @@ class TestEndToEnd:
         """
         # 1. Initial attention at scale 1
         attention_scale1 = attention_layer(
-            test_input, test_input, test_input
+            test_input,
+            mask=None,
+            return_metrics=False
         )
         
         # 2. Create pattern and scale up
@@ -480,8 +491,8 @@ class TestEndToEnd:
         # 3. Attention at new scale
         attention_scale2 = attention_layer(
             scaled_pattern.coordinates,
-            scaled_pattern.coordinates,
-            scaled_pattern.coordinates
+            mask=None,
+            return_metrics=False
         )
         
         # Check scale-appropriate properties
@@ -517,7 +528,9 @@ class TestEndToEnd:
         
         # 2. Through attention
         attention_out = attention_layer(
-            test_input, test_input, test_input
+            test_input,
+            mask=None,
+            return_metrics=False
         )
         attention_quantum = state_manager.initialize_state("attention", attention_out.shape[-1])
         attention_geometric = state_manager.initialize_state("attention_geom", attention_out.shape[-1])
@@ -531,7 +544,7 @@ class TestEndToEnd:
         quantum_state = neural_bridge.neural_to_quantum(attention_out)
         if isinstance(quantum_state, tuple):
             quantum_state = quantum_state[0]  # Extract state from validation result
-        evolved_state = neural_bridge.evolve_quantum_state(quantum_state)
+        evolved_state = neural_bridge.evolve_quantum_state(quantum_state, time=1.0)
         
         # 4. Scale transition
         pattern = PatternSection(

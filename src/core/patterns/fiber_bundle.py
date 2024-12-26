@@ -202,7 +202,18 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         """
         # Initialize result tensor
         num_points = path.shape[0]
-        result = torch.zeros(num_points, self.fiber_dim, device=path.device, dtype=path.dtype)
+        
+        # Handle batched sections
+        if len(section.shape) > 2:  # [batch, seq, dim]
+            batch_size, seq_len, dim = section.shape
+            section = section.reshape(-1, dim)
+        elif len(section.shape) == 2:  # [batch, dim]
+            batch_size, dim = section.shape
+        else:  # [dim]
+            dim = section.shape[0]
+            section = section.unsqueeze(0)
+            
+        result = torch.zeros(num_points, section.shape[0], self.fiber_dim, device=path.device, dtype=path.dtype)
         result[0] = section  # Initial condition
         
         # Compute path tangent vectors and normalize

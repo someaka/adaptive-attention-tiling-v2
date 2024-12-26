@@ -53,7 +53,10 @@ from ...patterns.dynamics import PatternDynamics
 from ...patterns.evolution import PatternEvolution
 from ...patterns.symplectic import SymplecticStructure
 from ...patterns.riemannian import PatternRiemannianStructure
-from ...patterns.operadic_structure import AttentionOperad, OperadicOperation, OperadicComposition
+from ...patterns.operadic_structure import (
+    AttentionOperad,
+    OperadicOperation
+)
 from ...patterns.enriched_structure import PatternTransition, WaveEmergence
 from ...tiling.geometric_flow import GeometricFlow
 
@@ -279,82 +282,14 @@ class PatternFiberBundle(BaseFiberBundle):
         self.to(self.device)
 
     def _initialize_components(self) -> None:
-        """Initialize all components of the pattern fiber bundle."""
-        # Initialize Riemannian framework
+        """Initialize bundle components efficiently."""
+        # Initialize geometric components
         self.riemannian_framework = PatternRiemannianStructure(
             manifold_dim=self.total_dim,
             pattern_dim=self.fiber_dim,
             device=self.device,
             dtype=self.dtype
         )
-        
-        # Initialize symplectic structure
-        self.symplectic_structure = SymplecticStructure(
-            dim=self.total_dim,
-            preserve_structure=True,
-            wave_enabled=True
-        )
-        
-        # Initialize pattern formation
-        self.pattern_formation = PatternFormation(
-            dim=self.total_dim,
-            dt=self._config.dt,
-            diffusion_coeff=0.1,
-            reaction_coeff=1.0,
-            preserve_structure=True,
-            wave_enabled=True
-        )
-        
-        # Initialize geometric flow
-        self.geometric_flow = GeometricFlow(
-            hidden_dim=self.total_dim,
-            manifold_dim=self.total_dim,
-            motive_rank=self._config.motive_rank,
-            num_charts=4,
-            integration_steps=self._config.integration_steps,
-            dt=self._config.dt,
-            stability_threshold=self._config.stability_threshold
-        )
-        
-        # Initialize pattern dynamics and evolution
-        self.pattern_dynamics = PatternDynamics(dt=self._config.dt)
-        self.pattern_evolution = PatternEvolution(
-            framework=self.riemannian_framework,
-            learning_rate=self._config.learning_rate,
-            momentum=self._config.momentum
-        )
-        
-        # Initialize operadic structures
-        self.attention_operad = AttentionOperad(
-            base_dim=self.total_dim,
-            preserve_symplectic=True,
-            preserve_metric=True
-        )
-        
-        # Initialize enriched structures
-        self.pattern_transition = PatternTransition(
-            wave_emergence=WaveEmergence(
-                dt=self._config.dt,
-                num_steps=10
-            )
-        )
-        
-        # Initialize algebraic structures
-        self.height_structure = HeightStructure(num_primes=self._config.num_primes)
-        
-        # Initialize fiber metric
-        self.fiber_metric = lambda g1, g2: torch.trace(
-            torch.matmul(g1, g2.transpose(-2, -1))
-        )
-        
-        # Initialize wave and transition components
-        self.wave = WaveEmergence(
-            dt=self._config.dt, 
-            num_steps=self._config.integration_steps
-        )
-        self.transition = PatternTransition(wave_emergence=self.wave)
-        
-        # Initialize geometric components
         self.geometric_flow = RiemannianFlow(
             manifold_dim=self._config.base_dim,
             hidden_dim=self._config.fiber_dim,
@@ -364,25 +299,48 @@ class PatternFiberBundle(BaseFiberBundle):
             use_parallel_transport=True
         )
         
-        self.riemannian_framework = PatternRiemannianStructure(
-            manifold_dim=self.total_dim,
-            pattern_dim=self._config.fiber_dim,
-            device=self.device,
-            dtype=None
-        )
-        
-        # Initialize pattern dynamics components
+        # Initialize pattern components
         self.pattern_formation = PatternFormation(
             dim=self._config.fiber_dim,
             dt=self._config.dt,
             diffusion_coeff=self._DEFAULT_DIFFUSION_COEFF,
             reaction_coeff=self._DEFAULT_REACTION_COEFF
         )
-        self.pattern_dynamics = PatternDynamics(dt=self._config.dt)
         self.pattern_evolution = PatternEvolution(
             framework=self.riemannian_framework,
             learning_rate=self._config.learning_rate,
             momentum=self._config.momentum
+        )
+        
+        # Initialize arithmetic components
+        self.height_structure = HeightStructure(
+            num_primes=self._config.num_primes
+        )
+        
+        # Initialize symplectic structure
+        self.symplectic = SymplecticStructure(
+            dim=self.total_dim,
+            preserve_structure=True,
+            wave_enabled=True
+        )
+        
+        # Initialize operadic structure
+        self.operadic = AttentionOperad(
+            base_dim=self._config.base_dim,
+            preserve_symplectic=True,
+            preserve_metric=True,
+            dtype=self.dtype
+        )
+        
+        # Initialize wave components
+        self.wave = WaveEmergence(
+            dt=self._config.dt,
+            num_steps=self._config.integration_steps
+        )
+        
+        # Initialize transition components
+        self.transition = PatternTransition(
+            wave_emergence=self.wave
         )
 
     def _initialize_basis_matrices(self) -> None:
@@ -1044,27 +1002,12 @@ class PatternFiberBundle(BaseFiberBundle):
         2. Stability Control: Monitors and corrects unstable transport paths
         3. Dimension Handling: Ensures correct fiber dimension through operadic transitions
         
-        The transport process:
-        1. Computes base geometric transport
-        2. Evolves transport path with pattern formation dynamics
-        3. Detects and corrects unstable points through pattern evolution
-        4. Ensures dimension compatibility through operadic transitions
-        
         Args:
             section: Section to transport (shape: [..., fiber_dim])
             path: Path to transport along (shape: [num_points, base_dim])
             
         Returns:
             Transported section as a Tensor (shape: [num_points, fiber_dim])
-            
-        Note:
-            The method combines geometric parallel transport with pattern
-            evolution to ensure the transported section maintains both
-            geometric and pattern-specific properties along the path.
-            
-            For unstable points (determined by stability_threshold), the
-            method applies pattern evolution using reaction-diffusion
-            dynamics to stabilize the transport.
         """
         # Ensure section is a tensor and on the correct device
         result: Tensor = self._ensure_tensor_format(section)
@@ -1075,6 +1018,10 @@ class PatternFiberBundle(BaseFiberBundle):
                 with self.with_tensor_state(result) as formatted_section, \
                      self.with_tensor_state(path) as formatted_path:
 
+                    # Handle batch dimension if present
+                    if len(formatted_section.shape) == 3:  # [batch, seq, dim]
+                        formatted_section = formatted_section.reshape(-1, formatted_section.shape[-1])
+                    
                     # Ensure section has correct fiber dimension
                     if formatted_section.shape[-1] != self.fiber_dim:
                         formatted_section = self._handle_dimension_transition(formatted_section)
@@ -1089,6 +1036,7 @@ class PatternFiberBundle(BaseFiberBundle):
                     # Initialize result with correct shape
                     result = torch.zeros(
                         len(formatted_path),
+                        formatted_section.shape[0] if len(formatted_section.shape) > 1 else 1,
                         self.fiber_dim,
                         device=formatted_section.device,
                         dtype=formatted_section.dtype
@@ -1117,11 +1065,19 @@ class PatternFiberBundle(BaseFiberBundle):
                     if result.shape[-1] != self.fiber_dim:
                         result = self._handle_dimension_transition(result)
 
+                    # Restore original batch shape if needed
+                    if len(section.shape) == 3:
+                        result = result.reshape(len(formatted_path), *section.shape[1:])
+                    
         except Exception as e:
             # Return original section if transport fails
             warnings.warn(f"Parallel transport failed: {str(e)}. Returning original section.")
-            result = section.clone().expand(len(path), -1)
-
+            # Expand section to match path length while preserving batch dimensions
+            if len(section.shape) == 3:  # [batch, seq, dim]
+                result = section.unsqueeze(0).expand(len(path), *section.shape)
+            else:  # [batch, dim] or [dim]
+                result = section.unsqueeze(0).expand(len(path), *section.shape)
+        
         return result
 
     #--------------------------------------------------------------------------

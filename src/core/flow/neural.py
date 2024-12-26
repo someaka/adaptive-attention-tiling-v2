@@ -165,7 +165,6 @@ class NeuralGeometricFlow(PatternFormationFlow):
             num_heads=num_heads,
             dropout=dropout,
             dtype=self.dtype,
-            device=self.device,
             manifold_type="hyperbolic",
             curvature=-1.0
         )

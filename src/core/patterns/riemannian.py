@@ -622,63 +622,48 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
     def exp_map(self, point: Tensor, vector: Tensor) -> Tensor:
         """Compute exponential map at a point in a given direction.
         
-        This base implementation uses a simple first-order approximation
-        for small vectors and geodesic integration for larger ones.
+        Implements the exponential map using parallel transport along geodesics.
         
         Args:
-            point: Base point on the manifold
-            vector: Tangent vector at the base point
+            point: Base point on manifold
+            vector: Tangent vector at base point
             
         Returns:
-            Point reached by following the geodesic
+            Point reached by following geodesic in direction of vector
         """
-        # Get vector norm using the metric
-        metric = self.compute_metric(point.unsqueeze(0)).values[0]
-        vector_norm = torch.sqrt(torch.einsum('i,ij,j->', vector, metric, vector))
+        # Ensure points have gradients
+        point = self._ensure_gradients(point)
+        vector = self._ensure_gradients(vector)
         
-        # For small vectors, use first-order approximation
-        if vector_norm < 1e-6:
-            return point + vector
-            
-        # For larger vectors, integrate geodesic equation
-        # Get Christoffel symbols at the base point
-        christoffel = self.compute_christoffel(point.unsqueeze(0)).values[0]
+        # Get metric at point
+        metric = self.compute_metric(point).values
         
-        # Normalize vector to unit speed
-        vector = vector / vector_norm
+        # Compute vector norm using metric (with batch dimensions)
+        # Original: vector_norm = torch.sqrt(torch.einsum('i,ij,j->', vector, metric, vector))
+        # New: Handle batch dimensions correctly
+        vector_norm = torch.sqrt(torch.einsum('...i,...ij,...j->...', vector, metric, vector))
         
-        # Integrate geodesic equation using 4th order Runge-Kutta
-        dt = 0.1
-        steps = int(vector_norm / dt) + 1
-        dt = vector_norm / steps
+        # Normalize vector
+        vector = vector / (vector_norm.unsqueeze(-1) + 1e-8)
         
+        # Get Christoffel symbols at point
+        christoffel = self.compute_christoffel(point)
+        
+        # Compute geodesic using parallel transport
+        t = torch.linspace(0, 1, steps=10, device=self.device, dtype=self.dtype)
         current_point = point
-        current_velocity = vector
         
-        for _ in range(steps):
-            # RK4 integration step
-            k1_pos = current_velocity
-            k1_vel = -torch.einsum('ijk,j,k->i', christoffel, current_velocity, current_velocity)
+        for step in t[1:]:  # Skip t=0 since we start at point
+            # Transport vector using connection
+            transported = self.parallel_transport(vector, current_point, christoffel)
             
-            mid_point = current_point + 0.5 * dt * k1_pos
-            mid_vel = current_velocity + 0.5 * dt * k1_vel
-            k2_pos = mid_vel
-            k2_vel = -torch.einsum('ijk,j,k->i', christoffel, mid_vel, mid_vel)
+            # Update position
+            current_point = current_point + step * transported
             
-            mid_point = current_point + 0.5 * dt * k2_pos
-            mid_vel = current_velocity + 0.5 * dt * k2_vel
-            k3_pos = mid_vel
-            k3_vel = -torch.einsum('ijk,j,k->i', christoffel, mid_vel, mid_vel)
-            
-            end_point = current_point + dt * k3_pos
-            end_vel = current_velocity + dt * k3_vel
-            k4_pos = end_vel
-            k4_vel = -torch.einsum('ijk,j,k->i', christoffel, end_vel, end_vel)
-            
-            # Update position and velocity
-            current_point = current_point + (dt/6) * (k1_pos + 2*k2_pos + 2*k3_pos + k4_pos)
-            current_velocity = current_velocity + (dt/6) * (k1_vel + 2*k2_vel + 2*k3_vel + k4_vel)
-        
+            # Project back to manifold if needed
+            if hasattr(self, 'project_to_manifold'):
+                current_point = self.project_to_manifold(current_point)
+                
         return current_point
 
 class PatternRiemannianStructure(BaseRiemannianStructure):

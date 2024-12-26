@@ -48,6 +48,7 @@ active_regime: debug
 common:
   # Attention parameters
   dropout: 0.1
+  epsilon: 1e-6  # Added epsilon parameter for state configuration
 
   # Quantum parameters
   wave_enabled: true
@@ -57,10 +58,6 @@ common:
   # Manifold parameters
   manifold_type: "hyperbolic"
   curvature: -1.0
-
-  # Evolution parameters
-  dt: 0.1
-  epsilon: 1e-6
 
   # Memory management
   clear_memory: true
@@ -72,7 +69,7 @@ common:
     log_level: "DEBUG"
     log_shapes: true
     log_metrics: true
-    log_flow: true
+    log_flow: false
     max_flow_steps: 100
     check_nan: true
     break_on_nan: true
@@ -82,3 +79,32 @@ common:
   # Logging
   log_metrics: true
   save_checkpoints: false 
+
+  # Evolution parameters
+  evolution:
+    rtol: 0.001  # Relative tolerance for evolution comparisons
+
+test_state_space:
+  num_samples: 100
+  batch_size: 32
+  hidden_dim: 8
+  manifold_dim: 4
+  
+test_scale_transition:
+  num_samples: 100
+  batch_size: 32
+  hidden_dim: 8
+  manifold_dim: 4
+  
+test_transition_accuracy:
+  num_samples: 100
+  batch_size: 32
+  hidden_dim: 8
+  manifold_dim: 4
+  
+test_attention_quantum_flow:
+  batch_size: 1
+  seq_len: 2
+  hidden_dim: 8
+  num_heads: 1
+  manifold_dim: 4 

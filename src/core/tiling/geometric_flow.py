@@ -114,23 +114,25 @@ class GeometricFlow(RiemannianFlow):
         # Project quantum term to match Ricci tensor dimensions
         if quantum_term.shape != ricci.shape:
             # Get target shape from ricci tensor
-            h, w = ricci.shape[-2], ricci.shape[-1]  # Get last two dimensions as integers
+            batch_size = ricci.shape[0]
+            h, w = ricci.shape[-2], ricci.shape[-1]
             
             # Reshape quantum term to match ricci dimensions
-            quantum_term_flat = quantum_term.reshape(-1, *quantum_term.shape[-2:])
-            
-            # Use adaptive pooling to match exact dimensions
-            quantum_term_resized = torch.nn.functional.adaptive_avg_pool2d(
-                quantum_term_flat.unsqueeze(1),  # Add channel dimension
-                output_size=(h, w)  # Use tuple of integers
+            quantum_term = quantum_term.reshape(batch_size, -1, quantum_term.shape[-1])
+            quantum_term = F.adaptive_avg_pool2d(
+                quantum_term.unsqueeze(1),  # Add channel dimension
+                output_size=(h, w)  # Target size
             ).squeeze(1)  # Remove channel dimension
             
-            # Restore batch dimensions
-            quantum_term = quantum_term_resized.reshape(*ricci.shape)
+            # Ensure final shape matches ricci tensor
+            quantum_term = quantum_term.reshape(batch_size, h, w)
         
         # Add quantum corrections with a small scaling factor for stability
         alpha = 0.1  # Small factor for stability
         ricci = ricci + alpha * quantum_term
+        
+        # Ensure ricci tensor has the correct shape
+        ricci = ricci.reshape(*metric.shape)
         
         return ricci
     

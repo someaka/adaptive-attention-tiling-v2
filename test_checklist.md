@@ -1,7 +1,7 @@
 - [x] tests/core/attention/test_geometric.py
 - [x] tests/core/tiling/test_strategies.py
-- [ ] tests/metrics/test_metrics_integration.py
-- [ ] tests/performance/benchmarks/test_core.py
+- [x] tests/metrics/test_metrics_integration.py
+- [x] tests/performance/benchmarks/test_core.py
 - [ ] tests/performance/cpu/test_algorithms.py
 - [x] tests/performance/cpu/test_memory_management.py
 - [ ] tests/performance/cpu/test_memory.py

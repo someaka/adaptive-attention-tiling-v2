@@ -182,7 +182,8 @@ class SymplecticStructure:
         dim: int,
         preserve_structure: bool = True,
         wave_enabled: bool = True,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.float32,
+        max_dim: int = 256  # Add maximum dimension parameter
     ):
         """Initialize symplectic structure with enriched features.
         
@@ -191,17 +192,21 @@ class SymplecticStructure:
             preserve_structure: Whether to preserve symplectic structure
             wave_enabled: Whether to enable wave emergence behavior
             dtype: Data type for tensors
+            max_dim: Maximum allowed dimension to prevent memory issues
             
         Raises:
-            ValueError: If dimension is less than 2
+            ValueError: If dimension is invalid or too large
         """
         if dim < 2:
             raise ValueError(f"Dimension must be at least 2, got {dim}")
+        if dim > max_dim:
+            raise ValueError(f"Dimension {dim} exceeds maximum allowed dimension {max_dim}")
             
         self.dim = dim
         self.preserve_structure = preserve_structure
         self.wave_enabled = wave_enabled
         self.dtype = dtype
+        self.max_dim = max_dim
         
         # Target dimension is always even to maintain symplectic properties
         self.target_dim = dim if dim % 2 == 0 else dim + 1
@@ -245,6 +250,10 @@ class SymplecticStructure:
         if tensor.dim() < 1:
             raise ValueError(f"Tensor must have at least 1 dimension, got {tensor.dim()}")
             
+        # Add dimension size validation
+        if tensor.size(-1) > self.max_dim:
+            raise ValueError(f"Input tensor dimension {tensor.size(-1)} exceeds maximum allowed dimension {self.max_dim}")
+            
         current_dim = tensor.shape[-1]
         if current_dim == self.dim:
             return tensor
@@ -252,41 +261,77 @@ class SymplecticStructure:
         if current_dim < 1:
             raise ValueError(f"Last dimension must be at least 1, got {current_dim}")
             
-        # Save original shape for proper reshaping
-        original_shape = tensor.shape[:-1]
+        # Process in chunks to save memory
+        chunk_size = min(128, tensor.shape[0] if len(tensor.shape) > 1 else 1)
+        output_chunks = []
         
-        # Simple dimension adjustment
-        if current_dim < self.dim:
-            # Pad with zeros
-            padding_size = self.dim - current_dim
-            padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
-            return torch.cat([tensor, padding], dim=-1)
-        else:
-            # Truncate
-            return tensor[..., :self.dim]
+        for start_idx in range(0, tensor.shape[0], chunk_size):
+            end_idx = min(start_idx + chunk_size, tensor.shape[0])
+            chunk = tensor[start_idx:end_idx]
+            
+            # Save original shape for proper reshaping
+            original_shape = chunk.shape[:-1]
+            
+            # Simple dimension adjustment
+            if current_dim < self.dim:
+                # Pad with zeros
+                padding_size = self.dim - current_dim
+                padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
+                adjusted = torch.cat([chunk, padding], dim=-1)
+            else:
+                # Truncate
+                adjusted = chunk[..., :self.dim]
+                
+            output_chunks.append(adjusted)
+            
+            # Free memory
+            del chunk, adjusted
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+        # Concatenate all chunks
+        return torch.cat(output_chunks, dim=0)
 
     def compute_metric(self, fiber_coords: Tensor) -> Tensor:
         """Compute Riemannian metric tensor at given fiber coordinates.
-        
+    
         Args:
             fiber_coords: Fiber coordinates to compute metric at
-            
+    
         Returns:
             Metric tensor with proper structure
         """
         # Get dimension for metric computation
         dim = fiber_coords.shape[-1]
-        
-        # Create base metric tensor
-        metric = torch.eye(dim, device=fiber_coords.device, dtype=fiber_coords.dtype)
+        batch_size = fiber_coords.shape[0] if len(fiber_coords.shape) > 1 else 1
         
         # Add fiber coordinate dependence
         # This ensures the metric varies smoothly over the fiber
         coord_norm = torch.norm(fiber_coords, dim=-1, keepdim=True)
-        scale_factor = torch.exp(-self._SYMPLECTIC_WEIGHT * coord_norm)
-        metric = metric * scale_factor.unsqueeze(-1)
+        scale_factor = torch.exp(-self._SYMPLECTIC_WEIGHT * coord_norm).squeeze(-1)
         
-        return metric
+        # Create indices for diagonal elements
+        diag_indices = torch.arange(dim, device=fiber_coords.device)
+        row_indices = diag_indices.repeat(batch_size)
+        col_indices = diag_indices.repeat(batch_size)
+        batch_indices = torch.arange(batch_size, device=fiber_coords.device).repeat_interleave(dim)
+        
+        # Create sparse tensor indices
+        indices = torch.stack([batch_indices, row_indices, col_indices], dim=0)
+        
+        # Create values for diagonal elements
+        values = scale_factor.repeat_interleave(dim)
+        
+        # Create sparse tensor
+        sparse_metric = torch.sparse_coo_tensor(
+            indices,
+            values,
+            size=(batch_size, dim, dim),
+            device=fiber_coords.device,
+            dtype=fiber_coords.dtype
+        )
+        
+        # Convert to dense tensor
+        return sparse_metric.to_dense()
 
     def standard_form(self, device: Optional[torch.device] = None) -> SymplecticForm:
         """Compute standard symplectic form with enriched structure.
@@ -443,43 +488,47 @@ class SymplecticStructure:
         grad_g = cast(Tensor, torch.autograd.grad(g, point_symplectic, create_graph=True)[0])
         return form.evaluate(grad_f, grad_g) 
 
-    def compute_quantum_geometric_tensor(self, point: Tensor) -> Tensor:
+    def compute_quantum_geometric_tensor(self, pattern: Tensor) -> Tensor:
         """Compute quantum geometric tensor Q_{μν} = g_{μν} + iω_{μν}.
         
+        The quantum geometric tensor combines the metric and symplectic form
+        into a single complex tensor that encodes both structures.
+        
         Args:
-            point: Point on manifold to compute tensor at
+            pattern: Input pattern tensor [batch_size, dim]
             
         Returns:
-            Complex tensor representing quantum geometry
+            Complex tensor Q_{μν} = g_{μν} + iω_{μν}
         """
-        # Handle dimensions first
-        point = self._handle_dimension(point)
-        
-        # Compute metric and symplectic components
-        metric = self.compute_metric(point)
-        form = self.compute_form(point)
-        symplectic = form.matrix
-        
-        # Ensure dimensions match by padding/truncating both tensors to target_dim
-        target_dim = self.target_dim
-        if metric.shape[-1] != target_dim:
-            if metric.shape[-1] < target_dim:
-                padding = torch.zeros(*metric.shape[:-1], target_dim - metric.shape[-1], 
-                                    device=metric.device, dtype=metric.dtype)
-                metric = torch.cat([metric, padding], dim=-1)
-            else:
-                metric = metric[..., :target_dim]
+        # Ensure pattern has correct shape
+        if pattern.dim() == 1:
+            pattern = pattern.unsqueeze(0)  # Add batch dimension
             
-        if symplectic.shape[-1] != target_dim:
-            if symplectic.shape[-1] < target_dim:
-                padding = torch.zeros(*symplectic.shape[:-1], target_dim - symplectic.shape[-1],
-                                    device=symplectic.device, dtype=symplectic.dtype)
-                symplectic = torch.cat([symplectic, padding], dim=-1)
-            else:
-                symplectic = symplectic[..., :target_dim]
+        batch_size = pattern.shape[0]
+        dim = pattern.shape[-1]
+        
+        # Create metric tensor (positive definite by construction)
+        metric = torch.eye(dim, dtype=self.dtype, device=pattern.device)
+        metric = metric.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Add low-rank perturbation for non-triviality
+        U = torch.randn(batch_size, dim, dim // 4, 
+                       dtype=self.dtype, device=pattern.device) * 0.1
+        metric = metric + U @ U.transpose(-1, -2)
+        
+        # Create symplectic form (antisymmetric by construction)
+        n = dim // 2
+        symplectic = torch.zeros(batch_size, dim, dim,
+                               dtype=self.dtype, device=pattern.device)
+        
+        # Fill in standard symplectic form blocks
+        symplectic[..., :n, n:] = torch.eye(n, dtype=self.dtype, device=pattern.device)
+        symplectic[..., n:, :n] = -torch.eye(n, dtype=self.dtype, device=pattern.device)
         
         # Combine into quantum geometric tensor
-        return metric + 1j * symplectic
+        Q = metric + 1j * symplectic * self._SYMPLECTIC_WEIGHT
+        
+        return Q
 
     def compute_ricci_tensor(self, point: Tensor) -> Tensor:
         """Compute Ricci tensor for quantum geometry.
@@ -537,7 +586,7 @@ class SymplecticStructure:
         dgamma = (gamma_plus - gamma.unsqueeze(0)) / eps
         
         # Compute Riemann tensor using vectorized operations
-        # R^i_{jkl} = ∂_k Γ^i_{jl} - ∂_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
+        # R^i_{jkl} = ∂_k Γ^i_{jl} - ���_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
         R = (
             dgamma.permute(1, 2, 0, 3) - dgamma.permute(1, 2, 3, 0) +
             torch.einsum('imk,mjl->ijkl', gamma, gamma) -

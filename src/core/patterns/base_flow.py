@@ -125,11 +125,14 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             0.1 * metric_norm / (ricci_norm + self.stability_threshold)
         )
         
-        # Reshape adaptive timestep for broadcasting
+        # Reshape adaptive timestep for broadcasting with metric and flow tensors
         adaptive_timestep = adaptive_timestep.view(*metric.shape[:-2], 1, 1)
         
         # Compute flow step with positivity preservation
         flow = -2 * ricci
+        
+        # Ensure flow has the same shape as metric
+        flow = flow.reshape(*metric.shape)
         
         # Compute eigendecomposition of flow
         flow_eigvals, flow_eigvecs = torch.linalg.eigh(flow)

@@ -10,7 +10,9 @@ This module provides comprehensive benchmarks for core operations including:
 import pytest
 import torch
 import time
-from typing import Tuple, cast
+import yaml
+import os
+from typing import Tuple, cast, Dict, Any
 
 from src.core.attention import AttentionCompute
 from src.core.flow import PatternFormationFlow
@@ -27,17 +29,47 @@ from src.core.patterns import (
 from tests.performance.benchmarks.metrics import BenchmarkMetrics
 
 
+def load_test_config(profile: str = "tiny") -> Dict[str, Any]:
+    """Load test configuration based on hardware profile.
+    
+    Args:
+        profile: Hardware profile to use ('tiny', 'standard', 'server')
+        
+    Returns:
+        Test configuration dictionary
+    """
+    config_path = os.path.join("configs", "test_regimens", f"{profile}.yaml")
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
 class TestCoreOperations:
     @pytest.fixture(autouse=True)
     def setup(self):
         """Setup test environment."""
-        self.sizes = [512, 1024, 2048, 4096]
-        self.batch_sizes = [1, 8, 16, 32]
-        self.iterations = 10
+        # Load configuration (default to tiny for laptop testing)
+        self.config = load_test_config("tiny")
+        
+        # Set up test parameters from config
+        pattern_config = self.config["pattern_tests"]
+        perf_config = self.config["performance_tests"]
+        geo_config = self.config["geometric_tests"]
+        
+        self.sizes = [
+            pattern_config["pattern_size"] // 4,
+            pattern_config["pattern_size"] // 2,
+            pattern_config["pattern_size"],
+            pattern_config["pattern_size"] * 2
+        ]
+        self.batch_sizes = [1, 4, 8, min(16, perf_config["max_batch_size"])]
+        self.iterations = perf_config["test_iters"]
         self.metrics = BenchmarkMetrics()
+        
+        # Initialize framework with config parameters
         self.riemannian_framework = PatternRiemannianStructure(
-            manifold_dim=64,
-            pattern_dim=64  # Setting pattern_dim equal to manifold_dim for testing
+            manifold_dim=geo_config["max_dim"] // 2,  # Use half of max_dim for manifold
+            pattern_dim=geo_config["max_dim"] // 2,   # Use half of max_dim for pattern
+            device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         )
 
     def test_attention_computation(self):

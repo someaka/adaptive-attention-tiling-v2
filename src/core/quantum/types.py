@@ -16,13 +16,19 @@ class QuantumState:
     amplitudes: torch.Tensor  # State vector amplitudes
     basis_labels: List[str]  # Labels for basis states
     phase: torch.Tensor  # Quantum phase information
+    original_norm: Optional[torch.Tensor] = None  # Original norm of the input tensor
 
     def __post_init__(self):
         """Ensure state normalization and proper tensor types."""
-        # Convert to complex if not already
+        # Convert to complex64 if not already
         if not torch.is_complex(self.amplitudes):
             self.amplitudes = self.amplitudes.to(torch.complex64)
+        elif self.amplitudes.dtype != torch.complex64:
+            self.amplitudes = self.amplitudes.to(torch.complex64)
+            
         if not torch.is_complex(self.phase):
+            self.phase = self.phase.to(torch.complex64)
+        elif self.phase.dtype != torch.complex64:
             self.phase = self.phase.to(torch.complex64)
 
         # Normalize state vector
@@ -107,9 +113,26 @@ class QuantumState:
             new_amplitudes = unitary @ self.amplitudes
         else:
             # For batched states
-            new_amplitudes = torch.bmm(unitary.unsqueeze(0).expand(self.amplitudes.shape[0], -1, -1),
-                                     self.amplitudes.unsqueeze(-1)).squeeze(-1)
-        return QuantumState(new_amplitudes, self.basis_labels, self.phase)
+            if len(self.amplitudes.shape) == 3:  # [batch_size, seq_len, dim]
+                batch_size, seq_len, dim = self.amplitudes.shape
+                amplitudes_flat = self.amplitudes.reshape(-1, dim)  # [batch_size * seq_len, dim]
+                
+                # Ensure unitary has correct shape [batch_size * seq_len, dim, dim]
+                if len(unitary.shape) > 3:
+                    unitary = unitary.reshape(-1, dim, dim)
+                unitary_expanded = unitary.expand(batch_size * seq_len, dim, dim)
+                
+                new_amplitudes_flat = torch.bmm(unitary_expanded, amplitudes_flat.unsqueeze(-1)).squeeze(-1)
+                new_amplitudes = new_amplitudes_flat.reshape(batch_size, seq_len, dim)
+            else:
+                new_amplitudes = unitary @ self.amplitudes
+            
+        return QuantumState(
+            amplitudes=new_amplitudes,
+            basis_labels=self.basis_labels,
+            phase=self.phase,
+            original_norm=self.original_norm
+        )
 
     def partial_trace(self, subsystem_dims: List[int], trace_out: int) -> torch.Tensor:
         """Compute reduced density matrix by tracing out specified subsystem."""
