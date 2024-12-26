@@ -1,0 +1,84 @@
+# Test configuration for quantum geometric attention
+
+# Test regimes
+regimes:
+  debug:
+    # Minimal dimensions for debugging
+    hidden_dim: 8
+    num_heads: 1
+    head_dim: 4
+    manifold_dim: 4
+    motive_rank: 1
+    batch_size: 1
+    seq_len: 2
+    num_layers: 1
+    tile_size: 2
+    num_steps: 2
+
+  tiny:
+    # Small dimensions for quick tests
+    hidden_dim: 16
+    num_heads: 2
+    head_dim: 8
+    manifold_dim: 8
+    motive_rank: 2
+    batch_size: 1
+    seq_len: 4
+    num_layers: 2
+    tile_size: 4
+    num_steps: 5
+
+  small:
+    # Moderate dimensions for thorough tests
+    hidden_dim: 32
+    num_heads: 4
+    head_dim: 8
+    manifold_dim: 16
+    motive_rank: 4
+    batch_size: 2
+    seq_len: 8
+    num_layers: 3
+    tile_size: 8
+    num_steps: 10
+
+# Active regime (change this to switch between regimes)
+active_regime: debug
+
+# Common parameters across all regimes
+common:
+  # Attention parameters
+  dropout: 0.1
+
+  # Quantum parameters
+  wave_enabled: true
+  wave_k: 2.0
+  wave_omega: 1.0
+
+  # Manifold parameters
+  manifold_type: "hyperbolic"
+  curvature: -1.0
+
+  # Evolution parameters
+  dt: 0.1
+  epsilon: 1e-6
+
+  # Memory management
+  clear_memory: true
+  track_memory: true
+  memory_threshold: 1e9  # 1GB
+
+  # Debug settings
+  debug:
+    log_level: "DEBUG"
+    log_shapes: true
+    log_metrics: true
+    log_flow: true
+    max_flow_steps: 100
+    check_nan: true
+    break_on_nan: true
+    profile_memory: true
+    save_states: false
+
+  # Logging
+  log_metrics: true
+  save_checkpoints: false 

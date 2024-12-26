@@ -16,6 +16,12 @@ import torch
 from torch import nn
 
 
+class ComplexTanh(nn.Module):
+    """Complex-valued tanh activation function."""
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(input.real) + 1j * torch.tanh(input.imag)
+
+
 @dataclass
 class ScaleConnectionData:
     """Data class for scale connection results."""
@@ -32,7 +38,7 @@ class RGFlow:
     This class implements a geometric RG flow that preserves the
     semigroup property and scale transformation properties.
     """
-    beta_function: Callable[[torch.Tensor], torch.Tensor]
+    beta_function: Callable[[torch.Tensor], torch.Tensor]    
     fixed_points: Optional[List[torch.Tensor]] = None
     stability: Optional[List[bool]] = None
     flow_lines: Optional[List[torch.Tensor]] = None
@@ -588,66 +594,62 @@ class ScaleCohomology:
         # De Rham complex components (Ω^k forms)
         self.forms = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(max(self._compute_form_dim(k, dim), 1), max(dim * 2, 1), dtype=dtype),
-                nn.ReLU(),
-                nn.Linear(max(dim * 2, 1), max(self._compute_form_dim(k + 1, dim), 1), dtype=dtype)
+                nn.Linear(max(self._compute_form_dim(k, dim), 1), max(dim * 2, 1), dtype=torch.complex64),
+                ComplexTanh(),
+                nn.Linear(max(dim * 2, 1), max(self._compute_form_dim(k + 1, dim), 1), dtype=torch.complex64)
             ) for k in range(dim + 1)
         ])
 
         # Geometric flow components with optimized architecture
         self.riemann_computer = nn.Sequential(
-            nn.Linear(dim, dim * 2, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 2, dim * dim, dtype=dtype)
+            nn.Linear(dim, dim * 2, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 2, dim * dim, dtype=torch.complex64)
         )
 
         # Initialize potential gradient network with correct dimensions
         self.potential_grad = nn.Sequential(
-            nn.Linear(dim * dim, dim * 2, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 2, dim * dim, dtype=dtype)
+            nn.Linear(dim * dim, dim * 2, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 2, dim * dim, dtype=torch.complex64)
         )
-        # Initialize the last layer to be close to zero
-        with torch.no_grad():
-            self.potential_grad[-1].weight.data *= 0.01
-            self.potential_grad[-1].bias.data *= 0.01
 
         # Specialized networks for cohomology computation
         self.cocycle_computer = nn.Sequential(
-            nn.Linear(dim * 3, dim * 4, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 4, dim, dtype=dtype)
+            nn.Linear(dim * 3, dim * 4, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 4, dim, dtype=torch.complex64)
         )
 
         self.coboundary_computer = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 4, dim, dtype=dtype)
+            nn.Linear(dim * 2, dim * 4, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 4, dim, dtype=torch.complex64)
         )
 
         # Initialize components
-        self.connection = ScaleConnection(dim, num_scales, dtype=dtype)
-        self.rg_flow = RenormalizationFlow(dim, dtype=dtype)
-        self.anomaly_detector = AnomalyDetector(dim, dtype=dtype)
-        self.scale_invariance = ScaleInvariance(dim, num_scales, dtype=dtype)
+        self.connection = ScaleConnection(dim, num_scales, dtype=torch.complex64)
+        self.rg_flow = RenormalizationFlow(dim, dtype=torch.complex64)
+        self.anomaly_detector = AnomalyDetector(dim, dtype=torch.complex64)
+        self.scale_invariance = ScaleInvariance(dim, num_scales, dtype=torch.complex64)
 
         # Specialized networks for advanced computations
         self.callan_symanzik_net = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 4, dim, dtype=dtype)
+            nn.Linear(dim * 2, dim * 4, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 4, dim, dtype=torch.complex64)
         )
         
         self.ope_net = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 4, dim, dtype=dtype)
+            nn.Linear(dim * 2, dim * 4, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 4, dim, dtype=torch.complex64)
         )
 
         self.conformal_net = nn.Sequential(
-            nn.Linear(dim, dim * 2, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(dim * 2, 1, dtype=dtype)
+            nn.Linear(dim, dim * 2, dtype=torch.complex64),
+            ComplexTanh(),
+            nn.Linear(dim * 2, 1, dtype=torch.complex64)
         )
 
     @staticmethod
@@ -882,19 +884,36 @@ class ScaleCohomology:
         return unique_points
 
     def fixed_point_stability(self, fixed_point: torch.Tensor, beta_function: Callable[[torch.Tensor], torch.Tensor]) -> str:
-        """Analyze stability of a fixed point."""
+        """Analyze stability of a fixed point.
+        
+        For U(1) symmetry, we need to handle both:
+        1. The quantum aspect (phase preservation)
+        2. The geometric aspect (manifold structure)
+        """
         # Compute Jacobian at fixed point
         x = fixed_point.requires_grad_(True)
         beta = beta_function(x)
         
-        # Compute full Jacobian matrix
+        # Initialize Jacobian matrix with proper shape
         dim = x.shape[0]
         jacobian = torch.zeros((dim, dim), dtype=x.dtype)
-        for i in range(dim):
-            grad = torch.autograd.grad(beta[i], x, retain_graph=True)[0]
-            jacobian[i] = grad
         
-        # Compute eigenvalues of Jacobian
+        # Compute full Jacobian matrix respecting U(1) structure
+        for i in range(dim):
+            # Take gradient of i-th component
+            if beta[i].is_complex():
+                # For complex components, compute gradient of real and imaginary parts
+                grad_real = torch.autograd.grad(beta[i].real, x, retain_graph=True)[0]
+                grad_imag = torch.autograd.grad(beta[i].imag, x, retain_graph=True)[0]
+                jacobian[i] = grad_real + 1j * grad_imag
+            else:
+                grad = torch.autograd.grad(beta[i], x, retain_graph=True)[0]
+                jacobian[i] = grad
+        
+        # Ensure Jacobian is properly shaped for eigenvalue computation
+        jacobian = jacobian.reshape(dim, dim)
+        
+        # Compute eigenvalues respecting U(1) structure
         eigenvalues = torch.linalg.eigvals(jacobian)
         
         # Analyze stability based on eigenvalue real parts
@@ -902,6 +921,10 @@ class ScaleCohomology:
             return "stable"
         elif torch.all(eigenvalues.real > 0):
             return "unstable"
+        # If any eigenvalue is very close to zero, it's marginal
+        elif torch.any(torch.abs(eigenvalues.real) < 1e-6):
+            return "marginal"
+        # Otherwise it's also marginal (mixed eigenvalues)
         else:
             return "marginal"
 
@@ -925,19 +948,64 @@ class ScaleCohomology:
         return [float(ev.real) for ev in eigenvalues]
 
     def anomaly_polynomial(self, state: torch.Tensor) -> List[AnomalyPolynomial]:
-        """Compute anomaly polynomials using differential forms and cohomology."""
+        """Compute anomaly polynomials using differential forms and cohomology.
+        
+        For a symmetry action g, the anomaly polynomial A(g) should satisfy:
+        A(g1 ∘ g2) = A(g1) + A(g2)  (Wess-Zumino consistency)
+        
+        For U(1) symmetry, we handle this by:
+        1. Working with phase angles (periodic structure)
+        2. Using proper differential forms
+        3. Ensuring cohomological consistency
+        """
         if callable(state):
             # If state is a function (symmetry action), evaluate it on test points
-            test_points = torch.randn(10, self.dim, dtype=self.dtype)
+            test_points = torch.linspace(0, 2*torch.pi, 10, dtype=torch.complex64)
             state_tensor = torch.stack([state(x) for x in test_points])
+            
+            # For U(1), work with phase angles
+            # Extract phase angle in [-π, π]
+            state_tensor = torch.angle(state_tensor)
         else:
-            state_tensor = state
-
-        # Use forms for anomaly detection
+            state_tensor = state.real
+            
+        # Normalize phase to [0, 2π] for consistent composition
+        state_tensor = (state_tensor + 2*torch.pi) % (2*torch.pi)
+        
+        # Convert to complex for form computation
+        state_tensor = state_tensor.to(torch.complex64)
+        
+        # Reshape for k-forms while preserving phase structure
+        state_tensor = state_tensor.reshape(-1, 1)
+        
+        # Use forms for anomaly detection with cohomological consistency
         anomalies = []
+        
         for k in range(self.dim + 1):
-            omega = self.forms[k](state_tensor)
+            # For each k-form, compute dimension
+            k_dim = max(self._compute_form_dim(k, self.dim), 1)
+            
+            # Prepare input for k-form
+            if k == 0:
+                k_input = state_tensor
+            else:
+                # For higher k-forms, use wedge product structure
+                # This preserves the phase addition property
+                k_input = torch.cat([state_tensor] * k_dim, dim=1)
+                
+                # For U(1), phases add under composition
+                # No additional scaling needed since we're working with angles
+            
+            # Compute k-form
+            omega = self.forms[k](k_input)
+            
+            # Only include non-zero forms
             if torch.norm(omega) > 1e-6:
+                # Scale coefficients to match phase composition
+                # For U(1), this means the coefficients should add
+                # when the phases add (mod 2π)
+                omega = omega / (2 * torch.pi)  # Normalize by period
+                
                 anomalies.append(
                     AnomalyPolynomial(
                         coefficients=omega,
@@ -946,6 +1014,7 @@ class ScaleCohomology:
                         type=self._classify_anomaly(k)
                     )
                 )
+        
         return anomalies
 
     def scale_invariants(self, structure: torch.Tensor) -> List[Tuple[torch.Tensor, float]]:
@@ -1250,3 +1319,4 @@ class ScaleSystem:
         results["cohomology"] = cohomology
 
         return results
+

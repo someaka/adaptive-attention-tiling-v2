@@ -1,9 +1,9 @@
 # Test configuration for debugging (absolute minimal settings)
 hardware_profile:
   name: "debug"
-  description: "Minimal configuration for debugging"
+  description: "Extreme minimal configuration for debugging"
   target_hardware:
-    ram_gb: 4
+    ram_gb: 2
   cpu: "minimal"
   memory: "minimal"
 
@@ -12,6 +12,7 @@ geometric_tests:
   num_heads: 1      # Single head
   batch_size: 1     # Single item batch
   dtype: "float32"  # Lower precision
+  hidden_dim: 8     # Extremely small hidden dimension
   
 hyperbolic_tests:
   vector_scales: [0.01]  # Single scale
@@ -21,8 +22,10 @@ hyperbolic_tests:
 euclidean_tests:
   dimensions: 2
   test_batch_size: 1
+  hidden_dim: 8
 
 parallel_transport:
   dimensions: 2
   methods: ["schild"]  # Single method
   test_cases: 1        # Single test case
+  hidden_dim: 8

@@ -233,8 +233,6 @@ class NeuralQuantumBridge(nn.Module):
         # Get attention pattern
         attention_result = self.quantum_tile(
             state.amplitudes,
-            state.amplitudes,
-            state.amplitudes,
             return_metrics=False
         )
         

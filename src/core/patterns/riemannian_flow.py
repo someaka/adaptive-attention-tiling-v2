@@ -50,11 +50,21 @@ class RiemannianFlow(BaseGeometricFlow):
         
         self.use_parallel_transport = use_parallel_transport
         
+        # Initialize flow layers with correct dimensions
+        if hidden_dim is None:
+            hidden_dim = manifold_dim
+        
+        # Flow layers should map from hidden_dim to hidden_dim
+        self.flow_layers = nn.ModuleList([
+            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
+            for _ in range(num_layers)
+        ])
+        
         # Additional Riemannian-specific networks
         self.christoffel_net = nn.Sequential(
-            nn.Linear(manifold_dim, self.hidden_dim),
+            nn.Linear(manifold_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(self.hidden_dim, manifold_dim * manifold_dim * manifold_dim)
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim * manifold_dim)
         )
     
     def compute_christoffel(
@@ -62,79 +72,101 @@ class RiemannianFlow(BaseGeometricFlow):
         metric: torch.Tensor,
         points: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Compute Christoffel symbols.
+        """Compute Christoffel symbols for the metric tensor.
         
         Args:
-            metric: Metric tensor
-            points: Optional points where to compute symbols
+            metric: Metric tensor of shape [..., manifold_dim, manifold_dim]
+            points: Optional points tensor for computing metric derivatives
             
         Returns:
             Christoffel symbols tensor
         """
-        batch_size = metric.shape[0]
+        # Get device and dtype from metric
+        device = metric.device
+        dtype = metric.dtype
         
-        if points is not None:
-            # Use neural network for position-dependent symbols
-            christoffel = self.christoffel_net(points)
-            christoffel = christoffel.view(
-                batch_size,
-                self.manifold_dim,
-                self.manifold_dim,
-                self.manifold_dim
-            )
+        # Handle different input shapes
+        if metric.dim() > 3:
+            # If metric has more than 3 dimensions, flatten all but last 2
+            batch_size = metric.shape[0]
+            metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
+            # Update batch_size to account for flattened dimensions
+            batch_size = metric.shape[0]
+        elif metric.dim() == 3:  # [batch_size, manifold_dim, manifold_dim]
+            batch_size = metric.shape[0]
         else:
-            # Compute standard Christoffel symbols
-            # First compute inverse metric with stability check
-            eigvals, eigvecs = torch.linalg.eigh(metric)
-            if torch.min(eigvals) <= self.stability_threshold:
-                eigvals = torch.clamp(eigvals, min=self.stability_threshold)
-                metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1)
-            
-            metric_inv = torch.inverse(metric)
-            
-            # Compute metric derivatives with adaptive epsilon
-            metric_scale = torch.norm(metric, dim=(-2, -1), keepdim=True)
-            eps = self.stability_threshold * torch.sqrt(metric_scale)
-            
-            eye = torch.eye(self.manifold_dim, device=metric.device)
-            metric_derivs = torch.zeros(
+            raise ValueError(f"Unexpected metric shape: {metric.shape}")
+        
+        # Compute inverse metric
+        metric_inv = torch.inverse(metric + self.stability_threshold * torch.eye(
+            self.manifold_dim, device=device, dtype=dtype
+        ).unsqueeze(0))
+        
+        # Initialize metric derivatives
+        metric_derivs = torch.zeros(
+            batch_size,
+            self.manifold_dim,
+            self.manifold_dim,
+            self.manifold_dim,
+            device=device,
+            dtype=dtype
+        )
+        
+        # Create identity matrix for finite differences
+        eye = torch.eye(
+            self.manifold_dim,
+            device=device,
+            dtype=dtype
+        )
+        
+        # Small value for finite differences
+        eps = 1e-6
+        
+        # Create a zero tensor for points if None
+        if points is None:
+            points = torch.zeros(
                 batch_size,
-                self.manifold_dim,
-                self.manifold_dim,
                 self.manifold_dim,
                 device=metric.device
             )
-            
-            # Create a zero tensor for points if None
-            if points is None:
-                points = torch.zeros(
-                    batch_size,
-                    self.manifold_dim,
-                    device=metric.device
-                )
-            
-            for k in range(self.manifold_dim):
-                shift = eps * eye[k]
-                # Forward difference with stability scaling
-                metric_derivs[..., k] = (
-                    self.compute_metric(points + shift.unsqueeze(0)) -
-                    metric
-                ) / (eps + self.stability_threshold)
-            
-            # Compute Christoffel symbols with stability
-            christoffel = 0.5 * torch.einsum(
-                'bim,bmjk->bijk',
-                metric_inv,
-                metric_derivs + 
-                metric_derivs.transpose(-2, -1).transpose(-3, -2) -
-                metric_derivs.transpose(-3, -1)
-            )
-            
-            # Add stability regularization
-            christoffel_norm = torch.norm(christoffel, dim=(-3, -2, -1), keepdim=True)
-            if torch.any(christoffel_norm > 1.0 / self.stability_threshold):
-                christoffel = christoffel * (1.0 / self.stability_threshold) / christoffel_norm
-                
+        
+        # Compute metric derivatives using finite differences
+        for k in range(self.manifold_dim):
+            shift = eps * eye[k]
+            # Forward difference with stability scaling
+            shifted_metric = self.compute_metric(points + shift.unsqueeze(0))
+            diff = (shifted_metric - metric) / (eps + self.stability_threshold)
+            # Ensure diff has the right shape [batch_size, manifold_dim, manifold_dim]
+            if diff.dim() > 3:
+                diff = diff.reshape(-1, self.manifold_dim, self.manifold_dim)
+            metric_derivs[..., k] = diff
+        
+        # Compute Christoffel symbols using einsum for better broadcasting
+        christoffel = torch.zeros(
+            batch_size,
+            self.manifold_dim,
+            self.manifold_dim,
+            self.manifold_dim,
+            device=device,
+            dtype=dtype
+        )
+        
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    # Compute partial derivatives
+                    partial_k = metric_derivs[..., k, i, j]
+                    partial_j = metric_derivs[..., j, i, k]
+                    partial_i = metric_derivs[..., i, j, k]
+                    
+                    # Combine terms using einsum for proper broadcasting
+                    combined_terms = partial_k + partial_j - partial_i  # [batch_size]
+                    christoffel[..., i, j, k] = 0.5 * torch.einsum(
+                        '...i,...->...',
+                        metric_inv[..., i, :],
+                        combined_terms
+                    )
+        
         return christoffel
     
     def compute_ricci_tensor(
@@ -142,56 +174,74 @@ class RiemannianFlow(BaseGeometricFlow):
         metric: torch.Tensor,
         connection: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Compute Ricci tensor using full Riemannian structure.
-        
+        """Compute Ricci tensor.
+
         Args:
-            metric: Metric tensor
-            connection: Optional connection form
-            
+            metric: Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, heads, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, heads, time, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, heads, time, extra, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, heads, time, extra, extra2, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, heads, time, extra, extra2, extra3, manifold_dim, manifold_dim]
+                or [batch_size, seq_len, heads, time, extra, extra2, extra3, extra4, manifold_dim, manifold_dim]
+
         Returns:
-            Ricci curvature tensor
+            Ricci tensor of shape [batch_size, manifold_dim, manifold_dim]
         """
-        batch_size = metric.shape[0]
-        
-        # Get Christoffel symbols with stability
-        christoffel = self.compute_christoffel(metric)
-        
-        # Compute Riemann curvature components with stability
+        # Store original device and dtype
+        device = metric.device
+        dtype = metric.dtype
+
+        # Handle different input shapes
+        orig_shape = metric.shape
+        if metric.dim() > 3:
+            # If metric has more than 3 dimensions, flatten all but last 2
+            batch_size = metric.shape[0]
+            metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
+            # Update batch_size to account for flattened dimensions
+            batch_size = metric.shape[0]
+        elif metric.dim() == 3:  # [batch_size, manifold_dim, manifold_dim]
+            batch_size = metric.shape[0]
+        else:
+            raise ValueError(f"Unexpected metric shape: {metric.shape}")
+
+        # Compute Christoffel symbols if not provided
+        if connection is None:
+            connection = self.compute_christoffel(metric)
+
+        # Compute Riemann tensor components
         riemann = torch.zeros(
             batch_size,
             self.manifold_dim,
             self.manifold_dim,
             self.manifold_dim,
             self.manifold_dim,
-            device=metric.device
+            device=device,
+            dtype=dtype
         )
-        
-        # Compute R^i_jkl component using einsum for better stability
-        # First term: Γ^i_km Γ^m_jl
-        term1 = torch.einsum('bikm,bmjl->bijkl', christoffel, christoffel)
-        
-        # Second term: Γ^i_lm Γ^m_jk
-        term2 = torch.einsum('bilm,bmjk->bijkl', christoffel, christoffel)
-        
-        # Combine terms with stability check
-        riemann = term1 - term2
-        
-        # Normalize if too large
-        riemann_norm = torch.norm(riemann, dim=(-4, -3, -2, -1), keepdim=True)
-        if torch.any(riemann_norm > 1.0 / self.stability_threshold):
-            riemann = riemann * (1.0 / self.stability_threshold) / riemann_norm
-        
-        # Contract to get Ricci tensor using einsum
-        ricci = torch.einsum('bijkj->bik', riemann)
-        
-        # Symmetrize Ricci tensor
-        ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
-        
-        # Scale Ricci tensor for stability in flow
-        ricci_norm = torch.norm(ricci, dim=(-2, -1), keepdim=True)
-        if torch.any(ricci_norm > 1.0):
-            ricci = ricci / ricci_norm
-            
+
+        # Compute Riemann tensor
+        for i in range(self.manifold_dim):
+            for j in range(self.manifold_dim):
+                for k in range(self.manifold_dim):
+                    for l in range(self.manifold_dim):
+                        # R^i_{jkl} = \partial_k \Gamma^i_{jl} - \partial_l \Gamma^i_{jk} + ...
+                        term1 = connection[..., i, j, l].unsqueeze(-1) * connection[..., :, k, l]
+                        term2 = -connection[..., i, j, k].unsqueeze(-1) * connection[..., :, l, k]
+                        riemann[..., i, j, k, l] = term1.sum(-1) + term2.sum(-1)
+
+        # Contract to get Ricci tensor
+        ricci = torch.einsum('...ijij->...ij', riemann)
+
+        # Ensure final shape is [batch_size, manifold_dim, manifold_dim]
+        if ricci.shape[0] != batch_size:
+            # If batch dimension is wrong, reshape to combine all dimensions except last two
+            ricci = ricci.reshape(batch_size, self.manifold_dim, self.manifold_dim)
+
+        assert ricci.shape == (batch_size, self.manifold_dim, self.manifold_dim), \
+            f"Expected shape {(batch_size, self.manifold_dim, self.manifold_dim)}, got {ricci.shape}"
+
         return ricci
     
     def parallel_transport(

@@ -112,12 +112,21 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1)
             
         # Scale timestep based on metric and Ricci norms
-        metric_norm = torch.norm(metric, dim=(-2, -1), keepdim=True)
-        ricci_norm = torch.norm(ricci, dim=(-2, -1), keepdim=True)
+        # Compute norms while preserving batch dimensions
+        metric_flat = metric.reshape(-1, metric.shape[-1] * metric.shape[-1])
+        ricci_flat = ricci.reshape(-1, ricci.shape[-1] * ricci.shape[-1])
+        
+        metric_norm = torch.norm(metric_flat, dim=1, keepdim=True)
+        ricci_norm = torch.norm(ricci_flat, dim=1, keepdim=True)
+        
+        # Compute adaptive timestep with proper broadcasting
         adaptive_timestep = timestep * torch.minimum(
             torch.ones_like(metric_norm),
-            0.1 * metric_norm / (ricci_norm + self.stability_threshold)  # More conservative scaling
+            0.1 * metric_norm / (ricci_norm + self.stability_threshold)
         )
+        
+        # Reshape adaptive timestep for broadcasting
+        adaptive_timestep = adaptive_timestep.view(*metric.shape[:-2], 1, 1)
         
         # Compute flow step with positivity preservation
         flow = -2 * ricci
@@ -143,7 +152,9 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             new_metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1)
         
         # Normalize metric if needed
-        new_metric_norm = torch.norm(new_metric, dim=(-2, -1), keepdim=True)
+        new_metric_flat = new_metric.reshape(-1, new_metric.shape[-1] * new_metric.shape[-1])
+        new_metric_norm = torch.norm(new_metric_flat, dim=1, keepdim=True).view(-1, 1, 1)
+        
         if torch.any(new_metric_norm > 1.0 / self.stability_threshold):
             new_metric = new_metric * (1.0 / self.stability_threshold) / new_metric_norm
         

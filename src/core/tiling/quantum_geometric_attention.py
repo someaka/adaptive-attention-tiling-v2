@@ -230,8 +230,13 @@ class QuantumGeometricAttention(nn.Module):
         
         # Initialize geometric flow
         self.flow = GeometricFlow(
+            hidden_dim=self.head_dim,
             manifold_dim=self.manifold_dim,
-            hidden_dim=hidden_dim,
+            motive_rank=motive_rank,
+            num_charts=4,
+            integration_steps=10,
+            dt=0.1,
+            stability_threshold=1e-6,
             dtype=dtype
         ).to(self.device)
         
@@ -370,29 +375,19 @@ class QuantumGeometricAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
         return_metrics: bool = False
     ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
-        """Apply quantum geometric attention.
-        
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
-            mask: Optional attention mask
-            return_metrics: Whether to return attention metrics
-            
-        Returns:
-            Tuple of (output tensor, optional metrics dictionary)
-        """
+        """Apply quantum geometric attention."""
         batch_size, seq_len, _ = x.shape
-        metrics: Dict[str, Any] = {} if return_metrics else {}
+        metrics = {} if isinstance(return_metrics, bool) and return_metrics else {}
         
         # Process through each attention layer
         current = x
         for i, attention_layer in enumerate(self.attention_layers):
-            # Project to Q, K, V
+            # Project to Q, K, V in-place
             qkv = self.to_qkv(current)
-            qkv = qkv.chunk(3, dim=-1)
-            q, k, v = map(
-                lambda t: t.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2),
-                qkv
-            )
+            q, k, v = qkv.chunk(3, dim=-1)
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             
             # Apply geometric flow to queries and keys
             q_flowed, q_metrics = self.flow(q.reshape(-1, self.head_dim))
@@ -406,8 +401,8 @@ class QuantumGeometricAttention(nn.Module):
                 metrics[f'layer_{i}_q_flow'] = q_metrics
                 metrics[f'layer_{i}_k_flow'] = k_metrics
             
-            # Initialize attention scores
-            dots = torch.zeros(
+            # Compute attention scores efficiently
+            dots = torch.empty(
                 batch_size,
                 self.num_heads,
                 seq_len,
@@ -415,6 +410,8 @@ class QuantumGeometricAttention(nn.Module):
                 device=x.device,
                 dtype=x.dtype
             )
+            torch.matmul(q_flowed, k_flowed.transpose(-2, -1), out=dots)
+            dots.mul_(self.scale)
             
             # Process through attention layer
             head_dots, layer_metrics = attention_layer(q_flowed, k_flowed, v)
@@ -425,21 +422,30 @@ class QuantumGeometricAttention(nn.Module):
             
             # Apply attention mask if provided
             if mask is not None:
-                dots = dots.masked_fill(mask[:, None, None, :] == 0, float('-inf'))
+                dots.masked_fill_(mask[:, None, None, :] == 0, float('-inf'))
             
-            # Compute attention weights
-            attn = F.softmax(dots * self.scale, dim=-1)
-            attn = self.dropout(attn)
+            # Compute attention weights in-place
+            dots = F.softmax(dots, dim=-1)
+            dots = self.dropout(dots)
             
-            # Apply attention to values
-            out = torch.matmul(attn, v)
+            # Apply attention to values in-place
+            out = torch.empty(
+                batch_size,
+                self.num_heads,
+                seq_len,
+                self.head_dim,
+                device=x.device,
+                dtype=x.dtype
+            )
+            torch.matmul(dots, v, out=out)
             
-            # Reshape and project output
-            out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
+            # Reshape and project output in-place
+            out = out.transpose(1, 2).contiguous()
+            out = out.view(batch_size, seq_len, self.hidden_dim)
             out = self.to_out(out)
             
-            # Add residual connection and update current
-            current = current + out
+            # Add residual connection and update current in-place
+            current.add_(out)
             
             if return_metrics:
                 metrics[f'layer_{i}_output'] = {
@@ -659,21 +665,33 @@ class QuantumGeometricAttention(nn.Module):
         
         # Compute Jacobian
         g_state.requires_grad_(True)
-        tangent_vectors = torch.eye(self.hidden_dim).to(g_state.device)
+        
+        # Create basis vectors for tangent space
+        basis_vectors = torch.eye(
+            self.hidden_dim,
+            device=g_state.device,
+            dtype=g_state.dtype
+        ).reshape(-1, self.hidden_dim)  # [hidden_dim, hidden_dim]
         
         # Use flow module's forward method
         def flow_fn(x):
-            return self.flow(x)
+            return self.flow(x.reshape(-1, self.hidden_dim))[0]  # Only take output, not metrics
         
-        jacobian = torch.autograd.functional.jvp(
-            flow_fn,
-            g_state,
-            tangent_vectors,
-            create_graph=True
-        )[1]
+        # Compute Jacobian-vector products for each basis vector
+        jvps = []
+        for v in basis_vectors:
+            _, jvp = torch.autograd.functional.jvp(
+                flow_fn,
+                (g_state.reshape(-1, self.hidden_dim),),
+                (v.expand_as(g_state.reshape(-1, self.hidden_dim)),)
+            )
+            jvps.append(jvp)
+        
+        # Stack JVPs to form Jacobian
+        jacobian = torch.stack(jvps, dim=1)  # [batch_size, hidden_dim, hidden_dim]
         
         # Compute metric tensor
-        metric = torch.einsum("...i,...j->...ij", jacobian, jacobian)
+        metric = torch.einsum('...ij,...kj->...ik', jacobian, jacobian)
         
         return metric
 

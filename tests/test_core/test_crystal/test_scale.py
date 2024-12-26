@@ -272,7 +272,18 @@ class TestScaleCohomology:
             a1 = scale_system.anomaly_polynomial(g1)
             a2 = scale_system.anomaly_polynomial(g2)
             composed = scale_system.anomaly_polynomial(lambda x: g1(g2(x)))
-            return torch.allclose(composed, a1 + a2, rtol=1e-4)
+            
+            # Compare coefficients of each anomaly polynomial
+            for i, (c, a1p, a2p) in enumerate(zip(composed, a1, a2)):
+                print(f"Polynomial {i}:")
+                print(f"  Composed: {c.coefficients}")
+                print(f"  A1: {a1p.coefficients}")
+                print(f"  A2: {a2p.coefficients}")
+                print(f"  A1 + A2: {a1p.coefficients + a2p.coefficients}")
+                print(f"  Difference: {torch.norm(c.coefficients - (a1p.coefficients + a2p.coefficients))}")
+                if not torch.allclose(c.coefficients, a1p.coefficients + a2p.coefficients, rtol=1e-4):
+                    return False
+            return True
 
         def g1(x):
             return torch.exp(1j * x)

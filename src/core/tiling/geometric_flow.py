@@ -77,11 +77,18 @@ class GeometricFlow(RiemannianFlow):
             torch.randn(num_charts, manifold_dim, dtype=self.dtype)
         )
         
-        # Hamiltonian structure
-        self.hamiltonian = nn.Sequential(
+        # Initialize flow layers with correct dimensions
+        self.flow_layers = nn.ModuleList([
             nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype),
+            nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype)
+        ])
+        
+        # Hamiltonian structure with adaptive input projection
+        self.hamiltonian = nn.Sequential(
+            nn.AdaptiveAvgPool1d(hidden_dim),  # Project any input size to hidden_dim
+            nn.Linear(hidden_dim, manifold_dim, dtype=self.dtype),  # Project to manifold_dim
             nn.SiLU(),
-            nn.Linear(manifold_dim, 1, dtype=self.dtype)
+            nn.Linear(manifold_dim, 1, dtype=self.dtype)  # Output scalar energy
         )
     
     def compute_ricci_tensor(
@@ -103,16 +110,36 @@ class GeometricFlow(RiemannianFlow):
         
         # Add quantum corrections from arithmetic structure
         quantum_term = self.arithmetic.compute_quantum_correction(metric)
-        ricci = ricci + quantum_term
+        
+        # Project quantum term to match Ricci tensor dimensions
+        if quantum_term.shape != ricci.shape:
+            # Get target shape from ricci tensor
+            h, w = ricci.shape[-2], ricci.shape[-1]  # Get last two dimensions as integers
+            
+            # Reshape quantum term to match ricci dimensions
+            quantum_term_flat = quantum_term.reshape(-1, *quantum_term.shape[-2:])
+            
+            # Use adaptive pooling to match exact dimensions
+            quantum_term_resized = torch.nn.functional.adaptive_avg_pool2d(
+                quantum_term_flat.unsqueeze(1),  # Add channel dimension
+                output_size=(h, w)  # Use tuple of integers
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Restore batch dimensions
+            quantum_term = quantum_term_resized.reshape(*ricci.shape)
+        
+        # Add quantum corrections with a small scaling factor for stability
+        alpha = 0.1  # Small factor for stability
+        ricci = ricci + alpha * quantum_term
         
         return ricci
     
     def flow_step(
         self,
-        metric: Tensor,
-        ricci: Tensor,
+        metric: torch.Tensor,
+        ricci: torch.Tensor,
         timestep: float = 0.1
-    ) -> Tuple[Tensor, Dict[str, Any]]:
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Perform flow step with quantum geometric features.
         
         Args:
@@ -126,33 +153,51 @@ class GeometricFlow(RiemannianFlow):
         # Basic Riemannian flow step
         new_metric, metrics = super().flow_step(metric, ricci, timestep)
         
+        # Reshape metric for hamiltonian computation
+        batch_size = metric.shape[0]
+        metric_flat = metric.reshape(batch_size, 1, -1)  # [batch_size, 1, N]
+        
         # Add quantum geometric metrics
         metrics.update({
             'quantum_correction': torch.norm(
                 self.arithmetic.compute_quantum_correction(metric)
             ).item(),
-            'hamiltonian': self.hamiltonian(
-                metric.reshape(metric.shape[0], -1)
-            ).mean().item()
+            'hamiltonian': self.hamiltonian(metric_flat).squeeze(-1).mean().item()
         })
         
         return new_metric, metrics
     
     def compute_metric(self, x: Tensor) -> Tensor:
-        """Compute metric with quantum geometric structure.
+        """Compute metric with quantum geometric structure."""
+        # Project input to manifold dimension
+        x_proj = x[..., :self.manifold_dim]
         
-        Args:
-            x: Input tensor
-            
-        Returns:
-            Metric tensor with quantum corrections
-        """
         # Get base metric
-        metric = super().compute_metric(x)
+        metric = super().compute_metric(x_proj)  # Shape: [batch_size, manifold_dim, manifold_dim]
         
         # Add quantum geometric structure
-        quantum_metric = self.arithmetic.compute_quantum_metric(x)
-        metric = metric + quantum_metric
+        quantum_metric = self.arithmetic.compute_quantum_metric(x)  # Shape: [batch_size, manifold_dim, manifold_dim]
+        
+        # Ensure quantum metric has the same shape as base metric
+        if quantum_metric.shape != metric.shape:
+            batch_size = metric.shape[0]
+            
+            # Resize quantum metric in-place
+            quantum_metric = quantum_metric.view(-1, quantum_metric.shape[-1])
+            quantum_metric = F.adaptive_avg_pool1d(
+                quantum_metric.unsqueeze(1),
+                output_size=self.manifold_dim
+            ).squeeze(1)
+            
+            # Reshape and pool to final dimensions
+            quantum_metric = quantum_metric.view(batch_size, -1, self.manifold_dim)
+            quantum_metric = F.adaptive_avg_pool2d(
+                quantum_metric.unsqueeze(1),
+                output_size=(self.manifold_dim, self.manifold_dim)
+            ).squeeze(1)
+        
+        # Add metrics with proper scaling in-place
+        metric.add_(quantum_metric, alpha=0.1)
         
         return metric
     
@@ -172,6 +217,10 @@ class GeometricFlow(RiemannianFlow):
         """
         # Initialize path if requested
         path: List[Tensor] = [x] if return_path else []
+        
+        # Project input to manifold dimension if needed
+        if x.shape[-1] != self.manifold_dim:
+            x = x[..., :self.manifold_dim]
         
         # Get initial metric with quantum structure
         metric = self.compute_metric(x)
@@ -197,7 +246,7 @@ class GeometricFlow(RiemannianFlow):
             # Update position
             current = self.flow_layers[0](current)
             current = F.silu(current)
-            current = self.flow_layers[-1](current)
+            current = self.flow_layers[1](current)
             
             if return_path:
                 path.append(current)
