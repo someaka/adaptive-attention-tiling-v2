@@ -61,7 +61,7 @@ class TestCoreOperations:
             pattern_config["pattern_size"],
             pattern_config["pattern_size"] * 2
         ]
-        self.batch_sizes = [1, 4, 8, min(16, perf_config["max_batch_size"])]
+        self.batch_sizes = [1, 4, 8, 16]
         self.iterations = perf_config["test_iters"]
         self.metrics = BenchmarkMetrics()
         
@@ -69,7 +69,7 @@ class TestCoreOperations:
         self.riemannian_framework = PatternRiemannianStructure(
             manifold_dim=geo_config["max_dim"] // 2,  # Use half of max_dim for manifold
             pattern_dim=geo_config["max_dim"] // 2,   # Use half of max_dim for pattern
-            device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            device=torch.device('cpu')  # CPU-only implementation
         )
 
     def test_attention_computation(self):

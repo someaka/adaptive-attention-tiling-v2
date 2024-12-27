@@ -48,6 +48,7 @@ from .operadic_structure import (
     EnrichedAttention,
 )
 import logging
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +287,6 @@ class SymplecticStructure:
             
             # Free memory
             del chunk, adjusted
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
             
         # Concatenate all chunks
         return torch.cat(output_chunks, dim=0)
@@ -586,7 +586,7 @@ class SymplecticStructure:
         dgamma = (gamma_plus - gamma.unsqueeze(0)) / eps
         
         # Compute Riemann tensor using vectorized operations
-        # R^i_{jkl} = ∂_k Γ^i_{jl} - ���_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
+        # R^i_{jkl} = ∂_k Γ^i_{jl} - ∂_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
         R = (
             dgamma.permute(1, 2, 0, 3) - dgamma.permute(1, 2, 3, 0) +
             torch.einsum('imk,mjl->ijkl', gamma, gamma) -
@@ -691,3 +691,7 @@ class SymplecticStructure:
         
         logger.debug("Finished quantum Ricci flow")
         return current_point 
+
+    def _cleanup(self):
+        """Clean up memory after operations."""
+        gc.collect()  # Use regular garbage collection 
