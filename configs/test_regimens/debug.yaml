@@ -29,3 +29,24 @@ parallel_transport:
   methods: ["schild"]  # Single method
   test_cases: 1        # Single test case
   hidden_dim: 8
+
+quantum_geometric:
+  fisher_rao_weight: 0.1    # Reduced weight for debugging
+  quantum_weight: 0.01      # Minimal quantum contribution
+  stress_energy_weight: 0.1 # Reduced stress-energy coupling
+  manifold_dim: 2          # Minimal manifold dimension
+  hidden_dim: 4            # Absolute minimal hidden dimension
+  dt: 0.1                  # Larger timestep for faster convergence
+
+anomaly_detection:
+  polynomial_degree: 2     # Reduced from 4 to minimum needed
+  cohomology_dim: 2       # Minimal dimension
+  batch_size_geometric: 1  # Process one at a time
+  cache_size: 100         # Small cache for testing
+  precision: "float32"    # Use lower precision
+
+memory_management:
+  max_cached_tensors: 100  # Limit tensor cache
+  defrag_threshold: 0.5    # Aggressive defragmentation
+  gc_frequency: 100        # Frequent garbage collection
+  tensor_lifecycle: "short" # Short tensor lifetime

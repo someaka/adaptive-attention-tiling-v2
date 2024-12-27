@@ -161,7 +161,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # Initialize quantum bridge with proper configuration
         self.quantum_bridge = NeuralQuantumBridge(
-            hidden_dim=manifold_dim,  # Use manifold_dim instead of hidden_dim
+            hidden_dim=max(manifold_dim, num_heads * 8),  # Ensure hidden_dim is divisible by num_heads
             num_heads=num_heads,
             dropout=dropout,
             dtype=self.dtype,
