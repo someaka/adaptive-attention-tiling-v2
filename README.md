@@ -227,3 +227,28 @@ PYTEST_PROFILE=server pytest tests/
 ```
 
 The configurations are stored in `configs/test_regimens/` and can be customized for your specific hardware setup.
+
+### Symbolic Math Verification
+The system uses SymPy for symbolic mathematics verification, particularly useful for:
+- Verifying quantum field theory relationships
+- Checking commutation relations
+- Validating scaling equations
+- Confirming algebraic identities in physics equations
+
+Example of verifying the Callan-Symanzik equation relationships:
+```python
+from sympy import symbols, simplify, pi
+
+# Define symbols
+g, pi = symbols('g pi')
+
+# Define QFT functions
+gamma = g**2/(16*pi**2)      # Anomalous dimension
+dgamma = g/(8*pi**2)         # Its derivative
+beta = g**3/(32*pi**2)       # Beta function
+
+# Verify β(g)∂_g γ(g) = γ(g)²
+lhs = beta * dgamma
+rhs = gamma**2
+assert simplify(lhs - rhs) == 0
+```

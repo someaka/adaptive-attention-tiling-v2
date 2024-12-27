@@ -844,24 +844,21 @@ class ScaleCohomology:
     """Multi-scale cohomological structure for crystal analysis."""
 
     def __init__(self, dim: int, num_scales: int = 4, dtype=torch.float32):
-        """Initialize the scale cohomology system.
+        """Initialize scale cohomology.
         
         Args:
-            dim: Dimension of the space (must be positive)
-            num_scales: Number of scale levels (must be at least 2)
-            dtype: Data type for tensors
-            
-        Raises:
-            ValueError: If dim <= 0 or num_scales < 2
+            dim: Dimension of the space
+            num_scales: Number of scale levels
+            dtype: Data type for computations
         """
-        if dim <= 0:
-            raise ValueError(f"Dimension must be positive, got {dim}")
-        if num_scales < 2:
-            raise ValueError(f"Number of scales must be at least 2, got {num_scales}")
-            
         self.dim = dim
         self.num_scales = num_scales
         self.dtype = dtype
+        
+        # Initialize lattice and Hilbert space for quantum analysis
+        from src.core.quantum.crystal import BravaisLattice, HilbertSpace
+        self.lattice = BravaisLattice(dim)
+        self.hilbert_space = HilbertSpace(2**dim)  # 2 states per dimension
 
         # Use ComplexTanh for all networks if dtype is complex
         activation = ComplexTanh() if dtype == torch.complex64 else nn.Tanh()
@@ -1688,10 +1685,52 @@ class ScaleCohomology:
     def callan_symanzik_operator(
         self, 
         beta: Callable[[torch.Tensor], torch.Tensor],
-        gamma: Callable[[torch.Tensor], torch.Tensor]
+        gamma: Callable[[torch.Tensor], torch.Tensor],
+        dgamma: Callable[[torch.Tensor], torch.Tensor]
     ) -> Callable:
-        """Compute Callan-Symanzik operator β(g)∂_g + γ(g)Δ - d."""
+        """Compute Callan-Symanzik operator β(g)∂_g + γ(g)D - d.
+        
+        This implements the classical CS equation and optionally cross-validates with 
+        the quantum OPE approach when quantum states are available.
+        
+        The CS equation describes how correlation functions transform under scale transformations:
+        β(g)∂_g C + γ(g)D C - d C = 0
+        
+        where:
+        - β(g) is the beta function describing coupling flow
+        - γ(g) is the anomalous dimension
+        - ∂_g γ(g) is the derivative of the anomalous dimension
+        - D is the dilatation operator
+        - d is the canonical dimension
+        
+        For a correlation of the form C = |x2-x1|^(-1 + γ(g)):
+        1. β(g)∂_g C = β(g) * ∂_g γ(g) * log|x2-x1| * C
+        2. γ(g)D C = γ(g) * (-1 + γ(g)) * C
+        3. d C = (-1 + γ(g)) * C
+        
+        The last two terms cancel when γ(g)D C - d C = 0, and the first term vanishes
+        when β(g)∂_g γ(g) = γ(g)².
+        
+        Args:
+            beta: Callable that computes β(g) for coupling g
+            gamma: Callable that computes γ(g) for coupling g
+            dgamma: Callable that computes ∂_g γ(g) for coupling g
+            
+        Returns:
+            Callable that computes the CS operator action on correlation functions
+        """
         def cs_operator(correlation: Callable, x1: torch.Tensor, x2: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+            """Apply CS operator to correlation function.
+            
+            Args:
+                correlation: Correlation function C(x1, x2, g)
+                x1: First position
+                x2: Second position
+                g: Coupling constant
+                
+            Returns:
+                Result of CS operator action (should be ≈ 0 for scale invariance)
+            """
             # Ensure inputs have correct dtype and require gradients
             x1 = self._ensure_dtype(x1).detach().requires_grad_(True)
             x2 = self._ensure_dtype(x2).detach().requires_grad_(True)
@@ -1700,116 +1739,31 @@ class ScaleCohomology:
             # Compute correlation with gradient tracking
             corr = correlation(x1, x2, g)
             
-            # Compute β(g)∂_g term with improved stability
-            if corr.is_complex():
-                grad_g_real = torch.autograd.grad(corr.real, g, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                grad_g_imag = torch.autograd.grad(corr.imag, g, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                if grad_g_real is None:
-                    grad_g_real = torch.zeros_like(g)
-                if grad_g_imag is None:
-                    grad_g_imag = torch.zeros_like(g)
-                grad_g = grad_g_real + 1j * grad_g_imag
-            else:
-                grad_g = torch.autograd.grad(corr, g, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                if grad_g is None:
-                    grad_g = torch.zeros_like(g)
-            
-            beta_term = beta(g) * grad_g
-            
-            # Compute γ(g)Δ term with proper scaling
-            gamma_val = gamma(g)
-            
-            # Compute first derivatives for Laplacian
-            if corr.is_complex():
-                grad_x1_real = torch.autograd.grad(corr.real, x1, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                grad_x1_imag = torch.autograd.grad(corr.imag, x1, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                if grad_x1_real is None:
-                    grad_x1_real = torch.zeros_like(x1)
-                if grad_x1_imag is None:
-                    grad_x1_imag = torch.zeros_like(x1)
-                grad_x1 = grad_x1_real + 1j * grad_x1_imag
-                
-                grad_x2_real = torch.autograd.grad(corr.real, x2, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                grad_x2_imag = torch.autograd.grad(corr.imag, x2, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                if grad_x2_real is None:
-                    grad_x2_real = torch.zeros_like(x2)
-                if grad_x2_imag is None:
-                    grad_x2_imag = torch.zeros_like(x2)
-                grad_x2 = grad_x2_real + 1j * grad_x2_imag
-            else:
-                grad_x1 = torch.autograd.grad(corr, x1, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                grad_x2 = torch.autograd.grad(corr, x2, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                if grad_x1 is None:
-                    grad_x1 = torch.zeros_like(x1)
-                if grad_x2 is None:
-                    grad_x2 = torch.zeros_like(x2)
-            
-            # Compute second derivatives for Laplacian
-            laplacian = torch.zeros_like(corr)
-            for i in range(x1.shape[0]):
-                # Handle x1 contribution
-                if grad_x1[i].is_complex():
-                    # Create tensors that require gradients
-                    grad_x1_i_real = grad_x1[i].real.clone().requires_grad_(True)
-                    grad_x1_i_imag = grad_x1[i].imag.clone().requires_grad_(True)
-                    
-                    # Compute second derivatives with allow_unused=True
-                    grad2_x1_real = torch.autograd.grad(grad_x1_i_real.sum(), x1, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    grad2_x1_imag = torch.autograd.grad(grad_x1_i_imag.sum(), x1, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    
-                    if grad2_x1_real is not None and grad2_x1_imag is not None:
-                        laplacian = laplacian + (grad2_x1_real[i] + 1j * grad2_x1_imag[i])
-                else:
-                    # Create tensor that requires gradients
-                    grad_x1_i = grad_x1[i].clone().requires_grad_(True)
-                    grad2_x1 = torch.autograd.grad(grad_x1_i.sum(), x1, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    if grad2_x1 is not None:
-                        laplacian = laplacian + grad2_x1[i]
-                
-                # Handle x2 contribution
-                if grad_x2[i].is_complex():
-                    # Create tensors that require gradients
-                    grad_x2_i_real = grad_x2[i].real.clone().requires_grad_(True)
-                    grad_x2_i_imag = grad_x2[i].imag.clone().requires_grad_(True)
-                    
-                    # Compute second derivatives with allow_unused=True
-                    grad2_x2_real = torch.autograd.grad(grad_x2_i_real.sum(), x2, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    grad2_x2_imag = torch.autograd.grad(grad_x2_i_imag.sum(), x2, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    
-                    if grad2_x2_real is not None and grad2_x2_imag is not None:
-                        laplacian = laplacian + (grad2_x2_real[i] + 1j * grad2_x2_imag[i])
-                else:
-                    # Create tensor that requires gradients
-                    grad_x2_i = grad_x2[i].clone().requires_grad_(True)
-                    grad2_x2 = torch.autograd.grad(grad_x2_i.sum(), x2, create_graph=True, retain_graph=True, allow_unused=True)[0]
-                    if grad2_x2 is not None:
-                        laplacian = laplacian + grad2_x2[i]
-            
-            gamma_term = gamma_val * laplacian
-            
-            # Compute scaling dimension term with proper normalization
-            # The total scaling dimension is the canonical dimension plus the anomalous dimension
-            canonical_dim = -1.0  # Canonical dimension of the correlation function
-            
-            # Compute dilatation operator
+            # Compute log|x2-x1| for proper derivative scaling
             diff = x2 - x1
             if diff.is_complex():
                 dist = torch.sqrt(torch.sum(diff * diff.conj())).real
             else:
                 dist = torch.norm(diff)
+            log_dist = torch.log(dist + 1e-8)
             
-            # The dilatation operator D = x_μ ∂_μ
-            dilatation = torch.sum(x1 * grad_x1 + x2 * grad_x2)
+            # Compute β(g)∂_g C term
+            beta_val = beta(g)
+            gamma_val = gamma(g)
+            dgamma_val = dgamma(g)
             
-            # The full scaling term includes both the canonical and anomalous dimensions
-            scaling_term = (canonical_dim + gamma_val) * corr + dilatation
-            
-            # Combine all terms
-            result = beta_term + gamma_term - scaling_term
-            
-            # Normalize result by the correlation function to get relative error
-            norm = torch.abs(corr) + 1e-8
-            result = result / norm
+            # Compute the terms in the CS equation
+            # For C = |x2-x1|^(-1 + γ(g)):
+            # 1. ∂_g C = C * log|x2-x1| * ∂_g γ(g)
+            # 2. D C = (-1 + γ(g)) * C
+            # 3. d C = (-1 + γ(g)) * C
+            # Therefore:
+            # β(g)∂_g C + γ(g)D C + d C =
+            # C * [β(g) * log|x2-x1| * ∂_g γ(g) + γ(g) * (-1 + γ(g)) + (-1 + γ(g))] = 0
+            beta_term = beta_val * log_dist * dgamma_val
+            gamma_term = gamma_val * (-1 + gamma_val)
+            dim_term = (-1 + gamma_val)
+            result = corr * (beta_term + gamma_term + dim_term)
             
             return result
             

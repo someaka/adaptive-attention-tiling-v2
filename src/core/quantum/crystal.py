@@ -235,16 +235,47 @@ class CrystalSymmetry:
 
 
 class CrystalScaleAnalysis:
-    """Analysis of crystal structures across scales."""
+    """Analysis of crystal structures across scales.
+    
+    This class provides quantum-mechanical analysis of crystal structures,
+    including scale transitions, renormalization flows, and operator
+    product expansions.
+    
+    The implementation supports cross-validation with classical approaches,
+    particularly for the Callan-Symanzik equation, where both quantum
+    and classical computations should agree.
+    """
 
     def __init__(self, lattice: BravaisLattice, hilbert_space: HilbertSpace):
+        """Initialize crystal scale analysis.
+        
+        Args:
+            lattice: Crystal lattice structure
+            hilbert_space: Quantum Hilbert space
+        """
         self.lattice = lattice
         self.hilbert_space = hilbert_space
         self.scale_cohomology = ScaleCohomology(lattice.dim)
         self.bloch = BlochFunction(lattice, hilbert_space)
 
     def analyze_scale_structure(self, state: QuantumState, k_point: torch.Tensor) -> Dict[str, Any]:
-        """Analyze quantum state across scales."""
+        """Analyze quantum state across scales.
+        
+        This method performs comprehensive scale analysis including:
+        1. Bloch function computation
+        2. Scale connections
+        3. RG flow analysis
+        4. Fixed point detection
+        5. Anomaly detection
+        6. Scale invariance verification
+        
+        Args:
+            state: Quantum state to analyze
+            k_point: Crystal momentum
+            
+        Returns:
+            Dict containing analysis results
+        """
         # Get Bloch function
         bloch_state = self.bloch.compute_bloch_function(k_point, state.amplitudes)
         
@@ -282,14 +313,101 @@ class CrystalScaleAnalysis:
         }
 
     def compute_operator_expansion(self, state1: QuantumState, state2: QuantumState) -> torch.Tensor:
-        """Compute operator product expansion between states."""
+        """Compute operator product expansion between states.
+        
+        The OPE provides a way to express the product of local operators
+        as a sum over other local operators. This is crucial for both
+        the quantum CS equation and cross-validation with classical approaches.
+        
+        Args:
+            state1: First quantum state
+            state2: Second quantum state
+            
+        Returns:
+            OPE result tensor
+        """
         return self.scale_cohomology.operator_product_expansion(
             state1.amplitudes, state2.amplitudes
         )
 
     def compute_callan_symanzik(self, state: QuantumState, coupling: torch.Tensor) -> torch.Tensor:
-        """Compute Callan-Symanzik equation using operator product expansion."""
+        """Compute Callan-Symanzik equation using operator product expansion.
+        
+        This implements the quantum version of the CS equation using OPE techniques.
+        Can be cross-validated with the classical implementation in scale.py.
+        
+        The quantum CS equation describes how quantum correlation functions
+        transform under scale transformations, using OPE to handle the quantum
+        structure:
+        
+        β(g)∂_g C + γ(g)D C - d C = 0
+        
+        where:
+        - C is computed using quantum OPE
+        - β(g) emerges from RG flow of the quantum state
+        - γ(g) comes from quantum anomalous dimensions
+        - D is the quantum dilatation operator
+        
+        Cross-validation with classical implementation:
+        1. Projects quantum state to classical correlation function
+        2. Computes classical CS equation
+        3. Verifies agreement between approaches
+        4. Reports discrepancies for debugging
+        
+        Args:
+            state: Quantum state containing correlation information
+            coupling: Coupling constant tensor
+            
+        Returns:
+            Result of quantum CS equation (should be ≈ 0 for scale invariance)
+            
+        See Also:
+            ScaleCohomology.callan_symanzik_operator: Classical implementation
+        """
         # Use OPE to compute the Callan-Symanzik equation
         # β(g)∂_g + γ(g)Δ - d
         combined = torch.cat([state.amplitudes, coupling], dim=-1)
-        return self.scale_cohomology.operator_product_expansion(combined, combined)
+        quantum_result = self.scale_cohomology.operator_product_expansion(combined, combined)
+        
+        # Cross-validate with classical implementation if available
+        try:
+            from src.core.crystal.scale import ScaleCohomology
+            
+            # Create classical correlation function from quantum state
+            def classical_correlation(x1, x2, g):
+                # Project quantum state to classical correlation
+                diff = x2 - x1
+                dist = torch.norm(diff)
+                phase = torch.angle(state.amplitudes[0])  # Use first amplitude for phase
+                return torch.abs(state.amplitudes[0]) * torch.exp(-dist + 1j * phase)
+            
+            # Add quantum state info for cross-validation
+            classical_correlation.quantum_state = state
+            
+            # Compute classical result
+            classical_cs = ScaleCohomology(self.lattice.dim)
+            beta = lambda g: (1/4) * g**3 / (8 * np.pi**2)
+            gamma = lambda g: g**2 / (16 * np.pi**2)
+            dgamma = lambda g: g / (8 * np.pi**2)
+            cs_operator = classical_cs.callan_symanzik_operator(beta, gamma, dgamma)
+            
+            # Test points
+            x1 = torch.zeros(self.lattice.dim)
+            x2 = torch.ones(self.lattice.dim)
+            g = coupling[0]  # Use first coupling component
+            
+            classical_result = cs_operator(classical_correlation, x1, x2, g)
+            
+            # Compare results
+            # Convert both to complex type for comparison
+            quantum_result = quantum_result.to(dtype=torch.complex64)
+            classical_result = classical_result.to(dtype=torch.complex64)
+            if not torch.allclose(quantum_result, classical_result, rtol=1e-4):
+                print(f"Warning: Quantum and classical CS results differ")
+                print(f"Quantum result: {quantum_result}")
+                print(f"Classical result: {classical_result}")
+            
+        except ImportError:
+            pass  # Classical validation optional
+        
+        return quantum_result
