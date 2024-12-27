@@ -1181,208 +1181,234 @@ class ScaleCohomology:
         return [float(ev.real) for ev in eigenvalues]
 
     def anomaly_polynomial(self, symmetry_action: Callable[[torch.Tensor], torch.Tensor]) -> List[AnomalyPolynomial]:
-        """Compute anomaly polynomial for a symmetry action."""
+        """Compute anomaly polynomial for a symmetry action.
+        
+        This method computes the anomaly polynomial that measures the failure of
+        a symmetry to commute with scale transformations. For U(1) symmetries,
+        this requires careful tracking of phases and proper normalization.
+        
+        Args:
+            symmetry_action: Function implementing the symmetry transformation
+            
+        Returns:
+            List of anomaly polynomials at different orders
+        """
+        from src.core.quantum.u1_utils import normalize_with_phase, track_phase_evolution, compose_phases, compute_winding_number
+        from src.core.patterns.arithmetic_dynamics import ArithmeticDynamics
+        from src.core.patterns.operadic_handler import OperadicStructureHandler
+        from src.core.patterns.enriched_structure import WaveEmergence, PatternTransition
+        from src.core.flow.pattern_heat import PatternHeatFlow
+        from src.core.flow.information_ricci import InformationRicciFlow
+        
         if not callable(symmetry_action):
             raise TypeError("symmetry_action must be a callable function")
             
-        # Create test state with proper normalization
-        state = torch.randn(self.dim, dtype=self.dtype)
-        state = state / (torch.norm(state) + 1e-8)
+        # Create test state with non-constant phase
+        test_x = torch.linspace(0, 2*torch.pi, self.dim, dtype=torch.float32).to(self.dtype)
+        state = torch.exp(1j * test_x)
+        state_norm, state_phase = normalize_with_phase(state, return_phase=True)
         
-        # Compute symmetry action with numerical stability
-        transformed = symmetry_action(state)
-        transformed = transformed / (torch.norm(transformed) + 1e-8)
+        # Apply symmetry with phase tracking
+        transformed = symmetry_action(state_norm)
+        transformed_norm, transformed_phase = normalize_with_phase(transformed, return_phase=True)
         
-        # Compute RG flow of original and transformed states
+        # Compute winding number for the symmetry action
+        winding = compute_winding_number(transformed)
+        
+        # Initialize arithmetic dynamics and operadic handler
+        arithmetic = ArithmeticDynamics(
+            hidden_dim=self.dim,
+            motive_rank=4,  # Use 4 for U(1) symmetry
+            quantum_weight=0.1,
+            dtype=self.dtype
+        )
+        
+        operadic = OperadicStructureHandler(
+            base_dim=self.dim,
+            hidden_dim=self.dim,
+            motive_rank=4,
+            preserve_symplectic=True,
+            dtype=self.dtype
+        )
+        
+        # Initialize geometric layers
+        information_flow = InformationRicciFlow(
+            manifold_dim=self.dim,
+            hidden_dim=self.dim,
+            dt=0.1,
+            fisher_rao_weight=1.0,
+            quantum_weight=0.1,
+            stress_energy_weight=1.0
+        )
+        
+        heat_flow = PatternHeatFlow(
+            manifold_dim=self.dim,
+            hidden_dim=self.dim,
+            dt=0.1,
+            heat_diffusion_weight=1.0
+        )
+        
+        wave = WaveEmergence(
+            dt=0.1,
+            num_steps=10,
+            dtype=self.dtype
+        )
+        
+        pattern_transition = PatternTransition(
+            wave_emergence=wave,
+            dtype=self.dtype
+        )
+        
+        # Track relative phase between states using geometric layers
+        relative_phase = compose_phases(transformed_phase, -state_phase)
+        
+        # Create enriched morphism for phase transition
+        phase_morphism = pattern_transition.create_morphism(
+            source=torch.exp(1j * state_phase).reshape(-1, 1),
+            target=torch.exp(1j * transformed_phase).reshape(-1, 1)
+        )
+        
+        # Evolve phase through wave emergence
+        evolved_phase = wave.evolve_structure(
+            pattern=torch.exp(1j * relative_phase).reshape(-1, 1),
+            direction=phase_morphism.structure_map
+        )
+        
+        # Initialize metric for information flow
+        metric = torch.eye(self.dim, dtype=self.dtype).unsqueeze(0)
+        
+        # Compute RG flow with phase-aware observables
         def flow_observable(x: torch.Tensor) -> torch.Tensor:
-            x_norm = torch.norm(x) + 1e-8
-            return torch.sum((x / x_norm)**2)
+            # Track both magnitude and phase evolution with geometric layers
+            x_norm, x_phase = normalize_with_phase(x, return_phase=True)
+            
+            # Evolve through pattern heat flow
+            x_evolved = heat_flow.evolve_pattern(
+                pattern=x_norm,
+                metric=metric,
+                timestep=0.1
+            )
+            
+            # Apply information flow
+            metric_evolved, _ = information_flow.flow_step(metric, timestep=0.1)
+            
+            return x_evolved * torch.exp(1j * x_phase)
             
         def transformed_observable(x: torch.Tensor) -> torch.Tensor:
-            x_norm = torch.norm(x) + 1e-8
-            transformed_x = symmetry_action(x / x_norm)
-            return torch.sum(transformed_x**2)
+            # Apply symmetry and track phase with geometric layers
+            x_norm, x_phase = normalize_with_phase(x, return_phase=True)
+            transformed_x = symmetry_action(x_norm)
+            transformed_norm, transformed_phase = normalize_with_phase(transformed_x, return_phase=True)
             
+            # Create enriched morphism for transformation
+            morphism = pattern_transition.create_morphism(
+                source=x_norm.reshape(-1, 1),
+                target=transformed_norm.reshape(-1, 1)
+            )
+            
+            # Evolve through pattern heat flow
+            transformed_evolved = heat_flow.evolve_pattern(
+                pattern=transformed_norm,
+                metric=metric,
+                timestep=0.1
+            )
+            
+            # Apply information flow
+            metric_evolved, _ = information_flow.flow_step(metric, timestep=0.1)
+            
+            return transformed_evolved * torch.exp(1j * transformed_phase)
+        
         flow_original = self.renormalization_flow(flow_observable)
         flow_transformed = self.renormalization_flow(transformed_observable)
         
-        # Compute anomaly as difference in flows with improved consistency
+        # Compute anomaly with proper phase tracking
         anomaly_coeffs = []
         scales = torch.linspace(0, 1, 10)
         
         for t_val in scales:
-            # Evolve both flows with numerical stability
-            evolved_original = flow_original.evolve(float(t_val)).apply(state)
-            evolved_original = evolved_original / (torch.norm(evolved_original) + 1e-8)
+            # Evolve both flows with phase tracking
+            evolved_original = flow_original.evolve(float(t_val)).apply(state_norm)
+            evolved_transformed = flow_transformed.evolve(float(t_val)).apply(transformed_norm)
             
-            evolved_transformed = flow_transformed.evolve(float(t_val)).apply(transformed)
-            evolved_transformed = evolved_transformed / (torch.norm(evolved_transformed) + 1e-8)
+            # Track phase evolution with respect to initial states
+            _, evolved_original_phase = track_phase_evolution(state_norm, evolved_original)
+            _, evolved_transformed_phase = track_phase_evolution(transformed_norm, evolved_transformed)
             
-            # Compute difference and normalize
-            diff = evolved_transformed - symmetry_action(evolved_original)
-            norm = torch.norm(diff) + 1e-8
-            diff = diff / norm
-            
-            # Project onto polynomial basis with improved orthogonality
-            coeffs = []
-            for n in range(4):  # Use polynomials up to degree 3
-                # Use Hermite polynomials for better orthogonality
-                if n == 0:
-                    basis = torch.ones_like(state)
-                elif n == 1:
-                    basis = state
-                elif n == 2:
-                    basis = state**2 - torch.ones_like(state)
-                elif n == 3:
-                    basis = state**3 - 3*state
-                
-                # Compute coefficient with proper normalization
-                basis_norm = torch.sum(basis * basis.conj()) + 1e-8
-                coeff = torch.sum(diff * basis.conj()) / basis_norm
-                coeffs.append(coeff)
-            
-            anomaly_coeffs.append(torch.stack(coeffs))
-            
-        # Average coefficients over flow time with proper weighting
-        weights = torch.exp(-scales)  # Give more weight to early times
-        weights = weights / (weights.sum() + 1e-8)
-        anomaly = torch.sum(torch.stack(anomaly_coeffs) * weights.unsqueeze(1), dim=0)
-        
-        # Ensure Wess-Zumino consistency
-        # The anomaly should transform covariantly under the symmetry
-        def transform_coeffs(coeffs: torch.Tensor) -> torch.Tensor:
-            """Transform coefficients under symmetry action with proper composition."""
-            transformed = []
-            for i, coeff in enumerate(coeffs):
-                # Apply symmetry with appropriate power and phase
-                phase = torch.tensor(2j * torch.pi * i / len(coeffs), dtype=self.dtype)
-                
-                # Transform coefficient with proper composition
-                # First normalize the coefficient
-                coeff_norm = torch.norm(coeff) + 1e-8
-                normalized_coeff = coeff / coeff_norm
-                
-                # Apply symmetry action with proper phase
-                transformed_coeff = symmetry_action(normalized_coeff.unsqueeze(0))[0]
-                
-                # Add phase factor that respects composition
-                phase_factor = torch.exp(phase)
-                
-                # Scale back and add phase
-                transformed_coeff = transformed_coeff * coeff_norm * phase_factor
-                
-                # Add cross-terms for proper composition
-                if i > 0:
-                    for j in range(i):
-                        # Add contribution from lower degree terms
-                        cross_phase = torch.tensor(2j * torch.pi * (i-j) / len(coeffs), dtype=self.dtype)
-                        cross_term = coeffs[j] * coeffs[i-j-1] * torch.exp(cross_phase)
-                        transformed_coeff = transformed_coeff + cross_term / (i + 1)  # Scale cross terms by degree
-                
-                transformed.append(transformed_coeff)
-            
-            result = torch.stack(transformed)
-            # Normalize result while preserving relative phases
-            norm = torch.norm(result) + 1e-8
-            phase_factor = torch.exp(1j * torch.angle(result[0])) if result[0] != 0 else 1.0
-            return (result / norm) * phase_factor
-            
-        # Apply consistency condition iteratively with stability
-        for _ in range(3):  # A few iterations for better convergence
-            transformed_anomaly = transform_coeffs(anomaly)
-            # Compute norm ratio and ensure it's complex
-            norm_ratio = torch.norm(transformed_anomaly) / (torch.norm(anomaly) + 1e-8)
-            
-            # Handle real and imaginary parts separately for sqrt
-            norm_ratio_real = torch.clamp(norm_ratio.real, 0.1, 10.0)
-            # For complex numbers, we want to preserve the phase but limit magnitude
-            magnitude = torch.sqrt(norm_ratio_real)
-            phase = torch.angle(transformed_anomaly[0]) - torch.angle(anomaly[0])
-            phase = torch.clamp(phase, -torch.pi/4, torch.pi/4)  # Limit phase change
-            
-            # Construct consistency factor in polar form
-            consistency_factor = magnitude * torch.exp(1j * phase)
-            anomaly = anomaly * consistency_factor
-            
-        # Normalize final anomaly and ensure proper composition
-        anomaly = anomaly / (torch.norm(anomaly) + 1e-8)
-        
-        # Create AnomalyPolynomial object with proper structure
-        variables = [f"x_{i}" for i in range(self.dim)]
-        anomaly_poly = AnomalyPolynomial(
-            coefficients=anomaly,
-            variables=variables,
-            degree=3,  # We used polynomials up to degree 3
-            type="polynomial"  # Use a simple type string
-        )
-        
-        # Ensure composition property by adjusting coefficients
-        def adjust_for_composition(poly: AnomalyPolynomial) -> AnomalyPolynomial:
-            """Adjust anomaly polynomial to satisfy the Wess-Zumino consistency condition.
-            
-            For U(1) symmetries g1, g2, the anomaly polynomial must satisfy:
-            A(g1 ∘ g2) = A(g1) + A(g2)
-            
-            The composition law for U(1) phases must be properly handled:
-            - For g1(x) = e^(ix), phase = 1
-            - For g2(x) = e^(2ix), phase = 2
-            - For g1(g2(x)) = e^(i(e^(2ix))), phase = 3
-            
-            Args:
-                poly: Input anomaly polynomial to adjust
-                
-            Returns:
-                Adjusted anomaly polynomial satisfying Wess-Zumino consistency
-                
-            The adjustment process:
-            1. Compute base coefficients with proper U(1) phases
-            2. Add cross-terms that respect phase composition
-            3. Normalize while preserving relative phases
-            """
-            coeffs = poly.coefficients
-            adjusted = torch.zeros_like(coeffs)
-            
-            # Initialize base correction with proper U(1) phase
-            # For U(1) symmetries, we need e^(2πi(n+1)/N) to account for base phase
-            base_correction = torch.exp(torch.tensor(2j * torch.pi / len(coeffs), dtype=self.dtype))
-            
-            # First pass: compute basic coefficients with proper U(1) phases
-            for i in range(len(coeffs)):
-                # Scale coefficient based on its degree with proper composition
-                power = torch.tensor(1.0 / (i + 1), dtype=self.dtype)  # Linear scaling with degree
-                
-                # Add composition correction with proper U(1) phase
-                # The (i + 1) accounts for the base phase of the U(1) symmetry
-                phase = torch.tensor(2j * torch.pi * (i + 1) / len(coeffs), dtype=self.dtype)
-                correction = base_correction * torch.exp(phase)
-                
-                # Apply both scaling and phase correction
-                adjusted[i] = coeffs[i] * power * correction
-            
-            # Second pass: add cross-terms with proper phase composition
-            for i in range(1, len(coeffs)):
-                # Add contribution from lower degree terms with proper phase
-                for j in range(i):
-                    # Cross phase must account for composition of U(1) phases
-                    # The (j + 1) factor ensures proper phase composition
-                    cross_phase = torch.tensor(2j * torch.pi * (i-j) / len(coeffs), dtype=self.dtype)
-                    cross_term = adjusted[j] * adjusted[i-j-1] * torch.exp(cross_phase * (j + 1))
-                    adjusted[i] = adjusted[i] + cross_term  # Add cross terms without additional scaling
-            
-            # Normalize with proper phase preservation
-            norm = torch.norm(adjusted) + 1e-8
-            # Preserve the U(1) phase structure in normalization
-            phase_factor = torch.exp(1j * torch.angle(adjusted[0])) if adjusted[0] != 0 else 1.0
-            adjusted = (adjusted / norm) * phase_factor
-            
-            return AnomalyPolynomial(
-                coefficients=adjusted,
-                variables=poly.variables,
-                degree=poly.degree,
-                type=poly.type
+            # Create enriched morphism for phase difference
+            phase_morphism = pattern_transition.create_morphism(
+                source=torch.exp(1j * evolved_original_phase),
+                target=torch.exp(1j * evolved_transformed_phase)
             )
             
-        return [adjust_for_composition(anomaly_poly)]
+            # Evolve phase difference through wave emergence
+            phase_diff_pattern = wave.evolve_structure(
+                pattern=torch.exp(1j * (evolved_transformed_phase - evolved_original_phase)),
+                direction=phase_morphism.structure_map
+            )
+            phase_diff = torch.angle(phase_diff_pattern)
+            
+            # Project onto U(1)-covariant polynomial basis with geometric layers
+            coeffs = []
+            for n in range(4):  # Use polynomials up to degree 3
+                # Use proper U(1)-covariant basis elements
+                if n == 0:
+                    basis = torch.ones_like(state_norm)
+                elif n == 1:
+                    basis = torch.exp(1j * winding * torch.angle(state_norm)) * torch.abs(state_norm)
+                elif n == 2:
+                    basis = torch.exp(2j * winding * torch.angle(state_norm)) * torch.abs(state_norm)**2
+                elif n == 3:
+                    basis = torch.exp(3j * winding * torch.angle(state_norm)) * torch.abs(state_norm)**3
+                
+                # Evolve basis through pattern heat flow
+                basis_evolved = heat_flow.evolve_pattern(
+                    pattern=basis,
+                    metric=metric,
+                    timestep=0.1
+                )
+                
+                # Apply information flow
+                metric_evolved, _ = information_flow.flow_step(metric, timestep=0.1)
+                
+                # Compute coefficient with geometric evolution
+                coeff = torch.mean(torch.exp(1j * phase_diff) * basis_evolved.conj())
+                coeffs.append(coeff)
+            
+            # Create enriched morphism for coefficient composition
+            coeffs_tensor = torch.stack(coeffs)
+            coeffs_morphism = pattern_transition.create_morphism(
+                source=coeffs_tensor.reshape(-1, 1),
+                target=coeffs_tensor.reshape(-1, 1)
+            )
+            
+            # Apply operadic composition through pattern transition
+            operation = operadic.create_operation(
+                source_dim=len(coeffs),
+                target_dim=len(coeffs),
+                preserve_structure='U1'
+            )
+            operation.composition_law = coeffs_morphism.structure_map
+            anomaly_coeffs.append(operation.composition_law)
+        
+        # Average coefficients over flow time with proper phase weighting
+        # Use linear weighting to preserve consistency
+        weights = torch.linspace(1, 0, len(scales))
+        weights = weights / torch.sum(weights)
+        anomaly = torch.sum(torch.stack(anomaly_coeffs) * weights.unsqueeze(1), dim=0)
+        
+        # Create anomaly polynomials with proper phase structure
+        anomalies = []
+        for degree in range(4):
+            anomalies.append(
+                AnomalyPolynomial(
+                    coefficients=anomaly[degree:],
+                    variables=[f"θ_{i}" for i in range(degree + 1)],  # Use angle variables
+                    degree=degree,
+                    type="U(1)"  # Mark as U(1) type
+                )
+            )
+            
+        return anomalies
 
     def scale_invariants(self, structure: torch.Tensor) -> List[Tuple[torch.Tensor, float]]:
         """Find scale invariant quantities in the structure.

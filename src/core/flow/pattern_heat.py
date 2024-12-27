@@ -80,12 +80,16 @@ class PatternHeatFlow(InformationRicciFlow):
         """Compute Laplace-Beltrami operator Δ_g u.
         
         Args:
-            pattern: Pattern field (batch_size, manifold_dim)
+            pattern: Pattern field (batch_size, manifold_dim) or (manifold_dim,)
             metric: Metric tensor (batch_size, manifold_dim, manifold_dim)
             
         Returns:
-            Laplace-Beltrami of pattern (batch_size, manifold_dim)
+            Laplace-Beltrami of pattern (batch_size, manifold_dim) or (manifold_dim,)
         """
+        # Ensure pattern has batch dimension
+        if len(pattern.shape) == 1:
+            pattern = pattern.unsqueeze(0)
+            
         # Compute metric inverse
         metric_inverse = torch.inverse(metric + self.stability_threshold * torch.eye(
             self.manifold_dim,
@@ -93,31 +97,44 @@ class PatternHeatFlow(InformationRicciFlow):
         ).unsqueeze(0))
         
         # Compute Christoffel symbols
-        grad_outputs = torch.ones_like(pattern)
+        grad_outputs = torch.ones_like(pattern).requires_grad_(True)
         first_grads = torch.autograd.grad(
             pattern,
             pattern,
             grad_outputs=grad_outputs,
-            create_graph=True
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True
         )[0]
         
         # Second derivatives
         laplacian_rows = []
         for i in range(self.manifold_dim):
+            # Create one-hot grad_outputs without in-place operations
             grad_outputs = torch.zeros_like(first_grads)
-            grad_outputs[:, i] = 1.0
+            grad_outputs = grad_outputs.index_fill_(1, torch.tensor([i]), 1.0)
+            grad_outputs = grad_outputs.requires_grad_(True)
+            
             second_grads = torch.autograd.grad(
                 first_grads,
                 pattern,
                 grad_outputs=grad_outputs,
-                create_graph=True
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True
             )[0]
             laplacian_rows.append(second_grads)
         
         laplacian = torch.stack(laplacian_rows, dim=1)
         
         # Contract with metric inverse
-        return torch.einsum('bij,bjk->bik', metric_inverse, laplacian)
+        result = torch.einsum('bij,bjk->bik', metric_inverse, laplacian)
+        
+        # Restore original shape if needed
+        if len(pattern.shape) == 1:
+            result = result.squeeze(0)
+            
+        return result
 
     def compute_pattern_gradient(
         self,
@@ -127,19 +144,31 @@ class PatternHeatFlow(InformationRicciFlow):
         """Compute pattern gradient ∇u.
         
         Args:
-            pattern: Pattern field (batch_size, manifold_dim)
+            pattern: Pattern field (batch_size, manifold_dim) or (manifold_dim,)
             metric: Metric tensor (batch_size, manifold_dim, manifold_dim)
             
         Returns:
-            Pattern gradient (batch_size, manifold_dim)
+            Pattern gradient (batch_size, manifold_dim) or (manifold_dim,)
         """
-        grad_outputs = torch.ones_like(pattern)
-        return torch.autograd.grad(
+        # Ensure pattern has batch dimension
+        if len(pattern.shape) == 1:
+            pattern = pattern.unsqueeze(0)
+            
+        grad_outputs = torch.ones_like(pattern).requires_grad_(True)
+        grads = torch.autograd.grad(
             pattern,
             pattern,
             grad_outputs=grad_outputs,
-            create_graph=True
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True
         )[0]
+        
+        # Restore original shape if needed
+        if len(pattern.shape) == 1:
+            grads = grads.squeeze(0)
+            
+        return grads
 
     def evolve_pattern(
         self,
@@ -160,6 +189,10 @@ class PatternHeatFlow(InformationRicciFlow):
         Returns:
             Evolved pattern field (batch_size, manifold_dim)
         """
+        # Enable gradients for pattern and metric
+        pattern = pattern.detach().requires_grad_(True)
+        metric = metric.detach().requires_grad_(True)
+        
         # Compute Laplace-Beltrami term
         laplacian = self.compute_laplace_beltrami(pattern, metric)
         
@@ -189,7 +222,7 @@ class PatternHeatFlow(InformationRicciFlow):
             inner_product * pattern_grad
         )
         
-        return new_pattern
+        return new_pattern.detach()
 
     def flow_step(
         self,

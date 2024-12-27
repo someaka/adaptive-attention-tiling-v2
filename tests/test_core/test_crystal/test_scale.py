@@ -518,6 +518,8 @@ class TestScaleCohomology:
 
     def test_anomaly_polynomial(self, scale_system, dtype):
         """Test anomaly polynomial computation (VERY IMPORTANT)."""
+        from src.core.quantum.u1_utils import compute_winding_number
+        
         # Create test symmetry
         def symmetry_action(x: torch.Tensor) -> torch.Tensor:
             """Simple U(1) symmetry."""
@@ -533,30 +535,29 @@ class TestScaleCohomology:
         def test_consistency(g1, g2):
             """Test Wess-Zumino consistency condition."""
             print("\nTesting Wess-Zumino consistency:")
-            
-            # Test individual symmetries
-            test_x = torch.ones(scale_system.dim, dtype=dtype)
+
+            # Test individual symmetries using non-constant test vector
+            test_x = torch.linspace(0, 2*torch.pi, scale_system.dim, dtype=torch.float32).to(dtype)
             print(f"\nSymmetry actions on test vector:")
             print(f"g1(x) = {g1(test_x)}")
             print(f"g2(x) = {g2(test_x)}")
             print(f"g1(g2(x)) = {g1(g2(test_x))}")
-            
-            # Compute winding numbers
+
+            # Compute winding numbers using improved method
             def compute_winding(g, x):
                 gx = g(x)
-                phase = torch.angle(gx[0]) / torch.pi
-                return phase.item()
-            
+                return compute_winding_number(gx).item() * torch.pi
+
             print(f"\nWinding numbers:")
             print(f"g1 winding: {compute_winding(g1, test_x):.3f}π")
             print(f"g2 winding: {compute_winding(g2, test_x):.3f}π")
             print(f"g1∘g2 winding: {compute_winding(lambda x: g1(g2(x)), test_x):.3f}π")
-            
+
             # Compute anomalies
             a1 = scale_system.anomaly_polynomial(g1)
             a2 = scale_system.anomaly_polynomial(g2)
             composed = scale_system.anomaly_polynomial(lambda x: g1(g2(x)))
-            
+
             print("\nPhase analysis:")
             for i, (c, a1p, a2p) in enumerate(zip(composed, a1, a2)):
                 print(f"\nDegree {i} phase factors:")
@@ -573,7 +574,7 @@ class TestScaleCohomology:
                 print(f"  A1: {a1p.coefficients}")
                 print(f"  A2: {a2p.coefficients}")
                 print(f"  A1 + A2: {a1p.coefficients + a2p.coefficients}")
-                
+
                 # Compute differences with proper complex handling
                 diff = torch.abs(c.coefficients - (a1p.coefficients + a2p.coefficients))
                 rel_diff = torch.where(
@@ -581,10 +582,10 @@ class TestScaleCohomology:
                     diff / torch.abs(a1p.coefficients + a2p.coefficients),
                     torch.zeros_like(diff)
                 )
-                
+
                 print(f"  Absolute difference: {torch.max(diff).item()}")
                 print(f"  Maximum relative difference: {torch.max(rel_diff).item()}")
-                
+
                 if not torch.allclose(c.coefficients, a1p.coefficients + a2p.coefficients, rtol=1e-3):
                     return False
             return True

@@ -58,9 +58,9 @@ class WaveEmergence:
         Returns:
             Evolved pattern tensor
         """
-        # Initialize wave components
-        u = pattern.to(dtype=self.dtype)
-        v = torch.zeros_like(pattern, dtype=self.dtype)  # Velocity field
+        # Initialize wave components with gradients
+        u = pattern.to(dtype=self.dtype).detach().requires_grad_(True)
+        v = torch.zeros_like(pattern, dtype=self.dtype).requires_grad_(True)  # Velocity field
         
         # Ensure compatible shapes for direction
         if len(direction.shape) == 2 and len(u.shape) == 2:
@@ -102,7 +102,7 @@ class WaveEmergence:
         if len(pattern.shape) == 1 and len(u.shape) == 2:
             u = u.squeeze(0)
             
-        return u
+        return u.detach()
     
     def _laplacian(self, tensor: Tensor) -> Tensor:
         """Compute discrete Laplacian of tensor.
@@ -113,6 +113,12 @@ class WaveEmergence:
         Returns:
             Laplacian of input tensor
         """
+        # Handle complex tensors by splitting real and imaginary parts
+        if tensor.is_complex():
+            real_laplacian = self._laplacian(tensor.real)
+            imag_laplacian = self._laplacian(tensor.imag)
+            return real_laplacian + 1j * imag_laplacian
+            
         # Use constant padding for 1D case
         if len(tensor.shape) == 1:
             padded = torch.nn.functional.pad(
