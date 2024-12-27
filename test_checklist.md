@@ -4,7 +4,7 @@
 - [x] tests/performance/benchmarks/test_core.py
 - [x] tests/performance/cpu/test_algorithms.py
 - [x] tests/performance/cpu/test_memory_management.py
-- [ ] tests/performance/cpu/test_memory.py
+- [x] tests/performance/cpu/test_memory.py
 - [x] tests/performance/cpu/test_vectorization.py
 - [x] tests/test_core/test_cpu_operations.py
 - [x] tests/test_core/test_crystal/test_refraction.py

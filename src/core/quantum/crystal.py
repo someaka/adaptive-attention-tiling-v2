@@ -256,7 +256,17 @@ class CrystalScaleAnalysis:
         
         rg_flow = self.scale_cohomology.renormalization_flow(bloch_state.amplitudes)
         fixed_points = self.scale_cohomology.fixed_points(bloch_state.amplitudes)
-        anomalies = self.scale_cohomology.anomaly_polynomial(bloch_state.amplitudes)
+        
+        # Create symmetry action function for anomaly detection
+        def symmetry_action(x: torch.Tensor) -> torch.Tensor:
+            # Apply a U(1) phase transformation based on overlap with Bloch state
+            overlap = torch.sum(x * bloch_state.amplitudes.conj()) / (
+                torch.norm(x) * torch.norm(bloch_state.amplitudes) + 1e-8
+            )
+            phase = torch.angle(overlap)
+            return x * torch.exp(1j * phase)
+            
+        anomalies = self.scale_cohomology.anomaly_polynomial(symmetry_action)
         invariants = self.scale_cohomology.scale_invariants(bloch_state.amplitudes)
         
         # Check conformal properties
