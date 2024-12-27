@@ -6,7 +6,7 @@ import time
 from functools import reduce
 import weakref
 from dataclasses import dataclass, field
-from typing import Callable, Tuple, Dict, List, Optional, Set
+from typing import Callable, Tuple, Dict, List, Optional, Set, Any
 
 import torch
 
@@ -63,12 +63,12 @@ class SizeClassAllocator:
         return 1 << (size - 1).bit_length()
         
     def split_block(self, block: torch.Tensor, target_size: int) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Split a block into two buddies if possible."""
+        """Split a block into two buddies using power-of-2 alignment."""
         current_size = block.nelement() * block.element_size()
-        if current_size // 2 >= target_size:
-            half_size = current_size // 2
-            buddy = block.narrow(0, half_size, half_size)
-            return block.narrow(0, 0, half_size), buddy
+        # Round target size up to next power of 2
+        aligned_size = 1 << (target_size - 1).bit_length()
+        if current_size >= 2 * aligned_size:
+            return block.narrow(0, 0, aligned_size), block.narrow(0, aligned_size, current_size - aligned_size)
         return block, None
         
     def allocate(self, size: int) -> Optional[torch.Tensor]:
@@ -120,6 +120,11 @@ class MemoryManager:
     """Manages memory allocation and operations for tensors."""
 
     def __init__(self, cache_size: int = 32, cleanup_threshold: float = 0.7):
+        if cache_size <= 0:
+            raise ValueError("Cache size must be positive")
+        if not 0 < cleanup_threshold < 1:
+            raise ValueError("Cleanup threshold must be between 0 and 1")
+            
         self._allocated_memory = 0
         self._peak_memory = 0
         self._metrics: List[MemoryMetrics] = []
@@ -141,6 +146,11 @@ class MemoryManager:
         self._memory_pressure = 0.0  # Track memory pressure
         self._total_gaps = 0  # Track total gaps for O(1) fragmentation calculation
         self._pressure_ema_alpha = 0.2  # EMA factor for memory pressure
+        self._allocation_history: List[int] = []  # Track recent allocation sizes
+        self._history_window = 100  # Number of recent allocations to track
+        self._debug_mode = False
+        self._allocation_stack_traces: Dict[int, str] = {}  # Track allocation sites
+        self._error_log: List[str] = []  # Track errors for debugging
 
     def _calculate_chunk_size(self) -> int:
         """Calculate optimal chunk size based on CPU cache size."""
@@ -152,11 +162,24 @@ class MemoryManager:
             return 256  # Default if can't read CPU cache size
 
     def _update_memory_pressure(self) -> None:
-        """Update memory pressure metric using exponential moving average."""
+        """Update memory pressure using allocation history and fragmentation."""
+        # Calculate allocation pattern pressure
+        if self._allocation_history:
+            recent_avg = sum(self._allocation_history) / len(self._allocation_history)
+            pattern_pressure = sum(abs(size - recent_avg) for size in self._allocation_history) / (
+                len(self._allocation_history) * recent_avg
+            ) if recent_avg > 0 else 0
+        else:
+            pattern_pressure = 0
+            
+        # Calculate current pressure including allocation patterns
         current_pressure = (
-            self._allocated_memory / max(1, self._peak_memory) +
-            self.get_fragmentation_ratio()
-        ) / 2
+            0.4 * (self._allocated_memory / max(1, self._peak_memory)) +
+            0.4 * self.get_fragmentation_ratio() +
+            0.2 * pattern_pressure
+        )
+        
+        # Update using EMA
         self._memory_pressure = (
             self._pressure_ema_alpha * current_pressure +
             (1 - self._pressure_ema_alpha) * self._memory_pressure
@@ -185,50 +208,132 @@ class MemoryManager:
         if tensor_id in self._fixed_tensors:
             self._fixed_tensors.remove(tensor_id)
 
-    def allocate_tensor(self, size: Tuple[int, ...], fix: bool = False, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-        """Allocate a new tensor with improved memory management."""
-        if self._should_cleanup():
-            self._cleanup_dead_refs()
-            self._allocator.coalesce_blocks()
-            self._last_cleanup = time.perf_counter()
+    def enable_debug_mode(self) -> None:
+        """Enable debug mode for additional tracking and validation."""
+        self._debug_mode = True
         
-        # Calculate memory size once and reuse
-        memory_size = reduce(lambda x, y: x * y, size) * torch.finfo(dtype).bits // 8
+    def disable_debug_mode(self) -> None:
+        """Disable debug mode."""
+        self._debug_mode = False
         
-        # Try to get from allocator first
-        pooled_tensor = self._allocator.allocate(memory_size)
-        if pooled_tensor is not None:
-            self._pool_hits += 1
-            pooled_tensor.resize_(size)
-            if fix:
-                self.fix_tensor_in_memory(pooled_tensor)
-            return pooled_tensor
+    def get_error_log(self) -> List[str]:
+        """Get the list of recorded errors."""
+        return self._error_log.copy()
+        
+    def _log_error(self, error: str) -> None:
+        """Log an error with timestamp."""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._error_log.append(f"[{timestamp}] {error}")
+        
+    def _validate_tensor(self, tensor: torch.Tensor) -> bool:
+        """Validate tensor state."""
+        try:
+            if not isinstance(tensor, torch.Tensor):
+                self._log_error(f"Invalid tensor type: {type(tensor)}")
+                return False
+            if not tensor.is_contiguous():
+                self._log_error(f"Non-contiguous tensor detected: {tensor.stride()}")
+            if tensor.requires_grad:
+                self._log_error("Tensor with requires_grad=True in memory pool")
+            _ = tensor.size()  # Check if tensor is alive
+            return True
+        except Exception as e:
+            self._log_error(f"Tensor validation failed: {str(e)}")
+            return False
             
-        self._pool_misses += 1
-        
-        # Rest of allocation logic...
-        tensor = torch.zeros(size, dtype=dtype)
-        
-        # Update sorted allocations and gaps
-        insert_idx = bisect.bisect_left(self._sorted_allocations, memory_size)
-        if insert_idx > 0:
-            self._total_gaps += memory_size - self._sorted_allocations[insert_idx - 1]
-        if insert_idx < len(self._sorted_allocations):
-            self._total_gaps += self._sorted_allocations[insert_idx] - memory_size
-        self._sorted_allocations.insert(insert_idx, memory_size)
-        
-        memory_size = tensor.element_size() * tensor.nelement()
-        self._allocated_memory += memory_size
-        self._peak_memory = max(self._peak_memory, self._allocated_memory)
-        tensor_id = id(tensor)
-        self._tensor_allocations[tensor_id] = memory_size
-        
-        if fix:
-            self.fix_tensor_in_memory(tensor)
-        
-        # Use weakref to track tensor deletion
+    def allocate_tensor(self, size: Tuple[int, ...], fix: bool = False, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Allocate a new tensor with improved safety checks."""
+        if not size:
+            raise ValueError("Empty size tuple")
+        if any(s <= 0 for s in size):
+            raise ValueError(f"Invalid tensor dimensions: {size}")
+            
+        try:
+            stack_trace = None
+            if self._debug_mode:
+                import traceback
+                stack_trace = ''.join(traceback.format_stack())
+            
+            # Calculate memory size once using element_size for accuracy
+            tensor = torch.zeros(size, dtype=dtype)
+            memory_size = tensor.element_size() * tensor.nelement()
+            
+            # Update allocation history
+            self._allocation_history.append(memory_size)
+            if len(self._allocation_history) > self._history_window:
+                self._allocation_history.pop(0)
+            
+            # Try cache first for exact size match
+            cache_key = f"{size}_{dtype}"
+            cached_ref = self._cache.get(cache_key)
+            if cached_ref is not None:
+                cached_tensor = cached_ref()
+                if cached_tensor is not None and cached_tensor.size() == size:
+                    self._cache_hits += 1
+                    if fix:
+                        self.fix_tensor_in_memory(cached_tensor)
+                    return cached_tensor
+            
+            # Try allocator next
+            pooled_tensor = self._allocator.allocate(memory_size)
+            if pooled_tensor is not None:
+                self._pool_hits += 1
+                pooled_tensor.resize_(size)
+                if fix:
+                    self.fix_tensor_in_memory(pooled_tensor)
+                return pooled_tensor
+            
+            self._pool_misses += 1
+            self._cache_misses += 1
+            
+            # Update tracking
+            self._allocated_memory += memory_size
+            self._peak_memory = max(self._peak_memory, self._allocated_memory)
+            tensor_id = id(tensor)
+            self._tensor_allocations[tensor_id] = memory_size
+            
+            # Update sorted allocations and gaps
+            insert_idx = bisect.bisect_left(self._sorted_allocations, memory_size)
+            if insert_idx > 0:
+                self._total_gaps += memory_size - self._sorted_allocations[insert_idx - 1]
+            if insert_idx < len(self._sorted_allocations):
+                self._total_gaps += self._sorted_allocations[insert_idx] - memory_size
+            self._sorted_allocations.insert(insert_idx, memory_size)
+            
+            if fix:
+                self.fix_tensor_in_memory(tensor)
+            
+            # Create and store weak reference
+            ref = weakref.ref(tensor, self._create_cleanup_callback(tensor_id))
+            self._tensor_refs.append(ref)
+            
+            # Update cache if not fixed
+            if not fix:
+                self._cache.put(cache_key, ref)
+            
+            self._metrics.append(
+                MemoryMetrics(
+                    allocated_memory=self._allocated_memory,
+                    peak_memory=self._peak_memory,
+                    fragmentation_ratio=self.get_fragmentation_ratio(),
+                    operation_type="allocate",
+                )
+            )
+            
+            if self._debug_mode and stack_trace is not None:
+                self._allocation_stack_traces[id(tensor)] = stack_trace
+                if not self._validate_tensor(tensor):
+                    raise RuntimeError("Tensor validation failed after allocation")
+                    
+            return tensor
+            
+        except Exception as e:
+            self._log_error(f"Allocation failed: {str(e)}")
+            raise
+
+    def _create_cleanup_callback(self, tensor_id: int) -> Callable[[weakref.ref], None]:
+        """Create a cleanup callback for tensor deletion."""
         def cleanup(ref: weakref.ref) -> None:
-            nonlocal tensor_id
             if tensor_id in self._tensor_allocations:
                 size = self._tensor_allocations[tensor_id]
                 self._allocated_memory -= size
@@ -242,9 +347,13 @@ class MemoryManager:
                         self._allocator.deallocate(tensor, size)
                 else:
                     self._fixed_tensors.remove(tensor_id)
-                # Remove from sorted allocations
+                # Update gaps
                 idx = bisect.bisect_left(self._sorted_allocations, size)
                 if idx < len(self._sorted_allocations) and self._sorted_allocations[idx] == size:
+                    if idx > 0:
+                        self._total_gaps -= size - self._sorted_allocations[idx - 1]
+                    if idx < len(self._sorted_allocations) - 1:
+                        self._total_gaps -= self._sorted_allocations[idx + 1] - size
                     self._sorted_allocations.pop(idx)
                 self._metrics.append(
                     MemoryMetrics(
@@ -254,26 +363,7 @@ class MemoryManager:
                         operation_type="deallocate",
                     )
                 )
-                tensor_id = None
-
-        # Create and store weak reference
-        ref = weakref.ref(tensor, cleanup)
-        self._tensor_refs.append(ref)
-        
-        # Update cache if not fixed
-        if not fix:
-            self._cache.put(str(size), ref)
-
-        self._metrics.append(
-            MemoryMetrics(
-                allocated_memory=self._allocated_memory,
-                peak_memory=self._peak_memory,
-                fragmentation_ratio=self.get_fragmentation_ratio(),
-                operation_type="allocate",
-            )
-        )
-
-        return tensor
+        return cleanup
 
     def get_fragmentation_ratio(self) -> float:
         """Calculate memory fragmentation ratio in O(1) time."""
@@ -300,50 +390,63 @@ class MemoryManager:
         return self._pool_hits, self._pool_misses
 
     def _cleanup_dead_refs(self) -> None:
-        """Clean up dead tensor references with optimized batch processing."""
-        # Pre-allocate lists for better memory efficiency
-        live_refs = []
-        dead_sizes = []
-        dead_indices = set()
-        
-        # Batch process references
-        for ref in self._tensor_refs:
-            tensor = ref()
-            if tensor is not None:
-                try:
-                    _ = tensor.shape
-                    live_refs.append(ref)
-                except:
-                    tensor_id = id(tensor)
-                    if tensor_id in self._tensor_allocations:
-                        size = self._tensor_allocations[tensor_id]
-                        dead_sizes.append(size)
-                        idx = bisect.bisect_left(self._sorted_allocations, size)
-                        if idx < len(self._sorted_allocations) and self._sorted_allocations[idx] == size:
-                            dead_indices.add(idx)
-                            # Update gaps
-                            if idx > 0:
-                                self._total_gaps -= size - self._sorted_allocations[idx - 1]
-                            if idx < len(self._sorted_allocations) - 1:
-                                self._total_gaps -= self._sorted_allocations[idx + 1] - size
-        
-        # Batch cleanup
-        if dead_sizes:
-            # Update allocations
-            self._allocated_memory -= sum(dead_sizes)
+        """Clean up dead tensor references with improved error handling."""
+        try:
+            cleanup_start = time.perf_counter()
+            initial_memory = self._allocated_memory
             
-            # Update sorted allocations efficiently
-            new_sorted = [
-                size for i, size in enumerate(self._sorted_allocations)
-                if i not in dead_indices
-            ]
-            self._sorted_allocations = new_sorted
+            # Pre-allocate lists for better memory efficiency
+            live_refs = []
+            dead_sizes = []
+            dead_indices = set()
             
-            # Single garbage collection
-            gc.collect()
-        
-        self._tensor_refs = live_refs
-        self._update_memory_pressure()
+            # Batch process references
+            for ref in self._tensor_refs:
+                tensor = ref()
+                if tensor is not None:
+                    try:
+                        _ = tensor.shape
+                        live_refs.append(ref)
+                    except:
+                        tensor_id = id(tensor)
+                        if tensor_id in self._tensor_allocations:
+                            size = self._tensor_allocations[tensor_id]
+                            dead_sizes.append(size)
+                            idx = bisect.bisect_left(self._sorted_allocations, size)
+                            if idx < len(self._sorted_allocations) and self._sorted_allocations[idx] == size:
+                                dead_indices.add(idx)
+                                # Update gaps
+                                if idx > 0:
+                                    self._total_gaps -= size - self._sorted_allocations[idx - 1]
+                                if idx < len(self._sorted_allocations) - 1:
+                                    self._total_gaps -= self._sorted_allocations[idx + 1] - size
+            
+            # Batch cleanup
+            if dead_sizes:
+                # Update allocations
+                self._allocated_memory -= sum(dead_sizes)
+                
+                # Update sorted allocations efficiently
+                new_sorted = [
+                    size for i, size in enumerate(self._sorted_allocations)
+                    if i not in dead_indices
+                ]
+                self._sorted_allocations = new_sorted
+                
+                # Single garbage collection
+                gc.collect()
+            
+            self._tensor_refs = live_refs
+            self._update_memory_pressure()
+            
+            if self._debug_mode:
+                cleanup_time = time.perf_counter() - cleanup_start
+                memory_freed = initial_memory - self._allocated_memory
+                self._log_error(f"Cleanup completed: {memory_freed} bytes freed in {cleanup_time:.3f}s")
+                
+        except Exception as e:
+            self._log_error(f"Cleanup failed: {str(e)}")
+            raise
 
     def optimized_matmul(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Perform memory-optimized matrix multiplication with adaptive chunking."""
@@ -481,5 +584,51 @@ class MemoryManager:
         self._tensor_refs.clear()
         self._sorted_allocations.clear()
         self._allocator.clear()
-        self._allocated_memory = 0
-        gc.collect()
+
+    def get_allocation_trace(self, tensor: torch.Tensor) -> Optional[str]:
+        """Get the stack trace where a tensor was allocated."""
+        tensor_id = id(tensor)
+        return self._allocation_stack_traces.get(tensor_id)
+        
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get detailed memory statistics for debugging."""
+        return {
+            'allocated_memory': self._allocated_memory,
+            'peak_memory': self._peak_memory,
+            'fragmentation_ratio': self.get_fragmentation_ratio(),
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+            'pool_hits': self._pool_hits,
+            'pool_misses': self._pool_misses,
+            'live_tensors': len(self._tensor_refs),
+            'fixed_tensors': len(self._fixed_tensors),
+            'allocation_sizes': sorted(self._sorted_allocations),
+            'total_gaps': self._total_gaps,
+            'memory_pressure': self._memory_pressure
+        }
+        
+    def validate_state(self) -> bool:
+        """Validate internal state consistency."""
+        try:
+            # Check tensor tracking consistency
+            tracked_memory = sum(self._tensor_allocations.values())
+            if tracked_memory != self._allocated_memory:
+                self._log_error(f"Memory tracking mismatch: tracked={tracked_memory}, allocated={self._allocated_memory}")
+                return False
+                
+            # Validate all tensors
+            for ref in self._tensor_refs:
+                tensor = ref()
+                if tensor is not None and not self._validate_tensor(tensor):
+                    return False
+                    
+            # Check sorted allocations consistency
+            if len(self._sorted_allocations) != len(self._tensor_allocations):
+                self._log_error("Allocation tracking mismatch")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            self._log_error(f"State validation failed: {str(e)}")
+            return False
