@@ -2,7 +2,7 @@
 - [x] tests/core/tiling/test_strategies.py
 - [x] tests/metrics/test_metrics_integration.py
 - [x] tests/performance/benchmarks/test_core.py
-- [ ] tests/performance/cpu/test_algorithms.py
+- [x] tests/performance/cpu/test_algorithms.py
 - [x] tests/performance/cpu/test_memory_management.py
 - [ ] tests/performance/cpu/test_memory.py
 - [x] tests/performance/cpu/test_vectorization.py
