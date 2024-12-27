@@ -1697,8 +1697,8 @@ class ScaleCohomology:
         β(g)∂_g C + γ(g)D C - d C = 0
         
         where:
-        - β(g) is the beta function describing coupling flow
-        - γ(g) is the anomalous dimension
+        - β(g) is the beta function describing coupling flow under renormalization scale changes
+        - γ(g) is the anomalous dimension from field renormalization
         - ∂_g γ(g) is the derivative of the anomalous dimension
         - D is the dilatation operator
         - d is the canonical dimension
@@ -1708,8 +1708,16 @@ class ScaleCohomology:
         2. γ(g)D C = γ(g) * (-1 + γ(g)) * C
         3. d C = (-1 + γ(g)) * C
         
-        The last two terms cancel when γ(g)D C - d C = 0, and the first term vanishes
-        when β(g)∂_g γ(g) = γ(g)².
+        The equation is satisfied when:
+        1. β(g)∂_g γ(g) = γ(g)² (consistency condition)
+        2. γ(g)D C - d C = 0 (scaling dimension condition)
+        
+        For QED-like theories:
+        - β(g) = g³/(32π²) 
+        - γ(g) = g²/(16π²)
+        - ∂_g γ(g) = g/(8π²)
+        
+        These satisfy β(g)∂_g γ(g) = γ(g)² = g⁴/(256π⁴).
         
         Args:
             beta: Callable that computes β(g) for coupling g
@@ -1718,6 +1726,10 @@ class ScaleCohomology:
             
         Returns:
             Callable that computes the CS operator action on correlation functions
+        
+        References:
+            - Peskin & Schroeder, "An Introduction to QFT", Section 12.2
+            - Lecture notes on Callan-Symanzik equation
         """
         def cs_operator(correlation: Callable, x1: torch.Tensor, x2: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
             """Apply CS operator to correlation function.

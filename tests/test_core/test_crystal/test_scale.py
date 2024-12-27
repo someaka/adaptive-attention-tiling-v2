@@ -232,41 +232,54 @@ class TestScaleCohomology:
 
     def test_callan_symanzik(self, scale_system, space_dim, dtype):
         """Test Callan-Symanzik equation properties and cross-implementation validation.
-        
+
         This test verifies:
         1. Classical CS equation implementation
-           - Proper term balance (β(g)∂_g C + γ(g)D C + d C = 0)
+           - Proper term balance (β(g)∂_g C + γ(g)D C - d C = 0)
            - Correct scaling behavior
            - Proper handling of complex values
-        
+           - Consistency condition β(g)∂_g γ(g) = γ(g)²
+
         2. Quantum CS equation implementation (when available)
            - OPE-based computation
            - Proper quantum state handling
            - Correct scaling dimensions
-        
-        3. Cross-validation between implementations
-           - Agreement between classical and quantum results
-           - Proper error handling and reporting
-           - Scale invariance verification
-        
+           - Cross-validation with classical results
+
+        3. Test cases:
+           a) Multiple coupling values (g = 0.1, 0.5, 1.0, 2.0)
+              - For small g (≤ 0.1): Total should be -0.5
+              - For all g: β(g)∂_g γ(g) = γ(g)²
+           
+           b) Multiple beta function factors (0.5, 1.0, 2.0)
+              - For factor = 1.0: Total should be -0.5
+              - For other factors: Verify consistency condition
+           
+           c) Multiple canonical dimensions (-1.0, -0.5, 0.0, 0.5)
+              - For dim = -1.0: Total should be -0.5
+              - For other dims: Verify consistency condition
+
         The test uses a correlation function of the form:
         C(x1, x2, g) = |x2 - x1|^(-1 + γ(g))
-        
-        which should exactly satisfy the CS equation when:
-        β(g)∂_g γ(g) = γ(g)²
-        
+
+        with QED-like functions:
+        - β(g) = g³/(32π²)
+        - γ(g) = g²/(16π²)
+        - ∂_g γ(g) = g/(8π²)
+
         For this correlation function:
         1. ∂_g C = C * log|x2-x1| * ∂_g γ(g)
         2. D C = (-1 + γ(g)) * C
         3. d C = (-1 + γ(g)) * C
-        
+
         Therefore:
-        β(g)∂_g C + γ(g)D C + d C =
-        β(g) * C * log|x2-x1| * ∂_g γ(g) + γ(g) * (-1 + γ(g)) * C + (-1 + γ(g)) * C = 0
-        
-        The last two terms cancel when γ(g)D C + d C = 0, and the first term vanishes
-        when β(g)∂_g γ(g) = γ(g)².
-        
+        β(g)∂_g C + γ(g)D C - d C =
+        C * [β(g) * log|x2-x1| * ∂_g γ(g) + γ(g) * (-1 + γ(g)) + (-1 + γ(g))]
+
+        The equation is satisfied when:
+        1. β(g)∂_g γ(g) = γ(g)² = g⁴/(256π⁴)
+        2. γ(g)D C - d C = 0
+
         Args:
             scale_system: Scale system instance
             space_dim: Dimension of space
@@ -274,6 +287,10 @@ class TestScaleCohomology:
             
         Raises:
             AssertionError: If CS equation is not satisfied or implementations disagree
+
+        References:
+            - Peskin & Schroeder, "An Introduction to QFT", Section 12.2
+            - Lecture notes on Callan-Symanzik equation
         """
         
         def create_correlation(canonical_dim: float = -1.0):

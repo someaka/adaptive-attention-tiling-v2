@@ -252,3 +252,35 @@ lhs = beta * dgamma
 rhs = gamma**2
 assert simplify(lhs - rhs) == 0
 ```
+
+### Documentation Standards
+
+1. **Code Documentation**
+   - Detailed docstrings with mathematical notation
+   - Accurate reflection of current implementation
+   - Cross-references to theoretical background
+   - Examples and usage patterns
+   - Performance considerations
+
+2. **Mathematical Documentation**
+   - LaTeX-style equations in docstrings
+   - References to physics literature
+   - Clear connection between theory and code
+   - Validation of mathematical properties
+   - Consistency conditions and constraints
+
+3. **Test Documentation**
+   - Clear test objectives and coverage
+   - Mathematical properties being tested
+   - Edge cases and failure modes
+   - Performance benchmarks
+   - Cross-validation between implementations
+
+4. **Maintenance**
+   - Regular review and updates
+   - Version tracking
+   - Deprecation notices
+   - Migration guides
+   - Breaking changes
+
+The project maintains high standards for documentation, with a particular focus on accurate mathematical notation and theoretical background in docstrings. This helps ensure that the implementation correctly reflects the underlying physics and mathematics.
