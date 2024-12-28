@@ -369,12 +369,6 @@ class ScaleCohomology:
             - target_scale: Target scale
             - connection_map: Parallel transport map
             - holonomy: Scale transformation holonomy
-            
-        Notes:
-            - Uses efficient matrix operations
-            - Handles numerical stability
-            - Preserves gauge invariance
-            - Optimizes memory usage
         """
         with memory_efficient_computation("scale_connection"):
             # Ensure inputs have correct dtype
@@ -384,17 +378,20 @@ class ScaleCohomology:
             # Compute log ratio element-wise with stability
             epsilon = 1e-8  # Numerical stability factor
             scale_ratio = (scale2 + epsilon) / (scale1 + epsilon)
-            log_ratio = torch.log(scale_ratio).mean()  # Overall scale factor
+            log_ratio = torch.log(scale_ratio)  # Keep element-wise log ratio
 
             # Initialize base metric efficiently
             g = torch.eye(self.dim, dtype=self.dtype)
             
             # Compute generator matrix with memory optimization
-            g_flat = g.reshape(-1).unsqueeze(0)  # Add batch dimension
-            F = self.potential_grad(g_flat).reshape(self.dim, self.dim)
+            generator = self.connection_generator(scale1)
             
-            # Compute connection map using optimized matrix exponential
-            connection_map = torch.matrix_exp(log_ratio * F)
+            # For infinitesimal transformations, use linear approximation
+            if torch.abs(log_ratio).max() < 1e-3:
+                connection_map = g + log_ratio * generator
+            else:
+                # For larger transformations, use matrix exponential
+                connection_map = torch.matrix_exp(log_ratio * generator)
 
             # Compute holonomy with efficient operations
             holonomy = self.connection.compute_holonomy([g, connection_map])
@@ -445,10 +442,18 @@ class ScaleCohomology:
         with memory_efficient_computation("connection_generator"):
             # Initialize base metric efficiently
             g = torch.eye(self.dim, dtype=self.dtype)
-            g_flat = g.reshape(-1)
+            g_flat = g.reshape(-1).unsqueeze(0)  # Add batch dimension
             
             # Compute potential gradient - this is the generator
             generator = self.potential_grad(g_flat).reshape(self.dim, self.dim)
+            
+            # Ensure antisymmetry for infinitesimal generator
+            generator = 0.5 * (generator - generator.transpose(-1, -2))
+            
+            # Normalize generator to have unit norm for numerical stability
+            generator_norm = torch.norm(generator)
+            if generator_norm > 0:
+                generator = generator / generator_norm
             
             return generator
 
