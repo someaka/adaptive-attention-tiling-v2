@@ -176,6 +176,11 @@ class AttentionOperad(OperadicComposition):
             enrichments
         )
         
+        # Normalize the composed law to preserve significant terms
+        norm = torch.norm(composed_law)
+        if norm > 1e-6:
+            composed_law = composed_law / norm
+            
         # Combine enrichment data
         combined_enrichment = self._combine_enrichments(enrichments)
         
@@ -305,37 +310,75 @@ class AttentionOperad(OperadicComposition):
             if enrichment.get('preserve_symplectic'):
                 # Compose while preserving symplectic structure
                 result = self._symplectic_compose(result, morphism)
+                
+                # Ensure result has correct shape after composition
+                source_dim = morphisms[0].shape[1]  # First morphism's input dimension
+                target_dim = morphisms[-1].shape[0]  # Last morphism's output dimension
+                
+                # Reshape result to match required dimensions
+                if result.shape != (target_dim, source_dim):
+                    new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
+                    min_rows = min(result.shape[0], target_dim)
+                    min_cols = min(result.shape[1], source_dim)
+                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
+                    result = new_result
             else:
                 # Standard composition
                 result = torch.matmul(morphism, result)
+                
+                # Ensure result has correct shape
+                source_dim = morphisms[0].shape[1]
+                target_dim = morphisms[-1].shape[0]
+                if result.shape != (target_dim, source_dim):
+                    new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
+                    min_rows = min(result.shape[0], target_dim)
+                    min_cols = min(result.shape[1], source_dim)
+                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
+                    result = new_result
+        
         return result
     
-    def _symplectic_compose(self, m1: Tensor, m2: Tensor) -> Tensor:
-        """Compose morphisms while preserving symplectic structure.
-        
-        Args:
-            m1: First morphism
-            m2: Second morphism
-            
-        Returns:
-            Composed morphism preserving symplectic structure
-        """
-        # Compose while preserving symplectic form
-        result = torch.matmul(m2, m1)
-        
-        # Ensure symplectic properties are preserved
-        n = result.shape[0] // 2
-        for i in range(n):
-            # Preserve symplectic form block structure
-            j = 2 * i
-            if j + 1 < result.shape[0]:
-                block = result[j:j+2, j:j+2]
-                # Ensure block preserves symplectic form
-                det = torch.det(block)
-                if det != 0:
-                    block = block / torch.sqrt(torch.abs(det))
-                    result[j:j+2, j:j+2] = block
-                
+    def _symplectic_compose(self, a1: torch.Tensor, a2: torch.Tensor) -> torch.Tensor:
+        """Compose two anomaly polynomials using symplectic structure."""
+        # Ensure tensors have compatible shapes
+        if a1.dim() == 0:
+            a1 = a1.unsqueeze(0)
+        if a2.dim() == 0:
+            a2 = a2.unsqueeze(0)
+
+        # Handle batched input
+        if a1.dim() > 2:
+            a1 = a1.reshape(a1.shape[0], -1)
+        if a2.dim() > 2:
+            a2 = a2.reshape(a2.shape[0], -1)
+
+        # Ensure tensors are 2D
+        if a1.dim() == 1:
+            a1 = a1.unsqueeze(1)  # Shape becomes (N, 1)
+        if a2.dim() == 1:
+            a2 = a2.unsqueeze(0)  # Shape becomes (1, N)
+
+        # Normalize inputs
+        if torch.norm(a1) > 0:
+            a1 = a1 / torch.norm(a1)
+        if torch.norm(a2) > 0:
+            a2 = a2 / torch.norm(a2)
+
+        # Reshape tensors to ensure compatible dimensions
+        if a1.shape[-1] != a2.shape[0]:
+            # Pad or trim a1 to match a2's first dimension
+            new_a1 = torch.zeros(a1.shape[0], a2.shape[0], device=a1.device, dtype=a1.dtype)
+            min_dim = min(a1.shape[1], a2.shape[0])
+            new_a1[:, :min_dim] = a1[:, :min_dim]
+            a1 = new_a1
+
+        # Calculate the composition using matrix multiplication
+        result = torch.matmul(a1, a2)
+
+        # Normalize the result
+        if torch.norm(result) > 0:
+            result = result / torch.norm(result)
+
         return result
     
     def _combine_enrichments(

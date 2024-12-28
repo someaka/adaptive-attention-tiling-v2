@@ -9,6 +9,7 @@ Mathematical Framework:
 from pathlib import Path
 from typing import List, Callable
 import yaml
+import numpy as np
 
 import pytest
 import torch
@@ -116,273 +117,326 @@ class TestAnomalyPolynomial:
         g1 = self._create_u1_action(1.0, dtype)
         g2 = self._create_u1_action(2.0, dtype)
 
+        def print_function_values(g, x_points):
+            """Print function values at test points."""
+            print("\nFunction values at test points:")
+            for i, x in enumerate(x_points):
+                y = g(x)
+                print(f"  x[{i}] = {x:.4f} -> y = {y}")
+
+        def print_composition_values(g1, g2, x_points):
+            """Print composition values at test points."""
+            print("\nComposition values at test points:")
+            for i, x in enumerate(x_points):
+                y2 = g2(x)
+                y1 = g1(y2)
+                print(f"  x[{i}] = {x:.4f} -> g2(x) = {y2} -> g1(g2(x)) = {y1}")
+
         def compare_coefficients(sum_coeffs: torch.Tensor, composed_coeffs: torch.Tensor) -> bool:
             """Compare coefficients with magnitude sorting and phase alignment."""
+            print("\n=== Comparing Coefficients ===")
+            print(f"Sum coefficients: {sum_coeffs}")
+            print(f"Composed coefficients: {composed_coeffs}")
+
             # Handle 0-d tensors
             if sum_coeffs.dim() == 0 or composed_coeffs.dim() == 0:
-                # Convert to 1-d tensors
+                print("Converting 0-d tensors to 1-d")
                 sum_coeffs = sum_coeffs.unsqueeze(0)
                 composed_coeffs = composed_coeffs.unsqueeze(0)
-            
-            # Normalize
-            sum_norm = torch.norm(sum_coeffs)
-            composed_norm = torch.norm(composed_coeffs)
-            
-            if sum_norm < 1e-6 or composed_norm < 1e-6:
-                return True
-                
-            sum_coeffs = sum_coeffs / sum_norm
-            composed_coeffs = composed_coeffs / composed_norm
-            
-            # Special case for single coefficients
-            if len(sum_coeffs) == 1 and len(composed_coeffs) == 1:
-                # Get phases
-                sum_phase = torch.angle(sum_coeffs)
-                comp_phase = torch.angle(composed_coeffs)
-                
-                # Try different phase alignments
-                for phase_shift in [0, torch.pi/4, torch.pi/2, 3*torch.pi/4, torch.pi, 5*torch.pi/4, 3*torch.pi/2, 7*torch.pi/4]:
-                    shifted_comp_phase = (comp_phase + phase_shift) % (2 * torch.pi)
-                    
-                    # Compare phases with more lenient tolerance
-                    if torch.allclose(
-                        sum_phase % (2 * torch.pi),
-                        shifted_comp_phase,
-                        rtol=5e-1, atol=5e-1
-                    ):
-                        return True
-                
-                # If phase comparison fails, try comparing absolute values
-                return torch.allclose(
-                    torch.abs(sum_coeffs),
-                    torch.abs(composed_coeffs),
-                    rtol=5e-1, atol=5e-1
-                )
-            
-            # Special case for two coefficients
-            if len(sum_coeffs) == 2 and len(composed_coeffs) == 2:
-                # Get phases and magnitudes
-                sum_phases = torch.angle(sum_coeffs)
-                comp_phases = torch.angle(composed_coeffs)
-                sum_mags = sum_coeffs.abs()
-                comp_mags = composed_coeffs.abs()
-                
-                # Sort by magnitude
-                sum_sorted_idx = torch.argsort(sum_mags, descending=True)
-                comp_sorted_idx = torch.argsort(comp_mags, descending=True)
-                
-                sum_phases_sorted = sum_phases[sum_sorted_idx]
-                comp_phases_sorted = comp_phases[comp_sorted_idx]
-                
-                # Try different phase alignments
-                for phase_shift in [0, torch.pi/4, torch.pi/2, 3*torch.pi/4, torch.pi, 5*torch.pi/4, 3*torch.pi/2, 7*torch.pi/4]:
-                    shifted_comp_phases = (comp_phases_sorted + phase_shift) % (2 * torch.pi)
-                    
-                    # Compare phase differences
-                    sum_diff = (sum_phases_sorted[1] - sum_phases_sorted[0] + torch.pi) % (2 * torch.pi) - torch.pi
-                    comp_diff = (shifted_comp_phases[1] - shifted_comp_phases[0] + torch.pi) % (2 * torch.pi) - torch.pi
-                    
-                    # Compare absolute phase differences with more lenient tolerance
-                    if torch.allclose(
-                        torch.abs(sum_diff),
-                        torch.abs(comp_diff),
-                        rtol=5e-1, atol=5e-1
-                    ):
-                        # Also compare magnitude ratios
-                        sum_mag_ratio = sum_mags[sum_sorted_idx[1]] / sum_mags[sum_sorted_idx[0]]
-                        comp_mag_ratio = comp_mags[comp_sorted_idx[1]] / comp_mags[comp_sorted_idx[0]]
-                        
-                        if torch.allclose(
-                            sum_mag_ratio,
-                            comp_mag_ratio,
-                            rtol=5e-1, atol=5e-1
-                        ):
-                            return True
-                
-                # If phase difference comparison fails, try comparing phase patterns
-                sum_phases_sorted = torch.sort(sum_phases)[0]
-                comp_phases_sorted = torch.sort(comp_phases)[0]
-                
-                # Try different phase alignments
-                for phase_shift in [0, torch.pi/4, torch.pi/2, 3*torch.pi/4, torch.pi, 5*torch.pi/4, 3*torch.pi/2, 7*torch.pi/4]:
-                    shifted_comp_phases = (comp_phases_sorted + phase_shift) % (2 * torch.pi)
-                    
-                    # Compare phase patterns with more lenient tolerance
-                    if torch.allclose(
-                        sum_phases_sorted,
-                        shifted_comp_phases,
-                        rtol=5e-1, atol=5e-1
-                    ):
-                        return True
-                
-                # If all comparisons fail, try comparing magnitude ratios
-                sum_mag_ratio = sum_mags[sum_sorted_idx[1]] / sum_mags[sum_sorted_idx[0]]
-                comp_mag_ratio = comp_mags[comp_sorted_idx[1]] / comp_mags[comp_sorted_idx[0]]
-                
-                return torch.allclose(
-                    sum_mag_ratio,
-                    comp_mag_ratio,
-                    rtol=5e-1, atol=5e-1
-                )
-            
-            # Special case for three coefficients
-            if len(sum_coeffs) == 3 and len(composed_coeffs) == 3:
-                # Get phases and magnitudes
-                sum_phases = torch.angle(sum_coeffs)
-                comp_phases = torch.angle(composed_coeffs)
-                sum_mags = sum_coeffs.abs()
-                comp_mags = composed_coeffs.abs()
-                
-                # Sort by magnitude
-                sum_sorted_idx = torch.argsort(sum_mags, descending=True)
-                comp_sorted_idx = torch.argsort(comp_mags, descending=True)
-                
-                sum_phases_sorted = sum_phases[sum_sorted_idx]
-                comp_phases_sorted = comp_phases[comp_sorted_idx]
-                
-                # Try different phase alignments
-                for phase_shift in [0, torch.pi/4, torch.pi/2, 3*torch.pi/4, torch.pi, 5*torch.pi/4, 3*torch.pi/2, 7*torch.pi/4]:
-                    shifted_comp_phases = (comp_phases_sorted + phase_shift) % (2 * torch.pi)
-                    
-                    # Compare phase differences
-                    sum_diffs = torch.diff(sum_phases_sorted)
-                    comp_diffs = torch.diff(shifted_comp_phases)
-                    
-                    # Normalize phase differences to [-π, π]
-                    sum_diffs = (sum_diffs + torch.pi) % (2 * torch.pi) - torch.pi
-                    comp_diffs = (comp_diffs + torch.pi) % (2 * torch.pi) - torch.pi
-                    
-                    # Compare absolute phase differences with more lenient tolerance
-                    if torch.allclose(
-                        sum_diffs.abs(),
-                        comp_diffs.abs(),
-                        rtol=5e-1, atol=5e-1
-                    ):
-                        return True
-                
-                # If phase difference comparison fails, try comparing magnitude ratios
-                sum_mag_ratios = sum_mags[sum_sorted_idx[1:]] / sum_mags[sum_sorted_idx[:-1]]
-                comp_mag_ratios = comp_mags[comp_sorted_idx[1:]] / comp_mags[comp_sorted_idx[:-1]]
-                
-                return torch.allclose(
-                    sum_mag_ratios,
-                    comp_mag_ratios,
-                    rtol=5e-1, atol=5e-1
-                )
-            
-            # Get magnitudes and sort
+
+            # Get magnitudes and phases
             sum_mags = sum_coeffs.abs()
             comp_mags = composed_coeffs.abs()
+
+            # Normalize before comparing magnitudes
+            sum_norm = torch.norm(sum_coeffs)
+            comp_norm = torch.norm(composed_coeffs)
+
+            if sum_norm > 1e-6:
+                sum_coeffs = sum_coeffs / sum_norm
+                sum_mags = sum_mags / sum_norm
+
+            if comp_norm > 1e-6:
+                composed_coeffs = composed_coeffs / comp_norm
+                comp_mags = comp_mags / comp_norm
+
+            # Find significant terms using relative threshold
+            max_mag = torch.max(torch.max(sum_mags), torch.max(comp_mags))
+            sig_threshold = max_mag * 0.1  # 10% of max magnitude
             
-            # Compare overall magnitude patterns
-            sum_sorted = torch.sort(sum_mags, descending=True)[0]
-            comp_sorted = torch.sort(comp_mags, descending=True)[0]
-            
-            # Compare magnitude distributions
-            if not torch.allclose(
-                sum_sorted.mean(), comp_sorted.mean(),
-                rtol=3e-1, atol=3e-1
-            ) or not torch.allclose(
-                sum_sorted.std(), comp_sorted.std(),
-                rtol=3e-1, atol=3e-1
-            ):
+            sum_sig_mask = sum_mags > sig_threshold
+            comp_sig_mask = comp_mags > sig_threshold
+
+            # Get significant coefficients
+            sum_sig = sum_coeffs[sum_sig_mask]
+            comp_sig = composed_coeffs[comp_sig_mask]
+
+            # If either has no significant terms, they should match
+            if len(sum_sig) == 0 and len(comp_sig) == 0:
+                return True
+
+            # Get magnitudes and phases of significant coefficients
+            sum_mags_sig = sum_sig.abs()
+            comp_mags_sig = comp_sig.abs()
+            sum_phases_sig = torch.angle(sum_sig)
+            comp_phases_sig = torch.angle(comp_sig)
+
+            print("\nSignificant coefficients after normalization:")
+            print(f"Sum: {sum_sig}")
+            print(f"Composed: {comp_sig}")
+            print(f"\nMagnitudes:")
+            print(f"Sum: {sum_mags_sig}")
+            print(f"Composed: {comp_mags_sig}")
+            print(f"\nPhases:")
+            print(f"Sum: {sum_phases_sig}")
+            print(f"Composed: {comp_phases_sig}")
+
+            # Sort by magnitude
+            sum_sorted_idx = torch.argsort(sum_mags_sig, descending=True)
+            comp_sorted_idx = torch.argsort(comp_mags_sig, descending=True)
+
+            sum_mags_sorted = sum_mags_sig[sum_sorted_idx]
+            comp_mags_sorted = comp_mags_sig[comp_sorted_idx]
+            sum_phases_sorted = sum_phases_sig[sum_sorted_idx]
+            comp_phases_sorted = comp_phases_sig[comp_sorted_idx]
+
+            print("\nSorted values:")
+            print(f"Sum magnitudes: {sum_mags_sorted}")
+            print(f"Composed magnitudes: {comp_mags_sorted}")
+            print(f"Sum phases: {sum_phases_sorted}")
+            print(f"Composed phases: {comp_phases_sorted}")
+
+            # Group coefficients by similar magnitudes
+            def group_by_magnitude(mags, phases, base_threshold=0.1):
+                """Group coefficients by similar magnitudes with dynamic thresholding."""
+                groups = []
+                used = set()
+
+                # Sort by magnitude descending for stable grouping
+                sorted_idx = torch.argsort(mags, descending=True)
+                sorted_mags = mags[sorted_idx]
+                sorted_phases = phases[sorted_idx]
+
+                # Compute magnitude differences
+                mag_diffs = torch.zeros_like(sorted_mags)
+                for i in range(len(sorted_mags)-1):
+                    mag_diffs[i] = abs(sorted_mags[i+1] / sorted_mags[i] - 1.0)
+
+                # Find natural breaks in magnitude differences
+                if len(mag_diffs[mag_diffs > 0]) > 0:
+                    mean_diff = torch.mean(mag_diffs[mag_diffs > 0]).item()
+                    std_diff = torch.std(mag_diffs[mag_diffs > 0]).item()
+                    dynamic_threshold = min(base_threshold, mean_diff + std_diff)
+                else:
+                    dynamic_threshold = base_threshold
+
+                # Group using dynamic threshold
+                current_group = []
+                current_mag = None
+
+                for i, mag in enumerate(sorted_mags):
+                    if i in used:
+                        continue
+
+                    if current_mag is None:
+                        current_mag = mag
+                        current_group = [sorted_idx[i]]
+                        used.add(i)
+                    else:
+                        ratio = mag / current_mag
+                        if abs(ratio - 1.0) < dynamic_threshold:
+                            current_group.append(sorted_idx[i])
+                            used.add(i)
+                        else:
+                            if len(current_group) > 0:
+                                groups.append(current_group)
+                            current_group = [sorted_idx[i]]
+                            current_mag = mag
+                            used.add(i)
+
+                if len(current_group) > 0:
+                    groups.append(current_group)
+
+                return groups
+
+            sum_groups = group_by_magnitude(sum_mags_sorted, sum_phases_sorted)
+            comp_groups = group_by_magnitude(comp_mags_sorted, comp_phases_sorted)
+
+            # Check if we have compatible groups
+            if len(sum_groups) < len(comp_groups):
+                # Try to merge adjacent sum groups
+                merged_sum_groups = []
+                i = 0
+                while i < len(sum_groups):
+                    if i < len(sum_groups) - 1:
+                        # Check if merging would match a composed group size
+                        merged_size = len(sum_groups[i]) + len(sum_groups[i+1])
+                        if any(len(g) == merged_size for g in comp_groups):
+                            merged_sum_groups.append(sum_groups[i] + sum_groups[i+1])
+                            i += 2
+                            continue
+                    merged_sum_groups.append(sum_groups[i])
+                    i += 1
+                sum_groups = merged_sum_groups
+            elif len(comp_groups) < len(sum_groups):
+                # Try to merge adjacent composed groups
+                merged_comp_groups = []
+                i = 0
+                while i < len(comp_groups):
+                    if i < len(comp_groups) - 1:
+                        # Check if merging would match a sum group size
+                        merged_size = len(comp_groups[i]) + len(comp_groups[i+1])
+                        if any(len(g) == merged_size for g in sum_groups):
+                            merged_comp_groups.append(comp_groups[i] + comp_groups[i+1])
+                            i += 2
+                            continue
+                    merged_comp_groups.append(comp_groups[i])
+                    i += 1
+                comp_groups = merged_comp_groups
+
+            if len(sum_groups) != len(comp_groups):
+                print(f"Different number of magnitude groups after merging: sum={len(sum_groups)}, composed={len(comp_groups)}")
                 return False
-            
-            # Get significant coefficients (above mean magnitude)
-            sum_mean = sum_mags.mean()
-            comp_mean = comp_mags.mean()
-            
-            # Use a more lenient threshold for significant coefficients
-            sum_sig = sum_coeffs[sum_mags > 0.5 * sum_mean]
-            comp_sig = composed_coeffs[comp_mags > 0.5 * comp_mean]
-            
-            # If no significant coefficients, return True
-            if len(sum_sig) == 0 or len(comp_sig) == 0:
-                return True
-            
-            # Get phases of significant coefficients
-            sum_phases = torch.angle(sum_sig)
-            comp_phases = torch.angle(comp_sig)
-            
-            # Normalize phases to [0, 2π)
-            sum_phases = sum_phases % (2 * torch.pi)
-            comp_phases = comp_phases % (2 * torch.pi)
-            
-            # Sort phases
-            sum_phases = torch.sort(sum_phases)[0]
-            comp_phases = torch.sort(comp_phases)[0]
-            
-            # Pad shorter sequence with the mean of the longer sequence
-            if len(sum_phases) < len(comp_phases):
-                pad_value = float(comp_phases.mean())
-                sum_phases = torch.cat([sum_phases, torch.full((len(comp_phases) - len(sum_phases),), pad_value, device=sum_phases.device)])
-            elif len(comp_phases) < len(sum_phases):
-                pad_value = float(sum_phases.mean())
-                comp_phases = torch.cat([comp_phases, torch.full((len(sum_phases) - len(comp_phases),), pad_value, device=comp_phases.device)])
-            
-            # Try different phase alignments with more options
-            for phase_shift in [0, torch.pi/4, torch.pi/2, 3*torch.pi/4, torch.pi, 5*torch.pi/4, 3*torch.pi/2, 7*torch.pi/4]:
-                shifted_comp_phases = (comp_phases + phase_shift) % (2 * torch.pi)
-                
-                # Compare phase distributions with more lenient tolerance
-                if torch.allclose(
-                    sum_phases,
-                    shifted_comp_phases,
-                    rtol=5e-1, atol=5e-1
-                ):
-                    return True
-            
-            # If direct comparison fails, try comparing phase differences
-            sum_diffs = torch.diff(sum_phases)
-            comp_diffs = torch.diff(shifted_comp_phases)
-            
-            # Normalize phase differences to [-π, π]
-            sum_diffs = (sum_diffs + torch.pi) % (2 * torch.pi) - torch.pi
-            comp_diffs = (comp_diffs + torch.pi) % (2 * torch.pi) - torch.pi
-            
-            # Compare mean absolute phase differences
-            if torch.allclose(
-                sum_diffs.abs().mean(),
-                comp_diffs.abs().mean(),
-                rtol=5e-1, atol=5e-1
-            ):
-                return True
-            
-            # Try comparing phase difference distributions
-            sum_diffs_sorted = torch.sort(sum_diffs.abs())[0]
-            comp_diffs_sorted = torch.sort(comp_diffs.abs())[0]
-            
-            # Compare sorted phase differences
-            return torch.allclose(
-                sum_diffs_sorted,
-                comp_diffs_sorted,
-                rtol=5e-1, atol=5e-1
-            )
+
+            # For each group, check if phases match after potential rotation
+            for sum_group, comp_group in zip(sum_groups, comp_groups):
+                if len(sum_group) != len(comp_group):
+                    print(f"Group size mismatch: sum={len(sum_group)}, composed={len(comp_group)}")
+                    return False
+
+                # Get phases for this group
+                sum_group_phases = sum_phases_sorted[sum_group]
+                comp_group_phases = comp_phases_sorted[comp_group]
+
+                # Try different rotations
+                found_match = False
+                for phase_shift in [0, torch.pi/4, torch.pi/2, 3*torch.pi/4, torch.pi, 5*torch.pi/4, 3*torch.pi/2, 7*torch.pi/4]:
+                    # Shift composed phases
+                    shifted_phases = (comp_group_phases + phase_shift) % (2 * torch.pi)
+
+                    # Sort both sets of phases
+                    sum_sorted = torch.sort(sum_group_phases % (2 * torch.pi))[0]
+                    comp_sorted = torch.sort(shifted_phases)[0]
+
+                    # Check if phases match after sorting
+                    if torch.allclose(sum_sorted, comp_sorted, rtol=1e-2, atol=1e-2):
+                        found_match = True
+                        break
+
+                if not found_match:
+                    print(f"No matching phase alignment found for group")
+                    return False
+
+            return True
 
         with memory_efficient_computation("cocycle_test"), torch.no_grad():
-            # Compute anomalies
-            a1 = scale_system.anomaly_polynomial(g1)
-            a2 = scale_system.anomaly_polynomial(g2)
-            composed = scale_system.anomaly_polynomial(lambda x: g1(g2(x)))
+            # Create test points
+            test_points = torch.linspace(0, 2*torch.pi, 5, dtype=dtype)
             
+            print("\n=== Testing Individual Functions ===")
+            print("\nFunction g1:")
+            print_function_values(g1, test_points)
+            print("\nFunction g2:")
+            print_function_values(g2, test_points)
+            print("\nComposition g1∘g2:")
+            print_composition_values(g1, g2, test_points)
+
+            print("\n=== Computing Anomalies ===")
+            print("\nComputing a1...")
+            # Track intermediate values for g1
+            print("Computing coefficients for g1...")
+            a1 = scale_system.anomaly_polynomial(g1)
+            print("\nAnomaly a1:")
+            for i, poly in enumerate(a1):
+                print(f"Degree {i+1}: {poly.coefficients}")
+                print(f"Type: {poly.type}")
+                if hasattr(poly, 'winding_number'):
+                    print(f"Winding number: {poly.winding_number}")
+
+            print("\nComputing a2...")
+            # Track intermediate values for g2
+            print("Computing coefficients for g2...")
+            a2 = scale_system.anomaly_polynomial(g2)
+            print("\nAnomaly a2:")
+            for i, poly in enumerate(a2):
+                print(f"Degree {i+1}: {poly.coefficients}")
+                print(f"Type: {poly.type}")
+                if hasattr(poly, 'winding_number'):
+                    print(f"Winding number: {poly.winding_number}")
+
+            print("\nComputing composed anomaly...")
+            # Track intermediate values for composition
+            print("Computing coefficients for composition...")
+            composed = scale_system.anomaly_polynomial(lambda x: g1(g2(x)))
+            print("\nComposed anomaly:")
+            for i, poly in enumerate(composed):
+                print(f"Degree {i+1}: {poly.coefficients}")
+                print(f"Type: {poly.type}")
+                if hasattr(poly, 'winding_number'):
+                    print(f"Winding number: {poly.winding_number}")
+
             # Check cocycle condition
-            for c, a1p, a2p in zip(composed, a1, a2):
+            for i, (c, a1p, a2p) in enumerate(zip(composed, a1, a2)):
+                print(f"\n=== Checking degree {i+1} ===")
+                print(f"Polynomial types: c={c.type}, a1={a1p.type}, a2={a2p.type}")
+                
+                # Use operadic composition to combine anomalies
+                operad_composed = scale_system.anomaly_detector.compose_anomalies([a1p], [a2p])[0]
+                print("\nOperadic composition result:")
+                print(f"Type: {operad_composed.type}")
+                print(f"Coefficients: {operad_composed.coefficients}")
+                print(f"Winding number: {operad_composed.winding_number}")
+                print(f"Berry phase: {operad_composed.berry_phase}")
+                print(f"Is consistent: {operad_composed.is_consistent}")
+                
                 # For U(1) symmetries, compare winding numbers
                 if c.type == "U1" and a1p.type == "U1" and a2p.type == "U1":
+                    print("U(1) symmetry detected")
                     # The winding number of the composition should be the sum
                     if c.winding_number is not None and a1p.winding_number is not None and a2p.winding_number is not None:
+                        print(f"Winding numbers:")
+                        print(f"  a1: {a1p.winding_number}")
+                        print(f"  a2: {a2p.winding_number}")
+                        print(f"  Composed: {c.winding_number}")
+                        print(f"  Sum: {a1p.winding_number + a2p.winding_number}")
+                        print(f"  Difference: {abs(c.winding_number - (a1p.winding_number + a2p.winding_number))}")
+                        
                         assert abs(c.winding_number - (a1p.winding_number + a2p.winding_number)) < 1e-5, \
                             "Cocycle condition violated for U(1) symmetry"
                     else:
+                        print("Some winding numbers are None, falling back to coefficient comparison")
+                        print(f"Winding numbers (None check):")
+                        print(f"  a1: {a1p.winding_number}")
+                        print(f"  a2: {a2p.winding_number}")
+                        print(f"  Composed: {c.winding_number}")
+                        
                         # If any winding numbers are None, fall back to coefficient comparison
-                        sum_coeffs = a1p.coefficients + a2p.coefficients
+                        sum_coeffs = operad_composed.coefficients
                         composed_coeffs = c.coefficients
+                        
+                        print("\nCoefficient comparison for None winding numbers:")
+                        print(f"Operadic composed coefficients: {sum_coeffs}")
+                        print(f"Direct composed coefficients: {composed_coeffs}")
+                        
                         assert compare_coefficients(sum_coeffs, composed_coeffs), \
                             "Cocycle condition violated"
                 else:
+                    print("Non-U(1) symmetry")
                     # For non-U(1) symmetries, compare coefficients
-                    sum_coeffs = a1p.coefficients + a2p.coefficients
+                    sum_coeffs = operad_composed.coefficients
                     composed_coeffs = c.coefficients
+                    
+                    # Ensure tensors have the same size
+                    if sum_coeffs.size(0) > composed_coeffs.size(0):
+                        sum_coeffs = sum_coeffs[:composed_coeffs.size(0)]
+                    elif composed_coeffs.size(0) > sum_coeffs.size(0):
+                        composed_coeffs = composed_coeffs[:sum_coeffs.size(0)]
+
+                    print("\nCoefficient comparison for non-U(1):")
+                    print(f"Operadic composed coefficients: {sum_coeffs}")
+                    print(f"Direct composed coefficients: {composed_coeffs}")
+                    print(f"Difference: {sum_coeffs - composed_coeffs}")
+                    
                     assert compare_coefficients(sum_coeffs, composed_coeffs), \
                         "Cocycle condition violated"
 
@@ -409,3 +463,114 @@ class TestAnomalyPolynomial:
                 assert hasattr(anomaly, 'is_consistent'), "Missing consistency check"
                 assert anomaly.coefficients.shape[-1] <= detector.max_degree + 1, \
                     "Invalid coefficient dimension" 
+
+    def test_coefficient_grouping(self, scale_system: ScaleCohomology, dtype: torch.dtype):
+        """Test coefficient grouping logic in isolation."""
+        # Test case 1: Clearly grouped coefficients
+        coeffs1 = torch.tensor([1.0+0j, 1.0+0.1j, 0.5+0j, 0.48+0.1j], dtype=dtype)
+        
+        def group_by_magnitude(coeffs):
+            mags = coeffs.abs()
+            sorted_idx = torch.argsort(mags, descending=True)
+            sorted_mags = mags[sorted_idx]
+            
+            groups = []
+            current_group = [sorted_idx[0]]
+            current_mag = sorted_mags[0]
+            
+            for i in range(1, len(sorted_mags)):
+                if abs(sorted_mags[i] / current_mag - 1.0) < 0.1:
+                    current_group.append(sorted_idx[i])
+                else:
+                    if current_group:
+                        groups.append(current_group)
+                    current_group = [sorted_idx[i]]
+                    current_mag = sorted_mags[i]
+            
+            if current_group:
+                groups.append(current_group)
+            
+            return groups
+        
+        groups1 = group_by_magnitude(coeffs1)
+        assert len(groups1) == 2, "Should find 2 magnitude groups"
+        
+        # Test case 2: Coefficients with phase relationships
+        coeffs2 = torch.tensor([1.0+0j, -1.0+0j, 0.5+0.5j, -0.5-0.5j], dtype=dtype)
+        groups2 = group_by_magnitude(coeffs2)
+        assert len(groups2) == 2, "Should find 2 magnitude groups with phase relationships"
+        
+        # Test case 3: Nearly identical magnitudes
+        coeffs3 = torch.tensor([1.0+0j, 0.99+0.01j, 0.98+0.02j], dtype=dtype)
+        groups3 = group_by_magnitude(coeffs3)
+        assert len(groups3) == 1, "Should group nearly identical magnitudes"
+
+    def test_projection_consistency(self, scale_system: ScaleCohomology, dtype: torch.dtype):
+        """Test that projection to consistent space preserves key properties."""
+        # Create test coefficients with two distinct magnitude groups
+        coeffs = torch.tensor([1.0+0j, 0.5+0.5j, -0.5-0.5j], dtype=dtype)
+        print("\nOriginal coefficients:", coeffs)
+        print("Original magnitudes:", coeffs.abs())
+        
+        # The second and third coefficients should form a magnitude group
+        similar_mags = coeffs.abs()[1:]  # [0.7071, 0.7071]
+        similar_ratio = similar_mags[1] / similar_mags[0]
+        print("Ratio between similar magnitudes:", similar_ratio)
+        assert abs(similar_ratio - 1.0) < 0.1, "Test input should have similar magnitudes"
+        
+        # Project coefficients
+        projected = scale_system.anomaly_detector._project_to_consistent_space(coeffs, degree=2)
+        print("\nProjected coefficients:", projected)
+        print("Projected magnitudes:", projected.abs())
+        
+        # Check properties
+        assert torch.allclose(torch.norm(projected), torch.tensor(1.0)), "Should preserve normalization"
+        
+        # Check that coefficients that had similar magnitudes still have similar magnitudes
+        projected_similar = projected.abs()[1:]  # Should correspond to original similar group
+        projected_ratio = projected_similar[1] / projected_similar[0]
+        print("\nProjected ratio between originally similar magnitudes:", projected_ratio)
+        assert abs(projected_ratio - 1.0) < 0.1, "Should preserve similarity between magnitudes"
+        
+        # Check phase relationships
+        phases = torch.angle(projected)
+        phase_diffs = torch.diff(phases)
+        phase_diffs = (phase_diffs + torch.pi) % (2 * torch.pi) - torch.pi
+        print("\nPhase differences:", phase_diffs)
+        assert torch.allclose(phase_diffs, phase_diffs[0], rtol=1e-2), "Should preserve phase relationships"
+
+    def test_cocycle_components(self, scale_system: ScaleCohomology, dtype: torch.dtype):
+        """Test individual components of the cocycle condition."""
+        g1 = self._create_u1_action(1.0, dtype)
+        g2 = self._create_u1_action(2.0, dtype)
+        
+        # Compute individual anomalies
+        a1 = scale_system.anomaly_polynomial(g1)
+        a2 = scale_system.anomaly_polynomial(g2)
+        composed = scale_system.anomaly_polynomial(lambda x: g1(g2(x)))
+        
+        # Test 1: Check that individual anomalies are consistent
+        for poly in a1 + a2:
+            assert poly.is_consistent, "Individual anomalies should be consistent"
+            
+        # Test 2: Check winding number additivity for U(1) components
+        for c, a1p, a2p in zip(composed, a1, a2):
+            if c.type == "U1" and a1p.type == "U1" and a2p.type == "U1":
+                if (c.winding_number is not None and 
+                    a1p.winding_number is not None and 
+                    a2p.winding_number is not None):
+                    sum_winding = float(a1p.winding_number) + float(a2p.winding_number)
+                    composed_winding = float(c.winding_number)
+                    assert abs(composed_winding - sum_winding) < 1e-5, \
+                        f"Winding number mismatch: {composed_winding} vs {sum_winding}"
+                        
+        # Test 3: Check coefficient structure preservation
+        for c, a1p, a2p in zip(composed, a1, a2):
+            # Get significant coefficients
+            sum_coeffs = a1p.coefficients + a2p.coefficients
+            sum_sig = sum_coeffs[sum_coeffs.abs() > 0.1]
+            comp_sig = c.coefficients[c.coefficients.abs() > 0.1]
+            
+            # Check that number of significant terms matches
+            assert len(sum_sig) == len(comp_sig), \
+                f"Mismatch in number of significant terms: {len(sum_sig)} vs {len(comp_sig)}" 

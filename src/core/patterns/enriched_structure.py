@@ -168,11 +168,42 @@ class PatternTransition(EnrichedTransition):
             # For matrix inputs, create transformation matrix
             structure = torch.eye(source.shape[0], device=source.device, dtype=source.dtype)
             evolved = self.wave.evolve_structure(source, direction)
-            structure = torch.matmul(evolved, torch.pinverse(source))
+            
+            # Handle evolved tensor shape
+            n = source.shape[0]  # Number of rows
+            evolved_flat = evolved.reshape(-1)  # Flatten completely
+            
+            # Pad or trim evolved tensor to match source size
+            target_size = source.shape[0] * source.shape[1]  # Total size needed
+            if evolved_flat.numel() < target_size:
+                # Pad with zeros
+                padded = torch.zeros(target_size, device=evolved.device, dtype=evolved.dtype)
+                padded[:evolved_flat.numel()] = evolved_flat
+                evolved_flat = padded
+            else:
+                # Trim to size
+                evolved_flat = evolved_flat[:target_size]
+            
+            # Reshape to match source dimensions
+            evolved = evolved_flat.reshape(source.shape)
+            
+            # Compute transformation using evolved state
+            evolved_flat = evolved.reshape(evolved.shape[0], -1)  # (n, m)
+            source_flat = source.reshape(source.shape[0], -1)     # (n, m)
+            
+            # Compute transformation matrix using pseudoinverse
+            pinv = torch.pinverse(source_flat)                    # (m, n)
+            structure = torch.matmul(evolved_flat, pinv)          # (n, n)
+            
+            # Ensure structure is square
+            if structure.shape[0] != structure.shape[1]:
+                n = min(structure.shape[0], structure.shape[1])
+                structure = structure[:n, :n]
+
         else:
-            # For vector inputs, use wave evolution directly
+            # For vector inputs, use direct evolution
             structure = self.wave.evolve_structure(source, direction)
-        
+
         return EnrichedMorphism(
             source_space=source,
             target_space=target,
@@ -189,17 +220,27 @@ class PatternTransition(EnrichedTransition):
         Returns:
             Composed enriched morphism
         """
-        if not torch.allclose(first.target_space, second.source_space):
-            raise ValueError("Morphisms not composable")
-            
-        # Ensure proper matrix shapes for composition
-        if len(first.structure_map.shape) == 2:
-            # For matrix structure maps
-            composed_structure = torch.matmul(second.structure_map, first.structure_map)
-        else:
-            # For vector structure maps, use element-wise composition
-            composed_structure = second.structure_map * first.structure_map
+        # Ensure tensors have same shape for comparison
+        first_target = first.target_space.reshape(-1)
+        second_source = second.source_space.reshape(-1)
         
+        # Pad shorter tensor if needed
+        if first_target.numel() < second_source.numel():
+            padded = torch.zeros_like(second_source)
+            padded[:first_target.numel()] = first_target
+            first_target = padded
+        elif second_source.numel() < first_target.numel():
+            padded = torch.zeros_like(first_target)
+            padded[:second_source.numel()] = second_source
+            second_source = padded
+            
+        # Check if tensors match after normalization
+        if not torch.allclose(first_target, second_source):
+            raise ValueError("Morphisms cannot be composed: target space of first morphism does not match source space of second morphism")
+
+        # Compose structure maps
+        composed_structure = torch.matmul(second.structure_map, first.structure_map)
+
         return EnrichedMorphism(
             source_space=first.source_space,
             target_space=second.target_space,

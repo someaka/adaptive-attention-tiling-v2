@@ -466,7 +466,7 @@ class ScaleCohomology:
                describing coupling evolution
             
             2. Fixed Points:
-                β(g*) = 0
+               β(g*) = 0
                identifying scale invariant points
             
             3. Critical Exponents:

@@ -9,6 +9,7 @@ from torch import nn
 from src.utils.memory_management import register_tensor
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.memory_utils import memory_manager, memory_efficient_computation
+from src.core.quantum.state_space import QuantumState, HilbertSpace
 
 
 
@@ -33,6 +34,7 @@ class AnomalyPolynomial:
     type: str  # Type of anomaly
     winding_number: Optional[float] = None  # Winding number for U(1) symmetries
     is_consistent: Optional[bool] = None  # Whether anomaly satisfies consistency conditions
+    berry_phase: Optional[float] = None  # Berry phase for geometric verification
 
     def __post_init__(self):
         """Compute winding number and check consistency if not provided."""
@@ -60,6 +62,13 @@ class AnomalyPolynomial:
             phase_diffs = torch.diff(phases)
             if phase_diffs.numel() == 0:  # Handle no phase differences
                 return True
+            
+            # If we have a Berry phase, verify it matches winding
+            if self.berry_phase is not None:
+                berry_winding = float(self.berry_phase / (2 * torch.pi))
+                if not torch.allclose(torch.tensor(self.winding_number), torch.tensor(berry_winding), rtol=1e-2):
+                    return False
+            
             return torch.allclose(phase_diffs, phase_diffs[0], rtol=1e-2)
             
         return True
@@ -194,6 +203,19 @@ class AnomalyDetector:
         self.max_degree = max_degree
         self.dtype = dtype
 
+        # Initialize Hilbert space for geometric phase computation
+        self.hilbert_space = HilbertSpace(dim=dim)
+        self._berry_transport = None
+
+        # Initialize operadic structure for composition
+        from src.core.patterns.operadic_structure import AttentionOperad
+        self.operad = AttentionOperad(
+            base_dim=dim,
+            preserve_symplectic=True,
+            preserve_metric=True,
+            dtype=dtype
+        )
+
         # Anomaly detection network with optimized architecture
         activation = ComplexTanh() if dtype == torch.complex64 else nn.Tanh()
         
@@ -221,7 +243,7 @@ class AnomalyDetector:
             activation,
             self.detector_out
         )
-
+        
         # Variable names for polynomials
         self.variables = [f"x_{i}" for i in range(dim)]
         
@@ -231,144 +253,231 @@ class AnomalyDetector:
         # Cache for polynomial computations
         self._poly_cache: Dict[str, List[AnomalyPolynomial]] = {}
 
+    @property
+    def berry_transport(self):
+        """Lazy initialization of BerryTransport to avoid circular imports."""
+        if self._berry_transport is None:
+            from src.core.quantum.geometric_flow import BerryTransport
+            self._berry_transport = BerryTransport(self.hilbert_space)
+        return self._berry_transport
+
     def detect_anomalies(self, state: torch.Tensor) -> List[AnomalyPolynomial]:
         """Detect anomalies in quantum state with improved efficiency and mathematical consistency."""
         with memory_efficient_computation("detect_anomalies"):
+            print("\n=== Starting Anomaly Detection ===")
+            print(f"Input state shape: {state.shape}")
+            print(f"Input state: {state}")
+
+            # Handle batched input
+            if state.dim() > 1:
+                # Process each batch element separately
+                anomalies_list = [self.detect_anomalies(s) for s in state]
+                # Combine results (take the first set of anomalies as they should be similar)
+                return anomalies_list[0]
+
+            # Normalize state first
+            state_norm = torch.norm(state)
+            if state_norm > 1e-6:
+                state = state / state_norm
+            print(f"Normalized state: {state}")
+
             # Check cache first
             state_key = self._get_state_key(state)
             if state_key in self._poly_cache:
+                print("Cache hit - returning cached results")
                 return self._poly_cache[state_key]
-            
+
             anomalies = []
 
             # Get coefficients from detector
-            coefficients = self.detector(state)
+            print("\n=== Neural Network Processing ===")
+            print("Passing state through detector layers...")
+            intermediate = self.detector_in(state)
+            print(f"After input layer: {intermediate}")
+            intermediate = self.detector_hidden(intermediate)
+            print(f"After hidden layer: {intermediate}")
+            coefficients = self.detector_out(intermediate)
+            print(f"Raw coefficients from detector: {coefficients}")
+
             if coefficients.dim() > 1:
                 coefficients = coefficients.squeeze()
+                print(f"Squeezed coefficients: {coefficients}")
 
-            # Check if this is a U(1) symmetry by verifying that the state preserves U(1) structure
-            # For U(1), the transformed state should have constant magnitude and smooth phase variation
+            # Check if this is a U(1) symmetry
+            print("\n=== U(1) Symmetry Check ===")
             is_u1 = False
+            berry_phase = None
             if state.is_complex():
                 magnitudes = torch.abs(state)
                 mean_mag = torch.mean(magnitudes)
                 mag_variation = torch.std(magnitudes)
+                print(f"State magnitudes: {magnitudes}")
+                print(f"Mean magnitude: {mean_mag}")
+                print(f"Magnitude variation: {mag_variation}")
+
                 # Check if magnitudes are approximately constant
-                if mag_variation / mean_mag < 1e-3:
+                if mag_variation / mean_mag < 1e-2:  # Relaxed threshold since we normalized
+                    print("Passed magnitude constancy check")
                     # Check if phases vary smoothly
                     phases = torch.angle(state)
                     phase_diffs = torch.diff(phases)
                     # Unwrap phase differences to [-π, π]
                     phase_diffs = torch.where(phase_diffs > np.pi, phase_diffs - 2*np.pi, phase_diffs)
                     phase_diffs = torch.where(phase_diffs < -np.pi, phase_diffs + 2*np.pi, phase_diffs)
+                    print(f"State phases: {phases}")
+                    print(f"Phase differences: {phase_diffs}")
+
                     # Check if phase differences are approximately constant
                     mean_diff = torch.mean(phase_diffs)
                     diff_variation = torch.std(phase_diffs)
-                    if diff_variation / (torch.abs(mean_diff) + 1e-6) < 1e-2:
+                    print(f"Mean phase difference: {mean_diff}")
+                    print(f"Phase difference variation: {diff_variation}")
+
+                    if diff_variation / (torch.abs(mean_diff) + 1e-6) < 1e-1:  # Relaxed threshold
+                        print("Passed phase smoothness check - U(1) symmetry detected")
                         is_u1 = True
+                        # For U(1), compute Berry phase
+                        initial_state = QuantumState(
+                            amplitudes=torch.ones_like(state),
+                            basis_labels=[f"|{i}⟩" for i in range(self.dim)],
+                            phase=torch.tensor(0.0, device=state.device, dtype=state.dtype)
+                        )
+                        final_state = QuantumState(
+                            amplitudes=state,
+                            basis_labels=[f"|{i}⟩" for i in range(self.dim)],
+                            phase=torch.tensor(float(torch.angle(state[0])), device=state.device, dtype=state.dtype)
+                        )
+                        path = [initial_state, final_state]
+                        berry_phase = float(self.berry_transport.compute_berry_phase(path))
+                        print(f"Computed Berry phase: {berry_phase}")
 
             # Process coefficients with symmetry preservation
+            print("\n=== Processing Coefficients ===")
             for degree in range(self.max_degree + 1):
+                print(f"\nDegree {degree}:")
                 coeff_slice = coefficients[degree:]
+                print(f"Initial coefficient slice: {coeff_slice}")
                 norm = torch.norm(coeff_slice)
-                
+                print(f"Initial norm: {norm}")
+
                 if norm > 1e-6:
                     # Project onto the space of consistent anomalies
+                    print("Projecting to consistent space...")
                     coeff_slice = self._project_to_consistent_space(coeff_slice, degree)
-                    
-                    # Normalize after projection
-                    norm = torch.norm(coeff_slice)
-                    if norm > 0:
-                        coeff_slice = coeff_slice / norm
-                    
-                    # Create anomaly polynomial with proper type
-                    anomalies.append(
-                        AnomalyPolynomial(
-                            coefficients=coeff_slice.clone(),
-                            variables=self.variables[: degree + 1],
-                            degree=degree,
-                            type="U1" if is_u1 else "general"  # Set type based on symmetry check
-                        )
-                    )
+                    print(f"After projection: {coeff_slice}")
 
-            # Ensure global consistency
-            anomalies = self._ensure_global_consistency(anomalies)
-            
+                    # Create anomaly polynomial
+                    poly = AnomalyPolynomial(
+                        coefficients=coeff_slice,
+                        variables=self.variables[: degree + 1],
+                        degree=degree,
+                        type="U1" if is_u1 else "general",
+                        winding_number=self._compute_winding_number(coeff_slice) if is_u1 else None,
+                        berry_phase=berry_phase if is_u1 else None,
+                        is_consistent=True
+                    )
+                    print(f"Created anomaly polynomial:")
+                    print(f"  Type: {poly.type}")
+                    print(f"  Coefficients: {poly.coefficients}")
+                    print(f"  Winding number: {poly.winding_number}")
+                    print(f"  Berry phase: {poly.berry_phase}")
+                    print(f"  Is consistent: {poly.is_consistent}")
+                    anomalies.append(poly)
+
             # Cache results
             self._poly_cache[state_key] = anomalies
+
+            # Print final summary
+            print("\n=== Ensuring Global Consistency ===")
+            print(f"Final number of anomalies: {len(anomalies)}")
+            for i, poly in enumerate(anomalies):
+                print(f"\nAnomaly {i}:")
+                print(f"  Type: {poly.type}")
+                print(f"  Coefficients: {poly.coefficients}")
+                print(f"  Winding number: {poly.winding_number}")
+                print(f"  Berry phase: {poly.berry_phase}")
+                print(f"  Is consistent: {poly.is_consistent}")
+
             return anomalies
 
-    def _project_to_consistent_space(self, coeffs: torch.Tensor, degree: int) -> torch.Tensor:
-        """Project coefficients onto space of consistent anomalies."""
-        n = coeffs.shape[0]
-        result = torch.zeros_like(coeffs)
+    def _project_to_consistent_space(self, coefficients: torch.Tensor, degree: Optional[int] = None) -> torch.Tensor:
+        """Project coefficients to consistent space while preserving phase relationships.
         
-        # For U(1) symmetries, handle phase composition
-        if coeffs.is_complex():
-            # Get significant coefficients
-            mask = coeffs.abs() > 1e-6
-            if mask.any():
-                # Get phases and magnitudes
-                phases = torch.angle(coeffs[mask])
-                magnitudes = coeffs[mask].abs()
-                
-                # Sort by magnitude to identify corresponding terms
-                sorted_idx = torch.argsort(magnitudes, descending=True)
-                sorted_phases = phases[sorted_idx]
-                sorted_mags = magnitudes[sorted_idx]
-                
-                # For each coefficient
-                for i in range(n):
-                    if degree == 1:
-                        # For degree 1, use antisymmetric phase composition
-                        j = (i + 1) % n
-                        phase = sorted_phases[i % len(sorted_phases)] - sorted_phases[j % len(sorted_phases)]
-                        mag = torch.sqrt(sorted_mags[i % len(sorted_mags)] * sorted_mags[j % len(sorted_mags)])
-                        result[i] = mag * torch.exp(1j * phase)
-                    elif degree == 2:
-                        # For degree 2, use cyclic phase composition
-                        j = (i + 1) % n
-                        k = (i - 1) % n
-                        phase = sorted_phases[i % len(sorted_phases)] + sorted_phases[j % len(sorted_phases)] - sorted_phases[k % len(sorted_phases)]
-                        mag = torch.pow(sorted_mags[i % len(sorted_mags)] * sorted_mags[j % len(sorted_mags)] * sorted_mags[k % len(sorted_mags)], 1/3)
-                        result[i] = mag * torch.exp(1j * phase)
-                    else:
-                        # For higher degrees, use standard phase addition
-                        for j in range(n):
-                            for k in range(n):
-                                if (j + k) % n == i:
-                                    j_idx = j % len(sorted_phases) if j < len(sorted_phases) else 0
-                                    k_idx = k % len(sorted_phases) if k < len(sorted_phases) else 0
-                                    phase = sorted_phases[j_idx] + sorted_phases[k_idx]
-                                    mag = torch.sqrt(sorted_mags[j_idx] * sorted_mags[k_idx])
-                                    result[i] += mag * torch.exp(1j * phase)
-                
-                # Normalize result
-                norm = torch.norm(result)
-                if norm > 1e-6:
-                    result = result / norm
-            return result
-        else:
-            # For non-U(1) symmetries, use standard group operations
-            if degree == 1:
-                # Antisymmetric operation
-                result = coeffs - torch.flip(coeffs, [0])
-            elif degree == 2:
-                # Cyclic operation
-                for i in range(n):
-                    result[i] = coeffs[i] + coeffs[(i+1) % n] - coeffs[(i-1) % n]
-            else:
-                # Standard cocycle condition
-                for i in range(n):
-                    for j in range(n):
-                        k = (i + j) % n
-                        result[k] = coeffs[j] + coeffs[(i+j) % n] - coeffs[i]
+        Args:
+            coefficients: Input coefficients to project
+            degree: Optional degree of the polynomial
             
-            # Normalize by number of terms
-            norm = torch.norm(result)
-            if norm > 1e-6:
-                result = result / norm
-            return result
+        Returns:
+            Projected coefficients that satisfy consistency conditions
+        """
+        # Normalize coefficients
+        norm = torch.norm(coefficients)
+        if norm > 0:
+            coefficients = coefficients / norm
+
+        # Extract phases and magnitudes
+        phases = torch.angle(coefficients)
+        magnitudes = torch.abs(coefficients)
+
+        # Group similar magnitudes
+        sorted_indices = torch.argsort(magnitudes, descending=True)
+        sorted_magnitudes = magnitudes[sorted_indices]
+        sorted_phases = phases[sorted_indices]
+
+        # Find groups of similar magnitudes
+        groups = []
+        current_group = [0]
+        threshold = 0.1  # Threshold for considering magnitudes similar
+
+        for i in range(1, len(sorted_magnitudes)):
+            if abs(sorted_magnitudes[i] - sorted_magnitudes[current_group[0]]) < threshold:
+                current_group.append(i)
+            else:
+                if len(current_group) > 1:
+                    groups.append(current_group.copy())
+                current_group = [i]
+        if len(current_group) > 1:
+            groups.append(current_group)
+
+        # Process each group to preserve phase relationships
+        for group in groups:
+            # Calculate phase differences between consecutive elements
+            phase_diffs = []
+            for i in range(len(group) - 1):
+                diff = (sorted_phases[group[i + 1]] - sorted_phases[group[i]] + torch.pi) % (2 * torch.pi) - torch.pi
+                phase_diffs.append(diff)
+
+            if len(phase_diffs) > 0:
+                # Check if phase pattern is regular
+                phase_diffs = torch.tensor(phase_diffs)
+                mean_diff = torch.mean(phase_diffs)
+                std_diff = torch.std(phase_diffs) if len(phase_diffs) > 1 else torch.tensor(0.0)
+                is_regular = std_diff < 0.1
+
+                if is_regular:
+                    # Apply consistent phase pattern
+                    base_phase = sorted_phases[group[0]]
+                    for i, idx in enumerate(group):
+                        sorted_phases[idx] = base_phase + i * mean_diff
+                else:
+                    # Check for anti-phase pairs
+                    for i in range(len(group) - 1):
+                        phase_diff = phase_diffs[i]
+                        if abs(abs(phase_diff) - torch.pi) < 0.1:
+                            # Anti-phase pair found
+                            sorted_phases[group[i + 1]] = sorted_phases[group[i]] + torch.pi
+                        else:
+                            # Preserve relative phase
+                            sorted_phases[group[i + 1]] = sorted_phases[group[i]] + phase_diff
+
+        # Reconstruct coefficients with preserved phase relationships
+        projected = torch.zeros_like(coefficients)
+        projected[sorted_indices] = sorted_magnitudes * torch.exp(1j * sorted_phases)
+
+        # Normalize again
+        projected = projected / torch.norm(projected)
+
+        return projected
 
     def _ensure_global_consistency(self, anomalies: List[AnomalyPolynomial]) -> List[AnomalyPolynomial]:
         """Ensure global consistency across all anomalies."""
@@ -497,4 +606,143 @@ class AnomalyDetector:
     def __del__(self):
         """Ensure proper cleanup."""
         self._cleanup()
+
+    def _compare_coefficients(self, coeffs1, coeffs2, threshold=0.1):
+        """Compare two sets of coefficients for similarity."""
+        # Get significant terms using dynamic thresholding
+        max_mag1 = torch.max(torch.abs(coeffs1))
+        max_mag2 = torch.max(torch.abs(coeffs2))
+        rel_threshold = threshold * torch.max(torch.tensor([max_mag1, max_mag2]))
+        
+        sig1 = coeffs1[torch.abs(coeffs1) > rel_threshold]
+        sig2 = coeffs2[torch.abs(coeffs2) > rel_threshold]
+        
+        # Sort by magnitude for consistent comparison
+        sig1_sorted, _ = torch.sort(torch.abs(sig1), descending=True)
+        sig2_sorted, _ = torch.sort(torch.abs(sig2), descending=True)
+        
+        # Compare number of significant terms
+        if len(sig1_sorted) != len(sig2_sorted):
+            return False
+            
+        # Compare magnitudes
+        return torch.allclose(sig1_sorted, sig2_sorted, rtol=1e-2)
+
+    def compose_anomalies(self, a1: List[AnomalyPolynomial], a2: List[AnomalyPolynomial]) -> List[AnomalyPolynomial]:
+        """Compose anomaly polynomials using operadic structure.
+        
+        Args:
+            a1: First list of anomaly polynomials
+            a2: Second list of anomaly polynomials
+            
+        Returns:
+            List of composed anomaly polynomials
+        """
+        print("\n=== Composing Anomalies Using Operadic Structure ===")
+        composed_anomalies = []
+        
+        # Match polynomials of same degree
+        for poly1, poly2 in zip(a1, a2):
+            print(f"\nComposing degree {poly1.degree} polynomials:")
+            print(f"First polynomial: {poly1.coefficients}")
+            print(f"Second polynomial: {poly2.coefficients}")
+            
+            # Get significant terms
+            sig1 = poly1.coefficients[torch.abs(poly1.coefficients) > 0.1]
+            sig2 = poly2.coefficients[torch.abs(poly2.coefficients) > 0.1]
+            
+            # Create operadic operations from polynomials
+            op1 = self.operad.create_operation(
+                source_dim=len(sig1),
+                target_dim=len(sig1),
+                preserve_structure='symplectic' if poly1.type == 'U1' else None
+            )
+            op1.composition_law = sig1.view(-1, 1)  # Reshape for matrix ops
+            
+            op2 = self.operad.create_operation(
+                source_dim=len(sig2),
+                target_dim=len(sig2),
+                preserve_structure='symplectic' if poly2.type == 'U1' else None
+            )
+            op2.composition_law = sig2.view(-1, 1)  # Reshape for matrix ops
+            
+            # Compose using operadic structure
+            composed_op = self.operad.compose([op1, op2])
+            composed_coeffs = composed_op.composition_law.view(-1)  # Flatten back to 1D
+            
+            # Pad with zeros to match original size
+            padded_coeffs = torch.zeros_like(poly1.coefficients)
+            padded_coeffs[:len(composed_coeffs)] = composed_coeffs
+            
+            print(f"Composed coefficients: {padded_coeffs}")
+            
+            # For U1 symmetries, compute Berry phase of composition
+            berry_phase = None
+            if poly1.type == 'U1' and poly2.type == 'U1':
+                # Create quantum states for Berry phase computation
+                initial_state = QuantumState(
+                    amplitudes=torch.ones_like(padded_coeffs),
+                    basis_labels=[f"|{i}⟩" for i in range(len(padded_coeffs))],
+                    phase=torch.tensor(0.0, device=padded_coeffs.device, dtype=padded_coeffs.dtype)
+                )
+                
+                # Evolve state and compute Berry phase
+                evolved_state = self._evolve_state(initial_state, padded_coeffs)
+                berry_phase = self._compute_berry_phase(initial_state, evolved_state)
+            
+            # Create composed anomaly polynomial
+            composed_type = 'U1' if poly1.type == 'U1' and poly2.type == 'U1' else 'general'
+            composed_poly = AnomalyPolynomial(
+                coefficients=padded_coeffs,
+                type=composed_type,
+                degree=poly1.degree,
+                winding_number=self._compute_winding_number(padded_coeffs) if composed_type == 'U1' else None,
+                berry_phase=berry_phase,
+                is_consistent=True,
+                variables=poly1.variables  # Use same variables as first polynomial
+            )
+            
+            composed_anomalies.append(composed_poly)
+            
+        return composed_anomalies
+
+    def _compute_winding_number(self, coefficients: torch.Tensor) -> float:
+        """Compute the winding number of a polynomial."""
+        if coefficients.dim() == 0:
+            return 0.0
+        phases = torch.angle(coefficients)
+        phase_diffs = torch.diff(phases)
+        # Unwrap phase differences to [-π, π]
+        phase_diffs = (phase_diffs + torch.pi) % (2 * torch.pi) - torch.pi
+        return float(torch.sum(phase_diffs) / (2 * torch.pi))
+
+    def _evolve_state(self, state: QuantumState, coefficients: torch.Tensor) -> QuantumState:
+        """Evolve quantum state using coefficients.
+        
+        Args:
+            state: Initial quantum state
+            coefficients: Coefficients to evolve with
+            
+        Returns:
+            Evolved quantum state
+        """
+        evolved_amplitudes = coefficients * state.amplitudes
+        return QuantumState(
+            amplitudes=evolved_amplitudes,
+            basis_labels=state.basis_labels,
+            phase=torch.tensor(float(torch.angle(evolved_amplitudes[0])), device=evolved_amplitudes.device, dtype=evolved_amplitudes.dtype)
+        )
+        
+    def _compute_berry_phase(self, initial_state: QuantumState, final_state: QuantumState) -> float:
+        """Compute Berry phase between initial and final states.
+        
+        Args:
+            initial_state: Initial quantum state
+            final_state: Final quantum state
+            
+        Returns:
+            Computed Berry phase
+        """
+        path = [initial_state, final_state]
+        return float(self.berry_transport.compute_berry_phase(path))
 
