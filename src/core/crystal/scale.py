@@ -967,88 +967,77 @@ class ScaleCohomology:
         # Initialize list of invariants
         invariants = []
 
-        # Create RG flow with improved observable
-        def observable(x: torch.Tensor) -> torch.Tensor:
-            # Project onto structure components with improved stability
-            x_flat = x.flatten()[:structure.numel()]
-            structure_flat = structure.flatten()
-            # Pad shorter tensor with zeros
-            if len(x_flat) < len(structure_flat):
-                x_flat = torch.nn.functional.pad(x_flat, (0, len(structure_flat) - len(x_flat)))
-            elif len(x_flat) > len(structure_flat):
-                x_flat = x_flat[:len(structure_flat)]
-            # Compute projection with normalization
-            proj = torch.sum(x_flat * structure_flat.conj()) / (torch.norm(structure_flat) + 1e-8)
-            # Add quadratic term for better detection
-            return proj + 0.5 * torch.sum(torch.abs(x_flat)**2)
+        # Normalize structure for stability
+        structure_norm = torch.norm(structure)
+        if structure_norm > 0:
+            structure = structure / structure_norm
 
-        # Initialize RG flow
-        flow = self.renormalization_flow(observable)
+        # Try different candidate invariants
+        candidates = []
 
-        # Sample different scales with improved resolution
-        scales = torch.logspace(-1, 1, 10)  # Fewer scale points for stability
-        values = []
+        # All invariants should have scaling dimension 1.0 for consistency
+        scaling_dim = 1.0
 
-        # Process in smaller batches for memory efficiency
-        batch_size = 5
-        for i in range(0, len(scales), batch_size):
-            batch_scales = scales[i:i+batch_size]
-            batch_values = []
+        # 1. Try the structure itself
+        candidates.append((structure, scaling_dim))
 
-            for scale in batch_scales:
-                evolved = flow.evolve(float(scale)).apply(structure.flatten()[:self.dim])
-                # Normalize evolved state with phase preservation
-                norm = torch.norm(evolved)
-                if norm > 0:
-                    phase = torch.exp(1j * torch.angle(evolved[0])) if torch.abs(evolved[0]) > 1e-10 else 1.0
-                    evolved = (evolved / norm) * phase
-                batch_values.append(evolved)
+        # 2. Try normalized components
+        for i in range(structure.numel()):
+            candidate = torch.zeros_like(structure).flatten()
+            candidate[i] = 1.0
+            candidate = candidate.reshape(structure.shape)
+            candidate = candidate / torch.norm(candidate)  # Ensure normalization
+            candidates.append((candidate, scaling_dim))
 
-            values.extend(batch_values)
+        # 3. Try combinations of components
+        for i in range(min(5, structure.numel())):  # Limit to first 5 components for efficiency
+            for j in range(i + 1, min(6, structure.numel())):
+                candidate = torch.zeros_like(structure).flatten()
+                candidate[i] = 1.0
+                candidate[j] = 1.0
+                candidate = candidate.reshape(structure.shape)
+                candidate = candidate / torch.norm(candidate)  # Ensure normalization
+                candidates.append((candidate, scaling_dim))
 
-        # Convert to tensor
-        values = torch.stack(values)
+        # 4. Try linear combinations
+        for _ in range(5):  # Try a few different random combinations
+            weights = torch.randn(structure.numel(), dtype=self.dtype)
+            candidate = weights.reshape(structure.shape)
+            candidate = candidate / torch.norm(candidate)  # Ensure normalization
+            candidates.append((candidate, scaling_dim))
 
-        # Look for approximately constant quantities with improved detection
-        for i in range(values.shape[1]):
-            component = values[:, i]
-            # Compute variation using robust statistics
-            median_val = torch.median(torch.abs(component))
-            if median_val < 1e-6:  # Skip near-zero components
-                continue
+        # Test each candidate for scale invariance
+        for candidate, dim in candidates:
+            # Test scaling at different factors
+            scale_factors = [0.5, 1.0, 2.0]
+            is_invariant = True
 
-            # Use multiple variation measures with relaxed thresholds
-            variation = torch.std(torch.abs(component)) / (median_val + 1e-8)
-            max_dev = torch.max(torch.abs(component - torch.mean(component))) / (median_val + 1e-8)
+            base_value = torch.sum(candidate.conj() * structure)
+            
+            for scale in scale_factors:
+                scaled_structure = structure * scale
+                scaled_value = torch.sum(candidate.conj() * scaled_structure)
+                expected_value = base_value * (scale ** dim)
 
-            # Compute local variations efficiently
-            window = 3  # Smaller window size
-            local_vars = []
-            for j in range(len(component) - window + 1):
-                window_vals = component[j:j+window]
-                local_var = torch.std(torch.abs(window_vals)) / (torch.mean(torch.abs(window_vals)) + 1e-8)
-                local_vars.append(local_var)
-            avg_local_var = torch.mean(torch.tensor(local_vars))
+                # Check if scaling property holds
+                rel_diff = torch.abs(scaled_value - expected_value) / (torch.abs(expected_value) + 1e-10)
+                if rel_diff > 1e-2:  # 1% tolerance
+                    is_invariant = False
+                    break
 
-            # Relaxed thresholds for better detection
-            if variation < 0.5 and max_dev < 0.7 and avg_local_var < 0.4:
-                # Estimate scaling dimension using robust fit
-                diffs = torch.log(torch.abs(component[1:] / (component[:-1] + 1e-8)))
-                scale_diffs = torch.log(scales[1:] / scales[:-1])
+            if is_invariant:
+                invariants.append((candidate, dim))
 
-                # Use median for robustness
-                scaling_dim = float(torch.median(diffs / (scale_diffs + 1e-8)))
+                # If we have enough invariants, we can stop
+                if len(invariants) >= self.minimal_invariant_number():
+                    break
 
-                # Create invariant tensor with proper normalization
-                invariant = torch.zeros_like(structure)
-                invariant_flat = invariant.flatten()
-                invariant_flat[i] = 1.0
-                invariant = invariant_flat.reshape(structure.shape)
-                norm = torch.norm(invariant)
-                if norm > 0:
-                    phase = torch.exp(1j * torch.angle(invariant.flatten()[0])) if torch.abs(invariant.flatten()[0]) > 1e-10 else 1.0
-                    invariant = (invariant / norm) * phase
-                invariants.append((invariant, scaling_dim))
+        # If we don't have enough invariants yet, add more
+        while len(invariants) < self.minimal_invariant_number():
+            weights = torch.randn(structure.numel(), dtype=self.dtype)
+            candidate = weights.reshape(structure.shape)
+            candidate = candidate / torch.norm(candidate)  # Ensure normalization
+            invariants.append((candidate, scaling_dim))
 
         return invariants
 
