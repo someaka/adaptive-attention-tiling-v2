@@ -364,16 +364,28 @@ class AttentionOperad(OperadicComposition):
         if torch.norm(a2) > 0:
             a2 = a2 / torch.norm(a2)
 
-        # Reshape tensors to ensure compatible dimensions
+        # Get target dimensions
+        target_dim = a1.shape[0]
+        source_dim = a2.shape[1] if a2.dim() > 1 else 1
+
+        # Reshape tensors to ensure compatible dimensions for multiplication
         if a1.shape[-1] != a2.shape[0]:
             # Pad or trim a1 to match a2's first dimension
-            new_a1 = torch.zeros(a1.shape[0], a2.shape[0], device=a1.device, dtype=a1.dtype)
+            new_a1 = torch.zeros(target_dim, a2.shape[0], device=a1.device, dtype=a1.dtype)
             min_dim = min(a1.shape[1], a2.shape[0])
             new_a1[:, :min_dim] = a1[:, :min_dim]
             a1 = new_a1
 
         # Calculate the composition using matrix multiplication
         result = torch.matmul(a1, a2)
+
+        # Ensure result has correct shape (target_dim, source_dim)
+        if result.shape != (target_dim, source_dim):
+            new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
+            min_rows = min(result.shape[0], target_dim)
+            min_cols = min(result.shape[1], source_dim)
+            new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
+            result = new_result
 
         # Normalize the result
         if torch.norm(result) > 0:

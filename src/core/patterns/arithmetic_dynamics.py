@@ -190,62 +190,75 @@ class ArithmeticDynamics(nn.Module):
 
     def compute_dynamics(self, x: torch.Tensor) -> torch.Tensor:
         """Compute arithmetic dynamics with quantum corrections.
-        
+
         Args:
             x: Input tensor of shape [..., hidden_dim] or [..., N] where N != hidden_dim
-            
+
         Returns:
             Evolved tensor of shape [..., hidden_dim]
         """
         # Save original shape and size for later reshaping
         original_shape = x.shape
         original_size = x.shape[-1]
-        
+
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
             # Flatten all but last dimension
             flat_shape = (-1, x.shape[-1])
             x_flat = x.reshape(flat_shape)
-            # Project to hidden_dim using adaptive pooling
-            x_hidden = torch.nn.functional.adaptive_avg_pool1d(
-                x_flat.unsqueeze(1),  # Add channel dimension
-                output_size=self.hidden_dim
+            
+            # Project to hidden_dim using linear interpolation
+            x_real = x_flat.real
+            x_imag = x_flat.imag
+            
+            # Project real and imaginary parts separately
+            x_real_hidden = torch.nn.functional.interpolate(
+                x_real.unsqueeze(1),  # Add channel dimension
+                size=self.hidden_dim,
+                mode='linear'
             ).squeeze(1)  # Remove channel dimension
+            
+            x_imag_hidden = torch.nn.functional.interpolate(
+                x_imag.unsqueeze(1),  # Add channel dimension
+                size=self.hidden_dim,
+                mode='linear'
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Combine real and imaginary parts
+            x_hidden = torch.complex(x_real_hidden, x_imag_hidden)
         else:
             x_hidden = x
-        
-        # Compute height
-        height = self.compute_height(x_hidden)  # [batch_size, height_dim]
-        
-        # Compute L-function
-        l_values = self.compute_l_function(x_hidden)  # [batch_size, motive_rank]
-        
-        # Project to measure space
-        measure = self.measure_proj(height)  # [batch_size, min_dim]
-        
-        # Apply quantum corrections
-        quantum_correction = self.quantum_proj(measure)  # [batch_size, min_dim]
-        quantum_correction = quantum_correction * self.quantum_weight  # Scale quantum effects
-        
-        # Project back to input space
-        output = self.output_proj(quantum_correction)  # [batch_size, hidden_dim]
-        
-        # Project output back to original size if needed
+
+        # Apply height map
+        height = self.height_map(x_hidden)
+
+        # Apply quantum flow
+        flow = self.flow(height)
+
+        # Project back to original size if needed
         if original_size != self.hidden_dim:
-            output = torch.nn.functional.adaptive_avg_pool1d(
-                output.unsqueeze(1),  # Add channel dimension
-                output_size=original_size
-            ).squeeze(1)  # Remove channel dimension
-        
-        # Add residual connection with stability factor
-        alpha = 0.1  # Small factor for stability
-        output = (1 - alpha) * x + alpha * output
-        
-        # Reshape result to match input shape
-        if len(original_shape) > 2:
-            output = output.reshape(original_shape)
+            # Split into real and imaginary parts
+            flow_real = flow.real
+            flow_imag = flow.imag
             
-        return output
+            # Project back using linear interpolation
+            flow_real_orig = torch.nn.functional.interpolate(
+                flow_real.unsqueeze(1),  # Add channel dimension
+                size=original_size,
+                mode='linear'
+            ).squeeze(1)  # Remove channel dimension
+            
+            flow_imag_orig = torch.nn.functional.interpolate(
+                flow_imag.unsqueeze(1),  # Add channel dimension
+                size=original_size,
+                mode='linear'
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Combine real and imaginary parts
+            flow = torch.complex(flow_real_orig, flow_imag_orig)
+
+        # Reshape back to original shape
+        return flow.reshape(original_shape)
 
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
@@ -336,11 +349,23 @@ class ArithmeticDynamics(nn.Module):
         
         # Project metric to height space
         if metric_flat.shape[-1] != self.hidden_dim:
-            # Use adaptive pooling to match hidden_dim
-            metric_flat = torch.nn.functional.adaptive_avg_pool1d(
-                metric_flat.unsqueeze(1),  # Add channel dimension
+            # Handle complex tensors by splitting real and imaginary parts
+            real_part = metric_flat.real.unsqueeze(1)  # Add channel dimension
+            imag_part = metric_flat.imag.unsqueeze(1)  # Add channel dimension
+            
+            # Apply adaptive pooling to real and imaginary parts separately
+            real_pooled = torch.nn.functional.adaptive_avg_pool1d(
+                real_part,
                 output_size=self.hidden_dim
             ).squeeze(1)  # Remove channel dimension
+            
+            imag_pooled = torch.nn.functional.adaptive_avg_pool1d(
+                imag_part,
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Recombine into complex tensor
+            metric_flat = torch.complex(real_pooled, imag_pooled)
         
         height_coords = self.height_map(metric_flat)  # [batch_size, height_dim]
         
@@ -359,20 +384,26 @@ class ArithmeticDynamics(nn.Module):
         
         # Ensure correction has the right number of elements
         if correction.shape[-1] != total_elements:
-            correction = torch.nn.functional.adaptive_avg_pool1d(
-                correction.unsqueeze(1),
+            # Handle complex tensors by splitting real and imaginary parts
+            real_part = correction.real.unsqueeze(1)  # Add channel dimension
+            imag_part = correction.imag.unsqueeze(1)  # Add channel dimension
+            
+            # Apply adaptive pooling to real and imaginary parts separately
+            real_pooled = torch.nn.functional.adaptive_avg_pool1d(
+                real_part,
                 output_size=total_elements
-            ).squeeze(1)
+            ).squeeze(1)  # Remove channel dimension
+            
+            imag_pooled = torch.nn.functional.adaptive_avg_pool1d(
+                imag_part,
+                output_size=total_elements
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Recombine into complex tensor
+            correction = torch.complex(real_pooled, imag_pooled)
         
         # Reshape to match input metric dimensions
-        correction = correction.view(*orig_shape, metric.shape[-2], metric.shape[-1])
-        
-        # Ensure the correction has exactly the same shape as the input metric
-        if correction.shape != metric.shape:
-            correction = torch.nn.functional.adaptive_avg_pool2d(
-                correction.reshape(-1, 1, correction.shape[-2], correction.shape[-1]),
-                output_size=(metric.shape[-2], metric.shape[-1])
-            ).squeeze(1).reshape(*metric.shape)
+        correction = correction.reshape(*orig_shape, metric.shape[-2], metric.shape[-1])
         
         return correction
 

@@ -6,9 +6,10 @@ their compositions, and transformations in the context of pattern spaces and
 dimensional transitions.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 import torch
-from torch import Tensor, nn
+import torch.nn as nn
+from torch import Tensor
 
 from .operadic_structure import (
     OperadicOperation,
@@ -47,49 +48,61 @@ class OperadicStructureHandler(nn.Module):
         motive_rank: int = 4,
         preserve_symplectic: bool = True,
         preserve_metric: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None
+        dtype: torch.dtype = torch.float32,
+        preserve_structure: bool = True,
+        cache_enabled: bool = True,
     ):
         """Initialize operadic structure handler.
         
         Args:
-            base_dim: Base dimension for operadic operations
-            hidden_dim: Hidden dimension for neural networks
+            base_dim: Base dimension for operations
+            hidden_dim: Hidden dimension for internal networks
             motive_rank: Rank of motivic structure
             preserve_symplectic: Whether to preserve symplectic structure
             preserve_metric: Whether to preserve metric structure
-            device: Computation device
-            dtype: Data type for computations
+            dtype: Data type for tensors
+            preserve_structure: Whether to preserve structure
+            cache_enabled: Whether to enable caching
         """
         super().__init__()
-        
         self.base_dim = base_dim
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.preserve_symplectic = preserve_symplectic
         self.preserve_metric = preserve_metric
-        
-        self.device = device or torch.device('cpu')
-        self.dtype = dtype or torch.float32
+        self.dtype = dtype
         
         # Initialize operadic structure
         self.operad = AttentionOperad(
             base_dim=base_dim,
-            preserve_symplectic=preserve_symplectic,
-            preserve_metric=preserve_metric
+            preserve_symplectic=True,
+            preserve_metric=True,
+            dtype=dtype
         )
         
-        # Initialize motivic integration system
+        # Initialize motivic integration
         self.motivic = MotivicIntegrationSystem(
             manifold_dim=base_dim,
             hidden_dim=hidden_dim,
             motive_rank=motive_rank,
-            device=self.device,
-            dtype=self.dtype
+            dtype=dtype
         )
         
-        # Cache for computed operations
-        self.operation_cache: Dict[Tuple[int, int], OperadicOperation] = {}
+        # Initialize networks with proper dtype and tanh activation for complex compatibility
+        self.composition_net = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim, dtype=dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype)
+        )
+        
+        self.structure_net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, base_dim * base_dim, dtype=dtype)
+        )
+        
+        # Initialize cache
+        self._operation_cache = {}
         
     def create_operation(
         self,
@@ -110,8 +123,8 @@ class OperadicStructureHandler(nn.Module):
             The created operadic operation
         """
         cache_key = (source_dim, target_dim)
-        if use_cache and cache_key in self.operation_cache:
-            return self.operation_cache[cache_key]
+        if use_cache and cache_key in self._operation_cache:
+            return self._operation_cache[cache_key]
         
         operation = self.operad.create_operation(
             source_dim=source_dim,
@@ -120,7 +133,7 @@ class OperadicStructureHandler(nn.Module):
         )
         
         if use_cache:
-            self.operation_cache[cache_key] = operation
+            self._operation_cache[cache_key] = operation
             
         return operation
     
@@ -140,8 +153,19 @@ class OperadicStructureHandler(nn.Module):
             - Composed operadic operation
             - Dictionary of metrics and measures
         """
-        # Compose operations
+        # Extract phases from composition laws
+        phases = [torch.angle(op.composition_law) for op in operations]
+        
+        # Compose operations while preserving phases
         composed = self.operad.compose(operations)
+        
+        # Compute composed phases
+        composed_phases = torch.zeros_like(composed.composition_law, dtype=torch.float32)
+        for phase in phases:
+            composed_phases = composed_phases + phase
+            
+        # Apply composed phases to composition law
+        composed.composition_law = composed.composition_law.abs() * torch.exp(1j * composed_phases)
         
         metrics = {}
         if with_motivic:

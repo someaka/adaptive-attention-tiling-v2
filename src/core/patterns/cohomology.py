@@ -80,10 +80,15 @@ class ArithmeticForm:
     def _compute_initial_height(self) -> torch.Tensor:
         """Compute initial height using prime bases."""
         # Ensure coefficients are 2D: [batch_size, features]
-        if self.coefficients.dim() == 1:
-            coeffs = self.coefficients.unsqueeze(0)
-        else:
-            coeffs = self.coefficients
+        coeffs = self.coefficients
+        original_shape = coeffs.shape
+        
+        # Reshape to 2D if needed
+        if coeffs.dim() > 2:
+            coeffs = coeffs.reshape(-1, coeffs.shape[-1])
+            
+        if coeffs.dim() == 1:
+            coeffs = coeffs.unsqueeze(0)
             
         if self.prime_bases is None:
             # Initialize prime bases if not already done
@@ -92,15 +97,30 @@ class ArithmeticForm:
                 device=coeffs.device
             )
             
-        # Project coefficients to lower dimension for height computation
-        batch_size = coeffs.shape[0]
-        feature_size = coeffs.shape[1]
-        
-        # Use adaptive pooling to reduce feature dimension
-        pooled_coeffs = torch.nn.functional.adaptive_avg_pool1d(
-            coeffs.unsqueeze(1),  # [batch_size, 1, features]
-            self.prime_bases.shape[0]  # Target length = num_primes
-        ).squeeze(1)  # [batch_size, num_primes]
+        # Handle complex tensors by splitting into real and imaginary parts
+        if coeffs.is_complex():
+            real_coeffs = coeffs.real.unsqueeze(1)  # [batch_size, 1, features]
+            imag_coeffs = coeffs.imag.unsqueeze(1)  # [batch_size, 1, features]
+            
+            # Pool real and imaginary parts separately
+            pooled_real = torch.nn.functional.adaptive_avg_pool1d(
+                real_coeffs,
+                self.prime_bases.shape[0]  # Target length = num_primes
+            ).squeeze(1)  # [batch_size, num_primes]
+            
+            pooled_imag = torch.nn.functional.adaptive_avg_pool1d(
+                imag_coeffs,
+                self.prime_bases.shape[0]  # Target length = num_primes
+            ).squeeze(1)  # [batch_size, num_primes]
+            
+            # Compute magnitude of complex numbers after pooling
+            pooled_coeffs = torch.sqrt(pooled_real**2 + pooled_imag**2)
+        else:
+            # For real tensors, proceed as before
+            pooled_coeffs = torch.nn.functional.adaptive_avg_pool1d(
+                coeffs.unsqueeze(1),  # [batch_size, 1, features]
+                self.prime_bases.shape[0]  # Target length = num_primes
+            ).squeeze(1)  # [batch_size, num_primes]
         
         # Compute log heights with proper broadcasting
         log_heights = torch.log(
@@ -110,7 +130,12 @@ class ArithmeticForm:
         # Weight by prime bases
         weighted_heights = log_heights * self.prime_bases
         
-        return torch.sum(weighted_heights, dim=-1)
+        # Sum and reshape back to original batch dimensions if needed
+        heights = torch.sum(weighted_heights, dim=-1)
+        if len(original_shape) > 2:
+            heights = heights.reshape(original_shape[:-1])
+            
+        return heights
 
     def _initialize_dynamics(self) -> torch.Tensor:
         """Initialize dynamical system state."""
@@ -220,13 +245,17 @@ class MotivicCohomology:
         else:
             coeffs = form.coefficients
             
+        # If coefficients have more than 2 dimensions, flatten all but the last
+        if coeffs.dim() > 2:
+            coeffs = coeffs.reshape(-1, coeffs.shape[-1])
+
         # Check for zero input
         if torch.all(coeffs == 0):
             return torch.zeros(coeffs.shape[0], self.motive_rank, device=coeffs.device)
-            
+
         # Get input scale for preservation
         input_scale = torch.norm(coeffs, dim=1, keepdim=True)
-            
+
         # Compute normalized height
         height = self.height_structure.compute_height(coeffs)
         height_norm = torch.norm(height, dim=-1, keepdim=True)
@@ -236,14 +265,14 @@ class MotivicCohomology:
             height / (height_norm + 1e-8),
             torch.zeros_like(height)
         )
-            
+
         # Handle optional dynamics_state
         if form.dynamics_state is None:
             # Initialize dynamics state if not present
             dynamics_state = coeffs
         else:
             dynamics_state = form.dynamics_state
-            
+
         # Compute normalized dynamics
         dynamics = self.dynamics.compute_dynamics(dynamics_state)
         dynamics_norm = torch.norm(dynamics, dim=-1, keepdim=True)
@@ -273,11 +302,11 @@ class MotivicCohomology:
 
         # Combine structures with proper batch handling
         combined = self._combine_structures(height, dynamics, flow_metrics)
-        
+
         # Ensure output has proper shape
         if combined.dim() == 1:
             combined = combined.unsqueeze(0)
-            
+
         # Normalize while preserving input scale
         combined_norm = torch.norm(combined, dim=-1, keepdim=True)
         # Only normalize if norm is non-zero, and scale by input magnitude
@@ -286,7 +315,11 @@ class MotivicCohomology:
             (combined / (combined_norm + 1e-8)) * input_scale,
             torch.zeros_like(combined)
         )
-        
+
+        # Reshape back to original batch dimensions if needed
+        if form.coefficients.dim() > 2:
+            combined = combined.reshape(*form.coefficients.shape[:-1], -1)
+
         return combined
 
     def _compute_stability(self, form: ArithmeticForm) -> float:
@@ -340,27 +373,90 @@ class MotivicCohomology:
         # Ensure all inputs have same batch size
         batch_size = height.shape[0]
         
-        # Project each component to motive rank dimension
+        # Project height to motive rank dimension
+        # Ensure height has at least 2 dimensions
+        if height.dim() == 1:
+            height = height.unsqueeze(0)  # Add batch dimension
         height_proj = torch.nn.functional.adaptive_avg_pool1d(
-            height.unsqueeze(1),
+            height.unsqueeze(1) if height.dim() == 2 else height,
             self.motive_rank
         ).squeeze(1)
         
-        dynamics_proj = torch.nn.functional.adaptive_avg_pool1d(
-            dynamics.unsqueeze(1),
-            self.motive_rank
-        ).squeeze(1)
+        # Handle dynamics tensor by separating real and imaginary parts
+        if dynamics.is_complex():
+            # Split into real and imaginary parts
+            dynamics_real = dynamics.real
+            dynamics_imag = dynamics.imag
+            
+            # Project each part separately
+            if dynamics.dim() > 3:
+                # Flatten all dimensions except last two into batch dimension
+                orig_shape = dynamics.shape
+                dynamics_real = dynamics_real.reshape(-1, *dynamics_real.shape[-2:])
+                dynamics_imag = dynamics_imag.reshape(-1, *dynamics_imag.shape[-2:])
+            
+            # Ensure dynamics_real and dynamics_imag have at least 2 dimensions
+            if dynamics_real.dim() == 1:
+                dynamics_real = dynamics_real.unsqueeze(0)
+            if dynamics_imag.dim() == 1:
+                dynamics_imag = dynamics_imag.unsqueeze(0)
+            
+            # Project each part
+            real_proj = torch.nn.functional.adaptive_avg_pool1d(
+                dynamics_real.unsqueeze(1) if dynamics_real.dim() == 2 else dynamics_real,
+                self.motive_rank
+            ).squeeze(1)
+            
+            imag_proj = torch.nn.functional.adaptive_avg_pool1d(
+                dynamics_imag.unsqueeze(1) if dynamics_imag.dim() == 2 else dynamics_imag,
+                self.motive_rank
+            ).squeeze(1)
+            
+            # Reshape back if needed
+            if dynamics.dim() > 3:
+                real_proj = real_proj.reshape(*orig_shape[:-2], self.motive_rank)
+                imag_proj = imag_proj.reshape(*orig_shape[:-2], self.motive_rank)
+            
+            # Combine back into complex tensor
+            dynamics_proj = torch.complex(real_proj, imag_proj)
+        else:
+            # Handle real tensor normally
+            if dynamics.dim() > 3:
+                # Flatten all dimensions except last two into batch dimension
+                orig_shape = dynamics.shape
+                dynamics = dynamics.reshape(-1, *dynamics.shape[-2:])
+            
+            # Ensure dynamics has at least 2 dimensions
+            if dynamics.dim() == 1:
+                dynamics = dynamics.unsqueeze(0)
+            
+            # Project dynamics
+            dynamics_proj = torch.nn.functional.adaptive_avg_pool1d(
+                dynamics.unsqueeze(1) if dynamics.dim() == 2 else dynamics,
+                self.motive_rank
+            ).squeeze(1)
+            
+            # Reshape back if needed
+            if dynamics.dim() > 3:
+                dynamics_proj = dynamics_proj.reshape(*orig_shape[:-2], self.motive_rank)
         
+        # Project flow metrics
+        # Ensure flow_metrics has at least 2 dimensions
+        if flow_metrics.dim() == 1:
+            flow_metrics = flow_metrics.unsqueeze(0)
         flow_proj = torch.nn.functional.adaptive_avg_pool1d(
-            flow_metrics.unsqueeze(1),
+            flow_metrics.unsqueeze(1) if flow_metrics.dim() == 2 else flow_metrics,
             self.motive_rank
         ).squeeze(1)
         
-        # Combine with equal weights
-        combined = (height_proj + dynamics_proj + flow_proj) / 3.0
+        # Combine projections
+        combined = height_proj + dynamics_proj + flow_proj
         
         # Normalize output
-        return combined / (torch.norm(combined, dim=-1, keepdim=True) + 1e-8)
+        norm = torch.norm(combined, dim=-1, keepdim=True)
+        combined = combined / (norm + 1e-8)
+        
+        return combined
 
 
 class HeightStructure:

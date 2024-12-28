@@ -45,75 +45,101 @@ from .motivic_riemannian_impl import MotivicRiemannianStructureImpl
 
 patch_typeguard()  # Enable runtime shape checking
 
-@typechecked
 class MotivicIntegrator(nn.Module):
-    """Compute motivic integrals for arithmetic dynamics."""
-    
+    """Integrator for motivic measures using neural networks."""
+
     def __init__(
         self,
-        hidden_dim: int,
+        hidden_dim: int = 4,
         motive_rank: int = 4,
         num_samples: int = 100,
-        monte_carlo_steps: int = 10
+        monte_carlo_steps: int = 10,
+        dtype: torch.dtype = torch.float32
     ):
-        super().__init__()
+        """Initialize integrator.
         
+        Args:
+            hidden_dim: Hidden dimension for neural networks
+            motive_rank: Rank of the motive
+            num_samples: Number of samples for Monte Carlo integration
+            monte_carlo_steps: Number of Monte Carlo steps
+            dtype: Data type for computations
+        """
+        super().__init__()
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_samples = num_samples
         self.monte_carlo_steps = monte_carlo_steps
+        self.dtype = dtype
         
-        # Compute minimum required dimension
-        self.min_dim = max(4, 2 * motive_rank)  # From MOTIVIC_DEBUG.md requirements
-        
-        # Initial projection to minimum required dimension
-        self.initial_proj = nn.Sequential(
-            nn.Linear(hidden_dim, self.min_dim),  # Input is hidden_dim from constructor
-            nn.SiLU(),
-            nn.Linear(self.min_dim, self.min_dim),  # Project to min_dim
-            nn.Tanh()
-        )
-        
-        # Network for computing motivic measure
+        # Initialize networks with default dimension
         self.measure_net = nn.Sequential(
-            nn.Linear(self.min_dim, self.min_dim),
-            nn.SiLU(),
-            nn.Linear(self.min_dim, self.min_dim),  # Output min_dim measure space
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh()
-        )
+        ).to(dtype=dtype)
         
-        # Network for computing integration domain
         self.domain_net = nn.Sequential(
-            nn.Linear(self.min_dim, self.min_dim),
-            nn.SiLU(),
-            nn.Linear(self.min_dim, 2 * self.min_dim),  # Output bounds for min_dim space
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 2 * hidden_dim),  # 2 * dim for lower and upper bounds
             nn.Tanh()
-        )
-        
-        # Print model summary for shape checking
-        print("\nInitial Projection Network:")
-        summary(self.initial_proj, input_size=(1, hidden_dim))
-        
-        print("\nMeasure Network:")
-        summary(self.measure_net, input_size=(1, self.min_dim))
-        
-        print("\nDomain Network:")
-        summary(self.domain_net, input_size=(1, self.min_dim))
-    
+        ).to(dtype=dtype)
+
+    def _resize_networks(self, input_dim: int):
+        """Resize neural networks for given input dimension."""
+        # Create new measure network that preserves input dimension
+        self.measure_net = nn.Sequential(
+            nn.Linear(input_dim, self.hidden_dim),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, input_dim),
+            nn.Tanh()
+        ).to(dtype=self.dtype)
+
+        # Create new domain network that outputs bounds for each dimension
+        self.domain_net = nn.Sequential(
+            nn.Linear(input_dim, self.hidden_dim),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, 2 * input_dim),  # 2 * dim for lower and upper bounds
+            nn.Tanh()
+        ).to(dtype=self.dtype)
+
     @typechecked
     def compute_measure(
-        self, 
-        x: torch.Tensor  # Accept any tensor with correct shape
-    ) -> torch.Tensor:  # Return tensor with shape [batch, min_dim]
+        self,
+        pattern: torch.Tensor,
+        with_quantum: bool = False
+    ) -> torch.Tensor:
         """Compute motivic measure with shape checking."""
-        # Ensure input has correct shape
-        if len(x.shape) == 1:
+        # Add batch dimension if needed
+        x = pattern
+        if len(x.shape) == 2:
             x = x.unsqueeze(0)  # Add batch dimension
         
-        # Project to min_dim first
-        x = self.initial_proj(x)  # [batch_size, min_dim]
+        # Get input dimension
+        input_dim = x.shape[-1]
         
-        # Compute measure - outputs [batch_size, min_dim]
+        # Resize networks if needed
+        if self.measure_net[0].in_features != input_dim:
+            self._resize_networks(input_dim)
+        
+        # Update dtype if input is complex
+        if x.is_complex():
+            self.dtype = x.dtype
+            # Convert network parameters to complex
+            for module in self.measure_net.modules():
+                if isinstance(module, nn.Linear):
+                    module.weight.data = module.weight.data.to(dtype=self.dtype)
+                    if module.bias is not None:
+                        module.bias.data = module.bias.data.to(dtype=self.dtype)
+            for module in self.domain_net.modules():
+                if isinstance(module, nn.Linear):
+                    module.weight.data = module.weight.data.to(dtype=self.dtype)
+                    if module.bias is not None:
+                        module.bias.data = module.bias.data.to(dtype=self.dtype)
+        
+        # Compute measure - dimensions flow naturally from input
         measure = self.measure_net(x)
         
         # Scale measure to have reasonable magnitude
@@ -127,13 +153,17 @@ class MotivicIntegrator(nn.Module):
         x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute integration domain bounds with shape checking."""
-        # Project to min_dim first
-        x = self.initial_proj(x)  # [batch_size, min_dim]
+        # Get input dimension
+        dim = x.shape[-1]
         
-        # Compute bounds - outputs [batch_size, 2 * min_dim]
+        # Resize networks if needed
+        if self.domain_net[0].in_features != dim:
+            self._resize_networks(dim)
+            
+        # Compute bounds - outputs [batch_size, 2 * dim]
         bounds = self.domain_net(x)
-        lower = bounds[..., :self.min_dim]  # [batch_size, min_dim]
-        upper = bounds[..., self.min_dim:]  # [batch_size, min_dim]
+        lower = bounds[..., :dim]  # [batch_size, dim]
+        upper = bounds[..., dim:]  # [batch_size, dim]
         
         # Scale bounds to reasonable range
         lower = lower - 1.0  # Shift to [-2, 0]
@@ -151,18 +181,19 @@ class MotivicIntegrator(nn.Module):
         """Perform Monte Carlo integration over the given measure and domain.
         
         Args:
-            measure: Measure tensor of shape [batch_size, min_dim]
-            lower: Lower bounds tensor of shape [batch_size, min_dim]
-            upper: Upper bounds tensor of shape [batch_size, min_dim]
+            measure: Measure tensor of shape [batch_size, dim]
+            lower: Lower bounds tensor of shape [batch_size, dim]
+            upper: Upper bounds tensor of shape [batch_size, dim]
             
         Returns:
             Integral values tensor of shape [batch_size]
         """
         batch_size = measure.shape[0]
+        dim = measure.shape[1]  # Use actual dimension from input
         device = measure.device
         
         # Initialize integral estimates
-        integral_estimates = torch.zeros(batch_size, device=device)
+        integral_estimates = torch.zeros(batch_size, device=device, dtype=self.dtype)
         
         # Compute volume of integration domain
         domain_volume = torch.prod(upper - lower, dim=-1)  # [batch_size]
@@ -170,28 +201,30 @@ class MotivicIntegrator(nn.Module):
         # Monte Carlo integration with importance sampling
         for _ in range(self.monte_carlo_steps):
             # Generate random samples in the domain
-            # Shape: [batch_size, num_samples, min_dim]
+            # Shape: [batch_size, num_samples, dim]
             samples = torch.rand(
-                batch_size, self.num_samples, self.min_dim, device=device
+                batch_size, self.num_samples, dim, device=device, dtype=self.dtype
             )
             
             # Scale samples to domain
-            # Shape: [batch_size, num_samples, min_dim]
+            # Shape: [batch_size, num_samples, dim]
             samples = samples * (upper.unsqueeze(1) - lower.unsqueeze(1)) + lower.unsqueeze(1)
             
             # Evaluate measure at sample points
-            # First reshape samples to [batch_size * num_samples, min_dim]
-            flat_samples = samples.reshape(-1, self.min_dim)
+            # First reshape samples to [batch_size * num_samples, dim]
+            flat_samples = samples.reshape(-1, dim)
             
-            # Compute measure values - outputs [batch_size * num_samples, min_dim]
+            # Compute measure values - outputs [batch_size * num_samples, dim]
             measure_values = self.measure_net(flat_samples)
             
-            # Reshape back to [batch_size, num_samples, min_dim]
-            measure_values = measure_values.reshape(batch_size, self.num_samples, self.min_dim)
+            # Reshape back to [batch_size, num_samples, dim]
+            measure_values = measure_values.reshape(batch_size, self.num_samples, dim)
             
-            # Compute contribution to integral (mean over samples)
-            # First compute L2 norm of measure values: [batch_size, num_samples]
-            measure_norms = torch.norm(measure_values, dim=-1)
+            # For complex measures, use absolute value
+            if measure_values.is_complex():
+                measure_norms = torch.abs(measure_values)
+            else:
+                measure_norms = torch.norm(measure_values, dim=-1)
             
             # Take mean over samples and multiply by domain volume
             # Shape: [batch_size]
@@ -225,7 +258,8 @@ class MotivicIntegrationSystem(nn.Module):
         num_primes: Number of primes for height computations
         monte_carlo_steps: Number of Monte Carlo integration steps
         num_samples: Number of samples per integration step
-    """    
+    """
+    
     def __init__(
         self,
         manifold_dim: int,
@@ -244,13 +278,14 @@ class MotivicIntegrationSystem(nn.Module):
             hidden_dim: Hidden dimension for neural networks
             motive_rank: Rank of motivic structure
             num_primes: Number of primes for height computations
-            monte_carlo_steps: Number of Monte Carlo steps
-            num_samples: Number of samples per step
-            device: Computation device
-            dtype: Data type for computations
+            monte_carlo_steps: Number of Monte Carlo integration steps
+            num_samples: Number of samples per integration step
+            device: Optional device for tensors
+            dtype: Optional dtype for tensors
         """
         super().__init__()
         
+        # Store parameters
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
@@ -279,7 +314,8 @@ class MotivicIntegrationSystem(nn.Module):
         self.cohomology = QuantumMotivicCohomology(
             metric=self.geometry,  # Pass the geometry as the metric/structure
             hidden_dim=hidden_dim,
-            motive_rank=motive_rank
+            motive_rank=motive_rank,
+            dtype=self.dtype
         )
         
         # Initialize integrator with fixed motive_rank=2
@@ -287,14 +323,16 @@ class MotivicIntegrationSystem(nn.Module):
             hidden_dim=hidden_dim,
             motive_rank=motive_rank,  # Use the same motive_rank as the rest of the system
             num_samples=num_samples,
-            monte_carlo_steps=monte_carlo_steps
+            monte_carlo_steps=monte_carlo_steps,
+            dtype=self.dtype
         )
         
         # Initialize arithmetic dynamics
         self.dynamics = ArithmeticDynamics(
             hidden_dim=hidden_dim,
             motive_rank=motive_rank,
-            num_primes=num_primes
+            num_primes=num_primes,
+            dtype=self.dtype
         )
         
         # Cache for intermediate computations
