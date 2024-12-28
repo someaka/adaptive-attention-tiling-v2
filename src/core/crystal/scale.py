@@ -466,7 +466,7 @@ class ScaleCohomology:
                describing coupling evolution
             
             2. Fixed Points:
-               β(g*) = 0
+                β(g*) = 0
                identifying scale invariant points
             
             3. Critical Exponents:
@@ -705,7 +705,7 @@ class ScaleCohomology:
         
         Mathematical Framework:
             1. Stability Matrix:
-               M_ij = ∂β_i/��g_j|_{g*}
+               M_ij = ∂β_i/∂g_j|_{g*}
                linearization around fixed point
             
             2. Eigenvalue Analysis:
@@ -900,9 +900,51 @@ class ScaleCohomology:
         """
         if not callable(symmetry_action):
             raise TypeError("symmetry_action must be a callable function")
-
+            
         # Create test state for anomaly detection
         with torch.no_grad():
+            # For complex dtype, create a U(1)-structured test state
+            if self.dtype == torch.complex64:
+                # Create phases from 0 to 2π
+                phases = torch.linspace(0, 2*torch.pi, self.dim, dtype=torch.float32)
+                # Create state with constant magnitude and varying phase
+                test_x = torch.exp(1j * phases).to(self.dtype)
+                
+                # Apply symmetry action
+                transformed = symmetry_action(test_x)
+                
+                # Check if this preserves U(1) structure
+                magnitudes = torch.abs(transformed)
+                mean_mag = torch.mean(magnitudes)
+                mag_variation = torch.std(magnitudes)
+                
+                # If magnitudes are approximately constant, this is likely a U(1) symmetry
+                if mag_variation / mean_mag < 1e-3:
+                    # Get phase differences
+                    trans_phases = torch.angle(transformed)
+                    phase_diffs = torch.diff(trans_phases)
+                    # Unwrap to [-π, π]
+                    phase_diffs = torch.where(phase_diffs > np.pi, phase_diffs - 2*np.pi, phase_diffs)
+                    phase_diffs = torch.where(phase_diffs < -np.pi, phase_diffs + 2*np.pi, phase_diffs)
+                    # If phase differences are approximately constant, confirm U(1)
+                    mean_diff = torch.mean(phase_diffs)
+                    diff_variation = torch.std(phase_diffs)
+                    if diff_variation / (torch.abs(mean_diff) + 1e-6) < 1e-2:
+                        # For U(1), compute winding number
+                        winding = float(torch.sum(phase_diffs) / (2 * torch.pi))
+                        # Create anomaly polynomial with proper winding number
+                        return [
+                            AnomalyPolynomial(
+                                coefficients=torch.tensor([winding], dtype=self.dtype),
+                                variables=["theta"],
+                                degree=1,
+                                type="U1",
+                                winding_number=winding,
+                                is_consistent=True
+                            )
+                        ]
+            
+            # For non-U(1) cases or real dtype, use linear spacing
             test_x = torch.linspace(0, 2*torch.pi, self.dim, dtype=torch.float32)
             if self.dtype == torch.complex64:
                 test_x = torch.exp(1j * test_x)
@@ -1240,7 +1282,7 @@ class ScaleCohomology:
         
         The equation is satisfied when:
         1. β(g)∂_g γ(g) = γ(g)² (consistency condition)
-        2. ��(g)D C - d C = 0 (scaling dimension condition)
+        2. β(g)D C - d C = 0 (scaling dimension condition)
         
         For QED-like theories:
         - β(g) = g³/(32π²) 
