@@ -20,7 +20,7 @@ from ..patterns.fiber_types import LocalChart as PatternSection
 from ..tiling.quantum_geometric_attention import QuantumGeometricAttention
 from .types import QuantumState
 from .state_space import HilbertSpace
-from ..crystal.scale import ScaleSystem
+from src.core.crystal.scale import ScaleSystem
 from ..tiling.state_manager import StateManager, StateConfig, StateType
 from ..tiling.quantum_attention_tile import QuantumMotivicTile
 from ..tiling.patterns.pattern_fiber_bundle import PatternFiberBundle

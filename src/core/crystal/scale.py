@@ -90,6 +90,8 @@ logger = logging.getLogger(__name__)
 # Global memory manager with enhanced metrics
 _memory_manager = MemoryManager()
 
+__all__ = ['ScaleSystem', 'ScaleCohomology']
+
 @dataclass(frozen=True)
 class MemoryStats:
     """Statistics for memory usage tracking.
@@ -252,7 +254,6 @@ class ScaleCohomology:
         # Initialize components with proper dtype and minimum dimensions
         self.connection = ScaleConnection(dim, num_scales, dtype=dtype)
         self.rg_flow = RenormalizationFlow(dim, dtype=dtype)
-        self.anomaly_detector = AnomalyDetector(dim, dtype=dtype)
         self.scale_invariance = ScaleInvariance(dim, num_scales, dtype=dtype)
 
         # Specialized networks for advanced computations
@@ -273,6 +274,16 @@ class ScaleCohomology:
             activation,
             nn.Linear(dim * 2, 1, dtype=dtype)
         )
+
+        # Initialize anomaly detector
+        self.anomaly_detector = AnomalyDetector(dim=dim, max_degree=4, dtype=dtype)
+
+        # Register all parameters for memory tracking
+        for module in [self.forms, self.riemann_computer, self.potential_grad,
+                      self.cocycle_computer, self.coboundary_computer, 
+                      self.anomaly_detector.detector]:
+            for param in module.parameters():
+                param.data = register_tensor(param.data)
 
     def _ensure_dtype(self, tensor: torch.Tensor) -> torch.Tensor:
         """Ensure tensor has correct dtype with minimal copying.
@@ -694,7 +705,7 @@ class ScaleCohomology:
         
         Mathematical Framework:
             1. Stability Matrix:
-               M_ij = ∂β_i/∂g_j|_{g*}
+               M_ij = ∂β_i/��g_j|_{g*}
                linearization around fixed point
             
             2. Eigenvalue Analysis:
@@ -875,112 +886,33 @@ class ScaleCohomology:
             return critical_exponents
 
     def anomaly_polynomial(self, symmetry_action: Callable[[torch.Tensor], torch.Tensor]) -> List[AnomalyPolynomial]:
-        """Compute anomaly polynomial for a symmetry action with memory optimization."""
-        logger.debug("Starting anomaly polynomial computation")
+        """Compute anomaly polynomial for a symmetry action.
         
+        Args:
+            symmetry_action: Function that implements the symmetry transformation
+                           Should take a tensor and return a tensor of same shape
+        
+        Returns:
+            List of AnomalyPolynomial objects representing detected anomalies
+            
+        Note:
+            This implementation delegates to the AnomalyDetector class for the actual computation
+        """
         if not callable(symmetry_action):
             raise TypeError("symmetry_action must be a callable function")
+
+        # Create test state for anomaly detection
+        with torch.no_grad():
+            test_x = torch.linspace(0, 2*torch.pi, self.dim, dtype=torch.float32)
+            if self.dtype == torch.complex64:
+                test_x = torch.exp(1j * test_x)
+            test_x = test_x.to(self.dtype)
             
-        def log_memory_usage(stage: str):
-            """Log memory usage at a given stage."""
-            stats = _memory_manager.get_memory_stats()
-            logger.debug(f"Memory at {stage}:")
-            logger.debug(f"  Allocated memory: {stats['allocated_memory'] / 1024**2:.2f}MB")
-            logger.debug(f"  Peak memory: {stats['peak_memory'] / 1024**2:.2f}MB")
-            logger.debug(f"  Fragmentation ratio: {stats['fragmentation_ratio']:.2%}")
-            logger.debug(f"  Cache hits/misses: {stats['cache_hits']}/{stats['cache_misses']}")
-        
-        with memory_efficient_computation("anomaly_polynomial"):
-            log_memory_usage("start")
+            # Apply symmetry action
+            transformed = symmetry_action(test_x)
             
-            # Process in very small batches to reduce memory usage
-            batch_size = 4  # Reduced batch size
-            total_points = min(self.dim, 32)  # Limit total points
-            num_batches = (total_points + batch_size - 1) // batch_size
-            
-            # Initialize accumulators for different polynomial terms
-            accumulated_phases = torch.zeros(4, dtype=torch.float32)
-            accumulated_norms = torch.zeros(4, dtype=torch.float32)
-            
-            logger.debug(f"Processing {total_points} points in {num_batches} batches")
-            
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, total_points)
-                current_batch_size = end_idx - start_idx
-                
-                with torch.no_grad():  # Reduce memory usage
-                    # Create minimal test points
-                    test_x = torch.linspace(0, 2*torch.pi, current_batch_size, dtype=torch.float32)
-                    if self.dtype == torch.complex64:
-                        test_x = torch.exp(1j * test_x)
-                    test_x = test_x.to(self.dtype)
-                    
-                    # Apply symmetry action with minimal memory
-                    transformed = symmetry_action(test_x)
-                    is_complex = torch.is_complex(transformed)
-                    
-                    # Compute phase and norm for different orders
-                    if is_complex:
-                        phases = torch.angle(transformed)
-                        norms = torch.abs(transformed)
-                        
-                        # Compute different orders of the polynomial
-                        for order in range(4):  # Include constant term
-                            phase_term = (phases ** order).sum()
-                            norm_term = (norms ** order).sum()
-                            accumulated_phases[order] += phase_term
-                            accumulated_norms[order] += norm_term
-                    else:
-                        norms = torch.abs(transformed)
-                        for order in range(4):  # Include constant term
-                            accumulated_phases[order] += 0.0  # No phase for real tensors
-                            accumulated_norms[order] += (norms ** order).sum()
-                    
-                    # Cleanup batch tensors
-                    del test_x, transformed
-                    if is_complex:
-                        del phases, norms
-                    else:
-                        del norms
-                    gc.collect()
-            
-            log_memory_usage("after_batch_processing")
-            
-            # Create minimal coefficient tensor
-            with torch.no_grad():
-                # Normalize accumulated values by total points
-                accumulated_phases /= total_points
-                accumulated_norms /= total_points
-                
-                # Create coefficient tensor with proper polynomial terms
-                coefficients = torch.zeros(4, dtype=self.dtype)  # Need 4 terms for consistency
-                
-                # Combine phase and norm information for all terms
-                for i in range(4):
-                    if self.dtype == torch.complex64:
-                        phase = accumulated_phases[i].clone().detach()
-                        norm = accumulated_norms[i].clone().detach()
-                        coefficients[i] = norm * torch.exp(1j * phase)
-                    else:
-                        coefficients[i] = accumulated_norms[i].clone().detach()
-                
-                # Normalize coefficients globally
-                norm = torch.norm(coefficients)
-                if norm > 1e-10:
-                    coefficients = coefficients / norm
-                
-                # Create polynomial with proper structure
-                polynomial = AnomalyPolynomial(
-                    coefficients=coefficients,
-                    variables=[f"θ_{i}" for i in range(4)],  # Need all variables for consistency
-                    degree=1,  # Keep minimal degree
-                        type="U(1)"  # Mark as U(1) type
-                )
-                
-            log_memory_usage("end")
-            
-            return [polynomial]  # Return minimal list
+            # Detect anomalies using the detector
+            return self.anomaly_detector.detect_anomalies(transformed)
 
     def scale_invariants(self, structure: torch.Tensor) -> List[Tuple[torch.Tensor, float]]:
         """Find scale invariant quantities in the structure.
@@ -1308,7 +1240,7 @@ class ScaleCohomology:
         
         The equation is satisfied when:
         1. β(g)∂_g γ(g) = γ(g)² (consistency condition)
-        2. γ(g)D C - d C = 0 (scaling dimension condition)
+        2. ��(g)D C - d C = 0 (scaling dimension condition)
         
         For QED-like theories:
         - β(g) = g³/(32π²) 
@@ -1610,6 +1542,76 @@ class ScaleCohomology:
         # Use the holographic principle to reconstruct boundary data
         # This is a simplified version that assumes conformal symmetry
         return ir_data / (torch.norm(ir_data) + 1e-8)
+
+    def __del__(self):
+        """Ensure proper cleanup of resources."""
+        # Clean up network parameters
+        for module in [self.forms, self.riemann_computer, self.potential_grad,
+                      self.cocycle_computer, self.coboundary_computer]:
+            del module
+            
+        # Clean up specialized components
+        if hasattr(self, 'connection'):
+            del self.connection
+        if hasattr(self, 'rg_flow'):
+            del self.rg_flow
+        if hasattr(self, 'scale_invariance'):
+            del self.scale_invariance
+        if hasattr(self, 'anomaly_detector'):
+            del self.anomaly_detector
+            
+        gc.collect()
+
+    def clear_anomaly_cache(self):
+        """Clear the anomaly detector's cache to free memory."""
+        if hasattr(self, 'anomaly_detector'):
+            self.anomaly_detector._poly_cache.clear()
+            gc.collect()
+
+    def get_cached_anomalies(self, state: torch.Tensor) -> Optional[List[AnomalyPolynomial]]:
+        """Get cached anomalies for a given state if available.
+        
+        Args:
+            state: Input state tensor
+            
+        Returns:
+            List of cached anomaly polynomials if found, None otherwise
+        """
+        if not hasattr(self, 'anomaly_detector'):
+            return None
+            
+        state_key = self.anomaly_detector._get_state_key(state)
+        return self.anomaly_detector._poly_cache.get(state_key)
+
+    def analyze_scale_anomalies(
+        self, 
+        state: torch.Tensor,
+        check_invariance: bool = True
+    ) -> Tuple[List[AnomalyPolynomial], Optional[List[Tuple[torch.Tensor, float]]]]:
+        """Analyze state for both anomalies and scale invariance.
+        
+        Args:
+            state: Input state tensor to analyze
+            check_invariance: Whether to also check for scale invariance
+            
+        Returns:
+            Tuple of:
+            - List of detected anomaly polynomials
+            - List of (state, scale) pairs for invariant structures (if check_invariance=True)
+              or None (if check_invariance=False)
+        """
+        # Ensure state has correct dtype
+        state = self._ensure_dtype(state)
+        
+        # First check for anomalies
+        anomalies = self.anomaly_detector.detect_anomalies(state)
+        
+        # Optionally check for scale invariance
+        invariants = None
+        if check_invariance:
+            invariants = self.scale_invariance.find_invariant_structures(state)
+            
+        return anomalies, invariants
 
 
 class ScaleSystem:
