@@ -292,7 +292,7 @@ class InformationRicciFlow(NeuralGeometricFlow):
         intermediate_dim = (manifold_dim + reduced_dim) // 2
         
         # Efficient potential network with residual connection
-        self.potential_net = nn.Sequential(
+        self.potential_net: nn.Sequential = nn.Sequential(
             nn.Linear(manifold_dim, intermediate_dim),
             nn.SiLU(),
             nn.Dropout(dropout),  # Add regularization
@@ -319,24 +319,9 @@ class InformationRicciFlow(NeuralGeometricFlow):
             torch.eye(manifold_dim).unsqueeze(0)
         )
 
-    @torch.jit.script
-    def _fused_potential_computation(self, points: Tensor) -> Tuple[Tensor, Tensor]:
-        """Compute information potential and its gradients efficiently.
-        
-        Implements a fused computation of the potential f and its
-        gradient ∂f/∂x^i for better performance and memory efficiency.
-        
-        Mathematical Expression:
-            f = F(x^i)  # Potential
-            ∂f/∂x^i    # Gradient
-        
-        where F is the potential neural network.
-        
-        Implementation Notes:
-            - Fuses forward and backward passes
-            - Creates computation graph once
-            - JIT-compiled for performance
-            - Optimizes memory allocation
+    # @torch.jit.script  # Disable TorchScript for now
+    def _fused_potential_computation(self, points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute potential and its gradients in a fused operation.
         
         Args:
             points: Input points x^i on manifold [batch_size, manifold_dim]
@@ -346,6 +331,7 @@ class InformationRicciFlow(NeuralGeometricFlow):
             - Information potential f [batch_size, 1]
             - Potential gradients ∂f/∂x^i [batch_size, manifold_dim]
         """
+        points = points.detach().requires_grad_(True)
         potential = self.potential_net(points)
         grad_outputs = torch.ones_like(potential)
         grads = torch.autograd.grad(

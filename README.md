@@ -116,6 +116,11 @@ The project is designed to run efficiently on standard CPU hardware. Minimum req
 - Efficient thread utilization
 - Cache-friendly data structures
 
+### Future Considerations
+- Monitor Mojo's progress towards dropping proprietary dependencies 
+- Evaluate potential integration with Mojo's native acceleration features once available
+- Consider migration path from current CPU optimizations to Mojo's built-in capabilities
+
 ### Benchmarking Metrics
 - Memory usage and allocation patterns
 - CPU computation time

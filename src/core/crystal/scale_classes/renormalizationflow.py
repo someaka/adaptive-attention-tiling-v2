@@ -64,7 +64,7 @@ class RenormalizationFlow:
             for _ in range(num_steps):
                 # Check if current point is near fixed point
                 detector_output = self.fp_detector(current.reshape(1, -1))
-                if detector_output.item() > 0.9:  # High confidence of fixed point
+                if torch.abs(detector_output).item() > 0.9:  # High confidence of fixed point
                     break
                     
                 beta = self.beta_function(current)

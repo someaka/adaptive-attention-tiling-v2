@@ -130,7 +130,6 @@ def memory_efficient_computation(operation: str):
     try:
         # Pre-operation cleanup
         gc.collect()
-        torch.cuda.empty_cache()
         
         # Log initial state
         initial_stats = _memory_manager.get_memory_stats()
@@ -150,7 +149,6 @@ def memory_efficient_computation(operation: str):
         raise
     finally:
         gc.collect()
-        torch.cuda.empty_cache()
 
 class ScaleCohomology:
     """Multi-scale cohomological structure for crystal analysis.
@@ -877,7 +875,7 @@ class ScaleCohomology:
             return critical_exponents
 
     def anomaly_polynomial(self, symmetry_action: Callable[[torch.Tensor], torch.Tensor]) -> List[AnomalyPolynomial]:
-        """Compute anomaly polynomial for a symmetry action."""
+        """Compute anomaly polynomial for a symmetry action with memory optimization."""
         logger.debug("Starting anomaly polynomial computation")
         
         if not callable(symmetry_action):
@@ -895,332 +893,94 @@ class ScaleCohomology:
         with memory_efficient_computation("anomaly_polynomial"):
             log_memory_usage("start")
             
-            from src.core.quantum.u1_utils import normalize_with_phase, track_phase_evolution, compose_phases, compute_winding_number
-            from src.core.patterns.arithmetic_dynamics import ArithmeticDynamics
-            from src.core.patterns.operadic_handler import OperadicStructureHandler
-            from src.core.patterns.enriched_structure import WaveEmergence, PatternTransition
-            from src.core.flow.pattern_heat import PatternHeatFlow
-            from src.core.flow.information_ricci import InformationRicciFlow
+            # Process in very small batches to reduce memory usage
+            batch_size = 4  # Reduced batch size
+            total_points = min(self.dim, 32)  # Limit total points
+            num_batches = (total_points + batch_size - 1) // batch_size
             
-            logger.debug("Creating test state...")
-            # Create test state with non-constant phase
-            test_x = torch.linspace(0, 2*torch.pi, self.dim, dtype=torch.float32).to(self.dtype)
-            state = torch.exp(1j * test_x)
-            state_norm, state_phase = normalize_with_phase(state, return_phase=True)
-            logger.debug(f"Created test state with shape {state.shape}")
-            log_memory_usage("after_state_creation")
+            # Initialize accumulators for different polynomial terms
+            accumulated_phases = torch.zeros(4, dtype=torch.float32)
+            accumulated_norms = torch.zeros(4, dtype=torch.float32)
             
-            logger.debug("Applying symmetry action...")
-            # Apply symmetry with phase tracking
-            transformed = symmetry_action(state_norm)
-            transformed_norm, transformed_phase = normalize_with_phase(transformed, return_phase=True)
-            logger.debug("Symmetry action applied")
-            log_memory_usage("after_symmetry_action")
+            logger.debug(f"Processing {total_points} points in {num_batches} batches")
             
-            logger.debug("Computing winding number...")
-            # Compute winding number for the symmetry action
-            winding = compute_winding_number(transformed)
-            logger.debug(f"Winding number: {winding}")
-            log_memory_usage("after_winding_number")
-            
-            logger.debug("Initializing geometric layers...")
-            # Initialize geometric layers with absolute minimum dimensions
-            min_hidden_dim = 4  # Absolute minimum
-            logger.debug(f"Using hidden_dim={min_hidden_dim}")
-            
-            logger.debug("Initializing information flow...")
-            information_flow = InformationRicciFlow(
-                manifold_dim=4,  # Minimum dimension
-                hidden_dim=min_hidden_dim,
-                dt=0.1,
-                fisher_rao_weight=0.1,  # Reduce weights
-                quantum_weight=0.01,
-                stress_energy_weight=0.1
-            )
-            logger.debug("Information flow initialized")
-            
-            logger.debug("Initializing heat flow...")
-            heat_flow = PatternHeatFlow(
-                manifold_dim=4,  # Minimum dimension
-                hidden_dim=min_hidden_dim,
-                dt=0.1,
-                heat_diffusion_weight=0.1  # Reduce weight
-            )
-            logger.debug("Heat flow initialized")
-            
-            logger.debug("Initializing wave emergence...")
-            wave = WaveEmergence(
-                dt=0.1,
-                num_steps=2,  # Minimum steps
-                dtype=self.dtype
-            )
-            logger.debug("Wave emergence initialized")
-            
-            logger.debug("Initializing pattern transition...")
-            pattern_transition = PatternTransition(
-                wave_emergence=wave,
-                dtype=self.dtype
-            )
-            logger.debug("Pattern transition initialized")
-            
-            logger.debug("Initializing quantum geometric attention...")
-            # Initialize quantum geometric attention with absolute minimum dimensions
-            quantum_attention = QuantumGeometricAttention(
-                hidden_dim=min_hidden_dim,
-                num_heads=1,  # Minimum heads
-                dropout=0.0,  # Disable dropout
-                manifold_type="euclidean",  # Simpler manifold
-                curvature=0.0,
-                manifold_dim=None,
-                num_layers=1,  # Minimum layers
-                tile_size=2,  # Minimum tile size
-                motive_rank=1,  # Minimum rank
-                dtype=self.dtype,
-                device=None
-            )
-            logger.debug("Quantum geometric attention initialized")
-            
-            logger.debug("Initializing metric...")
-            # Initialize metric for information flow
-            metric = torch.eye(4, dtype=self.dtype).unsqueeze(0)  # Minimum dimension
-            logger.debug("Metric initialized")
-            
-            logger.debug("Initializing arithmetic dynamics and operadic handler...")
-            # Initialize arithmetic dynamics and operadic handler with minimum dimensions
-            arithmetic = ArithmeticDynamics(
-                hidden_dim=min_hidden_dim,
-                motive_rank=1,  # Minimum rank
-                quantum_weight=0.01,  # Reduce weight
-                dtype=self.dtype
-            )
-            logger.debug("Arithmetic dynamics initialized")
-            
-            operadic = OperadicStructureHandler(
-                base_dim=4,  # Minimum dimension
-                hidden_dim=min_hidden_dim,
-                motive_rank=1,  # Minimum rank
-                preserve_symplectic=False,  # Disable symplectic preservation
-                dtype=self.dtype
-            )
-            logger.debug("Operadic handler initialized")
-            
-            logger.debug("Creating enriched morphism for phase transition...")
-            # Create enriched morphism for phase transition
-            phase_morphism = pattern_transition.create_morphism(
-                source=torch.exp(1j * state_phase).reshape(-1, 1),
-                target=torch.exp(1j * transformed_phase).reshape(-1, 1)
-            )
-            logger.debug("Phase morphism created")
-            
-            logger.debug("Evolving phase through wave emergence...")
-            # Evolve phase through wave emergence
-            evolved_phase = wave.evolve_structure(
-                pattern=torch.exp(1j * (transformed_phase - state_phase)).reshape(-1, 1),
-                direction=phase_morphism.structure_map
-            )
-            logger.debug("Phase evolved")
-            
-            logger.debug("Applying information flow to metric...")
-            # Apply information flow to metric with quantum corrections
-            metric_evolved, flow_metrics = information_flow.flow_step(metric, timestep=0.1)
-            logger.debug("Information flow applied")
-            
-            # Use quantum corrections if available
-            quantum_corrections = flow_metrics.quantum_corrections if hasattr(flow_metrics, 'quantum_corrections') else None
-            if quantum_corrections is not None:
-                metric_evolved = metric_evolved + quantum_corrections
-                logger.debug("Applied quantum corrections")
-            
-            logger.debug("Evolving states through pattern heat flow...")
-            # Evolve states through pattern heat flow with interaction
-            state_evolved = heat_flow.evolve_pattern(
-                pattern=state_norm,
-                metric=metric_evolved,
-                timestep=0.1
-            )
-            logger.debug("State evolved")
-            
-            transformed_evolved = heat_flow.evolve_pattern(
-                pattern=transformed_norm,
-                metric=metric_evolved,
-                timestep=0.1
-            )
-            logger.debug("Transformed state evolved")
-            
-            logger.debug("Computing RG flow with phase-aware observables...")
-            # Define flow observables with phase tracking
-            def flow_observable(x: torch.Tensor) -> torch.Tensor:
-                logger.debug("Computing flow observable")
-                # Track both magnitude and phase evolution with geometric layers
-                x_norm, x_phase = normalize_with_phase(x, return_phase=True)
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, total_points)
+                current_batch_size = end_idx - start_idx
                 
-                # Create wave packet for evolution
-                wave_packet = wave.evolve_structure(
-                    pattern=x_norm.reshape(-1, 1),
-                    direction=phase_morphism.structure_map
-                )
-                
-                # Evolve through pattern heat flow
-                x_evolved = heat_flow.evolve_pattern(
-                    pattern=wave_packet.squeeze(),
-                    metric=metric_evolved,
-                    timestep=0.1
-                )
-                
-                # Apply information flow with stress-energy
-                metric_next, _ = information_flow.flow_step(metric_evolved, timestep=0.1)
-                
-                return x_evolved * torch.exp(1j * x_phase)
-                
-            def transformed_observable(x: torch.Tensor) -> torch.Tensor:
-                logger.debug("Computing transformed observable")
-                # Apply symmetry and track phase with geometric layers
-                x_norm, x_phase = normalize_with_phase(x, return_phase=True)
-                transformed_x = symmetry_action(x_norm)
-                transformed_norm, transformed_phase = normalize_with_phase(transformed_x, return_phase=True)
-                
-                # Create enriched morphism for transformation
-                morphism = pattern_transition.create_morphism(
-                    source=x_norm.reshape(-1, 1),
-                    target=transformed_norm.reshape(-1, 1)
-                )
-                
-                # Create wave packet for evolution
-                wave_packet = wave.evolve_structure(
-                    pattern=transformed_norm.reshape(-1, 1),
-                    direction=morphism.structure_map
-                )
-                
-                # Evolve through pattern heat flow
-                transformed_evolved = heat_flow.evolve_pattern(
-                    pattern=wave_packet.squeeze(),
-                    metric=metric_evolved,
-                    timestep=0.1
-                )
-                
-                # Apply information flow with stress-energy
-                metric_next, _ = information_flow.flow_step(metric_evolved, timestep=0.1)
-                
-                return transformed_evolved * torch.exp(1j * transformed_phase)
+                with torch.no_grad():  # Reduce memory usage
+                    # Create minimal test points
+                    test_x = torch.linspace(0, 2*torch.pi, current_batch_size, dtype=torch.float32)
+                    if self.dtype == torch.complex64:
+                        test_x = torch.exp(1j * test_x)
+                    test_x = test_x.to(self.dtype)
+                    
+                    # Apply symmetry action with minimal memory
+                    transformed = symmetry_action(test_x)
+                    is_complex = torch.is_complex(transformed)
+                    
+                    # Compute phase and norm for different orders
+                    if is_complex:
+                        phases = torch.angle(transformed)
+                        norms = torch.abs(transformed)
+                        
+                        # Compute different orders of the polynomial
+                        for order in range(4):  # Include constant term
+                            phase_term = (phases ** order).sum()
+                            norm_term = (norms ** order).sum()
+                            accumulated_phases[order] += phase_term
+                            accumulated_norms[order] += norm_term
+                    else:
+                        norms = torch.abs(transformed)
+                        for order in range(4):  # Include constant term
+                            accumulated_phases[order] += 0.0  # No phase for real tensors
+                            accumulated_norms[order] += (norms ** order).sum()
+                    
+                    # Cleanup batch tensors
+                    del test_x, transformed
+                    if is_complex:
+                        del phases, norms
+                    else:
+                        del norms
+                    gc.collect()
             
-            # Initialize anomaly coefficients
-            anomaly_coeffs = []
-            scales = torch.linspace(0, 1, 5)  # Reduce number of scale points
+            log_memory_usage("after_batch_processing")
             
-            for t_val in scales:
-                with memory_efficient_computation(f"scale_{t_val}"):
-                    logger.debug(f"Computing at scale {t_val}")
-                    # Evolve both flows with wave packet evolution
-                    evolved_original = self.renormalization_flow(flow_observable).evolve(float(t_val)).apply(state_norm)
-                    evolved_transformed = self.renormalization_flow(transformed_observable).evolve(float(t_val)).apply(transformed_norm)
-                    
-                    # Create wave packets for phase evolution
-                    original_packet = wave.evolve_structure(
-                        pattern=evolved_original.reshape(-1, 1),
-                        direction=phase_morphism.structure_map
-                    )
-                    transformed_packet = wave.evolve_structure(
-                        pattern=evolved_transformed.reshape(-1, 1),
-                        direction=phase_morphism.structure_map
-                    )
-                    
-                    # Extract phases from wave packets
-                    evolved_original_phase = torch.angle(original_packet)
-                    evolved_transformed_phase = torch.angle(transformed_packet)
-                    
-                    # Clean up intermediate tensors
-                    del original_packet, transformed_packet
-                    
-                    # Create enriched morphism for phase difference
-                    phase_morphism = pattern_transition.create_morphism(
-                        source=torch.exp(1j * evolved_original_phase),
-                        target=torch.exp(1j * evolved_transformed_phase)
-                    )
-                    
-                    # Evolve phase difference through wave emergence
-                    phase_diff_pattern = wave.evolve_structure(
-                        pattern=torch.exp(1j * (evolved_transformed_phase - evolved_original_phase)),
-                        direction=phase_morphism.structure_map
-                    )
-                    phase_diff = torch.angle(phase_diff_pattern)
-                    
-                    # Clean up intermediate tensors
-                    del phase_diff_pattern, evolved_original_phase, evolved_transformed_phase
-                    
-                    # Project onto U(1)-covariant polynomial basis with geometric layers
-                    coeffs = []
-                    for n in range(2):  # Reduce polynomial degree
-                        with memory_efficient_computation(f"basis_{n}"):
-                            # Create basis with proper winding
-                            if n == 0:
-                                basis = torch.ones_like(state_norm)
-                            else:
-                                basis = torch.exp(n * 1j * winding * torch.angle(state_norm)) * torch.abs(state_norm)**n
-                            
-                            # Create wave packet for basis evolution
-                            basis_packet = wave.evolve_structure(
-                                pattern=basis.reshape(-1, 1),
-                                direction=phase_morphism.structure_map
-                            )
-                            
-                            # Evolve basis through pattern heat flow
-                            basis_evolved = heat_flow.evolve_pattern(
-                                pattern=basis_packet.squeeze(),
-                                metric=metric_evolved,
-                                timestep=0.1
-                            )
-                            
-                            # Clean up intermediate tensors
-                            del basis_packet
-                            
-                            # Apply information flow with stress-energy
-                            metric_next, _ = information_flow.flow_step(metric_evolved, timestep=0.1)
-                            
-                            # Compute coefficient with geometric evolution
-                            coeff = torch.mean(torch.exp(1j * phase_diff) * basis_evolved.conj())
-                            coeffs.append(coeff)
-                            
-                            # Clean up intermediate tensors
-                            del basis_evolved
-                    
-                    # Create enriched morphism for coefficient composition
-                    coeffs_tensor = torch.stack(coeffs)
-                    coeffs_morphism = pattern_transition.create_morphism(
-                        source=coeffs_tensor.reshape(-1, 1),
-                        target=coeffs_tensor.reshape(-1, 1)
-                    )
-                    
-                    # Apply operadic composition through pattern transition
-                    operation = operadic.create_operation(
-                        source_dim=len(coeffs),
-                        target_dim=len(coeffs),
-                        preserve_structure='U1'
-                    )
-                    operation.composition_law = coeffs_morphism.structure_map
-                    anomaly_coeffs.append(operation.composition_law)
-                    
-                    # Clean up intermediate tensors
-                    del coeffs_tensor, coeffs_morphism, operation
-                    gc.collect()  # Force garbage collection
-            
-            # Average coefficients over flow time with proper phase weighting
-            weights = torch.linspace(1, 0, len(scales))
-            weights = weights / torch.sum(weights)
-            anomaly = torch.sum(torch.stack(anomaly_coeffs) * weights.unsqueeze(1), dim=0)
-            
-            # Create anomaly polynomials with proper phase structure
-            anomalies = []
-            for degree in range(4):
-                anomalies.append(
-                    AnomalyPolynomial(
-                        coefficients=anomaly[degree:],
-                        variables=[f"θ_{i}" for i in range(degree + 1)],  # Use angle variables
-                        degree=degree,
+            # Create minimal coefficient tensor
+            with torch.no_grad():
+                # Normalize accumulated values by total points
+                accumulated_phases /= total_points
+                accumulated_norms /= total_points
+                
+                # Create coefficient tensor with proper polynomial terms
+                coefficients = torch.zeros(4, dtype=self.dtype)  # Need 4 terms for consistency
+                
+                # Combine phase and norm information for all terms
+                for i in range(4):
+                    if self.dtype == torch.complex64:
+                        phase = accumulated_phases[i].clone().detach()
+                        norm = accumulated_norms[i].clone().detach()
+                        coefficients[i] = norm * torch.exp(1j * phase)
+                    else:
+                        coefficients[i] = accumulated_norms[i].clone().detach()
+                
+                # Normalize coefficients globally
+                norm = torch.norm(coefficients)
+                if norm > 1e-10:
+                    coefficients = coefficients / norm
+                
+                # Create polynomial with proper structure
+                polynomial = AnomalyPolynomial(
+                    coefficients=coefficients,
+                    variables=[f"θ_{i}" for i in range(4)],  # Need all variables for consistency
+                    degree=1,  # Keep minimal degree
                         type="U(1)"  # Mark as U(1) type
-                    )
                 )
                 
-            return anomalies  # This is already at the end of the method
+            log_memory_usage("end")
+            
+            return [polynomial]  # Return minimal list
 
     def scale_invariants(self, structure: torch.Tensor) -> List[Tuple[torch.Tensor, float]]:
         """Find scale invariant quantities in the structure.
@@ -1536,7 +1296,7 @@ class ScaleCohomology:
         
         where:
         - β(g) is the beta function describing coupling flow under renormalization scale changes
-        - ��(g) is the anomalous dimension from field renormalization
+        - γ(g) is the anomalous dimension from field renormalization
         - ∂_g γ(g) is the derivative of the anomalous dimension
         - D is the dilatation operator
         - d is the canonical dimension

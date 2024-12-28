@@ -3,14 +3,25 @@
 import pytest
 import os
 import torch
+import gc
+import multiprocessing as mp
 from src.core.flow.neural import NeuralGeometricFlow
 import yaml
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_processes():
+    """Cleanup multiprocessing resources after all tests."""
+    yield
+    # Force cleanup of any remaining process pools
+    mp.get_context('spawn').Pool(1).close()
+    gc.collect()
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test():
     """Cleanup after each test."""
     yield
-    # Add any cleanup code here if needed
+    gc.collect()
+
 
 @pytest.fixture
 def manifold_dim():

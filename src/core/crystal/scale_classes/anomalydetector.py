@@ -143,7 +143,6 @@ class ScaleConnection:
         for connection in self.connections:
             del connection
         del self.holonomy_computer
-        torch.cuda.empty_cache()  # Clean GPU memory if available
         gc.collect()  # Trigger garbage collection
 
     def __del__(self):
@@ -204,9 +203,10 @@ class AnomalyDetector:
             anomalies = []
 
             # Analyze state for different polynomial degrees
-            # Use in-place operations where possible
-            coefficients = torch.empty((self.max_degree + 1,), dtype=self.dtype)
-            self.detector(state, out=coefficients)
+            # Get coefficients from detector
+            coefficients = self.detector(state)
+            if coefficients.dim() > 1:
+                coefficients = coefficients.squeeze()
 
             # Process coefficients efficiently
             for degree in range(self.max_degree + 1):
@@ -252,7 +252,6 @@ class AnomalyDetector:
         """Clean up resources."""
         del self.detector
         self._poly_cache.clear()
-        torch.cuda.empty_cache()
         gc.collect()
 
     def __del__(self):

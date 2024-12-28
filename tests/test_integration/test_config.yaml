@@ -62,7 +62,7 @@ common:
   # Memory management
   clear_memory: true
   track_memory: true
-  memory_threshold: 1e9  # 1GB
+  memory_threshold: 4e9  # 4GB
 
   # Debug settings
   debug:

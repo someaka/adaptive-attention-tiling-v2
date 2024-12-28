@@ -36,29 +36,32 @@ MAX_TIME_SECONDS = 5  # Reduced from 10 seconds
 @contextmanager
 def resource_guard() -> Generator[None, None, None]:
     """Set up resource limits for memory and time."""
-    # Set memory limit
-    memory_limit = MAX_MEMORY_GB * 1024 * 1024 * 1024  # Convert to bytes
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (memory_limit, hard))
-
-    # Set up timeout
-    def timeout_handler(_signum: int, _frame: Any) -> NoReturn:
-        msg = f"Test exceeded {MAX_TIME_SECONDS} seconds time limit"
-        raise TimeoutError(msg)
-
-    # Set signal handler
-    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(MAX_TIME_SECONDS)
-
+    # Store original limits
+    original_memory_soft, original_memory_hard = resource.getrlimit(resource.RLIMIT_AS)
+    original_handler = signal.getsignal(signal.SIGALRM)
+    
     try:
+        # Set memory limit
+        memory_limit = MAX_MEMORY_GB * 1024 * 1024 * 1024  # Convert to bytes
+        resource.setrlimit(resource.RLIMIT_AS, (memory_limit, original_memory_hard))
+
+        # Set up timeout
+        def timeout_handler(_signum: int, _frame: Any) -> NoReturn:
+            msg = f"Test exceeded {MAX_TIME_SECONDS} seconds time limit"
+            raise TimeoutError(msg)
+
+        # Set signal handler
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(MAX_TIME_SECONDS)
+
         yield
     finally:
         # Reset signal handler and alarm
         signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        signal.signal(signal.SIGALRM, original_handler)
         # Reset memory limit
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-        # Memory cleanup handled by garbage collection
+        resource.setrlimit(resource.RLIMIT_AS, (original_memory_soft, original_memory_hard))
+        # Memory cleanup
         gc.collect()
 
 

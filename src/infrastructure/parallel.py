@@ -28,10 +28,18 @@ class ParallelProcessor:
         self.device = device
         
         # Initialize process pool
-        self.process_pool = mp.Pool(processes=self.num_processes)
+        self.process_pool = None
+        self.thread_pool = None
         
-        # Initialize thread pool
+    def __enter__(self):
+        """Context manager entry."""
+        self.process_pool = mp.Pool(processes=self.num_processes)
         self.thread_pool = ThreadPoolExecutor(max_workers=self.num_threads)
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.cleanup()
         
     def parallel_map(
         self,
@@ -49,10 +57,13 @@ class ParallelProcessor:
         Returns:
             List of results
         """
+        if not hasattr(self, 'process_pool') or self.process_pool is None or self.thread_pool is None:
+            self.__enter__()
+            
         if use_processes:
-            return self.process_pool.map(func, data)
+            return self.process_pool.map(func, data)  # type: ignore
         else:
-            return list(self.thread_pool.map(func, data))
+            return list(self.thread_pool.map(func, data))  # type: ignore
             
     def parallel_execute(
         self,
@@ -68,10 +79,13 @@ class ParallelProcessor:
         Returns:
             List of results
         """
+        if not hasattr(self, 'process_pool') or self.process_pool is None or self.thread_pool is None:
+            self.__enter__()
+            
         if use_processes:
-            return self.process_pool.map(lambda f: f(), funcs)
+            return self.process_pool.map(lambda f: f(), funcs)  # type: ignore
         else:
-            return list(self.thread_pool.map(lambda f: f(), funcs))
+            return list(self.thread_pool.map(lambda f: f(), funcs))  # type: ignore
             
     def batch_process(
         self,
@@ -95,15 +109,27 @@ class ParallelProcessor:
         batches = torch.split(data, batch_size)
         
         # Process batches in parallel
+        if not hasattr(self, 'process_pool') or self.process_pool is None or self.thread_pool is None:
+            self.__enter__()
+            
         if use_processes:
-            results = self.process_pool.map(func, batches)
+            results = self.process_pool.map(func, batches)  # type: ignore
         else:
-            results = list(self.thread_pool.map(func, batches))
+            results = list(self.thread_pool.map(func, batches))  # type: ignore
             
         return results
         
     def cleanup(self):
         """Clean up parallel processing resources."""
-        self.process_pool.close()
-        self.process_pool.join()
-        self.thread_pool.shutdown()
+        if self.process_pool:
+            self.process_pool.close()
+            self.process_pool.join()
+            self.process_pool = None
+            
+        if self.thread_pool:
+            self.thread_pool.shutdown()
+            self.thread_pool = None
+            
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        self.cleanup()
