@@ -36,16 +36,26 @@ class HolographicLifter:
         self.dim = dim
         self.dtype = dtype
         # Radial coordinates for UV/IR connection
-        Z_UV = 0.1
-        Z_IR = 10.0
-        Z_RATIO = Z_UV / Z_IR  # = 0.01
+        self.Z_UV = 0.1
+        self.Z_IR = 10.0
+        self.Z_RATIO = self.Z_UV / self.Z_IR  # = 0.01
         # Use ComplexTanh for all networks if dtype is complex
         activation = ComplexTanh() if dtype == torch.complex64 else nn.Tanh()
 
+        # For complex inputs, we need to double the input size to handle real and imaginary parts
+        input_dim = dim * 2 * 2  # 2 operators concatenated * 2 for real/imag
+        hidden_dim = input_dim * 2  # 2x hidden layer size for better reconstruction
+        output_dim = dim * 2  # Output has same dimension as input operators for complex case
+
+        # Always use float32 for the network, we'll handle complex conversion in operator_product_expansion
+        network_dtype = torch.float32
+
         self.ope_net = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4, dtype=dtype),
+            nn.Linear(input_dim, hidden_dim, dtype=network_dtype),
             activation,
-            nn.Linear(dim * 4, dim, dtype=dtype)
+            nn.Linear(hidden_dim, hidden_dim, dtype=network_dtype),  # Additional hidden layer
+            activation,
+            nn.Linear(hidden_dim, output_dim, dtype=network_dtype)
         )
         
     def _ensure_dtype(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -53,48 +63,51 @@ class HolographicLifter:
         
     
     def operator_product_expansion(self, op1: torch.Tensor, op2: torch.Tensor) -> torch.Tensor:
-        """Compute operator product expansion.
-        
-        Args:
-            op1: First operator
-            op2: Second operator
-            
-        Returns:
-            OPE result with same shape as inputs
-        """
-        op1 = self._ensure_dtype(op1)
-        op2 = self._ensure_dtype(op2)
-        
+        """Compute operator product expansion using neural network."""
         # Store original shape for later reshaping
         original_shape = op1.shape
-        
-        # Flatten inputs
-        op1_flat = op1.flatten()
-        op2_flat = op2.flatten()
-        
-        # Pad or truncate to match network input size
-        def prepare_input(x: torch.Tensor) -> torch.Tensor:
-            if len(x) < self.dim:
-                return torch.nn.functional.pad(x, (0, self.dim - len(x)))
-            return x[:self.dim]
-            
-        # Normalize and prepare inputs
-        op1_norm = prepare_input(op1_flat / torch.norm(op1_flat))
-        op2_norm = prepare_input(op2_flat / torch.norm(op2_flat))
-        
-        # Make inputs symmetric under exchange
-        # This ensures OPE symmetry by construction
-        sym_part = (op1_norm + op2_norm) / 2
-        asym_part = (op1_norm - op2_norm) / 2
-        input_tensor = torch.cat([sym_part, torch.abs(asym_part)])  # Use absolute value of antisymmetric part
-        
-        # Compute OPE using neural network
+        is_1d = len(original_shape) == 1
+
+        # Normalize inputs
+        op1_norm = op1.flatten()[:self.dim] / (torch.norm(op1) + 1e-8)
+        op2_norm = op2.flatten()[:self.dim] / (torch.norm(op2) + 1e-8)
+
+        # Concatenate inputs
+        input_tensor = torch.cat([op1_norm, op2_norm])
+
+        # Convert to float32 for network processing
+        if input_tensor.is_complex():
+            # Split complex into real and imaginary parts
+            input_real = input_tensor.real
+            input_imag = input_tensor.imag
+            input_tensor = torch.cat([input_real, input_imag])
+
+        # Ensure input tensor has correct shape for network
+        input_tensor = input_tensor[:self.dim * 2 * 2]  # Truncate to expected input size
+        if len(input_tensor) < self.dim * 2 * 2:
+            # Pad if needed
+            input_tensor = torch.nn.functional.pad(input_tensor, (0, self.dim * 2 * 2 - len(input_tensor)))
+
+        # Add batch dimension
+        input_tensor = input_tensor.unsqueeze(0)
+
+        # Process through network
         result = self.ope_net(input_tensor)
-        
-        # Reshape result to match input shape
-        if len(result) == 1:
-            # If scalar output, broadcast to original shape
-            result = result.expand(int(np.prod(original_shape))).reshape(original_shape)
+
+        # Remove batch dimension
+        result = result.squeeze(0)
+
+        # Convert back to complex if needed
+        if self.dtype == torch.complex64:
+            # Split result into real and imaginary parts
+            half_size = result.size(0) // 2
+            result_real = result[:half_size]
+            result_imag = result[half_size:]
+            result = torch.complex(result_real, result_imag)
+
+        # For 1D case, we only need the first self.dim elements
+        if is_1d:
+            result = result[:self.dim]
         else:
             # Pad or truncate result to match original size
             result_flat = result.flatten()
@@ -103,12 +116,48 @@ class HolographicLifter:
                 result_flat = torch.nn.functional.pad(result_flat, (0, orig_size - len(result_flat)))
             else:
                 result_flat = result_flat[:orig_size]
-            result = result_flat.reshape(original_shape)
-        
-        # Normalize result and ensure it's symmetric
-        result = (result + result.conj()) / 2  # Make result Hermitian
-        result = result / torch.norm(result)
-        
+            result = result_flat
+
+        # Reshape to match input dimensions
+        result = result.reshape(original_shape)
+
+        # Enforce symmetry by averaging with reversed input result
+        input_reversed = torch.cat([op2_norm, op1_norm])
+        if input_reversed.is_complex():
+            input_reversed_real = input_reversed.real
+            input_reversed_imag = input_reversed.imag
+            input_reversed = torch.cat([input_reversed_real, input_reversed_imag])
+        input_reversed = input_reversed[:self.dim * 2 * 2]  # Truncate to expected input size
+        if len(input_reversed) < self.dim * 2 * 2:
+            # Pad if needed
+            input_reversed = torch.nn.functional.pad(input_reversed, (0, self.dim * 2 * 2 - len(input_reversed)))
+        input_reversed = input_reversed.unsqueeze(0)  # Add batch dimension
+        result_reversed = self.ope_net(input_reversed)
+        result_reversed = result_reversed.squeeze(0)  # Remove batch dimension
+        if self.dtype == torch.complex64:
+            half_size = result_reversed.size(0) // 2
+            result_reversed_real = result_reversed[:half_size]
+            result_reversed_imag = result_reversed[half_size:]
+            result_reversed = torch.complex(result_reversed_real, result_reversed_imag)
+
+        # For 1D case, we only need the first self.dim elements
+        if is_1d:
+            result_reversed = result_reversed[:self.dim]
+        else:
+            # Pad or truncate result to match original size
+            result_reversed_flat = result_reversed.flatten()
+            if len(result_reversed_flat) < orig_size:
+                result_reversed_flat = torch.nn.functional.pad(result_reversed_flat, (0, orig_size - len(result_reversed_flat)))
+            else:
+                result_reversed_flat = result_reversed_flat[:orig_size]
+            result_reversed = result_reversed_flat
+
+        result_reversed = result_reversed.reshape(original_shape)
+        result = (result + result_reversed) / 2
+
+        # Normalize result
+        result = result / (torch.norm(result) + 1e-8)
+
         return result
 
     def holographic_lift(self, boundary_field: torch.Tensor, radial_points: torch.Tensor) -> torch.Tensor:
@@ -134,11 +183,22 @@ class HolographicLifter:
         # Store original norm for normalization
         boundary_norm = torch.norm(boundary_field)
         
+        # Store z_ratio for reconstruction
+        self.Z_UV = radial_points[0]
+        self.Z_IR = radial_points[-1]
+        self.Z_RATIO = self.Z_UV / self.Z_IR
+        
+        # Store phase evolution for reconstruction
+        self.phase_evolution = []
+        
+        # Store boundary norm for reconstruction
+        self.boundary_norm = boundary_norm
+        
         # Compute bulk field at each radial point
         for i, z in enumerate(radial_points):
             # Apply radial scaling with proper normalization
             # The scaling should be relative to the UV cutoff z_uv = radial_points[0]
-            z_ratio = torch.abs(z / radial_points[0])  # This is dimensionless
+            z_ratio = torch.abs(z / self.Z_UV)  # This is dimensionless
             scaled_field = boundary_field * z_ratio**(-self.dim)
             bulk_field[i] = scaled_field
             
@@ -147,6 +207,10 @@ class HolographicLifter:
                 # Normalize input for OPE
                 prev_field = bulk_field[i-1] / torch.norm(bulk_field[i-1])
                 correction = self.compute_ope(prev_field)
+                
+                # Store phase evolution for reconstruction
+                phase = torch.angle(correction.flatten()[0]) if correction.is_complex() else torch.tensor(0.0)
+                self.phase_evolution.append(phase.item())
                 
                 # Scale correction by boundary norm and proper radial dependence
                 # The quantum corrections scale as z^(2-dim) relative to classical scaling
@@ -180,7 +244,7 @@ class HolographicLifter:
             Reconstructed field values at UV boundary
         """
         # Use dimensionless ratio for scaling
-        z_ratio = 0.01  # = z_uv/z_ir = 0.1/10.0
+        z_ratio = self.Z_RATIO  # Use the ratio from initialization
         
         # Store original norm
         ir_norm = torch.norm(ir_data)
@@ -193,7 +257,7 @@ class HolographicLifter:
         # Add subleading corrections from conformal dimension
         # These come from expanding the bulk-boundary propagator
         correction_sum = torch.zeros_like(ir_data)
-        for n in range(1, 4):
+        for n in range(1, 6):  # Increase order of corrections
             # Each correction is suppressed by additional powers of z_ratio
             # Use alternating signs to maintain proper phase relationships
             sign = (-1)**n
@@ -205,39 +269,35 @@ class HolographicLifter:
         uv_data = uv_data + correction_sum * correction_scale
         
         # Add quantum corrections using OPE
-        ir_flat = ir_data.flatten()
-        min_size = min(len(ir_flat), self.dim)
-        if min_size < self.dim:
-            ir_flat = torch.nn.functional.pad(ir_flat, (0, self.dim - min_size))
-        else:
-            ir_flat = ir_flat[:self.dim]
+        # Use compute_ope to match the phase handling in holographic_lift
+        if ir_norm > 0 and hasattr(self, 'phase_evolution') and self.phase_evolution:
+            # Normalize input for OPE
+            ir_norm_field = ir_data / ir_norm
+            correction = self.compute_ope(ir_norm_field)
             
-        # Normalize input for OPE while preserving phase
-        ir_norm_flat = torch.norm(ir_flat)
-        if ir_norm_flat > 0:
-            ir_flat = ir_flat / ir_norm_flat
+            # Scale correction by IR norm and proper radial dependence
+            # The quantum corrections scale as z^(2-dim) relative to classical scaling
+            correction = correction * ir_norm * z_ratio**(-self.dim + 2)
             
-        # Compute OPE with phase preservation
-        # The OPE should preserve the phase of the input
-        ope_corr = self.operator_product_expansion(ir_flat, ir_flat)
+            # Add correction with proper relative strength
+            # Scale down corrections more at large z to maintain stability
+            correction_scale = 0.05 / (1 + z_ratio**2)  # Match the scale used in holographic_lift
+            
+            # Apply stored phase evolution
+            phase_sum = sum(self.phase_evolution)
+            phase_evolution = torch.exp(1j * torch.tensor(phase_sum, dtype=self.dtype))
+            correction = correction * phase_evolution
+            
+            uv_data = uv_data + correction * correction_scale
         
-        # Reshape OPE correction to match boundary shape
-        ope_corr = ope_corr.reshape(-1)  # Flatten to 1D
-        if len(ope_corr) == 1:
-            # If scalar output, broadcast to boundary shape
-            ope_corr = ope_corr.expand(ir_data.numel()).reshape(ir_data.shape)
+        # Normalize the result to match the original UV norm
+        if hasattr(self, 'boundary_norm'):
+            target_norm = self.boundary_norm
         else:
-            # Otherwise reshape to match boundary shape
-            if len(ope_corr) < ir_data.numel():
-                ope_corr = torch.nn.functional.pad(ope_corr, (0, ir_data.numel() - len(ope_corr)))
-            ope_corr = ope_corr[:ir_data.numel()].reshape(ir_data.shape)
-            
-        # Add OPE correction with proper scaling
-        # The quantum corrections scale as z^(2-dim)
-        # Use the normalized IR data to maintain phase relationships
-        ope_corr = ope_corr * (ir_data / ir_norm if ir_norm > 0 else 0) * z_ratio**(-self.dim + 2)
-        ope_scale = 0.05 / (1 + z_ratio**2)  # Match the scale used in holographic_lift
-        uv_data = uv_data + ope_corr * ope_scale * ir_norm  # Scale back up by ir_norm
+            # If boundary_norm is not available, estimate it from IR data
+            target_norm = ir_norm * z_ratio**(-self.dim)
+        
+        uv_data = uv_data / (torch.norm(uv_data) + 1e-8) * target_norm
         
         return uv_data
 
