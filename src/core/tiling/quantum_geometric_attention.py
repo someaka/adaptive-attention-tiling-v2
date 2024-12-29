@@ -437,27 +437,30 @@ class QuantumGeometricAttention(nn.Module):
         current = x
         for i, attention_layer in enumerate(self.attention_layers):
             # Project to Q, K, V in-place
-            qkv = self.to_qkv(current)
-            q, k, v = qkv.chunk(3, dim=-1)
-            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-            k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-            v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            qkv = self.to_qkv(current)  # [batch_size, seq_len, 3 * expanded_dim]
+            q, k, v = qkv.chunk(3, dim=-1)  # each is [batch_size, seq_len, expanded_dim]
+            
+            # Reshape to separate heads: [batch_size, num_heads, seq_len, manifold_dim]
+            q = q.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
+            k = k.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
+            v = v.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
             
             # Project to manifold dimension before applying flow
-            q_manifold = self.manifold_proj(q.reshape(-1, self.head_dim))
+            q_manifold = self.manifold_proj(q.reshape(-1, self.head_dim))  # [batch_size * seq_len * num_heads, manifold_dim]
             k_manifold = self.manifold_proj(k.reshape(-1, self.head_dim))
+            
+            # Reshape for flow: [batch_size * seq_len * num_heads, manifold_dim]
+            batch_size_total = q_manifold.shape[0]
+            q_manifold = q_manifold.reshape(batch_size_total, -1)[:, :self.manifold_dim]
+            k_manifold = k_manifold.reshape(batch_size_total, -1)[:, :self.manifold_dim]
             
             # Apply geometric flow to queries and keys
             q_flowed, q_metrics = self.flow(q_manifold)
             k_flowed, k_metrics = self.flow(k_manifold)
             
-            # Project back to head_dim
-            q_flowed = self.pattern_proj(q_flowed)
-            k_flowed = self.pattern_proj(k_flowed)
-            
-            # Reshape back to attention dimensions
-            q_flowed = q_flowed.reshape(batch_size, self.num_heads, seq_len, -1)
-            k_flowed = k_flowed.reshape(batch_size, self.num_heads, seq_len, -1)
+            # Project back to head_dim and reshape: [batch_size, num_heads, seq_len, head_dim]
+            q_flowed = self.pattern_proj(q_flowed).reshape(batch_size, self.num_heads, seq_len, self.head_dim)
+            k_flowed = self.pattern_proj(k_flowed).reshape(batch_size, self.num_heads, seq_len, self.head_dim)
             
             if return_metrics_bool:
                 metrics[f'layer_{i}_q_flow'] = q_metrics
