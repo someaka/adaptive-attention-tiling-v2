@@ -294,10 +294,10 @@ class InformationRicciFlow(NeuralGeometricFlow):
         # Efficient potential network with residual connection
         self.potential_net: nn.Sequential = nn.Sequential(
             nn.Linear(manifold_dim, intermediate_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Dropout(dropout),  # Add regularization
             nn.Linear(intermediate_dim, reduced_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(reduced_dim, 1, bias=False)
         )
         
@@ -305,10 +305,10 @@ class InformationRicciFlow(NeuralGeometricFlow):
         self.stress_energy_net = nn.ModuleDict({
             'encoder': nn.Linear(manifold_dim * 2, intermediate_dim),
             'processor': nn.Sequential(
-                nn.SiLU(),
+                nn.Tanh(),
                 nn.Dropout(dropout),
                 nn.Linear(intermediate_dim, reduced_dim),
-                nn.SiLU(),
+                nn.Tanh(),
             ),
             'decoder': nn.Linear(reduced_dim, manifold_dim * manifold_dim, bias=False)
         })

@@ -239,7 +239,7 @@ class MotivicRiemannianStructure(
         # Compute transition map directly between coordinates
         diff = chart2_coords - chart1_coords
         transition = torch.matmul(diff, self.metric_factors)
-        return chart1_coords + F.silu(transition)
+        return chart1_coords + F.tanh(transition)
 
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Computes the connection form for parallel transport."""

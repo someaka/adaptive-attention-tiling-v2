@@ -49,14 +49,14 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         # Initialize basic flow network
         self.flow_layers = nn.ModuleList([
             nn.Linear(manifold_dim, self.hidden_dim, dtype=self.dtype),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(self.hidden_dim, manifold_dim, dtype=self.dtype)
         ])
         
         # Initialize metric computation
         self.metric_net = nn.Sequential(
             nn.Linear(manifold_dim, self.hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(self.hidden_dim, manifold_dim * manifold_dim)
         )
     
@@ -102,14 +102,14 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             Tuple of (new_metric, flow_metrics)
         """
         # Compute eigendecomposition of metric
-        eigvals, eigvecs = torch.linalg.eigh(metric)
+        eigvals, eigvecs = torch.linalg.eig(metric)
         
         # Ensure metric stays positive definite
-        min_eigval = torch.min(eigvals)
+        min_eigval = torch.min(torch.abs(eigvals))
         if min_eigval <= self.stability_threshold:
             # Add small positive constant to maintain positive definiteness
             eigvals = eigvals + (-min_eigval + self.stability_threshold)
-            metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1)
+            metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1).conj()
             
         # Scale timestep based on metric and Ricci norms
         # Compute norms while preserving batch dimensions
@@ -135,24 +135,24 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         flow = flow.reshape(*metric.shape)
         
         # Compute eigendecomposition of flow
-        flow_eigvals, flow_eigvecs = torch.linalg.eigh(flow)
+        flow_eigvals, flow_eigvecs = torch.linalg.eig(flow)
         
         # Limit the magnitude of negative eigenvalues
         max_neg_eigval = -self.stability_threshold / adaptive_timestep
-        flow_eigvals = torch.clamp(flow_eigvals, min=max_neg_eigval)
+        flow_eigvals = torch.clamp(torch.abs(flow_eigvals), min=max_neg_eigval) * torch.exp(1j * torch.angle(flow_eigvals))
         
         # Reconstruct flow with limited negative eigenvalues
-        flow = flow_eigvecs @ torch.diag_embed(flow_eigvals) @ flow_eigvecs.transpose(-2, -1)
+        flow = flow_eigvecs @ torch.diag_embed(flow_eigvals) @ flow_eigvecs.transpose(-2, -1).conj()
         
         # Update metric
         new_metric = metric + flow * adaptive_timestep
         
         # Project back to positive definite cone if needed
-        eigvals, eigvecs = torch.linalg.eigh(new_metric)
-        min_eigval = torch.min(eigvals)
+        eigvals, eigvecs = torch.linalg.eig(new_metric)
+        min_eigval = torch.min(torch.abs(eigvals))
         if min_eigval <= self.stability_threshold:
-            eigvals = torch.clamp(eigvals, min=self.stability_threshold)
-            new_metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1)
+            eigvals = torch.clamp(torch.abs(eigvals), min=self.stability_threshold) * torch.exp(1j * torch.angle(eigvals))
+            new_metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1).conj()
         
         # Normalize metric if needed
         new_metric_flat = new_metric.reshape(-1, new_metric.shape[-1] * new_metric.shape[-1])
@@ -162,19 +162,19 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             new_metric = new_metric * (1.0 / self.stability_threshold) / new_metric_norm
         
         # Ensure symmetry
-        new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+        new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1).conj())
         
         # Add small positive constant to diagonal for stability
-        new_metric = new_metric + torch.eye(new_metric.shape[-1], device=new_metric.device).unsqueeze(0) * self.stability_threshold
+        new_metric = new_metric + torch.eye(new_metric.shape[-1], device=new_metric.device, dtype=new_metric.dtype).unsqueeze(0) * self.stability_threshold
         
         # Compute basic flow metrics
         metrics = {
             'metric_norm': torch.norm(new_metric).item(),
             'ricci_norm': torch.norm(ricci).item(),
             'step_size': adaptive_timestep.mean().item(),
-            'min_eigval': torch.min(eigvals).item(),
-            'max_eigval': torch.max(eigvals).item(),
-            'condition_number': (torch.max(eigvals) / torch.clamp(torch.min(eigvals), min=self.stability_threshold)).item()
+            'min_eigval': torch.min(torch.abs(eigvals)).item(),
+            'max_eigval': torch.max(torch.abs(eigvals)).item(),
+            'condition_number': (torch.max(torch.abs(eigvals)) / torch.clamp(torch.min(torch.abs(eigvals)), min=self.stability_threshold)).item()
         }
         
         return new_metric, metrics

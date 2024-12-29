@@ -77,17 +77,38 @@ class GeometricFlow(RiemannianFlow):
             torch.randn(num_charts, manifold_dim, dtype=self.dtype)
         )
         
-        # Initialize flow layers with correct dimensions
+        # Initialize flow layers with complex weights
         self.flow_layers = nn.ModuleList([
             nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype),
             nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype)
         ])
         
+        # Initialize metric network with complex weights
+        self.metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=self.dtype)
+        )
+        
+        # Initialize weights with proper complex initialization
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Create complex weights directly
+                weight_shape = m.weight.shape
+                real_weight = torch.randn(*weight_shape) * 0.02
+                imag_weight = torch.randn(*weight_shape) * 0.02
+                m.weight = nn.Parameter(torch.complex(real_weight, imag_weight))
+                
+                if m.bias is not None:
+                    bias_shape = m.bias.shape
+                    real_bias = torch.zeros(*bias_shape)
+                    imag_bias = torch.zeros(*bias_shape)
+                    m.bias = nn.Parameter(torch.complex(real_bias, imag_bias))
+        
         # Hamiltonian structure with adaptive input projection
         self.hamiltonian = nn.Sequential(
-            nn.AdaptiveAvgPool1d(hidden_dim),  # Project any input size to hidden_dim
             nn.Linear(hidden_dim, manifold_dim, dtype=self.dtype),  # Project to manifold_dim
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(manifold_dim, 1, dtype=self.dtype)  # Output scalar energy
         )
     
@@ -174,32 +195,58 @@ class GeometricFlow(RiemannianFlow):
         # Project input to manifold dimension
         x_proj = x[..., :self.manifold_dim]
         
-        # Get base metric
-        metric = super().compute_metric(x_proj)  # Shape: [batch_size, manifold_dim, manifold_dim]
+        # Get base metric components
+        metric_features = self.metric_net(x_proj)
         
-        # Add quantum geometric structure
-        quantum_metric = self.arithmetic.compute_quantum_metric(x)  # Shape: [batch_size, manifold_dim, manifold_dim]
+        # Reshape to metric tensor
+        batch_size = x_proj.shape[0]
+        metric = metric_features.view(batch_size, self.manifold_dim, self.manifold_dim)
         
-        # Ensure quantum metric has the same shape as base metric
-        if quantum_metric.shape != metric.shape:
-            batch_size = metric.shape[0]
+        # Make metric symmetric
+        metric = 0.5 * (metric + metric.transpose(-2, -1))
+        
+        # Add initial regularization term
+        eye = torch.eye(
+            self.manifold_dim,
+            device=x_proj.device,
+            dtype=x_proj.dtype
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+        metric = metric + 1e-3 * eye
+        
+        # For complex numbers, preserve phase while ensuring positive definiteness
+        if torch.is_complex(metric):
+            # Compute eigendecomposition preserving complex phase
+            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+            magnitude = torch.abs(eigenvalues)
+            phase = eigenvalues / (magnitude + 1e-8)  # Preserve phase
             
-            # Resize quantum metric in-place
-            quantum_metric = quantum_metric.view(-1, quantum_metric.shape[-1])
-            quantum_metric = F.adaptive_avg_pool1d(
-                quantum_metric.unsqueeze(1),
-                output_size=self.manifold_dim
-            ).squeeze(1)
+            # Clamp magnitude while preserving phase
+            bounded_magnitude = torch.clamp(magnitude, min=1e-2)  # Increased minimum eigenvalue
+            eigenvalues = bounded_magnitude * phase
             
-            # Reshape and pool to final dimensions
-            quantum_metric = quantum_metric.view(batch_size, -1, self.manifold_dim)
-            quantum_metric = F.adaptive_avg_pool2d(
-                quantum_metric.unsqueeze(1),
-                output_size=(self.manifold_dim, self.manifold_dim)
-            ).squeeze(1)
+            # Convert eigenvalues to complex dtype
+            eigenvalues = eigenvalues.to(dtype=metric.dtype)
+            
+            # Reconstruct metric with bounded eigenvalues
+            metric = torch.matmul(
+                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+                eigenvectors.transpose(-2, -1).conj()
+            )
+        else:
+            # Real case - standard eigenvalue projection
+            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+            eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
+            metric = torch.matmul(
+                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+                eigenvectors.transpose(-2, -1)
+            )
         
-        # Add metrics with proper scaling in-place
-        metric.add_(quantum_metric, alpha=0.1)
+        # Add final regularization to ensure stability
+        metric = metric + 1e-3 * eye
+        
+        # Normalize by determinant to ensure unit volume
+        det = torch.linalg.det(metric).unsqueeze(-1).unsqueeze(-1)
+        metric = metric / (det + 1e-8).pow(1/self.manifold_dim)
         
         return metric
     
@@ -247,7 +294,7 @@ class GeometricFlow(RiemannianFlow):
             
             # Update position
             current = self.flow_layers[0](current)
-            current = F.silu(current)
+            current = F.tanh(current)
             current = self.flow_layers[1](current)
             
             if return_path:

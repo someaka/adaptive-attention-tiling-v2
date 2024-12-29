@@ -68,7 +68,7 @@ class PatternHeatFlow(InformationRicciFlow):
         # Pattern field network
         self.pattern_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
 

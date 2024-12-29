@@ -183,21 +183,21 @@ class PatternProcessor(nn.Module):
         # Pattern network: manifold_dim -> hidden_dim -> hidden_dim
         self.pattern_net = nn.Sequential(
             nn.Linear(self.manifold_dim, self.hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(self.hidden_dim, self.hidden_dim)
         )
         
         # Flow network: hidden_dim -> hidden_dim -> manifold_dim
         self.flow_net = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(self.hidden_dim, self.manifold_dim)
         )
         
         # Quantum network: manifold_dim -> hidden_dim -> manifold_dim
         self.quantum_net = nn.Sequential(
             nn.Linear(self.manifold_dim, self.hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(self.hidden_dim, self.manifold_dim)
         )
         

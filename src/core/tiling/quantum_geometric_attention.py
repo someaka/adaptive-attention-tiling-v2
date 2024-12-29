@@ -154,7 +154,7 @@ class QuantumGeometricAttention(nn.Module):
         num_layers: int = 3,
         tile_size: int = 8,
         motive_rank: int = 4,
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.complex64,
         device: Optional[torch.device] = None,
     ):
         """Initialize quantum geometric attention.
@@ -173,6 +173,10 @@ class QuantumGeometricAttention(nn.Module):
             device: Device to use
         """
         super().__init__()
+
+        # Validate dtype is complex
+        if not torch.is_complex(torch.empty(1, dtype=dtype)):
+            raise ValueError("dtype must be complex (torch.complex64 or torch.complex128)")
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -184,6 +188,9 @@ class QuantumGeometricAttention(nn.Module):
         self.manifold_dim = manifold_dim or hidden_dim // 2
         self.dtype = dtype
         self.device = device or torch.device('cpu')
+
+
+        
         
         # Initialize metric tensor
         self.register_parameter(
@@ -193,7 +200,7 @@ class QuantumGeometricAttention(nn.Module):
         
         # Initialize projection layers with correct dimensions
         self.manifold_proj = nn.Linear(
-            self.manifold_dim,  # Input dimension is manifold_dim
+            self.head_dim,  # Input dimension is head_dim
             self.manifold_dim,  # Output dimension is manifold_dim
             dtype=self.dtype,
             device=self.device
@@ -201,7 +208,7 @@ class QuantumGeometricAttention(nn.Module):
         
         self.manifold_proj_inv = nn.Linear(
             self.manifold_dim,  # Input dimension is manifold_dim
-            self.manifold_dim,  # Output dimension is manifold_dim
+            self.head_dim,  # Output dimension is head_dim
             dtype=self.dtype,
             device=self.device
         )
@@ -209,13 +216,13 @@ class QuantumGeometricAttention(nn.Module):
         # Initialize pattern projection layers
         self.pattern_proj = nn.Linear(
             self.manifold_dim,
-            self.hidden_dim,
+            self.head_dim,  # Changed to head_dim to match manifold_proj_inv output
             dtype=self.dtype,
             device=self.device
         )
         
         self.pattern_proj_inv = nn.Linear(
-            self.hidden_dim,
+            self.head_dim,  # Changed to head_dim to match pattern_proj output
             self.manifold_dim,
             dtype=self.dtype,
             device=self.device
@@ -236,13 +243,14 @@ class QuantumGeometricAttention(nn.Module):
         ])
 
         # Initialize to_qkv and to_out projections
-        self.to_qkv = nn.Linear(hidden_dim, 3 * hidden_dim, dtype=self.dtype, device=self.device)
-        self.to_out = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype, device=self.device)
+        expanded_dim = self.num_heads * self.manifold_dim
+        self.to_qkv = nn.Linear(expanded_dim, 3 * expanded_dim, dtype=self.dtype, device=self.device)
+        self.to_out = nn.Linear(expanded_dim, hidden_dim, dtype=self.dtype, device=self.device)
 
-        # Initialize geometric flow
+        # Initialize geometric flow with correct dimensions
         self.flow = GeometricFlow(
-            hidden_dim=self.head_dim,
-            manifold_dim=self.manifold_dim,
+            hidden_dim=self.manifold_dim,  # Use manifold_dim for hidden_dim
+            manifold_dim=self.manifold_dim,  # Use manifold_dim for manifold_dim
             motive_rank=motive_rank,
             num_charts=4,
             integration_steps=10,
@@ -278,36 +286,62 @@ class QuantumGeometricAttention(nn.Module):
         
     def _init_weights(self):
         """Initialize weights with proper scaling."""
-        # Initialize manifold projections
-        nn.init.orthogonal_(self.manifold_proj.weight)
-        nn.init.zeros_(self.manifold_proj.bias)
-        nn.init.orthogonal_(self.manifold_proj_inv.weight)
-        nn.init.zeros_(self.manifold_proj_inv.bias)
-        
-        # Initialize pattern projections
-        nn.init.orthogonal_(self.pattern_proj.weight)
-        nn.init.zeros_(self.pattern_proj.bias)
-        nn.init.orthogonal_(self.pattern_proj_inv.weight)
-        nn.init.zeros_(self.pattern_proj_inv.bias)
-        
-        # Initialize attention components
-        nn.init.normal_(self.to_qkv.weight, std=0.02)
-        nn.init.zeros_(self.to_qkv.bias)
-        nn.init.normal_(self.to_out.weight, std=0.02)
-        nn.init.zeros_(self.to_out.bias)
-
-        # Initialize query, key, value transformations
-        nn.init.normal_(self.query.weight, std=0.02)
-        nn.init.zeros_(self.query.bias)
-        nn.init.normal_(self.key.weight, std=0.02)
-        nn.init.zeros_(self.key.bias)
-        nn.init.normal_(self.value.weight, std=0.02)
-        nn.init.zeros_(self.value.bias)
-
-        # Initialize attention layers
-        for layer in self.attention_layers:
-            nn.init.normal_(layer.weight, std=0.02)
-            nn.init.zeros_(layer.bias)
+        # Initialize manifold projections with real weights first
+        with torch.no_grad():
+            # Create real orthogonal matrices
+            real_weight = torch.empty_like(self.manifold_proj.weight.real)
+            nn.init.orthogonal_(real_weight)
+            imag_weight = torch.empty_like(self.manifold_proj.weight.imag)
+            nn.init.orthogonal_(imag_weight)
+            
+            # Combine into complex weight
+            self.manifold_proj.weight.copy_(torch.complex(real_weight, imag_weight))
+            self.manifold_proj.bias.zero_()
+            
+            # Same for inverse projection
+            real_weight = torch.empty_like(self.manifold_proj_inv.weight.real)
+            nn.init.orthogonal_(real_weight)
+            imag_weight = torch.empty_like(self.manifold_proj_inv.weight.imag)
+            nn.init.orthogonal_(imag_weight)
+            self.manifold_proj_inv.weight.copy_(torch.complex(real_weight, imag_weight))
+            self.manifold_proj_inv.bias.zero_()
+            
+            # Initialize pattern projections similarly
+            real_weight = torch.empty_like(self.pattern_proj.weight.real)
+            nn.init.orthogonal_(real_weight)
+            imag_weight = torch.empty_like(self.pattern_proj.weight.imag)
+            nn.init.orthogonal_(imag_weight)
+            self.pattern_proj.weight.copy_(torch.complex(real_weight, imag_weight))
+            self.pattern_proj.bias.zero_()
+            
+            real_weight = torch.empty_like(self.pattern_proj_inv.weight.real)
+            nn.init.orthogonal_(real_weight)
+            imag_weight = torch.empty_like(self.pattern_proj_inv.weight.imag)
+            nn.init.orthogonal_(imag_weight)
+            self.pattern_proj_inv.weight.copy_(torch.complex(real_weight, imag_weight))
+            self.pattern_proj_inv.bias.zero_()
+            
+            # Initialize attention components with small normal values
+            for layer in [self.to_qkv, self.to_out, self.query, self.key, self.value]:
+                if hasattr(layer, 'weight'):
+                    real_weight = torch.empty_like(layer.weight.real)
+                    nn.init.normal_(real_weight, std=0.02)
+                    imag_weight = torch.empty_like(layer.weight.imag)
+                    nn.init.normal_(imag_weight, std=0.02)
+                    layer.weight.copy_(torch.complex(real_weight, imag_weight))
+                if hasattr(layer, 'bias') and layer.bias is not None:
+                    layer.bias.zero_()
+            
+            # Initialize attention layers
+            for layer in self.attention_layers:
+                if hasattr(layer, 'weight'):
+                    real_weight = torch.empty_like(layer.weight.real)
+                    nn.init.normal_(real_weight, std=0.02)
+                    imag_weight = torch.empty_like(layer.weight.imag)
+                    nn.init.normal_(imag_weight, std=0.02)
+                    layer.weight.copy_(torch.complex(real_weight, imag_weight))
+                if hasattr(layer, 'bias') and layer.bias is not None:
+                    layer.bias.zero_()
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
         """Compute Fisher information metric for states."""
@@ -409,19 +443,17 @@ class QuantumGeometricAttention(nn.Module):
             k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
             
+            # Project to manifold dimension before applying flow
+            q_manifold = self.manifold_proj(q.reshape(-1, self.head_dim))
+            k_manifold = self.manifold_proj(k.reshape(-1, self.head_dim))
+            
             # Apply geometric flow to queries and keys
-            # Reshape for flow operation
-            q_reshaped = q.reshape(-1, self.head_dim)
-            k_reshaped = k.reshape(-1, self.head_dim)
+            q_flowed, q_metrics = self.flow(q_manifold)
+            k_flowed, k_metrics = self.flow(k_manifold)
             
-            # Apply flow and get metrics
-            q_flowed, q_metrics = self.flow(q_reshaped)
-            k_flowed, k_metrics = self.flow(k_reshaped)
-            
-            # Project back to head_dim if needed
-            if q_flowed.shape[-1] != self.head_dim:
-                q_flowed = self.pattern_proj(q_flowed)
-                k_flowed = self.pattern_proj(k_flowed)
+            # Project back to head_dim
+            q_flowed = self.pattern_proj(q_flowed)
+            k_flowed = self.pattern_proj(k_flowed)
             
             # Reshape back to attention dimensions
             q_flowed = q_flowed.reshape(batch_size, self.num_heads, seq_len, -1)
@@ -431,8 +463,8 @@ class QuantumGeometricAttention(nn.Module):
                 metrics[f'layer_{i}_q_flow'] = q_metrics
                 metrics[f'layer_{i}_k_flow'] = k_metrics
             
-            # Compute attention scores
-            scores = torch.matmul(q_flowed, k_flowed.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            # Compute attention scores using complex inner product
+            scores = torch.matmul(q_flowed, k_flowed.transpose(-2, -1).conj()) / math.sqrt(self.head_dim)
             
             # Apply mask if provided
             if mask is not None:
@@ -440,7 +472,7 @@ class QuantumGeometricAttention(nn.Module):
                 scores = scores.masked_fill(~mask, float('-inf'))
             
             # Apply attention
-            attn = F.softmax(scores, dim=-1)
+            attn = F.softmax(scores.real, dim=-1)  # Use real part for softmax
             attn = self.dropout_layer(attn)
             
             # Apply attention to values
@@ -457,9 +489,18 @@ class QuantumGeometricAttention(nn.Module):
                     'std': float(out.std().item())
                 }
         
+        # Apply final projection
+        out = self.to_out(current)
+        
         if return_metrics_bool:
-            return current, metrics
-        return current
+            metrics['final_output'] = {
+                'norm': float(torch.linalg.vector_norm(out).item()),
+                'mean': float(out.mean().item()),
+                'std': float(out.std().item())
+            }
+            return out, metrics
+        
+        return out
 
     def prepare_attention_state(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None

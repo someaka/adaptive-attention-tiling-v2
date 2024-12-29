@@ -48,13 +48,13 @@ class PatternStabilityAnalysis:
         # Stability networks
         self.stability_net = nn.Sequential(
             nn.Linear(flow.manifold_dim * 2, flow.hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(flow.hidden_dim, 1)
         )
         
         self.control_net = nn.Sequential(
             nn.Linear(flow.manifold_dim * 3, flow.hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(flow.hidden_dim, flow.manifold_dim)
         )
 

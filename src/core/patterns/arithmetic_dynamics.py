@@ -58,34 +58,46 @@ class ArithmeticDynamics(nn.Module):
         )
 
         # Initialize networks
-        self.height_map = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
+        self.height_map = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim // 2, height_dim or hidden_dim, dtype=self.dtype)
+        )
         self.flow = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
         
         # Initialize L-function network to output motive_rank dimensions
         self.l_function = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
         )
 
         # Adelic projection
-        self.adelic_proj = nn.Linear(hidden_dim, num_primes * motive_rank, dtype=self.dtype)
+        self.adelic_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim // 2, num_primes * motive_rank, dtype=self.dtype)
+        )
 
         # Output projection layers
         self.min_dim = hidden_dim  # Use hidden_dim as min_dim
-        self.measure_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
+        self.measure_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim // 2, hidden_dim, dtype=self.dtype)
+        )
         self.output_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
 
         # Quantum correction networks - ensure same output size as l_function
         self.quantum_height = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
         )
         
         self.quantum_l_function = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, motive_rank, dtype=self.dtype)  # Match l_function output size
         )
 
@@ -537,14 +549,14 @@ class ModularFormComputer(nn.Module):
         # Network for computing q-expansion coefficients
         self.coeff_net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, num_coeffs * 2)  # Real and imaginary parts
         )
         
         # Network for computing symmetry parameters
         self.symmetry_net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim // 2, 2)  # Translation and inversion parameters
         )
         
@@ -633,7 +645,7 @@ class ModularFormComputer(nn.Module):
 #         # L-function computation
 #         self.l_function = nn.Sequential(
 #             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
-#             nn.SiLU(),
+#             nn.Tanh(),
 #             nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
 #         )
 

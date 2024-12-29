@@ -8,6 +8,9 @@ import numpy as np
 import pytest
 import torch
 from typing import Tuple, NamedTuple
+import torch.nn as nn
+import torch.nn.functional as F
+import math
 
 from src.core.crystal.scale_classes.holographiclift import HolographicLifter
 
@@ -97,6 +100,167 @@ class TestHolographicLift(TestBase):
             scale_error = self.rel_error(actual_scale, expected_scale)
             assert scale_error < 0.1, \
                 f"Radial scaling violated at z={z:.2f} with error {scale_error:.2e}"
+
+    def test_network_learning(self, lifter: HolographicLifter):
+        """Test that the network learns by verifying loss decreases using optimal learning rate."""
+        # Create test data with correct shape for quantum attention
+        # Shape should be [batch_size, seq_len, hidden_dim]
+        hidden_dim = lifter.quantum_attention.hidden_dim
+        manifold_dim = lifter.quantum_attention.manifold_dim
+        head_dim = lifter.quantum_attention.head_dim
+        num_heads = lifter.quantum_attention.num_heads
+        
+        print(f"\nNetwork dimensions:")
+        print(f"hidden_dim: {hidden_dim}")
+        print(f"manifold_dim: {manifold_dim}")
+        print(f"head_dim: {head_dim}")
+        print(f"num_heads: {num_heads}")
+        
+        # Create input with shape [batch_size, seq_len, hidden_dim]
+        test_input = torch.randn(1, 4, hidden_dim, dtype=lifter.dtype)
+        test_target = torch.randn(1, 4, hidden_dim, dtype=lifter.dtype)
+        
+        print(f"\nInput shapes:")
+        print(f"test_input: {test_input.shape}")
+        print(f"test_target: {test_target.shape}")
+        
+        # Project input to manifold dimension if needed
+        if test_input.shape[-1] != manifold_dim:
+            # First reshape to separate heads: [batch_size, seq_len, num_heads, head_dim]
+            reshaped_input = test_input.reshape(1, 4, num_heads, head_dim)
+            reshaped_target = test_target.reshape(1, 4, num_heads, head_dim)
+            
+            print(f"\nReshaped with heads:")
+            print(f"reshaped_input: {reshaped_input.shape}")
+            print(f"reshaped_target: {reshaped_target.shape}")
+            
+            # Flatten for projection: [batch_size * seq_len * num_heads, head_dim]
+            flat_input = reshaped_input.reshape(-1, head_dim)
+            flat_target = reshaped_target.reshape(-1, head_dim)
+            
+            print(f"\nFlattened shapes:")
+            print(f"flat_input: {flat_input.shape}")
+            print(f"flat_target: {flat_target.shape}")
+            
+            # Project to manifold dimension
+            flat_input = lifter.quantum_attention.manifold_proj(flat_input)
+            flat_target = lifter.quantum_attention.manifold_proj(flat_target)
+            
+            print(f"\nProjected shapes:")
+            print(f"flat_input: {flat_input.shape}")
+            print(f"flat_target: {flat_target.shape}")
+            
+            # Calculate output size
+            batch_size = test_input.shape[0]
+            seq_len = test_input.shape[1]
+            proj_dim = flat_input.shape[-1]
+            
+            # Reshape back: [batch_size, seq_len, num_heads, proj_dim]
+            test_input = flat_input.reshape(batch_size, seq_len, num_heads, proj_dim)
+            test_target = flat_target.reshape(batch_size, seq_len, num_heads, proj_dim)
+            
+            # Final reshape to merge heads: [batch_size, seq_len, num_heads * proj_dim]
+            test_input = test_input.reshape(batch_size, seq_len, num_heads * proj_dim)
+            test_target = test_target.reshape(batch_size, seq_len, num_heads * proj_dim)
+            
+            print(f"\nFinal shapes:")
+            print(f"test_input: {test_input.shape}")
+            print(f"test_target: {test_target.shape}")
+        
+        # Learning rate finder
+        def lr_finder(
+            model: nn.Module,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            min_lr: float = 1e-7,
+            max_lr: float = 10,
+            num_iters: int = 100
+        ) -> float:
+            # Store initial parameters
+            init_state = {
+                name: param.clone().detach()
+                for name, param in model.named_parameters()
+            }
+            
+            # Log-spaced learning rates
+            lrs = torch.logspace(math.log10(min_lr), math.log10(max_lr), num_iters)
+            losses = []
+            
+            # Test each learning rate
+            for lr in lrs:
+                optimizer = torch.optim.Adam(model.parameters(), lr=lr.item())
+                optimizer.zero_grad()
+                
+                output = model(x)
+                loss = F.mse_loss(output, y)
+                losses.append(loss.item())
+                
+                loss.backward()
+                optimizer.step()
+                
+                # Check for divergence
+                if not torch.isfinite(loss):
+                    break
+                    
+            # Restore initial parameters
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    param.copy_(init_state[name])
+            
+            # Find learning rate with steepest descent
+            smoothed_losses = torch.tensor(losses[:-1])  # Remove last potentially diverged loss
+            derivatives = (smoothed_losses[1:] - smoothed_losses[:-1]) / (lrs[1:] - lrs[:-1])
+            optimal_idx = torch.argmin(derivatives)
+            
+            print(f"\nLR finder results:")
+            print(f"Optimal learning rate: {lrs[optimal_idx].item():.2e}")
+            print(f"Loss at optimal lr: {losses[optimal_idx]:.2e}")
+            
+            return lrs[optimal_idx].item()
+        
+        # Find optimal learning rate
+        optimal_lr = lr_finder(lifter.quantum_attention, test_input, test_target)
+        
+        # Store initial parameters
+        initial_params = {
+            name: param.clone().detach()
+            for name, param in lifter.quantum_attention.named_parameters()
+        }
+        
+        # Create optimizer with found learning rate
+        optimizer = torch.optim.Adam(lifter.parameters(), lr=optimal_lr)
+        
+        # Track losses
+        losses = []
+        
+        # Do several training steps
+        n_steps = 10
+        for step in range(n_steps):
+            optimizer.zero_grad()
+            output = lifter.quantum_attention(test_input)
+            loss = F.mse_loss(output, test_target)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+            
+            print(f"Step {step}: loss = {loss.item():.2e}")
+        
+        # Check if parameters changed
+        changed = False
+        for name, param in lifter.quantum_attention.named_parameters():
+            if not torch.allclose(param, initial_params[name]):
+                changed = True
+                break
+                
+        # Verify loss decreased
+        assert changed, "Network parameters did not change during training"
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses[0]:.2e} -> {losses[-1]:.2e}"
+        
+        # Check for consistent decrease trend
+        decreasing_steps = sum(losses[i] > losses[i+1] for i in range(len(losses)-1))
+        decrease_ratio = decreasing_steps / (len(losses)-1)
+        print(f"\nLoss decreased in {decrease_ratio:.1%} of steps")
+        assert decrease_ratio > 0.5, f"Loss only decreased in {decrease_ratio:.1%} of steps"
 
     def test_uv_ir_connection(self, lifter: HolographicLifter, test_data: HolographicTestData):
         """Test UV/IR connection with detailed diagnostics."""

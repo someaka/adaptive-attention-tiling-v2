@@ -78,25 +78,25 @@ class HigherOrderFlow(PatternHeatFlow):
         # Higher-order networks
         self.fourth_order_net = nn.Sequential(
             nn.Linear(manifold_dim * 2, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
         
         self.bach_tensor_net = nn.Sequential(
             nn.Linear(manifold_dim * 2, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
         
         self.calabi_net = nn.Sequential(
             nn.Linear(manifold_dim * 2, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
         
         self.cross_curvature_net = nn.Sequential(
             nn.Linear(manifold_dim * 3, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim)
         )
 

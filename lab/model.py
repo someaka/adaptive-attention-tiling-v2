@@ -97,7 +97,7 @@ class QuantumGeometricAttention(nn.Module):
         # Phase encoding with stability
         self.phase_net = nn.Sequential(
             nn.Linear(self.head_dim, self.head_dim * 2),  # Per head dimension
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(self.head_dim * 2, self.head_dim)
         )
         
@@ -528,7 +528,7 @@ class PatternFlow(nn.Module):
         self.flow_map = nn.Linear(hidden_dim, hidden_dim)
         self.l_function = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim * 2, hidden_dim)
         )
         self.adelic_proj = nn.Linear(hidden_dim, manifold_dim)
@@ -537,51 +537,51 @@ class PatternFlow(nn.Module):
         # Flow components
         self.flow_field = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         
         self.hamiltonian = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         
         self.manifold_proj = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         
         # Flow networks
         self.flow_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         
         self.energy_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         
         self.output_proj = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, input_dim)
         )
         
         # Metric networks
         self.metric_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         
         self.ricci_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, manifold_dim)
         )
         

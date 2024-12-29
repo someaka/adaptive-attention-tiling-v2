@@ -182,22 +182,15 @@ class OperadicStructureValidator:
             Validation result
         """
         try:
-            # Create test tensors
-            test_source = torch.zeros(dim, dtype=dtype)
-            test_target = torch.zeros(dim, dtype=dtype)
+            # Create test tensor with batch dimension
+            test_tensor = torch.zeros((1, dim), dtype=dtype)
             
-            # Test operation creation
-            operation = handler.create_operation(
+            # Test operation application via dimension transition
+            result, metrics = handler.handle_dimension_transition(
+                tensor=test_tensor,
                 source_dim=dim,
                 target_dim=dim,
                 preserve_structure=structure_type
-            )
-            
-            # Test operation application
-            result = handler.apply_operation(
-                operation=operation,
-                source=test_source,
-                target=test_target
             )
             
             # Validate result dimension
@@ -215,7 +208,8 @@ class OperadicStructureValidator:
                 is_valid=True,
                 message="Operation creation and application validated",
                 data={
-                    'result_shape': result.shape
+                    'result_shape': result.shape,
+                    'metrics': metrics
                 }
             )
             
