@@ -16,6 +16,7 @@ from torch import nn
 
 from .state_space import HilbertSpace, QuantumState
 from ..crystal.scale import ScaleCohomology, RGFlow, ScaleConnectionData
+from src.core.crystal.scale_classes.holographiclift import HolographicLifter
 
 
 @dataclass
@@ -256,6 +257,7 @@ class CrystalScaleAnalysis:
         self.lattice = lattice
         self.hilbert_space = hilbert_space
         self.scale_cohomology = ScaleCohomology(lattice.dim)
+        self.holographic_lifter = HolographicLifter(dim=lattice.dim)
         self.bloch = BlochFunction(lattice, hilbert_space)
 
     def analyze_scale_structure(self, state: QuantumState, k_point: torch.Tensor) -> Dict[str, Any]:
@@ -326,8 +328,9 @@ class CrystalScaleAnalysis:
         Returns:
             OPE result tensor
         """
-        return self.scale_cohomology.operator_product_expansion(
-            state1.amplitudes, state2.amplitudes
+        return self.holographic_lifter.operator_product_expansion(
+            state1.amplitudes, 
+            state2.amplitudes
         )
 
     def compute_callan_symanzik(self, state: QuantumState, coupling: torch.Tensor) -> torch.Tensor:
@@ -367,7 +370,11 @@ class CrystalScaleAnalysis:
         # Use OPE to compute the Callan-Symanzik equation
         # β(g)∂_g + γ(g)Δ - d
         combined = torch.cat([state.amplitudes, coupling], dim=-1)
-        quantum_result = self.scale_cohomology.operator_product_expansion(combined, combined)
+        quantum_result = self.holographic_lifter.operator_product_expansion(
+            combined, 
+            combined
+        )
+        
         
         # Cross-validate with classical implementation if available
         try:
