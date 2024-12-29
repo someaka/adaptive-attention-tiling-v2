@@ -30,7 +30,7 @@ def get_hardware_info() -> HardwareInfo:
         device_name=device_name,
         total_memory=vm.total,
         available_memory=vm.available,
-        cpu_count=psutil.cpu_count()
+        cpu_count=psutil.cpu_count() or 1
     )
 
 

@@ -31,13 +31,19 @@ from src.core.tiling.quantum_geometric_attention import (
 )
 
 def complex_randn(*size, device=None):
-    """Create random complex tensor."""
-    real = complex_randn(*size, device=device)
-    imag = complex_randn(*size, device=device)
+    """Create random complex tensor with proper initialization."""
+    real = torch.randn(*size, device=device)
+    imag = torch.randn(*size, device=device)
     return torch.complex(real, imag)
 
 class TestQuantumGeometricAttention:
-    """Test suite for quantum geometric attention."""
+    """Test suite for quantum geometric attention with proper cleanup."""
+
+    def teardown_method(self):
+        """Clean up after each test."""
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
 
     @pytest.fixture
     def manifold_dim(self) -> int:
@@ -66,7 +72,8 @@ class TestQuantumGeometricAttention:
 
     @pytest.fixture
     def attention_layer(self, hidden_dim, manifold_dim, num_heads):
-        """Create a test attention layer."""
+        """Create a test attention layer with proper device placement."""
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         return QuantumGeometricAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
@@ -75,7 +82,8 @@ class TestQuantumGeometricAttention:
             manifold_dim=manifold_dim,  # Explicitly pass manifold_dim
             num_layers=3,
             tile_size=8,  # Reduced from 16 to match smaller scale
-            dtype=torch.complex64
+            dtype=torch.complex64,
+            device=device
         )
 
     @pytest.fixture
@@ -122,9 +130,13 @@ class TestQuantumGeometricAttention:
 
         # Test state normalization
         norms = state.quantum_state.norm(dim=-1)
+        # Check normalization with proper complex tolerances
         assert torch.allclose(
-            norms, torch.ones_like(norms), rtol=1e-5
+            norms, torch.ones_like(norms), rtol=1e-5, atol=1e-8
         ), "Quantum states should be normalized"
+        
+        # Validate quantum state properties
+        assert self.attention_layer.is_valid_quantum_state(state.quantum_state), "Invalid quantum state"
 
         # Test mask application
         masked_state = attention_layer.apply_mask(state, mask)

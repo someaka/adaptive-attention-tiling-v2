@@ -174,6 +174,27 @@ class QuantumGeometricAttention(nn.Module):
         """
         super().__init__()
 
+        # Initialize quantum attention tiles
+        self.tiles = nn.ModuleList([
+            QuantumMotivicTile(
+                size=tile_size,
+                hidden_dim=hidden_dim,
+                num_heads=1,  # Each tile handles one head
+                dropout=dropout,
+                resolution=1.0,
+                cohomology_dim=manifold_dim or hidden_dim // 2,
+                motive_rank=motive_rank,
+                dtype=dtype
+            )
+            for _ in range(num_heads)
+        ])
+
+        # Initialize original scale buffer for quantum-classical interface
+        self.register_buffer(
+            'original_scale',
+            torch.ones(1, 1, 1, dtype=self.dtype, device=self.device)
+        )
+
         # Validate dtype is complex
         if not torch.is_complex(torch.empty(1, dtype=dtype)):
             raise ValueError("dtype must be complex (torch.complex64 or torch.complex128)")
@@ -641,7 +662,7 @@ class QuantumGeometricAttention(nn.Module):
 
     def classical_to_quantum(self, x: torch.Tensor) -> torch.Tensor:
         """Convert classical input to quantum state.
-        
+
         Args:
             x: Input tensor of shape (batch_size, manifold_dim) or (batch_size, seq_len, manifold_dim)
             
@@ -891,7 +912,33 @@ class QuantumGeometricAttention(nn.Module):
             sparsity=sparsity
         )
 
-    def is_valid_quantum_state(self, state: torch.Tensor) -> bool:
+    def validate_quantum_state(self, state: torch.Tensor) -> None:
+        """Validate quantum state and raise error if invalid.
+        
+        Args:
+            state: Tensor to validate
+            
+        Raises:
+            ValueError: If state is invalid
+        """
+        # Check complex type
+        if not torch.is_complex(state):
+            raise ValueError("Quantum state must be complex-valued")
+            
+        # Check normalization
+        norms = state.norm(dim=-1)
+        if not torch.allclose(norms, torch.ones_like(norms), rtol=1e-5):
+            raise ValueError("Quantum state must be normalized")
+            
+        # Check shape compatibility
+        if len(state.shape) not in [3, 4]:  # (batch, seq, dim) or (batch, heads, seq, dim)
+            raise ValueError("Invalid quantum state shape")
+            
+        # Check dimension compatibility
+        if state.shape[-1] != self.hidden_dim:
+            raise ValueError(f"Expected hidden dimension {self.hidden_dim}, got {state.shape[-1]}")
+
+    def _is_valid_quantum_state(self, state: torch.Tensor) -> bool:
         """Check if tensor represents a valid quantum state.
         
         Args:
@@ -936,7 +983,7 @@ class QuantumGeometricAttention(nn.Module):
         
         return hamiltonian
 
-    def evolve_state(self, state: QuantumState, hamiltonian: torch.Tensor) -> QuantumState:
+    def evolve_state(self, state: QuantumState, hamiltonian: torch.Tensor, t: float = 0.1) -> QuantumState:
         """Evolve quantum state under Hamiltonian.
         
         This method implements quantum time evolution using the Schrödinger equation:
@@ -945,16 +992,17 @@ class QuantumGeometricAttention(nn.Module):
         Args:
             state: Initial quantum state |ψ(0)⟩
             hamiltonian: Hamiltonian operator H (must be Hermitian)
+            t: Evolution time (defaults to 0.1)
             
         Returns:
             Evolved quantum state |ψ(t)⟩
         """
+        if not isinstance(t, float):
+            raise TypeError("Evolution time 't' must be a float")
+            
         # Ensure complex types
         hamiltonian = hamiltonian.to(torch.complex128)
         state_vector = state.amplitudes.to(torch.complex128)
-        
-        # Evolution time (can be tuned)
-        t = 0.1
         
         # Single time evolution
         evolution_operator = torch.matrix_exp(-1j * hamiltonian * t)
@@ -1132,8 +1180,83 @@ class QuantumGeometricAttention(nn.Module):
                 observable,
                 state.amplitudes
             )
-            
         return expectation.real
+
+    def compute_berry_phase(
+        self,
+        state: QuantumState,
+        hamiltonian: torch.Tensor,
+        time_steps: int = 100
+    ) -> torch.Tensor:
+        """Compute Berry phase for cyclic evolution.
+        
+        Args:
+            state: Initial quantum state
+            hamiltonian: Time-dependent Hamiltonian
+            time_steps: Number of time steps for evolution
+            
+        Returns:
+            Berry phase
+        """
+        # Initialize phase accumulation
+        phase = torch.zeros(1, dtype=self.dtype, device=self.device)
+        
+        # Create time points
+        times = torch.linspace(0, 2*torch.pi, time_steps, device=self.device)
+        dt = float(times[1] - times[0])  # Convert to float for evolve_state
+        
+        # Initialize state
+        current_state = state
+        
+        for t in range(time_steps-1):
+            # Evolve state with float time step
+            next_state = self.evolve_state(current_state, hamiltonian, dt)
+            
+            # Compute Berry connection
+            overlap = torch.vdot(current_state.amplitudes, next_state.amplitudes)
+            connection = -torch.log(overlap / torch.abs(overlap)).imag
+            
+            # Accumulate phase
+            phase += connection
+            
+            current_state = next_state
+            
+        return phase
+
+    def compute_holonomy(
+        self,
+        state: QuantumState,
+        path: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """Compute holonomy along a path in state space.
+        
+        Args:
+            state: Initial quantum state
+            path: List of unitary operators defining the path
+            
+        Returns:
+            Geometric phase from holonomy
+        """
+        # Initialize phase
+        phase = torch.zeros(1, dtype=self.dtype, device=self.device)
+        current_state = state
+        
+        # Use unit time step for each unitary evolution
+        dt = 1.0
+        
+        for U in path:
+            # Apply unitary with explicit float time step
+            next_state = self.evolve_state(current_state, U, dt)
+            
+            # Compute connection
+            overlap = torch.vdot(current_state.amplitudes, next_state.amplitudes)
+            connection = torch.log(overlap / torch.abs(overlap)).imag
+            
+            # Accumulate phase
+            phase += connection
+            current_state = next_state
+            
+        return phase
 
     def compute_entanglement_metrics(self, state: QuantumState) -> Dict[str, torch.Tensor]:
         """Compute entanglement metrics for quantum state.
@@ -1222,10 +1345,11 @@ class QuantumGeometricTransformer(nn.Module):
             return_patterns: Whether to return pattern metrics
 
         Returns:
+            Tuple containing:
             - Processed tensor
             - Optional list of pattern metrics from each layer
         """
-        metrics_list = []
+        metrics_list: List[Dict[str, Any]] = []
 
         for layer in self.layers:
             # Apply attention with residual
