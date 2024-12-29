@@ -494,7 +494,7 @@ class HolographicLifter:
         
         Args:
             boundary_field: Field values at UV boundary (high energy)
-            radial_points: Radial coordinates for bulk reconstruction
+            radial_points: Radial coordinates for bulk reconstruction, must be strictly increasing
             
         Returns:
             Bulk field values at each radial point
@@ -1092,19 +1092,22 @@ class HolographicLifter:
         if not isinstance(tensor, torch.Tensor):
             return GeometricValidationResult(
                 is_valid=False,
-                message=f"{name} must be a torch.Tensor, got {type(tensor)}"
+                message=f"{name} must be a torch.Tensor, got {type(tensor)}",
+                data={"expected_type": "torch.Tensor", "actual_type": str(type(tensor))}
             )
             
         if torch.isnan(tensor).any():
             return GeometricValidationResult(
                 is_valid=False,
-                message=f"{name} contains NaN values"
+                message=f"{name} contains NaN values",
+                data={"has_nan": True}
             )
             
         if torch.isinf(tensor).any():
             return GeometricValidationResult(
                 is_valid=False,
-                message=f"{name} contains infinite values"
+                message=f"{name} contains infinite values",
+                data={"has_inf": True}
             )
             
         # Validate device compatibility
@@ -1123,13 +1126,25 @@ class HolographicLifter:
                 data={"expected_dtype": str(self.dtype), "actual_dtype": str(tensor.dtype)}
             )
             
+        # Validate tensor is contiguous for performance
+        if not tensor.is_contiguous():
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"{name} must be contiguous for optimal performance",
+                data={"is_contiguous": False}
+            )
+            
+        # All validations passed
         return GeometricValidationResult(
             is_valid=True, 
             message=f"{name} validation passed",
             data={
                 "shape": tensor.shape,
                 "device": str(tensor.device),
-                "dtype": str(tensor.dtype)
+                "dtype": str(tensor.dtype),
+                "is_contiguous": True,
+                "has_nan": False,
+                "has_inf": False
             }
         )
 
