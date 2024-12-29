@@ -495,15 +495,22 @@ class HolographicLifter:
         Args:
             boundary_field: Field values at UV boundary (high energy)
             radial_points: Radial coordinates for bulk reconstruction, must be strictly increasing
+                          from UV (small distance) to IR (large distance)
             
         Returns:
-            Bulk field values at each radial point
+            Bulk field values at each radial point, with shape (len(radial_points), *boundary_field.shape)
             
         Raises:
             ValidationError: If input validation fails
             ScalingError: If radial scaling computation fails
             OperatorError: If OPE computation fails
             MemoryError: If memory management fails
+            
+        Notes:
+            The radial points must increase monotonically to represent proper RG flow
+            from UV to IR. The boundary field is treated as the microscopic (UV) data,
+            and the method computes the corresponding macroscopic (IR) behavior through
+            the holographic correspondence.
         """
         # Validate inputs
         validation_result = self.validate_holographic_data(boundary_field, radial_points)
@@ -570,11 +577,11 @@ class HolographicLifter:
                             correction_scale = self.CORRECTION_SCALE_UV / (1 + z_ratio**2)
                             bulk_field[i].add_(correction * boundary_norm * corr_power * correction_scale)
                         
-                        # Periodic memory optimization
+                        # Periodic memory optimization in main lifting loop
                         if i % self.CLEANUP_INTERVAL == 0:
                             self._update_memory_pressure()
-                            self._ensure_memory_efficiency()
-                    
+                            self._ensure_memory_efficiency(min_free_memory=0.3)  # Higher threshold during lifting
+                        
                     return bulk_field
             except Exception as e:
                 raise MemoryError(f"Memory management failed: {str(e)}")
@@ -752,9 +759,10 @@ class HolographicLifter:
                             correction = ir_data * scale * sign
                             correction_sum.add_(correction)
                             
-                            # Update memory pressure periodically
+                            # Periodic memory optimization in reconstruction
                             if n % 2 == 0:
                                 self._update_memory_pressure()
+                                self._ensure_memory_efficiency(min_free_memory=0.2)  # Standard threshold for corrections
                         
                         # Scale down corrections to maintain stability
                         correction_scale = 0.1 / (1 + self.Z_RATIO**2)
@@ -787,8 +795,15 @@ class HolographicLifter:
             Reconstructed field values at IR boundary
             
         Raises:
-            ValidationError: If input validation fails
-            MemoryError: If memory management fails
+            ValidationError: If input validation fails or tensor properties are invalid
+            MemoryError: If memory management fails during tensor operations
+            HolographicError: If reconstruction process fails due to physics constraints
+            
+        Notes:
+            The reconstruction process follows the RG flow from UV to IR,
+            incorporating quantum corrections at each scale. The method ensures
+            that the holographic correspondence is preserved throughout the
+            reconstruction process.
         """
         try:
             # Validate input
@@ -825,9 +840,10 @@ class HolographicLifter:
                             correction = uv_data * scale * sign
                             correction_sum.add_(correction)
                             
-                            # Update memory pressure periodically
+                            # Periodic memory optimization in reconstruction
                             if n % 2 == 0:
                                 self._update_memory_pressure()
+                                self._ensure_memory_efficiency(min_free_memory=0.2)  # Standard threshold for corrections
                         
                         # Scale corrections for stability
                         correction_scale = 0.1 / (1 + self.Z_RATIO**2)
@@ -1093,21 +1109,35 @@ class HolographicLifter:
             return GeometricValidationResult(
                 is_valid=False,
                 message=f"{name} must be a torch.Tensor, got {type(tensor)}",
-                data={"expected_type": "torch.Tensor", "actual_type": str(type(tensor))}
+                data={
+                    "expected_type": "torch.Tensor",
+                    "actual_type": str(type(tensor)),
+                    "tensor_name": name
+                }
             )
             
         if torch.isnan(tensor).any():
             return GeometricValidationResult(
                 is_valid=False,
                 message=f"{name} contains NaN values",
-                data={"has_nan": True}
+                data={
+                    "has_nan": True,
+                    "tensor_name": name,
+                    "shape": tensor.shape,
+                    "dtype": str(tensor.dtype)
+                }
             )
             
         if torch.isinf(tensor).any():
             return GeometricValidationResult(
                 is_valid=False,
                 message=f"{name} contains infinite values",
-                data={"has_inf": True}
+                data={
+                    "has_inf": True,
+                    "tensor_name": name,
+                    "shape": tensor.shape,
+                    "dtype": str(tensor.dtype)
+                }
             )
             
         # Validate device compatibility
@@ -1115,7 +1145,12 @@ class HolographicLifter:
             return GeometricValidationResult(
                 is_valid=False,
                 message=f"{name} must be on device {self.device}, got {tensor.device}",
-                data={"expected_device": str(self.device), "actual_device": str(tensor.device)}
+                data={
+                    "expected_device": str(self.device),
+                    "actual_device": str(tensor.device),
+                    "tensor_name": name,
+                    "shape": tensor.shape
+                }
             )
             
         # Validate dtype compatibility
@@ -1123,7 +1158,12 @@ class HolographicLifter:
             return GeometricValidationResult(
                 is_valid=False,
                 message=f"{name} must have dtype {self.dtype}, got {tensor.dtype}",
-                data={"expected_dtype": str(self.dtype), "actual_dtype": str(tensor.dtype)}
+                data={
+                    "expected_dtype": str(self.dtype),
+                    "actual_dtype": str(tensor.dtype),
+                    "tensor_name": name,
+                    "shape": tensor.shape
+                }
             )
             
         # Validate tensor is contiguous for performance
@@ -1131,7 +1171,26 @@ class HolographicLifter:
             return GeometricValidationResult(
                 is_valid=False,
                 message=f"{name} must be contiguous for optimal performance",
-                data={"is_contiguous": False}
+                data={
+                    "is_contiguous": False,
+                    "tensor_name": name,
+                    "shape": tensor.shape,
+                    "dtype": str(tensor.dtype),
+                    "device": str(tensor.device)
+                }
+            )
+            
+        # Validate tensor shape based on name
+        if name == "radial_points" and len(tensor.shape) != 1:
+            return GeometricValidationResult(
+                is_valid=False,
+                message=f"{name} must be 1-dimensional, got shape {tensor.shape}",
+                data={
+                    "expected_dims": 1,
+                    "actual_dims": len(tensor.shape),
+                    "shape": tensor.shape,
+                    "tensor_name": name
+                }
             )
             
         # All validations passed
@@ -1139,12 +1198,14 @@ class HolographicLifter:
             is_valid=True, 
             message=f"{name} validation passed",
             data={
+                "tensor_name": name,
                 "shape": tensor.shape,
                 "device": str(tensor.device),
                 "dtype": str(tensor.dtype),
                 "is_contiguous": True,
                 "has_nan": False,
-                "has_inf": False
+                "has_inf": False,
+                "memory_size": tensor.numel() * tensor.element_size()
             }
         )
 
