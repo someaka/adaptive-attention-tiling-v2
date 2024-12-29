@@ -30,6 +30,11 @@ from src.core.tiling.quantum_geometric_attention import (
     QuantumGeometricAttention,
 )
 
+def complex_randn(*size, device=None):
+    """Create random complex tensor."""
+    real = complex_randn(*size, device=device)
+    imag = complex_randn(*size, device=device)
+    return torch.complex(real, imag)
 
 class TestQuantumGeometricAttention:
     """Test suite for quantum geometric attention."""
@@ -70,6 +75,7 @@ class TestQuantumGeometricAttention:
             manifold_dim=manifold_dim,  # Explicitly pass manifold_dim
             num_layers=3,
             tile_size=8,  # Reduced from 16 to match smaller scale
+            dtype=torch.complex64
         )
 
     @pytest.fixture
@@ -98,7 +104,7 @@ class TestQuantumGeometricAttention:
     ):
         """Test attention state preparation and properties."""
         # Create input tensor
-        x = torch.randn(batch_size, seq_length, hidden_dim)
+        x = complex_randn(batch_size, seq_length, hidden_dim)
         mask = torch.ones(batch_size, seq_length).bool()
 
         # Prepare attention state
@@ -131,9 +137,9 @@ class TestQuantumGeometricAttention:
     ):
         """Test attention pattern computation."""
         # Create query, key, value tensors
-        query = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
-        key = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
-        value = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        query = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        key = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        value = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
 
         # Compute attention patterns
         result = attention_layer.compute_attention_patterns(
@@ -173,9 +179,9 @@ class TestQuantumGeometricAttention:
         """Test geometric attention flow computation."""
         # Create patterns and metric tensor
         patterns = torch.softmax(
-            torch.randn(batch_size, attention_layer.num_heads, seq_length, seq_length), dim=-1
+            complex_randn(batch_size, attention_layer.num_heads, seq_length, seq_length), dim=-1
         )
-        metric = torch.eye(hidden_dim).expand(batch_size, attention_layer.num_heads, -1, -1)
+        metric = torch.eye(hidden_dim, dtype=torch.complex64).expand(batch_size, attention_layer.num_heads, -1, -1)
 
         # Compute geometric flow
         flow_result = attention_layer.geometric_attention_flow(patterns, metric)
@@ -206,7 +212,7 @@ class TestQuantumGeometricAttention:
     ):
         """Test quantum-classical information interface."""
         # Create classical input with manifold dimension
-        classical_input = torch.randn(batch_size, seq_length, manifold_dim)
+        classical_input = complex_randn(batch_size, seq_length, manifold_dim)
 
         # Convert to quantum state
         quantum_state = attention_layer.classical_to_quantum(classical_input)
@@ -242,7 +248,7 @@ class TestQuantumGeometricAttention:
         # Create per-head inputs with manifold dimension
         head_dim = manifold_dim  # Each head operates on manifold dimension
         head_states = [
-            torch.randn(batch_size, seq_length, head_dim)
+            complex_randn(batch_size, seq_length, head_dim)
             for _ in range(num_heads)
         ]
 
@@ -268,7 +274,7 @@ class TestQuantumGeometricAttention:
         ), "Heads should be approximately independent"
 
         # Test attention output
-        output = attention_layer(torch.randn(batch_size, seq_length, hidden_dim))
+        output = attention_layer(complex_randn(batch_size, seq_length, hidden_dim))
         assert output.shape == (
             batch_size,
             seq_length,
@@ -306,7 +312,7 @@ class TestQuantumGeometricAttention:
         ), "Berry phase should be quantized"
 
         # Test parallel transport
-        state = torch.randn(batch_size, seq_length, hidden_dim)
+        state = complex_randn(batch_size, seq_length, hidden_dim)
         transported = attention_layer.parallel_transport(state, path)
 
         # Test holonomy
@@ -330,7 +336,7 @@ class TestQuantumGeometricAttention:
     ):
         """Test attention manifold curvature properties."""
         # Create local patch of attention states with manifold dimension
-        states = torch.randn(batch_size, seq_length, manifold_dim)
+        states = complex_randn(batch_size, seq_length, manifold_dim)
 
         # Compute metric tensor
         metric = attention_layer.compute_metric_tensor(states)
@@ -348,7 +354,7 @@ class TestQuantumGeometricAttention:
         ), "Riemann tensor should be antisymmetric in last indices"
 
         # Test sectional curvature
-        planes = torch.randn(batch_size, manifold_dim, 2)  # Random 2-planes in manifold
+        planes = complex_randn(batch_size, manifold_dim, 2)  # Random 2-planes in manifold
         sectional = attention_layer.compute_sectional_curvature(states, planes)
         assert sectional.shape == (batch_size,), "Sectional curvature should be scalar"
 
@@ -370,7 +376,7 @@ class TestQuantumGeometricAttention:
         """Test entanglement properties in attention states."""
         # Create attention state
         state = attention_layer.prepare_attention_state(
-            torch.randn(batch_size, seq_length, hidden_dim),
+            complex_randn(batch_size, seq_length, hidden_dim),
             torch.ones(batch_size, seq_length).bool(),
         )
 
@@ -411,7 +417,7 @@ class TestQuantumGeometricAttention:
         """Test quantum error correction in attention."""
         # Create code state
         code_state = attention_layer.prepare_code_state(
-            torch.randn(batch_size, seq_length, hidden_dim)
+            complex_randn(batch_size, seq_length, hidden_dim)
         )
 
         # Test encoding map
@@ -450,7 +456,7 @@ class TestQuantumGeometricAttention:
         """Test topological features in attention."""
         # Create attention complex
         attention_complex = attention_layer.build_attention_complex(
-            torch.randn(batch_size, seq_length, hidden_dim)
+            complex_randn(batch_size, seq_length, hidden_dim)
         )
 
         # Test Betti numbers
@@ -499,9 +505,9 @@ class TestQuantumGeometricAttention:
     ) -> None:
         """Test attention pattern computation."""
         # Create query, key, value tensors
-        query = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
-        key = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
-        value = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        query = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        key = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
+        value = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim // attention_layer.num_heads)
 
         # Compute attention patterns
         result = attention_layer.compute_attention_patterns(query, key)
@@ -530,8 +536,8 @@ class TestQuantumGeometricAttention:
         assert geometric_structures.curvature_tensor.shape == (hidden_dim, hidden_dim, hidden_dim, hidden_dim)
 
         # Test sectional curvature computation
-        v1 = torch.randn(hidden_dim)
-        v2 = torch.randn(hidden_dim)
+        v1 = complex_randn(hidden_dim)
+        v2 = complex_randn(hidden_dim)
         curvature = geometric_structures.compute_sectional_curvature(None, v1, v2)
         assert isinstance(curvature, torch.Tensor)
         assert curvature.ndim == 0  # Scalar output
@@ -544,7 +550,7 @@ class TestQuantumGeometricAttention:
         assert pattern_dynamics.transfer_weights.shape == (8, 64, 64)
 
         # Test Fisher information computation
-        states = torch.randn(batch_size, hidden_dim)
+        states = complex_randn(batch_size, hidden_dim)
         fisher = pattern_dynamics.compute_fisher_information(states)
         assert fisher.shape == (hidden_dim, hidden_dim)
         assert torch.allclose(fisher, fisher.t())  # Should be symmetric

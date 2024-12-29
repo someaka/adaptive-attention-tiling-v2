@@ -450,9 +450,8 @@ class QuantumGeometricAttention(nn.Module):
             k_manifold = self.manifold_proj(k.reshape(-1, self.head_dim))
             
             # Reshape for flow: [batch_size * seq_len * num_heads, manifold_dim]
-            batch_size_total = q_manifold.shape[0]
-            q_manifold = q_manifold.reshape(batch_size_total, -1)[:, :self.manifold_dim]
-            k_manifold = k_manifold.reshape(batch_size_total, -1)[:, :self.manifold_dim]
+            q_manifold = q_manifold.reshape(-1, self.manifold_dim)
+            k_manifold = k_manifold.reshape(-1, self.manifold_dim)
             
             # Apply geometric flow to queries and keys
             q_flowed, q_metrics = self.flow(q_manifold)
@@ -749,40 +748,44 @@ class QuantumGeometricAttention(nn.Module):
             state: Current attention state
             
         Returns:
-            Metric tensor
+            Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
         """
-        # Extract geometric state
-        g_state = state.geometric_state
+        batch_size = state.quantum_state.shape[0]
         
-        # Compute Jacobian
-        g_state.requires_grad_(True)
+        # Initialize metric tensor
+        metric = torch.zeros(
+            (batch_size, self.manifold_dim, self.manifold_dim),
+            dtype=self.dtype,
+            device=self.device
+        )
         
-        # Create basis vectors for tangent space
-        basis_vectors = torch.eye(
-            self.hidden_dim,
-            device=g_state.device,
-            dtype=g_state.dtype
-        ).reshape(-1, self.hidden_dim)  # [hidden_dim, hidden_dim]
+        # Compute Jacobian of state map
+        with torch.enable_grad():
+            state_tensor = state.quantum_state.requires_grad_(True)
+            output = self._compute_quantum_features(state_tensor)
+            
+            # Create basis vectors for tangent space
+            basis_vectors = torch.eye(
+                self.manifold_dim,
+                device=self.device,
+                dtype=self.dtype
+            ).reshape(-1, self.manifold_dim)  # [manifold_dim, manifold_dim]
+            
+            # Compute Jacobian-vector products for each basis vector
+            jvps = []
+            for v in basis_vectors:
+                _, jvp = torch.autograd.functional.jvp(
+                    lambda x: self._compute_quantum_features(x),
+                    (state_tensor,),
+                    (v.expand_as(state_tensor),)
+                )
+                jvps.append(jvp)
+            
+            # Stack JVPs to form Jacobian
+            jacobian = torch.stack(jvps, dim=1)  # [batch_size, manifold_dim, manifold_dim]
         
-        # Use flow module's forward method
-        def flow_fn(x):
-            return self.flow(x.reshape(-1, self.hidden_dim))[0]  # Only take output, not metrics
-        
-        # Compute Jacobian-vector products for each basis vector
-        jvps = []
-        for v in basis_vectors:
-            _, jvp = torch.autograd.functional.jvp(
-                flow_fn,
-                (g_state.reshape(-1, self.hidden_dim),),
-                (v.expand_as(g_state.reshape(-1, self.hidden_dim)),)
-            )
-            jvps.append(jvp)
-        
-        # Stack JVPs to form Jacobian
-        jacobian = torch.stack(jvps, dim=1)  # [batch_size, hidden_dim, hidden_dim]
-        
-        # Compute metric tensor
-        metric = torch.einsum('...ij,...kj->...ik', jacobian, jacobian)
+        # Compute metric as g_ij = sum_k (∂f_k/∂x_i)(∂f_k/∂x_j)
+        metric = torch.einsum('...ki,...kj->...ij', jacobian, jacobian.conj())
         
         return metric
 
@@ -988,6 +991,195 @@ class QuantumGeometricAttention(nn.Module):
             basis_labels=state.basis_labels,
             phase=state.phase
         )
+
+    def geometric_attention_flow(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        num_steps: int = 10,
+        dt: float = 0.1,
+        return_metrics: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, FlowMetrics]]:
+        """Apply geometric attention flow to input tensor.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
+            mask: Optional attention mask
+            num_steps: Number of flow steps
+            dt: Time step size
+            return_metrics: Whether to return flow metrics
+            
+        Returns:
+            Flowed tensor and optional metrics
+        """
+        # Initialize state
+        state = self.prepare_attention_state(x, mask)
+        
+        # Initialize metrics
+        if return_metrics:
+            curvature_list = []
+            transport_list = []
+            geodesic_list = []
+            energy_list = []
+        
+        # Compute initial metric
+        metric = self.compute_metric_tensor(state)
+        
+        # Initialize flow
+        current = x
+        for step in range(num_steps):
+            # Compute Ricci tensor
+            ricci = self.flow.compute_ricci_tensor(metric)
+            
+            # Update metric using Ricci flow
+            metric = metric + dt * ricci
+            
+            # Project to manifold
+            current = self.manifold_proj(current.view(-1, self.head_dim))
+            
+            # Apply flow step
+            current = self.flow.flow_step(current, metric)
+            
+            # Project back
+            current = self.manifold_proj_inv(current).view(*x.shape)
+            
+            if return_metrics:
+                # Compute flow metrics
+                curvature = torch.einsum('...ii', ricci)
+                transport = self._apply_parallel_transport(current)
+                geodesic = self.flow.compute_geodesic_distance(x, current)
+                energy = self.flow.compute_flow_energy(metric)
+                
+                curvature_list.append(curvature)
+                transport_list.append(transport)
+                geodesic_list.append(geodesic)
+                energy_list.append(energy)
+        
+        if return_metrics:
+            metrics = FlowMetrics(
+                curvature=torch.stack(curvature_list, dim=0).mean(dim=0),
+                parallel_transport=torch.stack(transport_list, dim=0).mean(dim=0),
+                geodesic_distance=torch.stack(geodesic_list, dim=0).mean(dim=0),
+                energy=torch.stack(energy_list, dim=0).mean(dim=0)
+            )
+            return current, metrics
+        
+        return current
+
+    def prepare_quantum_state(self, x: torch.Tensor) -> QuantumState:
+        """Prepare quantum state from classical input.
+        
+        Args:
+            x: Classical input tensor
+            
+        Returns:
+            Quantum state representation
+        """
+        # Project to manifold space
+        x_manifold = self.manifold_proj(x.view(-1, self.head_dim))
+        
+        # Apply quantum attention
+        x_quantum = self.quantum_attention(x_manifold)
+        
+        # Normalize state
+        state_norm = torch.norm(x_quantum, dim=-1, keepdim=True)
+        quantum_state = x_quantum / (state_norm + 1e-8)
+        
+        # Create quantum state with proper initialization
+        basis_size = quantum_state.shape[-1]
+        basis_labels = [str(i) for i in range(basis_size)]
+        phase = torch.zeros(1, dtype=self.dtype, device=self.device)
+        
+        return QuantumState(
+            amplitudes=quantum_state,
+            basis_labels=basis_labels,
+            phase=phase
+        )
+
+    def measure_quantum_state(
+        self,
+        state: QuantumState,
+        observable: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Measure quantum state with optional observable.
+        
+        Args:
+            state: Quantum state to measure
+            observable: Optional observable operator
+            
+        Returns:
+            Measurement outcome
+        """
+        if observable is None:
+            # Default to computational basis measurement
+            probs = torch.abs(state.amplitudes) ** 2
+            return probs
+        
+        # Compute expectation value
+        if observable.dim() == 2:
+            # Single observable
+            expectation = torch.einsum(
+                '...i,ij,...j->...',
+                state.amplitudes.conj(),
+                observable,
+                state.amplitudes
+            )
+        else:
+            # Multiple observables
+            expectation = torch.einsum(
+                '...i,ijk,...k->...j',
+                state.amplitudes.conj(),
+                observable,
+                state.amplitudes
+            )
+            
+        return expectation.real
+
+    def compute_entanglement_metrics(self, state: QuantumState) -> Dict[str, torch.Tensor]:
+        """Compute entanglement metrics for quantum state.
+        
+        Args:
+            state: Quantum state to analyze
+            
+        Returns:
+            Dictionary of entanglement metrics
+        """
+        # Get state vector and compute density matrix
+        state_vector = state.amplitudes
+        density_matrix = torch.einsum('...i,...j->...ij', state_vector, state_vector.conj())
+        
+        # Compute reduced density matrices
+        n = state_vector.shape[-1]
+        n_qubits = int(math.log2(n))
+        
+        metrics = {}
+        
+        # Compute von Neumann entropy
+        eigenvals = torch.linalg.eigvalsh(density_matrix)
+        entropy = -torch.sum(eigenvals * torch.log2(eigenvals + 1e-10), dim=-1)
+        metrics['von_neumann_entropy'] = entropy
+        
+        # Compute purity
+        purity = torch.einsum('...ij,...ji->...', density_matrix, density_matrix)
+        metrics['purity'] = purity
+        
+        # Compute concurrence for 2-qubit states
+        if n_qubits == 2:
+            sigma_y = torch.tensor([[0, -1j], [1j, 0]], dtype=self.dtype, device=self.device)
+            rho_tilde = torch.einsum(
+                '...ij,jk,kl->...il',
+                density_matrix,
+                torch.kron(sigma_y, sigma_y),
+                density_matrix.conj()
+            )
+            eigenvals = torch.sort(torch.sqrt(torch.linalg.eigvalsh(rho_tilde)), dim=-1)[0]
+            concurrence = torch.maximum(
+                torch.zeros_like(eigenvals[..., -1]),
+                eigenvals[..., -1] - eigenvals[..., -2] - eigenvals[..., -3] - eigenvals[..., -4]
+            )
+            metrics['concurrence'] = concurrence
+        
+        return metrics
 
 
 class QuantumGeometricTransformer(nn.Module):
