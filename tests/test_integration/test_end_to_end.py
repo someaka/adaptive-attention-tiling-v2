@@ -20,10 +20,13 @@ from typing import Dict, Any, Optional, cast, Union, Tuple
 from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention, AttentionState
 from src.core.tiling.quantum_attention_tile import QuantumMotivicTile
 from src.core.quantum.neural_quantum_bridge import NeuralQuantumBridge
-from src.core.quantum.state_space import QuantumState
 from src.core.patterns.fiber_types import LocalChart as PatternSection
 from src.core.tiling.state_manager import StateManager, StateConfig, StateType
 from src.validation.quantum.state import QuantumStateValidationResult
+from src.core.quantum.types import QuantumState
+
+
+
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -522,7 +525,8 @@ class TestEndToEnd:
         input_geometric = state_manager.initialize_state("input_geom", test_input.shape[-1])
         input_state = AttentionState(
             quantum_state=input_quantum,
-            geometric_state=input_geometric
+            geometric_state=input_geometric,
+            attention_scores=None
         )
         input_metric = attention_layer.compute_metric_tensor(input_state)
         
@@ -536,7 +540,8 @@ class TestEndToEnd:
         attention_geometric = state_manager.initialize_state("attention_geom", attention_out.shape[-1])
         attention_state = AttentionState(
             quantum_state=attention_quantum,
-            geometric_state=attention_geometric
+            geometric_state=attention_geometric,
+            attention_scores=None
         )
         attention_metric = attention_layer.compute_metric_tensor(attention_state)
         
@@ -563,7 +568,8 @@ class TestEndToEnd:
         final_geometric = state_manager.initialize_state("final_geom", scaled_pattern.coordinates.shape[-1])
         final_state = AttentionState(
             quantum_state=final_quantum,
-            geometric_state=final_geometric
+            geometric_state=final_geometric,
+            attention_scores=None
         )
         final_metric = attention_layer.compute_metric_tensor(final_state)
         
