@@ -275,45 +275,40 @@ class NeuralQuantumBridge(nn.Module):
         time: float = 1.0,  # Default time step
         **kwargs
     ) -> QuantumState:
-        """Evolve quantum state using geometric attention.
+        """Evolve quantum state using attention pattern.
         
         Args:
-            state: Quantum state to evolve
-            attention_pattern: Optional attention pattern to use for evolution
-            time: Evolution time step (default: 1.0)
-            **kwargs: Additional arguments passed to evolution
+            state: Initial quantum state
+            attention_pattern: Optional attention pattern tensor
+            time: Evolution time
+            **kwargs: Additional arguments
             
         Returns:
             Evolved quantum state
         """
-        # Get attention pattern
+        # Validate input state
+        if not isinstance(state, QuantumState):
+            raise TypeError("Input must be a QuantumState")
+            
+        # Get state dimensions
+        batch_size = state.amplitudes.shape[0]
+        seq_len = state.amplitudes.shape[1] if len(state.amplitudes.shape) > 2 else 1
+        
+        # If no attention pattern provided, compute it using quantum attention
         if attention_pattern is None:
-            attention_result = self.quantum_attention.compute_attention_patterns(state.amplitudes)
-            if attention_result is None:
-                raise ValueError("No attention pattern available")
-            if isinstance(attention_result, tuple):
-                attention_pattern = attention_result[0]
-            else:
-                attention_pattern = attention_result
-            
-        # Project attention pattern to manifold dimension if needed
-        if attention_pattern.shape[-1] != self.manifold_dim:
-            attention_pattern = attention_pattern[..., :self.manifold_dim]
-            
-        # Construct Hamiltonian from attention pattern using quantum_attention
-        H = self.quantum_attention.construct_hamiltonian(attention_pattern)
+            # Use state amplitudes as query and key
+            attention_pattern, _ = self.quantum_attention.compute_attention_patterns(
+                query=state.amplitudes,
+                key=state.amplitudes,
+                return_metrics=True
+            )
         
-        # Compute evolution operator
-        U = torch.matrix_exp(-1j * time * H)
+        # Construct Hamiltonian from attention pattern
+        # attention_pattern is guaranteed to be a tensor here
+        hamiltonian = self.quantum_attention.construct_hamiltonian(attention_pattern)
         
-        # Evolve state
-        evolved_state = state.evolve(U)
-        
-        # Preserve original norm if it exists
-        if hasattr(state, 'original_norm') and state.original_norm is not None:
-            current_norm = torch.linalg.vector_norm(evolved_state.amplitudes, dim=-1, keepdim=True)
-            evolved_state.amplitudes = evolved_state.amplitudes * (state.original_norm / (current_norm + 1e-8))
-            evolved_state.original_norm = state.original_norm
+        # Evolve state using Hamiltonian
+        evolved_state = self.quantum_attention.evolve_state(state, hamiltonian, time)
         
         return evolved_state
 
