@@ -117,23 +117,23 @@ class TestQuantumGeometricAttention:
 
         # Test state properties
         assert isinstance(state, AttentionState), "Should return AttentionState"
-        assert state.quantum_state is not None, "Should have quantum state"
-        assert state.geometric_state is not None, "Should have geometric state"
+        assert state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")) is not None, "Should have quantum state"
+        assert state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")) is not None, "Should have geometric state"
 
         # Test state dimensions
-        assert state.quantum_state.shape[0] == batch_size, "Batch dimension preserved"
-        assert state.quantum_state.shape[1] == num_heads, "Head dimension correct"
-        assert state.quantum_state.shape[-1] == manifold_dim, "Manifold dimension correct"
+        assert state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")).shape[0] == batch_size, "Batch dimension preserved"
+        assert state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")).shape[1] == num_heads, "Head dimension correct"
+        assert state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")).shape[-1] == manifold_dim, "Manifold dimension correct"
 
         # Test state normalization
-        norms = state.quantum_state.norm(dim=-1)
+        norms = state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")).norm(dim=-1)
         # Check normalization with proper complex tolerances
         assert torch.allclose(
             norms, torch.ones_like(norms), rtol=1e-5, atol=1e-8
         ), "Quantum states should be normalized"
         
         # Validate quantum state properties
-        assert self.attention_layer.is_valid_quantum_state(state.quantum_state), "Invalid quantum state"
+        assert self.attention_layer.is_valid_quantum_state(state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")))
 
         # Test mask application
         masked_state = attention_layer.apply_mask(state, mask)
@@ -393,7 +393,7 @@ class TestQuantumGeometricAttention:
         def test_bipartite(split_idx: int):
             """Test entanglement across bipartition."""
             entropy = attention_layer.compute_entanglement_entropy(
-                state.quantum_state, split_idx
+                state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")), split_idx
             )
             assert entropy >= 0, "Entropy should be non-negative"
             assert entropy <= np.log(2) * min(
@@ -407,13 +407,13 @@ class TestQuantumGeometricAttention:
 
         # Test mutual information
         mi = attention_layer.compute_mutual_information(
-            state.quantum_state, [0, seq_length // 2, -1]
+            state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")), [0, seq_length // 2, -1]
         )
         assert mi >= 0, "Mutual information should be non-negative"
 
         # Test entanglement spectrum
         spectrum = attention_layer.compute_entanglement_spectrum(
-            state.quantum_state, seq_length // 2
+            state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")), seq_length // 2
         )
         assert torch.all(spectrum >= 0), "Spectrum should be non-negative"
         assert torch.allclose(

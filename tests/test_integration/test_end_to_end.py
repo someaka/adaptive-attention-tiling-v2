@@ -523,10 +523,11 @@ class TestEndToEnd:
         # 1. Initial geometric properties
         input_quantum = state_manager.initialize_state("input", test_input.shape[-1])
         input_geometric = state_manager.initialize_state("input_geom", test_input.shape[-1])
-        input_state = AttentionState(
-            quantum_state=input_quantum,
-            geometric_state=input_geometric,
-            attention_scores=None
+        input_state = AttentionState.initialize(
+            hidden_dim=test_input.shape[-1],
+            num_heads=attention_layer.num_heads,
+            device=test_input.device,
+            dtype=test_input.dtype
         )
         input_metric = attention_layer.compute_metric_tensor(input_state)
         
@@ -538,10 +539,11 @@ class TestEndToEnd:
         )
         attention_quantum = state_manager.initialize_state("attention", attention_out.shape[-1])
         attention_geometric = state_manager.initialize_state("attention_geom", attention_out.shape[-1])
-        attention_state = AttentionState(
-            quantum_state=attention_quantum,
-            geometric_state=attention_geometric,
-            attention_scores=None
+        attention_state = AttentionState.initialize(
+            hidden_dim=attention_out.shape[-1],
+            num_heads=attention_layer.num_heads,
+            device=attention_out.device,
+            dtype=attention_out.dtype
         )
         attention_metric = attention_layer.compute_metric_tensor(attention_state)
         
@@ -566,10 +568,11 @@ class TestEndToEnd:
         
         final_quantum = state_manager.initialize_state("final", scaled_pattern.coordinates.shape[-1])
         final_geometric = state_manager.initialize_state("final_geom", scaled_pattern.coordinates.shape[-1])
-        final_state = AttentionState(
-            quantum_state=final_quantum,
-            geometric_state=final_geometric,
-            attention_scores=None
+        final_state = AttentionState.initialize(
+            hidden_dim=scaled_pattern.coordinates.shape[-1],
+            num_heads=attention_layer.num_heads,
+            device=scaled_pattern.coordinates.device,
+            dtype=scaled_pattern.coordinates.dtype
         )
         final_metric = attention_layer.compute_metric_tensor(final_state)
         
