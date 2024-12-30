@@ -541,3 +541,23 @@ class GeometricStructures(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Process points through geometric operations."""
         return self.process_points(x, y, v, return_diagnostics)
+
+    def _quantum_attention(self, x: torch.Tensor) -> torch.Tensor:
+        """Quantum-aware attention weights computation.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Quantum attention weights of shape (batch_size, seq_len, hidden_dim)
+        """
+        # Project to quantum state space
+        x = self.quantum_proj(x)  # First linear layer
+        x = self.layer_norm(x)    # Layer normalization
+        x = F.tanh(x)            # Non-linearity
+        x = self.quantum_out(x)   # Second linear layer
+        
+        # Ensure quantum properties (unitarity, normalization)
+        x = F.normalize(x, p=2, dim=-1)
+        
+        return x

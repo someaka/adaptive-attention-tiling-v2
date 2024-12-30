@@ -17,7 +17,6 @@ from ..patterns.riemannian_base import RiemannianStructure
 from ..patterns.symplectic import SymplecticStructure
 from ..patterns.arithmetic_dynamics import ArithmeticPattern
 from ..patterns.fiber_types import LocalChart as PatternSection
-from ..tiling.quantum_geometric_attention import QuantumGeometricAttention
 from .types import QuantumState
 from .state_space import HilbertSpace
 from src.core.crystal.scale import ScaleSystem
@@ -73,15 +72,6 @@ class NeuralQuantumBridge(nn.Module):
         self.device = device or torch.device('cpu')
         self.manifold_dim = hidden_dim // 2  # Manifold dimension is half of hidden dimension
         
-        # Initialize quantum attention
-        self.quantum_attention = QuantumGeometricAttention(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            dtype=dtype,
-            device=self.device
-        )
-        
         # Initialize layer normalization
         self.layer_norm = nn.LayerNorm(hidden_dim).to(device=self.device, dtype=self.dtype)
         self.manifold_norm = nn.LayerNorm(self.manifold_dim).to(device=self.device, dtype=self.dtype)
@@ -116,42 +106,6 @@ class NeuralQuantumBridge(nn.Module):
             dtype=dtype
         )
         
-        # Scale cohomology system
-        self.scale_system = ScaleSystem(
-            dim=hidden_dim,
-            num_scales=4,
-            coupling_dim=hidden_dim,
-            dtype=dtype
-        )
-        
-        # Create Riemannian fiber bundle for motivic cohomology
-        self.riemannian_bundle = RiemannianFiberBundle(
-            dimension=hidden_dim,
-            device=self.device,
-            dtype=dtype
-        )
-        
-        # Motivic structure system
-        self.motivic_system = MotivicCohomology(
-            base_space=self.riemannian_bundle,  # Use Riemannian bundle as base space
-            hidden_dim=hidden_dim,
-            motive_rank=4,
-            num_primes=8,
-            dtype=dtype
-        )
-
-        # Initialize quantum tile
-        self.quantum_tile = QuantumMotivicTile(
-            size=hidden_dim,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            resolution=1.0,
-            cohomology_dim=8,
-            motive_rank=4,
-            dtype=dtype
-        ).to(device=self.device)
-
         # Initialize inverse projection
         self.inverse_projection = nn.Linear(
             self.manifold_dim,
@@ -203,11 +157,15 @@ class NeuralQuantumBridge(nn.Module):
         x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
         x_manifold = x_manifold / (x_norm + 1e-8)
         
-        # Convert to quantum amplitudes
-        amplitudes = self.quantum_attention.classical_to_quantum(x_manifold)
+        # Convert to quantum amplitudes using direct quantum state preparation
+        prepared_state = self.hilbert_space.prepare_state(x_manifold)
         
-        # Prepare quantum state
-        state = self.hilbert_space.prepare_state(amplitudes)
+        # Create quantum state with proper initialization
+        state = QuantumState(
+            amplitudes=prepared_state.amplitudes,
+            basis_labels=[str(i) for i in range(self.manifold_dim)],
+            phase=torch.zeros(1, dtype=self.dtype, device=self.device)
+        )
         
         # Store original norm in state for later use
         state.original_norm = original_norm

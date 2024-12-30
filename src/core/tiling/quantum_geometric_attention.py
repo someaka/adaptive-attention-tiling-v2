@@ -32,136 +32,38 @@ from .geometric_flow import GeometricFlow
 from .quantum_attention_tile import QuantumMotivicTile
 from ..patterns.symplectic import SymplecticStructure
 from ..patterns.riemannian import PatternRiemannianStructure
-from src.core.quantum.state_space import QuantumState
+from src.core.quantum.state_space import QuantumState, HilbertSpace
 from src.core.attention.geometric import GeometricStructures
-from src.core.patterns.dynamics import PatternDynamics
-from src.core.quantum.state_space import QuantumState
-from src.core.tiling.state_manager import StateManager
+from src.neural.attention.pattern.dynamics import PatternDynamics
+from src.core.tiling.state_manager import StateManager, StateConfig, StateType
 from src.core.tiling.attention_state import AttentionState
-
-# @dataclass
-# class GeometricStructures:
-#     """Geometric structures for attention."""
-    
-#     dim: int
-#     manifold_type: str
-#     curvature: float
-#     parallel_transport_method: str
-#     metric: torch.Tensor = field(default_factory=lambda: torch.eye(1, dtype=torch.float32))
-
-#     def __post_init__(self):
-#         """Initialize geometric operations."""
-#         # Initialize metric tensor with proper dimensions
-#         self.metric = torch.eye(self.dim, dtype=torch.float32)
-            
-#         if self.manifold_type == "hyperbolic":
-#             self.exp_map = HyperbolicExponential(self.dim, self.curvature)
-#             self.log_map = HyperbolicLogarithm(self.dim, self.curvature)
-#         else:
-#             self.exp_map = EuclideanExponential(self.dim)
-#             self.log_map = EuclideanLogarithm(self.dim)
-#         self.transport = ParallelTransport(self.dim)
-        
-#         # Validate metric tensor
-#         self._validate_metric()
-
-#     def _validate_metric(self):
-#         """Validate the metric tensor."""
-#         if self.metric.shape != (self.dim, self.dim):
-#             raise ValueError(f"Metric tensor must have shape ({self.dim}, {self.dim})")
-#         if not torch.allclose(self.metric, self.metric.T):
-#             raise ValueError("Metric tensor must be symmetric")
-#         try:
-#             torch.linalg.cholesky(self.metric)
-#         except RuntimeError:
-#             raise ValueError("Metric tensor must be positive definite")
-
-
-# class PatternDynamics:
-#     """Pattern dynamics for attention."""
-
-#     def __init__(
-#         self,
-#         dim: int,
-#         num_heads: int,
-#         num_patterns: int,
-#         temperature: float = 0.1,
-#         adaptation_rate: float = 0.01
-#     ):
-#         """Initialize pattern dynamics.
-        
-#         Args:
-#             dim: Hidden dimension
-#             num_heads: Number of attention heads
-#             num_patterns: Number of patterns to track
-#             temperature: Temperature for pattern adaptation
-#             adaptation_rate: Rate of pattern adaptation
-#         """
-#         self.dim = dim
-#         self.num_heads = num_heads
-#         self.num_patterns = num_patterns
-#         self.temperature = temperature
-#         self.adaptation_rate = adaptation_rate
-
-#         # Initialize pattern memory with proper dimensions
-#         self.patterns = nn.Parameter(torch.randn(num_patterns, dim, dim))
-#         self.pattern_scores = nn.Parameter(torch.zeros(num_patterns))
-
-#     def update_patterns(self, x: torch.Tensor) -> torch.Tensor:
-#         """Update pattern memory with new input.
-        
-#         Args:
-#             x: Input tensor of shape (batch_size, seq_len, dim)
-            
-#         Returns:
-#             Updated pattern scores of shape (batch_size, seq_len, num_patterns)
-#         """
-#         batch_size, seq_len, _ = x.shape
-        
-#         # Compute pattern similarities with proper dimension handling
-#         x_expanded = x.unsqueeze(2).unsqueeze(3)  # (batch, seq, 1, 1, dim)
-#         patterns_expanded = self.patterns.unsqueeze(0).unsqueeze(0)  # (1, 1, num_patterns, dim, dim)
-        
-#         # Compute similarity as trace of matrix product
-#         similarities = torch.einsum('bsnij,bsnjk->bsn', x_expanded, patterns_expanded)
-        
-#         # Update pattern scores with temperature
-#         scores = F.softmax(similarities / self.temperature, dim=-1)
-        
-#         # Adapt patterns with learning rate
-#         pattern_updates = torch.einsum('bsn,bsij->nij', scores, x.unsqueeze(-1) @ x.unsqueeze(-2))
-#         self.patterns.data += self.adaptation_rate * pattern_updates
-        
-#         return scores
-
-
-# @dataclass
-# class AttentionState:
-#     """State for quantum geometric attention."""
-    
-#     quantum_state: QuantumState()
-#     geometric_state: torch.Tensor
-#     attention_scores: Optional[torch.Tensor] = None
-
-
-@dataclass
-class AttentionMetrics:
-    """Metrics for attention patterns."""
-    
-    entropy: torch.Tensor  # Shape: (batch_size,)
-    complexity: torch.Tensor  # Shape: (batch_size,)
-    stability: Optional[torch.Tensor] = None  # Shape: (batch_size,)
-    sparsity: Optional[torch.Tensor] = None  # Shape: (batch_size,)
-
-
-@dataclass
-class FlowMetrics:
-    """Metrics for geometric attention flow."""
-    
-    curvature: torch.Tensor  # Shape: (batch_size,)
-    parallel_transport: torch.Tensor  # Shape: (batch_size, hidden_dim)
-    geodesic_distance: torch.Tensor  # Shape: (batch_size,)
-    energy: torch.Tensor  # Shape: (batch_size,)
+from src.core.quantum.neural_quantum_bridge import NeuralQuantumBridge
+from src.metrics.attention import (
+    AttentionMetrics,
+    FlowMetrics,
+    compute_attention_metrics,
+    compute_flow_metrics,
+    compute_parallel_transport,
+    compute_geodesic_distance,
+    compute_flow_energy,
+    compute_ricci_tensor
+)
+from src.metrics.quantum_geometric_metrics import (
+    MetricContext,
+    BaseMetric,
+    MetricDomain,
+    QuantumMetrics,
+    GeometricMetrics,
+    PatternMetrics
+)
+from src.validation.quantum.state import (
+    StateValidator,
+    StatePreparationValidator,
+    QuantumStateValidationResult,
+    StateValidationErrorType
+)
+from src.validation.patterns.formation import PatternFormationValidator
+from ..patterns.fiber_types import LocalChart as PatternSection
 
 
 class QuantumGeometricAttention(nn.Module):
@@ -227,15 +129,43 @@ class QuantumGeometricAttention(nn.Module):
         self.manifold_dim = manifold_dim if manifold_dim is not None else 4
         self.dtype = dtype
         self.device = device or torch.device('cpu')
+        
+        # Initialize HilbertSpace for quantum computations
+        self.hilbert_space = HilbertSpace(
+            dim=self.manifold_dim,
+            dtype=self.dtype  # HilbertSpace will handle device internally
+        )
+        
+        # Initialize state management and validation
+        self.state_config = StateConfig(
+            dim=self.manifold_dim,
+            type=StateType.PURE,  # Start with pure states
+            epsilon=1e-6,
+            max_entanglement=1.0,
+            dtype=self.dtype
+        )
+        self.state_manager = StateManager(self.state_config, device=self.device)
+        
+        # Initialize state validators
+        self.state_validator = StateValidator(tolerance=1e-6)
+        self.preparation_validator = StatePreparationValidator(tolerance=1e-6)
+        
         # Initialize original scale buffer for quantum-classical interface
         self.register_buffer(
             'original_scale',
             torch.ones(1, 1, 1, dtype=self.dtype, device=self.device)
         )
-        self.device = device or torch.device('cpu')
-
-
-                
+        
+        # Initialize neural quantum bridge for state conversion
+        self.quantum_bridge = NeuralQuantumBridge(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            manifold_type=manifold_type,
+            curvature=curvature,
+            dtype=dtype,
+            device=device
+        )
         
         # Initialize metric tensor
         self.register_parameter(
@@ -490,41 +420,36 @@ class QuantumGeometricAttention(nn.Module):
             k = k.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
             v = v.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
             
-            # Project to manifold dimension before applying flow
-            q_manifold = self.manifold_proj(q.reshape(-1, self.head_dim))  # [batch_size * seq_len * num_heads, manifold_dim]
-            k_manifold = self.manifold_proj(k.reshape(-1, self.head_dim))
+            # Process through quantum tiles
+            tile_outputs = []
+            tile_metrics = []
+            for h, tile in enumerate(self.tiles):
+                # Project to manifold dimension before applying flow
+                q_manifold = self.manifold_proj(q[:, h].reshape(-1, self.head_dim))
+                k_manifold = self.manifold_proj(k[:, h].reshape(-1, self.head_dim))
+                v_manifold = self.manifold_proj(v[:, h].reshape(-1, self.head_dim))
+                
+                # Prepare quantum state
+                q_state = self.prepare_quantum_state(q_manifold)
+                k_state = self.prepare_quantum_state(k_manifold)
+                v_state = self.prepare_quantum_state(v_manifold)
+                
+                # Process through tile
+                tile_output, tile_metric = tile(
+                    q_state.amplitudes,
+                    k_state.amplitudes,
+                    v_state.amplitudes,
+                    return_metrics=True
+                )
+                
+                # Convert back to classical representation
+                tile_output = self.quantum_to_classical(tile_output)
+                tile_outputs.append(tile_output)
+                tile_metrics.append(tile_metric)
             
-            # Reshape for flow: [batch_size * seq_len * num_heads, manifold_dim]
-            q_manifold = q_manifold.reshape(-1, self.manifold_dim)
-            k_manifold = k_manifold.reshape(-1, self.manifold_dim)
-            
-            # Apply geometric flow to queries and keys
-            q_flowed, q_metrics = self.flow(q_manifold)
-            k_flowed, k_metrics = self.flow(k_manifold)
-            
-            # Project back to head_dim and reshape: [batch_size, num_heads, seq_len, head_dim]
-            q_flowed = self.pattern_proj(q_flowed).reshape(batch_size, self.num_heads, seq_len, self.head_dim)
-            k_flowed = self.pattern_proj(k_flowed).reshape(batch_size, self.num_heads, seq_len, self.head_dim)
-            
-            if return_metrics_bool:
-                metrics[f'layer_{i}_q_flow'] = q_metrics
-                metrics[f'layer_{i}_k_flow'] = k_metrics
-            
-            # Compute attention scores using complex inner product
-            scores = torch.matmul(q_flowed, k_flowed.transpose(-2, -1).conj()) / math.sqrt(self.head_dim)
-            
-            # Apply mask if provided
-            if mask is not None:
-                mask = mask.unsqueeze(1).unsqueeze(2)  # Add head and query dimensions
-                scores = scores.masked_fill(~mask, float('-inf'))
-            
-            # Apply attention
-            attn = F.softmax(scores.real, dim=-1)  # Use real part for softmax
-            attn = self.dropout_layer(attn)
-            
-            # Apply attention to values
-            out = torch.matmul(attn, v)
-            out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
+            # Combine tile outputs
+            out = torch.stack(tile_outputs, dim=1)  # [batch_size, num_heads, seq_len, head_dim]
+            out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)  # [batch_size, seq_len, hidden_dim]
             
             # Update current
             current = out
@@ -533,17 +458,36 @@ class QuantumGeometricAttention(nn.Module):
                 metrics[f'layer_{i}_output'] = {
                     'norm': float(torch.linalg.vector_norm(out).item()),
                     'mean': float(out.mean().item()),
-                    'std': float(out.std().item())
+                    'std': float(out.std().item()),
+                    'tile_metrics': tile_metrics
                 }
         
         # Apply final projection
         out = self.to_out(current)
         
         if return_metrics_bool:
+            # Compute final quantum geometric metrics
+            final_metrics = compute_attention_metrics(
+                attention_patterns=out,
+                metric_context=MetricContext(
+                    timestamp=0.0,
+                    device=out.device,
+                    batch_size=batch_size,
+                    sequence_length=seq_len,
+                    hidden_dim=self.hidden_dim,
+                    resolution=1.0
+                )
+            )
+            
             metrics['final_output'] = {
                 'norm': float(torch.linalg.vector_norm(out).item()),
                 'mean': float(out.mean().item()),
-                'std': float(out.std().item())
+                'std': float(out.std().item()),
+                'quantum_geometric_metrics': {
+                    'entropy': float(final_metrics.entropy.mean().item()),
+                    'complexity': float(final_metrics.complexity.mean().item()),
+                    'stability': float(final_metrics.pattern_stability.mean().item()) if final_metrics.pattern_stability is not None else None
+                }
             }
             return out, metrics
         
@@ -690,13 +634,18 @@ class QuantumGeometricAttention(nn.Module):
         attention_patterns = F.softmax(scores, dim=-1)
         
         if return_metrics:
-            # Compute metrics using the attention patterns
-            metrics = AttentionMetrics(
-                entropy=self.compute_entropy(attention_patterns),
-                complexity=self.compute_complexity(attention_patterns),
-                stability=self.compute_stability(attention_patterns),
-                sparsity=self.compute_sparsity(attention_patterns)
+            # Create metric context
+            context = MetricContext(
+                timestamp=0.0,  # Current time not needed for attention
+                device=attention_patterns.device,
+                batch_size=batch_size,
+                sequence_length=seq_len,
+                hidden_dim=self.hidden_dim,
+                resolution=1.0  # Default resolution
             )
+            
+            # Compute metrics using the attention patterns
+            metrics = compute_attention_metrics(attention_patterns, context)
             return attention_patterns, metrics
         
         if value is not None:
@@ -725,48 +674,48 @@ class QuantumGeometricAttention(nn.Module):
         integrated = self.to_out(stacked)
         return integrated
 
-    def compute_entanglement_entropy(self, state: torch.Tensor, split_idx: int) -> torch.Tensor:
-        """Compute entanglement entropy across a bipartition.
+    # def compute_entanglement_entropy(self, state: torch.Tensor, split_idx: int) -> torch.Tensor:
+    #     """Compute entanglement entropy across a bipartition.
         
-        Args:
-            state: Quantum state tensor
-            split_idx: Index to split the state
+    #     Args:
+    #         state: Quantum state tensor
+    #         split_idx: Index to split the state
             
-        Returns:
-            Entanglement entropy
-        """
-        # Reshape state into matrix
-        state_matrix = state.view(-1, 2**split_idx, 2**(state.shape[-1] - split_idx))
+    #     Returns:
+    #         Entanglement entropy
+    #     """
+    #     # Reshape state into matrix
+    #     state_matrix = state.view(-1, 2**split_idx, 2**(state.shape[-1] - split_idx))
         
-        # Compute singular value decomposition
-        _, s, _ = torch.svd(state_matrix)
+    #     # Compute singular value decomposition
+    #     _, s, _ = torch.svd(state_matrix)
         
-        # Compute entropy from singular values
-        s_sq = s ** 2
-        entropy = -torch.sum(s_sq * torch.log(s_sq + 1e-10))
+    #     # Compute entropy from singular values
+    #     s_sq = s ** 2
+    #     entropy = -torch.sum(s_sq * torch.log(s_sq + 1e-10))
         
-        return entropy
+    #     return entropy
 
-    def compute_entropy(self, features: torch.Tensor) -> torch.Tensor:
-        """Compute entropy of attention features."""
-        probs = F.softmax(features, dim=-1)
-        log_probs = torch.log(probs + 1e-10)
-        entropy = -(probs * log_probs).sum(dim=-1)
-        return entropy
+    # def compute_entropy(self, features: torch.Tensor) -> torch.Tensor:
+    #     """Compute entropy of attention features."""
+    #     probs = F.softmax(features, dim=-1)
+    #     log_probs = torch.log(probs + 1e-10)
+    #     entropy = -(probs * log_probs).sum(dim=-1)
+    #     return entropy
 
-    def compute_complexity(self, features: torch.Tensor) -> torch.Tensor:
-        """Compute complexity of attention features."""
-        return torch.norm(features, p=2, dim=-1)
+    # def compute_complexity(self, features: torch.Tensor) -> torch.Tensor:
+    #     """Compute complexity of attention features."""
+    #     return torch.norm(features, p=2, dim=-1)
 
-    def compute_stability(self, features: torch.Tensor) -> torch.Tensor:
-        """Compute stability of attention features."""
-        return torch.var(features, dim=-1)
+    # def compute_stability(self, features: torch.Tensor) -> torch.Tensor:
+    #     """Compute stability of attention features."""
+    #     return torch.var(features, dim=-1)
 
-    def compute_sparsity(self, features: torch.Tensor) -> torch.Tensor:
-        """Compute sparsity of attention features."""
-        return torch.count_nonzero(features, dim=-1).float() / features.shape[-1]
+    # def compute_sparsity(self, features: torch.Tensor) -> torch.Tensor:
+    #     """Compute sparsity of attention features."""
+    #     return torch.count_nonzero(features, dim=-1).float() / features.shape[-1]
 
-    def classical_to_quantum(self, x: torch.Tensor) -> torch.Tensor:
+    def classical_to_quantum(self, x: torch.Tensor) -> QuantumState:
         """Convert classical input to quantum state.
 
         Args:
@@ -775,73 +724,29 @@ class QuantumGeometricAttention(nn.Module):
         Returns:
             Quantum state tensor
         """
-        # Add sequence dimension if input is flat
-        if x.dim() == 2:
-            x_reshaped = x.unsqueeze(1)  # (batch_size, 1, manifold_dim)
-        else:
-            x_reshaped = x
-            
-        batch_size, seq_len, _ = x_reshaped.shape
-        
-        # Project to manifold space
-        x_manifold = self.manifold_proj(x_reshaped.view(-1, self.manifold_dim))  # (batch_size * seq_len, manifold_dim)
-        x_manifold = x_manifold.view(batch_size, seq_len, self.manifold_dim)  # (batch_size, seq_len, manifold_dim)
-        
-        # Project to pattern space
-        x_pattern = self.pattern_proj(x_manifold)  # (batch_size, seq_len, hidden_dim)
-        
-        # Apply quantum attention
-        x_quantum = self.quantum_attention(x_pattern)  # (batch_size, seq_len, hidden_dim)
-        
-        # Project back to manifold space
-        x_manifold = self.pattern_proj_inv(x_quantum)  # (batch_size, seq_len, manifold_dim)
-        
-        # Project back to original space
-        x_out = self.manifold_proj_inv(x_manifold.view(-1, self.manifold_dim))  # (batch_size * seq_len, manifold_dim)
-        x_out = x_out.view(batch_size, seq_len, self.manifold_dim)  # (batch_size, seq_len, manifold_dim)
-        
-        # Remove sequence dimension if input was flat
-        if x.dim() == 2:
-            x_out = x_out.squeeze(1)  # (batch_size, manifold_dim)
-            
-        return x_out
+        result = self.quantum_bridge.neural_to_quantum(x)
+        # Handle both direct return and tuple return with validation
+        if isinstance(result, tuple):
+            return result[0]  # Extract just the QuantumState
+        return result
 
-    def quantum_to_classical(self, quantum_state: torch.Tensor) -> torch.Tensor:
+    def quantum_to_classical(self, quantum_state: Union[torch.Tensor, QuantumState]) -> torch.Tensor:
         """Convert quantum state back to classical tensor.
         
         Args:
-            quantum_state: Quantum state tensor from classical_to_quantum
+            quantum_state: Quantum state tensor or QuantumState object
             
         Returns:
-            Classical tensor with original dimensions
+            Classical tensor
         """
-        # Handle both multi-head and flat input formats
-        if len(quantum_state.shape) == 4:
-            batch_size, num_heads, seq_len, _ = quantum_state.shape
-            # Reshape to (batch_size * num_heads, seq_len, hidden_dim)
-            x_reshaped = quantum_state.transpose(1, 2).reshape(batch_size * num_heads, seq_len, self.hidden_dim)
-        else:
-            x_reshaped = quantum_state
-            
-        assert torch.allclose(x_reshaped.abs().norm(dim=-1), torch.ones_like(x_reshaped.abs().norm(dim=-1))), "Input quantum state should have unit norm"
-            
-        # Restore original scale before projections
-        x_scaled = x_reshaped * self.original_scale
-        assert torch.allclose(x_scaled.norm(dim=-1), self.original_scale.squeeze(-1)), "Scale should be restored correctly"
-            
-        # Project back from quantum state space
-        classical_proj = self.pattern_proj_inv(x_scaled)
-        assert classical_proj.shape[-1] == self.manifold_dim, f"Expected manifold dim {self.manifold_dim}, got {classical_proj.shape[-1]}"
-        
-        # Project back from manifold
-        classical_output = self.manifold_proj_inv(classical_proj)
-        assert classical_output.shape[-1] == (self.head_dim if len(quantum_state.shape) == 4 else self.hidden_dim), "Incorrect output dimension"
-        
-        # Reshape back to multi-head format if needed
-        if len(quantum_state.shape) == 4:
-            classical_output = classical_output.view(batch_size, seq_len, num_heads, -1).transpose(1, 2)
-            
-        return classical_output
+        # Ensure we have a QuantumState object
+        if not isinstance(quantum_state, QuantumState):
+            quantum_state = QuantumState(
+                amplitudes=quantum_state,
+                basis_labels=[str(i) for i in range(self.manifold_dim)],
+                phase=torch.zeros(1, dtype=self.dtype, device=self.device)
+            )
+        return self.quantum_bridge.quantum_to_neural(quantum_state)
 
     def create_attention_parameters(self, batch_size: int, seq_len: int) -> Dict[str, torch.Tensor]:
         """Create attention mechanism parameters.
@@ -1001,6 +906,16 @@ class QuantumGeometricAttention(nn.Module):
         # Create default key tensor if mask is None
         key_tensor = mask if mask is not None else state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum"))
         
+        # Create metric context
+        context = MetricContext(
+            timestamp=0.0,
+            device=query.device,
+            batch_size=batch_size,
+            sequence_length=seq_len,
+            hidden_dim=self.hidden_dim,
+            resolution=1.0
+        )
+        
         # Compute attention patterns with metrics
         attention_pattern, metrics = cast(
             Tuple[torch.Tensor, AttentionMetrics],
@@ -1024,41 +939,7 @@ class QuantumGeometricAttention(nn.Module):
         
         return attention_output, metrics
 
-    def _compute_attention_metrics(self, attention_pattern: torch.Tensor) -> AttentionMetrics:
-        """Compute metrics for attention pattern.
-        
-        Args:
-            attention_pattern: Attention pattern tensor
-            
-        Returns:
-            Attention metrics
-        """
-        # Compute entropy
-        entropy = -torch.sum(
-            attention_pattern * torch.log(attention_pattern + 1e-10),
-            dim=-1
-        ).mean()
-        
-        # Compute complexity using singular values
-        u, s, v = torch.svd(attention_pattern)
-        complexity = torch.sum(s) / s[0]
-        
-        # Compute stability through gradient norm
-        attention_pattern.requires_grad_(True)
-        grad = torch.autograd.grad(
-            attention_pattern.sum(), attention_pattern, create_graph=True
-        )[0]
-        stability = torch.norm(grad, dim=-1).mean()
-        
-        # Compute sparsity
-        sparsity = torch.sum(attention_pattern > 0.1) / attention_pattern.numel()
-        
-        return AttentionMetrics(
-            entropy=entropy,
-            complexity=complexity,
-            stability=stability,
-            sparsity=sparsity
-        )
+
 
     def validate_quantum_state(self, state: torch.Tensor) -> None:
         """Validate quantum state and raise error if invalid.
@@ -1073,18 +954,27 @@ class QuantumGeometricAttention(nn.Module):
         if not torch.is_complex(state):
             raise ValueError("Quantum state must be complex-valued")
             
-        # Check normalization
-        norms = state.norm(dim=-1)
-        if not torch.allclose(norms, torch.ones_like(norms), rtol=1e-5):
-            raise ValueError("Quantum state must be normalized")
+        # Check normalization with proper tolerance
+        norms = state.abs().norm(dim=-1)
+        if not torch.allclose(norms, torch.ones_like(norms), rtol=1e-5, atol=1e-7):
+            raise ValueError(f"Quantum state must be normalized, got norms: {norms}")
             
         # Check shape compatibility
         if len(state.shape) not in [3, 4]:  # (batch, seq, dim) or (batch, heads, seq, dim)
-            raise ValueError("Invalid quantum state shape")
+            raise ValueError(f"Invalid quantum state shape: {state.shape}")
             
         # Check dimension compatibility
         if state.shape[-1] != self.hidden_dim:
             raise ValueError(f"Expected hidden dimension {self.hidden_dim}, got {state.shape[-1]}")
+            
+        # Check phase consistency
+        phases = torch.angle(state)
+        if torch.any(torch.isnan(phases)) or torch.any(torch.isinf(phases)):
+            raise ValueError("Invalid phases in quantum state")
+            
+        # Check numerical stability
+        if torch.any(torch.isnan(state)) or torch.any(torch.isinf(state)):
+            raise ValueError("Quantum state contains NaN or Inf values")
 
     def _is_valid_quantum_state(self, state: torch.Tensor) -> bool:
         """Check if tensor represents a valid quantum state.
@@ -1225,7 +1115,7 @@ class QuantumGeometricAttention(nn.Module):
         current = x
         for step in range(num_steps):
             # Compute Ricci tensor
-            ricci = self.flow.compute_ricci_tensor(metric)
+            ricci = compute_ricci_tensor(metric)
             
             # Update metric using Ricci flow
             metric = metric + dt * ricci
@@ -1242,9 +1132,9 @@ class QuantumGeometricAttention(nn.Module):
             if return_metrics:
                 # Compute flow metrics
                 curvature = torch.einsum('...ii', ricci)
-                transport = self._apply_parallel_transport(current)
-                geodesic = self.flow.compute_geodesic_distance(x, current)
-                energy = self.flow.compute_flow_energy(metric)
+                transport = compute_parallel_transport(current, metric)
+                geodesic = compute_geodesic_distance(current, metric)
+                energy = compute_flow_energy(current, metric)
                 
                 curvature_list.append(curvature)
                 transport_list.append(transport)
@@ -1252,11 +1142,21 @@ class QuantumGeometricAttention(nn.Module):
                 energy_list.append(energy)
         
         if return_metrics:
-            metrics = FlowMetrics(
-                curvature=torch.stack(curvature_list, dim=0).mean(dim=0),
-                parallel_transport=torch.stack(transport_list, dim=0).mean(dim=0),
-                geodesic_distance=torch.stack(geodesic_list, dim=0).mean(dim=0),
-                energy=torch.stack(energy_list, dim=0).mean(dim=0)
+            # Create metric context
+            context = MetricContext(
+                timestamp=0.0,
+                device=x.device,
+                batch_size=x.shape[0],
+                sequence_length=x.shape[1],
+                hidden_dim=self.hidden_dim,
+                resolution=1.0
+            )
+            
+            # Compute flow metrics
+            metrics = compute_flow_metrics(
+                flow_path=current,
+                metric_tensor=metric,
+                context=context
             )
             return current, metrics
         
@@ -1285,6 +1185,9 @@ class QuantumGeometricAttention(nn.Module):
         basis_size = quantum_state.shape[-1]
         basis_labels = [str(i) for i in range(basis_size)]
         phase = torch.zeros(1, dtype=self.dtype, device=self.device)
+        
+        # Validate quantum state
+        self.validate_quantum_state(quantum_state)
         
         return QuantumState(
             amplitudes=quantum_state,
@@ -1451,4 +1354,396 @@ class QuantumGeometricAttention(nn.Module):
             metrics['concurrence'] = concurrence
         
         return metrics
+    
+    def analyze_pattern_formation(
+        self,
+        pattern: torch.Tensor,
+        time_steps: int = 100
+    ) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor]]]:
+        """Analyze pattern formation dynamics.
+        
+        Args:
+            pattern: Input pattern tensor of shape [batch_size, seq_len, hidden_dim]
+            time_steps: Number of evolution steps to analyze
+            
+        Returns:
+            Dictionary containing:
+            - 'formation_trajectory': Evolution of pattern over time (Tensor)
+            - 'stability_metrics': Stability analysis at each time step (Dict[str, Tensor])
+            - 'coherence_metrics': Pattern coherence measures (Dict[str, Tensor])
+            - 'symmetry_metrics': Symmetry analysis results (Dict[str, Tensor])
+        """
+        # Initialize pattern formation validator with appropriate thresholds
+        validator = PatternFormationValidator(
+            tolerance=1e-6,
+            coherence_threshold=0.8,
+            symmetry_threshold=0.9,
+            defect_threshold=0.1,
+            frequency_threshold=0.1,
+            phase_threshold=0.1
+        )
+        
+        # Initialize pattern dynamics with correct parameters
+        dynamics = PatternDynamics(
+            grid_size=pattern.shape[1],  # Use sequence length as grid size
+            space_dim=2,  # 2D space for attention patterns
+            hidden_dim=self.hidden_dim,
+            dt=0.01,  # Small time step for stability
+            num_modes=self.num_heads,  # Use number of heads as modes
+            quantum_enabled=True  # Enable quantum features
+        )
+        
+        # Validate and evolve pattern
+        validation_result = validator.validate(
+            dynamics=dynamics,
+            initial=pattern,
+            time_steps=time_steps
+        )
+        
+        # Initialize default metrics with correct types
+        default_metrics = {
+            'formation_trajectory': torch.zeros_like(pattern),
+            'stability_metrics': {'stability': torch.tensor(0.0, device=pattern.device)},
+            'coherence_metrics': {'coherence': torch.tensor(0.0, device=pattern.device)},
+            'symmetry_metrics': {'symmetry': torch.tensor(0.0, device=pattern.device)}
+        }
+        
+        # Extract metrics from validation result
+        if validation_result.data is not None:
+            trajectory = validation_result.data.get('trajectory')
+            if trajectory is not None:
+                default_metrics['formation_trajectory'] = trajectory
+            
+            stability = validation_result.data.get('stability')
+            if isinstance(stability, dict):
+                default_metrics['stability_metrics'] = {
+                    k: v for k, v in stability.items() 
+                    if isinstance(v, torch.Tensor)
+                }
+            
+            coherence = validation_result.data.get('coherence')
+            if isinstance(coherence, dict):
+                default_metrics['coherence_metrics'] = {
+                    k: v for k, v in coherence.items() 
+                    if isinstance(v, torch.Tensor)
+                }
+            
+            symmetry = validation_result.data.get('symmetry')
+            if isinstance(symmetry, dict):
+                default_metrics['symmetry_metrics'] = {
+                    k: v for k, v in symmetry.items() 
+                    if isinstance(v, torch.Tensor)
+                }
+        
+        return default_metrics
+    
+    def _validate_metrics(self, metrics: Dict[str, Any]) -> None:
+        """Validate metrics dictionary structure and values with detailed checks.
+        
+        Args:
+            metrics: Dictionary of metrics to validate
+            
+        Raises:
+            ValueError: If metrics are invalid
+        """
+        if not isinstance(metrics, dict):
+            raise ValueError(f"Metrics must be a dictionary, got {type(metrics)}")
+            
+        required_keys = {'entropy', 'complexity', 'stability'}
+        if not all(k in metrics for k in required_keys):
+            raise ValueError(f"Metrics must contain keys: {required_keys}")
+            
+        for k, v in metrics.items():
+            # Check value type
+            if v is not None and not isinstance(v, (int, float, torch.Tensor)):
+                raise ValueError(f"Metric {k} must be numeric or None, got {type(v)}")
+            
+            # Check for invalid values
+            if isinstance(v, (int, float)):
+                if math.isnan(v) or math.isinf(v):
+                    raise ValueError(f"Metric {k} has invalid value: {v}")
+            elif isinstance(v, torch.Tensor):
+                if torch.any(torch.isnan(v)) or torch.any(torch.isinf(v)):
+                    raise ValueError(f"Metric {k} contains NaN or Inf values")
+            
+            # Check value ranges for specific metrics
+            if k == 'entropy' and v is not None:
+                if isinstance(v, (int, float)) and (v < 0 or v > math.log(self.hidden_dim)):
+                    raise ValueError(f"Invalid entropy value: {v}")
+            elif k == 'complexity' and v is not None:
+                if isinstance(v, (int, float)) and v < 0:
+                    raise ValueError(f"Invalid complexity value: {v}")
+            elif k == 'stability' and v is not None:
+                if isinstance(v, (int, float)) and (v < 0 or v > 1):
+                    raise ValueError(f"Invalid stability value: {v}")
+
+    def _combine_tile_metrics(self, tile_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Combine metrics from multiple tiles with error handling.
+        
+        Args:
+            tile_metrics: List of metric dictionaries from tiles
+            
+        Returns:
+            Combined metrics dictionary
+            
+        Raises:
+            ValueError: If metrics are invalid or inconsistent
+        """
+        if not tile_metrics:
+            raise ValueError("No tile metrics provided")
+            
+        combined = {}
+        
+        try:
+            # Combine numeric metrics by averaging
+            numeric_keys = {'attention_entropy', 'output_norm', 'quantum_entropy', 'complexity'}
+            for key in numeric_keys:
+                values = [m[key] for m in tile_metrics if key in m]
+                if values:
+                    # Check for invalid values
+                    if any(not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v) for v in values):
+                        raise ValueError(f"Invalid values for metric {key}")
+                    combined[key] = sum(values) / len(values)
+            
+            # Combine attention metrics
+            attention_keys = {'attention_scores', 'attention_probs'}
+            for key in attention_keys:
+                tensors = [m[key] for m in tile_metrics if key in m]
+                if tensors:
+                    # Validate tensor shapes
+                    if not all(t.shape == tensors[0].shape for t in tensors):
+                        raise ValueError(f"Inconsistent shapes for metric {key}")
+                    combined[key] = torch.stack(tensors).mean(dim=0)
+            
+            # Combine quantum geometric metrics
+            quantum_keys = {'quantum_geometric'}
+            for key in quantum_keys:
+                metrics = [m[key] for m in tile_metrics if key in m]
+                if metrics:
+                    # Validate metric structure
+                    required_fields = {'entropy', 'complexity', 'stability'}
+                    if not all(all(f in m for f in required_fields) for m in metrics):
+                        raise ValueError(f"Missing required fields in {key}")
+                        
+                    combined[key] = {
+                        field: sum(m[field] for m in metrics) / len(metrics)
+                        for field in required_fields
+                    }
+                    
+            return combined
+            
+        except Exception as e:
+            raise ValueError(f"Error combining tile metrics: {str(e)}")
+
+    def _update_quantum_state(self, state: QuantumState) -> Dict[str, Any]:
+        """Update quantum state with current metrics and validation.
+        
+        Args:
+            state: Quantum state to update
+            
+        Returns:
+            Dictionary of computed metrics
+        """
+        # Validate state
+        self.validate_quantum_state(state.amplitudes)
+        
+        # Compute quantum metrics
+        metrics = self.compute_entanglement_metrics(state)
+        
+        # Return metrics instead of storing them
+        return metrics
+
+    def _process_tile_output(
+        self,
+        tile_output: Union[torch.Tensor, PatternSection],
+        tile_metrics: Dict[str, Any]
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Process output from a quantum tile.
+        
+        Args:
+            tile_output: Output tensor or pattern section from tile
+            tile_metrics: Metrics from tile processing
+            
+        Returns:
+            Tuple of:
+            - Processed classical tensor
+            - Updated metrics dictionary
+        """
+        # Extract tensor from pattern section if needed
+        output_tensor = tile_output.coordinates if isinstance(tile_output, PatternSection) else tile_output
+        
+        # Convert to classical representation
+        classical_output = self.quantum_to_classical(output_tensor)
+        
+        # Validate and update metrics
+        self._validate_metrics(tile_metrics)
+        
+        # Add quantum geometric metrics
+        quantum_metrics = compute_attention_metrics(
+            attention_patterns=classical_output,
+            metric_context=MetricContext(
+                timestamp=0.0,
+                device=classical_output.device,
+                batch_size=classical_output.shape[0],
+                sequence_length=classical_output.shape[1],
+                hidden_dim=self.hidden_dim,
+                resolution=1.0
+            )
+        )
+        
+        updated_metrics = {
+            **tile_metrics,
+            'quantum_geometric': {
+                'entropy': float(quantum_metrics.entropy.mean().item()),
+                'complexity': float(quantum_metrics.complexity.mean().item()),
+                'stability': float(quantum_metrics.pattern_stability.mean().item()) if quantum_metrics.pattern_stability is not None else None
+            }
+        }
+        
+        return classical_output, updated_metrics
+    
+    def _prepare_quantum_state(self, x: torch.Tensor) -> QuantumState:
+        """Prepare quantum state from classical input with validation.
+        
+        Args:
+            x: Classical input tensor
+            
+        Returns:
+            Validated quantum state
+            
+        Raises:
+            ValueError: If state preparation fails validation
+        """
+        # Convert to quantum state
+        if not isinstance(x, QuantumState):
+            if not torch.is_complex(x):
+                x = x.to(torch.complex64)
+            state = QuantumState(
+                amplitudes=x,
+                basis_labels=[str(i) for i in range(self.manifold_dim)],
+                phase=torch.zeros(1, dtype=self.dtype, device=self.device)
+            )
+        else:
+            state = x
+            
+        # Validate preparation
+        validation_result = self.preparation_validator.validate_preparation(
+            target=state,
+            prepared=state  # Self-validation for initial preparation
+        )
+        
+        if not validation_result.is_valid:
+            # Attempt to correct the state
+            state = self.preparation_validator.correct_state(
+                state=state,
+                error_type=validation_result.error_type or StateValidationErrorType.INVALID_NORM
+            )
+            
+        return state
+        
+    def _measure_quantum_state(self, state: QuantumState) -> torch.Tensor:
+        """Measure quantum state and project to classical representation.
+        
+        Args:
+            state: Quantum state to measure
+            
+        Returns:
+            Classical tensor representation
+        """
+        # Validate state before measurement
+        properties = self.state_validator.validate_state(state)
+        
+        # Project state to classical representation
+        if properties.is_pure:
+            # For pure states, use direct projection
+            classical = state.amplitudes
+        else:
+            # For mixed states, use density matrix eigendecomposition
+            density_matrix = torch.matmul(
+                state.amplitudes,
+                state.amplitudes.conj().transpose(-2, -1)
+            )
+            eigenvals, eigenvecs = torch.linalg.eigh(density_matrix)
+            # Use dominant eigenvector
+            classical = eigenvecs[..., -1]
+            
+        return classical.real
+        
+    def _compute_density_matrix(self, state: QuantumState) -> torch.Tensor:
+        """Compute density matrix representation of quantum state.
+        
+        Args:
+            state: Input quantum state
+            
+        Returns:
+            Density matrix tensor
+        """
+        # Validate state
+        properties = self.state_validator.validate_state(state)
+        
+        # Compute density matrix
+        if properties.is_pure:
+            # Pure state density matrix
+            return torch.matmul(
+                state.amplitudes.unsqueeze(-1),
+                state.amplitudes.conj().unsqueeze(-2)
+            )
+        else:
+            # Mixed state density matrix
+            return torch.matmul(
+                state.amplitudes,
+                state.amplitudes.conj().transpose(-2, -1)
+            )
+            
+    def _compute_von_neumann_entropy(self, state: Union[QuantumState, torch.Tensor]) -> torch.Tensor:
+        """Compute von Neumann entropy of quantum state.
+        
+        Args:
+            state: Either a QuantumState object or tensor of shape [..., manifold_dim]
+            
+        Returns:
+            Von Neumann entropy tensor
+            
+        Note:
+            For pure states S = 0
+            For mixed states 0 < S ≤ log(d) where d is manifold dimension
+        """
+        # Ensure we have a QuantumState object
+        if not isinstance(state, QuantumState):
+            state = self._prepare_quantum_state(state)
+            
+        # Validate state
+        properties = self.state_validator.validate_state(state)
+        
+        # Use HilbertSpace to compute entropy
+        return self.hilbert_space.compute_entropy(state)
+    
+    def _geometric_update(self, x: torch.Tensor) -> torch.Tensor:
+        """Updates based on manifold structure using geometric flow.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            
+        Returns:
+            Updated tensor with same shape as input
+        """
+        # Project to manifold space if needed
+        if x.shape[-1] != self.flow.manifold_dim:
+            x_manifold = x[..., :self.flow.manifold_dim]
+        else:
+            x_manifold = x
+        
+        # Apply geometric flow and get metrics
+        x_flowed, flow_metrics = self.flow(
+            x_manifold,
+            return_path=False  # We only need final state
+        )
+        
+        # The flow already handles:
+        # 1. Computing the metric via compute_metric()
+        # 2. Computing Ricci tensor via compute_ricci_tensor()
+        # 3. Performing integration steps with flow_step()
+        # 4. Applying quantum corrections through arithmetic structure
+        
+        return x_flowed
     

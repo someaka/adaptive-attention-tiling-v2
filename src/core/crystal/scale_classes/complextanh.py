@@ -11,7 +11,6 @@ from torch import nn
 # Import memory optimization utilities
 from src.core.performance.cpu.memory_management import MemoryManager, MemoryMetrics
 from src.utils.memory_management import optimize_memory, register_tensor
-from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention
 from src.core.crystal.scale_classes.rgflow import RGFlow
 
 

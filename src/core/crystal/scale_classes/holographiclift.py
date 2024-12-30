@@ -16,7 +16,6 @@ from torch import nn, Tensor
 # Import memory optimization utilities
 from src.core.performance.cpu.memory_management import MemoryManager, MemoryMetrics
 from src.utils.memory_management import optimize_memory, register_tensor
-from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention
 from src.core.crystal.scale_classes.rgflow import RGFlow
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.scaleinvariance import ScaleInvariance
@@ -163,19 +162,27 @@ class HolographicLifter(nn.Module):
         )
         self.current_phase = 0
         
-        # Initialize quantum geometric attention for operadic structure
-        self.quantum_attention = QuantumGeometricAttention(
-            hidden_dim=self.dim * 2,
-            num_heads=4,  # Multiple heads for better representation
-            dropout=0.1,  # Some dropout for regularization
-            manifold_type="hyperbolic",  # Use hyperbolic geometry for RG flow
-            curvature=-1.0,  # Negative curvature for hyperbolic space
-            num_layers=3,  # Multiple layers for deep representation
-            tile_size=8,  # Small tile size for fine-grained attention
-            motive_rank=4,  # Rank for quantum features
-            dtype=self.dtype
-        )
-        
+        # # Initialize quantum geometric attention for operadic structure
+        # self.quantum_attention = QuantumGeometricAttention(
+        #     hidden_dim=self.dim * 2,
+        #     num_heads=4,  # Multiple heads for better representation
+        #     dropout=0.1,  # Some dropout for regularization
+        #     manifold_type="hyperbolic",  # Use hyperbolic geometry for RG flow
+        #     curvature=-1.0,  # Negative curvature for hyperbolic space
+        #     num_layers=3,  # Multiple layers for deep representation
+        #     tile_size=8,  # Small tile size for fine-grained attention
+        #     motive_rank=4,  # Rank for quantum features
+        #     dtype=self.dtype
+        # )
+
+        # # Initialize physics-based holographic map
+        # self.quantum_attention = nn.Sequential(
+        #     # Physical parameters based on conformal dimension
+        #     nn.Parameter(torch.tensor(1.0 / self.dim)),  # UV scale ~ 1/dim
+        #     nn.Parameter(torch.tensor(float(self.dim))),  # IR scale ~ dim
+        #     ComplexTanh(),  # Preserves conformal structure
+        # )
+                
         # Initialize operadic handler with quantum attention
         self.operad_handler = OperadicStructureHandler(
             base_dim=self.dim,

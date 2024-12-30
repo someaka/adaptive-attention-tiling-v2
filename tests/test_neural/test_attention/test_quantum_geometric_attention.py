@@ -22,11 +22,14 @@ import torch
 import torch.linalg
 
 from src.core.tiling.quantum_geometric_attention import (
-    AttentionMetrics,
     AttentionState,
-    FlowMetrics,
     GeometricStructures,
     QuantumGeometricAttention,
+)
+from src.metrics.attention import (
+    AttentionMetrics,
+    FlowMetrics,
+    compute_attention_metrics
 )
 from src.core.patterns.dynamics import PatternDynamics
 
@@ -173,8 +176,21 @@ class TestQuantumGeometricAttention:
 
         # Test metric properties
         assert isinstance(metrics, AttentionMetrics), "Should return metrics"
-        assert metrics.entropy is not None, "Should compute entropy"
-        assert metrics.complexity is not None, "Should compute complexity"
+
+        # Test geometric metrics
+        assert metrics.metric_tensor is not None, "Should compute metric tensor"
+        assert metrics.curvature_tensor is not None, "Should compute curvature tensor"
+        assert metrics.connection is not None, "Should compute connection"
+
+        # Test flow metrics
+        assert metrics.flow_energy is not None, "Should compute flow energy"
+        assert metrics.flow_divergence is not None, "Should compute flow divergence"
+        assert metrics.geometric_flow is not None, "Should compute geometric flow"
+
+        # Test pattern metrics
+        assert metrics.pattern_entropy is not None, "Should compute pattern entropy"
+        assert metrics.pattern_complexity is not None, "Should compute pattern complexity"
+        assert metrics.pattern_stability is not None, "Should compute pattern stability"
 
         # Test causality if applicable
         if attention_layer.is_causal:
