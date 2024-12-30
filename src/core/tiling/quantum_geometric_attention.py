@@ -33,111 +33,115 @@ from .quantum_attention_tile import QuantumMotivicTile
 from ..patterns.symplectic import SymplecticStructure
 from ..patterns.riemannian import PatternRiemannianStructure
 from src.core.quantum.state_space import QuantumState
+from src.core.attention.geometric import GeometricStructures
+from src.core.patterns.dynamics import PatternDynamics
+from src.core.quantum.state_space import QuantumState
+from src.core.tiling.state_manager import StateManager
+from src.core.tiling.attention_state import AttentionState
 
-
-@dataclass
-class GeometricStructures:
-    """Geometric structures for attention."""
+# @dataclass
+# class GeometricStructures:
+#     """Geometric structures for attention."""
     
-    dim: int
-    manifold_type: str
-    curvature: float
-    parallel_transport_method: str
-    metric: torch.Tensor = field(default_factory=lambda: torch.eye(1, dtype=torch.float32))
+#     dim: int
+#     manifold_type: str
+#     curvature: float
+#     parallel_transport_method: str
+#     metric: torch.Tensor = field(default_factory=lambda: torch.eye(1, dtype=torch.float32))
 
-    def __post_init__(self):
-        """Initialize geometric operations."""
-        # Initialize metric tensor with proper dimensions
-        self.metric = torch.eye(self.dim, dtype=torch.float32)
+#     def __post_init__(self):
+#         """Initialize geometric operations."""
+#         # Initialize metric tensor with proper dimensions
+#         self.metric = torch.eye(self.dim, dtype=torch.float32)
             
-        if self.manifold_type == "hyperbolic":
-            self.exp_map = HyperbolicExponential(self.dim, self.curvature)
-            self.log_map = HyperbolicLogarithm(self.dim, self.curvature)
-        else:
-            self.exp_map = EuclideanExponential(self.dim)
-            self.log_map = EuclideanLogarithm(self.dim)
-        self.transport = ParallelTransport(self.dim)
+#         if self.manifold_type == "hyperbolic":
+#             self.exp_map = HyperbolicExponential(self.dim, self.curvature)
+#             self.log_map = HyperbolicLogarithm(self.dim, self.curvature)
+#         else:
+#             self.exp_map = EuclideanExponential(self.dim)
+#             self.log_map = EuclideanLogarithm(self.dim)
+#         self.transport = ParallelTransport(self.dim)
         
-        # Validate metric tensor
-        self._validate_metric()
+#         # Validate metric tensor
+#         self._validate_metric()
 
-    def _validate_metric(self):
-        """Validate the metric tensor."""
-        if self.metric.shape != (self.dim, self.dim):
-            raise ValueError(f"Metric tensor must have shape ({self.dim}, {self.dim})")
-        if not torch.allclose(self.metric, self.metric.T):
-            raise ValueError("Metric tensor must be symmetric")
-        try:
-            torch.linalg.cholesky(self.metric)
-        except RuntimeError:
-            raise ValueError("Metric tensor must be positive definite")
+#     def _validate_metric(self):
+#         """Validate the metric tensor."""
+#         if self.metric.shape != (self.dim, self.dim):
+#             raise ValueError(f"Metric tensor must have shape ({self.dim}, {self.dim})")
+#         if not torch.allclose(self.metric, self.metric.T):
+#             raise ValueError("Metric tensor must be symmetric")
+#         try:
+#             torch.linalg.cholesky(self.metric)
+#         except RuntimeError:
+#             raise ValueError("Metric tensor must be positive definite")
 
 
-class PatternDynamics:
-    """Pattern dynamics for attention."""
+# class PatternDynamics:
+#     """Pattern dynamics for attention."""
 
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        num_patterns: int,
-        temperature: float = 0.1,
-        adaptation_rate: float = 0.01
-    ):
-        """Initialize pattern dynamics.
+#     def __init__(
+#         self,
+#         dim: int,
+#         num_heads: int,
+#         num_patterns: int,
+#         temperature: float = 0.1,
+#         adaptation_rate: float = 0.01
+#     ):
+#         """Initialize pattern dynamics.
         
-        Args:
-            dim: Hidden dimension
-            num_heads: Number of attention heads
-            num_patterns: Number of patterns to track
-            temperature: Temperature for pattern adaptation
-            adaptation_rate: Rate of pattern adaptation
-        """
-        self.dim = dim
-        self.num_heads = num_heads
-        self.num_patterns = num_patterns
-        self.temperature = temperature
-        self.adaptation_rate = adaptation_rate
+#         Args:
+#             dim: Hidden dimension
+#             num_heads: Number of attention heads
+#             num_patterns: Number of patterns to track
+#             temperature: Temperature for pattern adaptation
+#             adaptation_rate: Rate of pattern adaptation
+#         """
+#         self.dim = dim
+#         self.num_heads = num_heads
+#         self.num_patterns = num_patterns
+#         self.temperature = temperature
+#         self.adaptation_rate = adaptation_rate
 
-        # Initialize pattern memory with proper dimensions
-        self.patterns = nn.Parameter(torch.randn(num_patterns, dim, dim))
-        self.pattern_scores = nn.Parameter(torch.zeros(num_patterns))
+#         # Initialize pattern memory with proper dimensions
+#         self.patterns = nn.Parameter(torch.randn(num_patterns, dim, dim))
+#         self.pattern_scores = nn.Parameter(torch.zeros(num_patterns))
 
-    def update_patterns(self, x: torch.Tensor) -> torch.Tensor:
-        """Update pattern memory with new input.
+#     def update_patterns(self, x: torch.Tensor) -> torch.Tensor:
+#         """Update pattern memory with new input.
         
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, dim)
+#         Args:
+#             x: Input tensor of shape (batch_size, seq_len, dim)
             
-        Returns:
-            Updated pattern scores of shape (batch_size, seq_len, num_patterns)
-        """
-        batch_size, seq_len, _ = x.shape
+#         Returns:
+#             Updated pattern scores of shape (batch_size, seq_len, num_patterns)
+#         """
+#         batch_size, seq_len, _ = x.shape
         
-        # Compute pattern similarities with proper dimension handling
-        x_expanded = x.unsqueeze(2).unsqueeze(3)  # (batch, seq, 1, 1, dim)
-        patterns_expanded = self.patterns.unsqueeze(0).unsqueeze(0)  # (1, 1, num_patterns, dim, dim)
+#         # Compute pattern similarities with proper dimension handling
+#         x_expanded = x.unsqueeze(2).unsqueeze(3)  # (batch, seq, 1, 1, dim)
+#         patterns_expanded = self.patterns.unsqueeze(0).unsqueeze(0)  # (1, 1, num_patterns, dim, dim)
         
-        # Compute similarity as trace of matrix product
-        similarities = torch.einsum('bsnij,bsnjk->bsn', x_expanded, patterns_expanded)
+#         # Compute similarity as trace of matrix product
+#         similarities = torch.einsum('bsnij,bsnjk->bsn', x_expanded, patterns_expanded)
         
-        # Update pattern scores with temperature
-        scores = F.softmax(similarities / self.temperature, dim=-1)
+#         # Update pattern scores with temperature
+#         scores = F.softmax(similarities / self.temperature, dim=-1)
         
-        # Adapt patterns with learning rate
-        pattern_updates = torch.einsum('bsn,bsij->nij', scores, x.unsqueeze(-1) @ x.unsqueeze(-2))
-        self.patterns.data += self.adaptation_rate * pattern_updates
+#         # Adapt patterns with learning rate
+#         pattern_updates = torch.einsum('bsn,bsij->nij', scores, x.unsqueeze(-1) @ x.unsqueeze(-2))
+#         self.patterns.data += self.adaptation_rate * pattern_updates
         
-        return scores
+#         return scores
 
 
-@dataclass
-class AttentionState:
-    """State for quantum geometric attention."""
+# @dataclass
+# class AttentionState:
+#     """State for quantum geometric attention."""
     
-    quantum_state: torch.Tensor
-    geometric_state: torch.Tensor
-    attention_scores: Optional[torch.Tensor] = None
+#     quantum_state: QuantumState()
+#     geometric_state: torch.Tensor
+#     attention_scores: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -563,10 +567,11 @@ class QuantumGeometricAttention(nn.Module):
             dtype=self.dtype, device=x.device
         )
         
-        return AttentionState(
-            quantum_state=quantum_state,
-            geometric_state=geometric_state,
-            attention_scores=None
+        return AttentionState.initialize(
+            hidden_dim=self.hidden_dim,
+            num_heads=self.num_heads,
+            device=x.device,
+            dtype=self.dtype
         )
 
     def _process_attention(self, x: torch.Tensor) -> torch.Tensor:
@@ -884,7 +889,7 @@ class QuantumGeometricAttention(nn.Module):
         """
         # Handle both AttentionState and raw tensor inputs
         if isinstance(state, AttentionState):
-            state_tensor = state.quantum_state
+            state_tensor = state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum"))
         else:
             state_tensor = state
             
@@ -994,13 +999,13 @@ class QuantumGeometricAttention(nn.Module):
         v_manifold = v_manifold.view(batch_size, seq_len, self.num_heads, -1)
         
         # Create default key tensor if mask is None
-        key_tensor = state.quantum_state if mask is None else mask
+        key_tensor = mask if mask is not None else state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum"))
         
         # Compute attention patterns with metrics
         attention_pattern, metrics = cast(
             Tuple[torch.Tensor, AttentionMetrics],
             self.compute_attention_patterns(
-                state.quantum_state,
+                state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum")),
                 key_tensor,
                 return_metrics=True
             )
@@ -1446,66 +1451,4 @@ class QuantumGeometricAttention(nn.Module):
             metrics['concurrence'] = concurrence
         
         return metrics
-
-
-class QuantumGeometricTransformer(nn.Module):
-    """Transformer using quantum geometric attention."""
-
-    def __init__(
-        self,
-        num_layers: int,
-        hidden_dim: int,
-        num_heads: int = 8,
-        tile_size: int = 64,
-        manifold_type: str = "hyperbolic",
-        curvature: float = -1.0,
-    ):
-        super().__init__()
-        
-        # Attention layers
-        self.layers = nn.ModuleList(
-            [
-                QuantumGeometricAttention(
-                    hidden_dim=hidden_dim,
-                    num_heads=num_heads,
-                    tile_size=tile_size,
-                    manifold_type=manifold_type,
-                    curvature=curvature,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        
-        self.norm = nn.LayerNorm(hidden_dim)
-
-    def forward(
-        self, x: torch.Tensor, return_patterns: bool = False
-    ) -> Tuple[torch.Tensor, Optional[List[Dict[str, Any]]]]:
-        """Apply quantum geometric transformer.
-
-        Args:
-            x: Input tensor
-            return_patterns: Whether to return pattern metrics
-
-        Returns:
-            Tuple containing:
-            - Processed tensor
-            - Optional list of pattern metrics from each layer
-        """
-        metrics_list: List[Dict[str, Any]] = []
-
-        for layer in self.layers:
-            # Apply attention with residual
-            attended, metrics = layer(x, return_patterns=return_patterns)
-            x = x + attended
-
-            # Apply normalization
-            x = self.norm(x)
-
-            if return_patterns:
-                metrics_list.append(metrics)
-
-        if return_patterns:
-            return x, metrics_list
-
-        return x, None
+    

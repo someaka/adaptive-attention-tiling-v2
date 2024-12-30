@@ -8,7 +8,7 @@ This project implements a novel attention mechanism based on quantum geometric p
 
 - Quantum geometric attention mechanisms
 - Information geometry and pattern theory
-- High-performance CPU computing
+- High-performance CPU ONLY computing (no GPU no CUDA no Vulkan)
 - Advanced stability and validation frameworks
 
 ## Core Components

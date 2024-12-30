@@ -26,9 +26,9 @@ from src.core.tiling.quantum_geometric_attention import (
     AttentionState,
     FlowMetrics,
     GeometricStructures,
-    PatternDynamics,
     QuantumGeometricAttention,
 )
+from src.core.patterns.dynamics import PatternDynamics
 
 def complex_randn(*size, device=None):
     """Create random complex tensor with proper initialization."""
@@ -100,11 +100,8 @@ class TestQuantumGeometricAttention:
     def pattern_dynamics(self, hidden_dim, num_heads):
         """Create pattern dynamics for testing."""
         return PatternDynamics(
-            dim=hidden_dim,
-            num_heads=num_heads,
-            num_patterns=32,  # Reduced from 64 to match smaller scale
-            temperature=0.1,
-            adaptation_rate=0.01,
+            dt=0.1,
+            device=torch.device('cpu')
         )
 
     def test_attention_state_preparation(
