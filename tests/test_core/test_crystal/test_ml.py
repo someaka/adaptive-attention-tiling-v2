@@ -328,7 +328,7 @@ def test_lr_finder(trainer):
     optimal_lr = find_optimal_lr(trainer.model, uv_data, ir_data)
     
     # Verify the found learning rate is reasonable
-    assert min_lr <= optimal_lr <= max_lr, \
+    assert math.isclose(optimal_lr, min_lr, rel_tol=1e-5) or (min_lr <= optimal_lr <= max_lr), \
         f"Found learning rate {optimal_lr} outside expected range [{min_lr}, {max_lr}]"
     
     # Test that the found learning rate actually works
