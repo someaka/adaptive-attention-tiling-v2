@@ -116,7 +116,7 @@ def main() -> None:
     
     trainer = HolographicTrainer(
         model=model,
-        save_dir=str(checkpoint_dir),
+        checkpoint_dir=str(checkpoint_dir),
         device=device
     )
     

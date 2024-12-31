@@ -162,11 +162,13 @@ def pretrained_model():
 def test_model_initialization(model):
     """Test that model initializes with correct properties."""
     assert model.dim == 4
+    assert isinstance(model.input_proj, torch.nn.Sequential)
     assert isinstance(model.layers, torch.nn.ModuleList)
-    assert len(model.layers) == 3  # Input layer, hidden layer, output layer
-    assert model.layers[0].in_features == 4
-    assert model.layers[0].out_features == 16
-    assert model.layers[-1].out_features == 4
+    assert len(model.layers) == 3  # Default n_layers - 1 for input/output projections
+    assert isinstance(model.output_proj, torch.nn.Sequential)
+    assert model.input_proj[0].in_features == 4
+    assert model.input_proj[0].out_features == 16  # Default hidden_dim
+    assert model.output_proj[-1].out_features == 4
     assert isinstance(model.log_scale, torch.nn.Parameter)
     assert isinstance(model.correction_weights, torch.nn.Parameter)
     assert model.correction_weights.shape == (3,)  # Three quantum correction terms
@@ -218,26 +220,8 @@ def test_network_learning(model):
         correction = (-1)**n * x * z_ratio**power / math.factorial(n)
         y = y + correction * correction_scale
     
-    # Custom complex MSE loss with physics-informed weighting
-    def physics_loss(output: torch.Tensor, target: torch.Tensor, input: torch.Tensor) -> torch.Tensor:
-        # Basic holographic error
-        N = z_ratio**model.dim
-        holographic_error = N*output - input
-        conformal_factor = N**2 + 1
-        basic_loss = torch.mean(torch.abs(holographic_error)**2) / conformal_factor
-        
-        # Quantum corrections
-        input_norm = torch.norm(input, dim=1, keepdim=True)
-        input_normalized = input / (input_norm + 1e-8)
-        quantum_pred = model.compute_quantum_corrections(input_normalized, input_norm)
-        quantum_target = target - input/N
-        quantum_loss = torch.mean(torch.abs(quantum_pred - quantum_target)**2) * N
-        
-        # Phase coherence
-        phase_diff = torch.angle(output) - torch.angle(target)
-        phase_loss = torch.mean(torch.abs(input)**2 * (1 - torch.cos(phase_diff))) / conformal_factor
-        
-        return basic_loss + 0.1 * quantum_loss + 0.01 * phase_loss
+    # Create trainer for loss computation
+    trainer = HolographicTrainer(model)
     
     # Store initial parameters
     initial_params = {
@@ -246,23 +230,23 @@ def test_network_learning(model):
     }
     
     # Create optimizer with appropriate learning rate
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
     
     # Track losses
     losses = []
     
     # Do several training steps
-    n_steps = 50  # More training steps
+    n_steps = 100  # More training steps
     for step in range(n_steps):
         optimizer.zero_grad()
         output = model(x)
-        loss = physics_loss(output, y, x)
-        losses.append(loss.item())
+        loss, _ = trainer.compute_loss(output, y, x, return_components=True)
+        losses.append(float(loss.real))
         loss.backward()
         optimizer.step()
         
         if step % 10 == 0:
-            print(f"Step {step}: loss = {loss.item():.2e}")
+            print(f"Step {step}: loss = {float(loss.real):.2e}")
     
     # Check if parameters changed
     changed = False

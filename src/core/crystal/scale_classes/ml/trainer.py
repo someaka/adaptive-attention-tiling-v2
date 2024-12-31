@@ -53,10 +53,10 @@ class HolographicTrainer:
         self.model.to(self.device)
         
         # Get model dimensions
-        if hasattr(model, 'layers') and len(model.layers) > 0:
-            self.hidden_dim = model.layers[0].out_features
+        if hasattr(model, 'input_proj') and len(model.input_proj) > 0:
+            self.hidden_dim = model.input_proj[0].out_features
         else:
-            self.hidden_dim = 16  # Default value
+            self.hidden_dim = 32  # Default value
         
         # Create checkpoint directory
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -384,18 +384,17 @@ class HolographicTrainer:
         checkpoint = {
             "epoch": epoch,
             "model_state": self.model.state_dict(),
-            "inverse_model_state": self.inverse_model.state_dict(),
             "metrics": metrics,
             "history": self.metrics
         }
         
-        checkpoint_path = self.save_dir / f"checkpoint_epoch_{epoch}.pt"
+        checkpoint_path = Path(self.checkpoint_dir) / f"checkpoint_epoch_{epoch}.pt"
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
         
         # Save best model separately
         if metrics["val_loss"] < min(self.metrics.get("val_loss", [float('inf')])):
-            best_model_path = self.save_dir / "best_model.pt"
+            best_model_path = Path(self.checkpoint_dir) / "best_model.pt"
             torch.save(checkpoint, best_model_path)
             logger.info("Saved new best model")
     
@@ -407,17 +406,13 @@ class HolographicTrainer:
             for k, vals in self.metrics.items()
         }
         
-        with open(self.save_dir / "training_history.json", "w") as f:
+        with open(Path(self.checkpoint_dir) / "training_history.json", "w") as f:
             json.dump(history, f, indent=2)
     
     def load_checkpoint(self, path: Union[str, Path]) -> int:
         """Load checkpoint and return epoch number."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint["model_state"])
-        
-        # Load inverse model state if available
-        if "inverse_model_state" in checkpoint:
-            self.inverse_model.load_state_dict(checkpoint["inverse_model_state"])
             
         # Load metrics if available
         if "history" in checkpoint:
@@ -497,13 +492,13 @@ class HolographicTrainer:
             }
         }
         
-        checkpoint_path = self.save_dir / f"checkpoint_epoch_{epoch}.pt"
+        checkpoint_path = Path(self.checkpoint_dir) / f"checkpoint_epoch_{epoch}.pt"
         torch.save(checkpoint, checkpoint_path)
         print(f"\nSaved checkpoint to {checkpoint_path}")
         
         # Save best model separately
-        best_model_path = self.save_dir / "best_model.pt"
-        torch.save(checkpoint, best_model_path) 
+        best_model_path = Path(self.checkpoint_dir) / "best_model.pt"
+        torch.save(checkpoint, best_model_path)
     
     def train_epoch(
         self,
@@ -525,6 +520,7 @@ class HolographicTrainer:
             optimizer.zero_grad()
             pred_ir = self.model(uv_batch)
             loss, components = self.compute_loss(pred_ir, ir_batch, uv_batch, return_components=True)
+            assert isinstance(components, dict), "Components should be a dictionary"
             
             # Backward pass with gradient clipping
             loss.backward()

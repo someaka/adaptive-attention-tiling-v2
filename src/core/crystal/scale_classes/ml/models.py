@@ -70,7 +70,7 @@ class HolographicNet(nn.Module):
     def __init__(
         self,
         dim: int,
-        hidden_dim: int = 16,
+        hidden_dim: int = 32,
         n_layers: int = 4,
         dtype: torch.dtype = torch.complex64,
         z_uv: float = 0.1,
@@ -96,29 +96,42 @@ class HolographicNet(nn.Module):
                          for n in range(1, 4)], dtype=dtype)
         )
         
-        # Simple feed-forward network for learning corrections
-        self.layers = nn.ModuleList([
+        # More expressive network with residual connections and layer norm
+        self.input_proj = nn.Sequential(
             nn.Linear(dim, hidden_dim, dtype=dtype),
-            *[nn.Linear(hidden_dim, hidden_dim, dtype=dtype) for _ in range(n_layers-2)],
-            nn.Linear(hidden_dim, dim, dtype=dtype)
+            ComplexNorm(hidden_dim, dtype=dtype),
+            nn.Tanh()
+        )
+        
+        self.layers = nn.ModuleList([
+            ResidualBlock(hidden_dim, dtype=dtype)
+            for _ in range(n_layers)
         ])
+        
+        self.output_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
+            ComplexNorm(hidden_dim, dtype=dtype),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, dim, dtype=dtype)
+        )
         
         self.reset_parameters()
     
     def reset_parameters(self):
         """Initialize parameters with physics-informed values."""
         with torch.no_grad():
-            # Initialize network weights to small values
-            for layer in self.layers:
-                if isinstance(layer, nn.Linear):
-                    fan_in = layer.weight.size(1)
-                    std = torch.sqrt(torch.tensor(2.0 / fan_in)) * 0.01  # Very small scale
-                    if layer.weight.is_complex():
-                        layer.weight.data.copy_(std * (torch.randn_like(layer.weight.real) + 1j * torch.randn_like(layer.weight.imag)))
+            # Initialize network weights with Kaiming initialization
+            for module in self.modules():
+                if isinstance(module, nn.Linear):
+                    if module.weight.is_complex():
+                        nn.init.kaiming_uniform_(module.weight.real, a=math.sqrt(5))
+                        nn.init.kaiming_uniform_(module.weight.imag, a=math.sqrt(5))
                     else:
-                        layer.weight.data.copy_(std * torch.randn_like(layer.weight))
-                    if layer.bias is not None:
-                        layer.bias.data.zero_()
+                        nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+                    if module.bias is not None:
+                        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+                        bound = 1 / math.sqrt(fan_in)
+                        nn.init.uniform_(module.bias, -bound, bound)
             
             # Initialize correction weights to match analytical solution
             self.correction_weights.data.copy_(torch.tensor(
@@ -136,7 +149,7 @@ class HolographicNet(nn.Module):
         """Compute quantum corrections using OPE-inspired terms."""
         corrections = torch.zeros_like(x)
         z_ratio = self.z_ratio
-        base_scale = torch.sigmoid(self.log_scale.real) * 0.01  # Small scale
+        base_scale = torch.sigmoid(self.log_scale.real)
         
         for n in range(1, 4):
             power = -self.dim + 2*n
@@ -161,19 +174,19 @@ class HolographicNet(nn.Module):
         else:
             x = x * scale
         
-        # Learn corrections through network
-        h = x
-        for i, layer in enumerate(self.layers):
+        # Learn corrections through network with residual connections
+        h = self.input_proj(x)
+        for layer in self.layers:
             h = layer(h)
-            if i < len(self.layers) - 1:
-                h = torch.tanh(h)
+        h = self.output_proj(h)
         
-        # Combine classical scaling and learned corrections
-        x = x + h * 0.1  # Small contribution from learned part
+        # Combine classical scaling and learned corrections using gating
+        gate = torch.sigmoid(h)
+        x = x * (1 - gate) + h * gate
         
         # Add analytical quantum corrections
         corrections = self.compute_quantum_corrections(x_orig / (input_norm + self.eps), input_norm)
-        x = x + corrections
+        x = x + corrections * 0.1  # Scale down corrections
         
         # Normalize output to match input norm
         output_norm = torch.norm(x, dim=1, keepdim=True)
