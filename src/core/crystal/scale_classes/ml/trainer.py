@@ -81,6 +81,7 @@ class HolographicTrainer:
             dim=model.dim,
             hidden_dim=hidden_dim * 2,
             n_layers=len(model.blocks),
+            dtype=model.dtype,
             z_uv=model.z_ir,
             z_ir=model.z_uv
         ).to(self.device)

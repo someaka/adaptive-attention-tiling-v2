@@ -473,43 +473,58 @@ class HolographicLifter(nn.Module):
             raise ScalingError(f"Failed to compute radial scaling: {str(e)}")
             
     def _apply_radial_scaling(self, tensor: torch.Tensor, z_ratio: torch.Tensor) -> torch.Tensor:
-        """Apply radial scaling to tensor.
+        """Apply radial scaling to tensor with proper complex handling.
         
         Args:
             tensor: Input tensor to scale
-            z_ratio: Ratio of z coordinates to scale by (as tensor)
+            z_ratio: Ratio of z coordinates to scale by
             
         Returns:
-            Scaled tensor
+            Scaled tensor with proper phase
         """
-        # Compute classical scaling
-        if z_ratio.is_complex():
-            phase = torch.exp(-1j * torch.angle(z_ratio) * self.dim)
-            classical_scale = torch.abs(z_ratio)**(-self.dim)
-        else:
-            phase = 1.0
-            classical_scale = z_ratio**(-self.dim)
-        
-        # Apply classical scaling with proper phase
-        scaled_tensor = tensor * classical_scale * phase
-        
-        # Add quantum corrections
-        quantum_power = 2 - self.dim  # Relevant deformation
-        correction_scale = self.CORRECTION_SCALE_UV / (1 + torch.abs(z_ratio)**2)
-        
-        # Compute quantum correction with proper phase
-        if z_ratio.is_complex():
-            phase = torch.exp(-1j * torch.angle(z_ratio) * quantum_power)
-            quantum_scale = torch.abs(z_ratio)**quantum_power
-        else:
-            phase = 1.0
-            quantum_scale = z_ratio**quantum_power
-        
-        # Apply quantum correction
-        correction = tensor * quantum_scale * phase * correction_scale
-        
-        # Combine classical scaling and quantum corrections
-        return scaled_tensor + correction
+        try:
+            # Handle complex tensors
+            if tensor.is_complex():
+                # Extract real and imaginary parts
+                real_part = tensor.real
+                imag_part = tensor.imag
+                
+                # Compute classical scaling
+                scale = torch.abs(z_ratio)**(-self.dim)
+                phase = torch.exp(-1j * torch.angle(z_ratio) * self.dim)
+                
+                # Apply scaling to real and imaginary parts separately
+                scaled_real = real_part * scale
+                scaled_imag = imag_part * scale
+                
+                # Recombine with proper phase
+                scaled_complex = torch.complex(scaled_real, scaled_imag) * phase
+                
+                # Add quantum corrections
+                quantum_power = 2 - self.dim  # Relevant deformation
+                correction_scale = self.CORRECTION_SCALE_UV / (1 + torch.abs(z_ratio)**2)
+                quantum_phase = torch.exp(-1j * torch.angle(z_ratio) * quantum_power)
+                quantum_scale = torch.abs(z_ratio)**quantum_power
+                
+                # Apply quantum correction with proper phase
+                correction = tensor * quantum_scale * quantum_phase * correction_scale
+                
+                return scaled_complex + correction
+                
+            else:
+                # For real tensors, simpler scaling
+                classical_scale = z_ratio**(-self.dim)
+                scaled_tensor = tensor * classical_scale
+                
+                # Add quantum corrections for real case
+                quantum_power = 2 - self.dim
+                correction_scale = self.CORRECTION_SCALE_UV / (1 + z_ratio**2)
+                correction = tensor * z_ratio**quantum_power * correction_scale
+                
+                return scaled_tensor + correction
+                
+        except Exception as e:
+            raise ScalingError(f"Failed to apply radial scaling: {str(e)}")
 
     def holographic_lift(self, boundary_field: torch.Tensor, radial_points: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Lift boundary field to bulk using holographic principle.
