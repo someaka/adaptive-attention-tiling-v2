@@ -11,6 +11,7 @@ from typing import Tuple, NamedTuple
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import os
 
 from src.core.crystal.scale_classes.holographiclift import HolographicLifter
 
@@ -75,6 +76,107 @@ def test_data(lifter):
     return TestBase.create_test_data(lifter)
 
 
+@pytest.fixture(scope="class")
+def pretrained_lifter():
+    """Create a pre-trained holographic lifter."""
+    lifter = HolographicLifter(dim=4, dtype=torch.complex64)
+    
+    # Load pre-trained weights if they exist
+    weights_path = "pretrained/holographic_net.pt"
+    if os.path.exists(weights_path):
+        lifter.holographic_net.load_state_dict(torch.load(weights_path))
+        return lifter
+            
+    # If no pre-trained weights, train the network
+    print("\nPre-training holographic network...")
+    batch_size = 128  # Larger batch for better statistics
+    n_epochs = 1000   # Train longer for better convergence
+    z_uv = 0.1
+    z_ir = 10.0
+    
+    # Create diverse training data
+    uv_data = torch.randn(batch_size, lifter.dim, dtype=lifter.dtype)
+    uv_data = uv_data / torch.norm(uv_data, dim=1, keepdim=True)
+    
+    # Compute expected IR data using analytical scaling
+    z_ratio = z_ir / z_uv
+    ir_data = uv_data * z_ratio**(-lifter.dim)
+    
+    # Add quantum corrections with proper scaling
+    correction_scale = 0.1 / (1 + z_ratio**2)
+    for n in range(1, 4):
+        power = -lifter.dim + 2*n
+        correction = (-1)**n * uv_data * z_ratio**power / math.factorial(n)
+        ir_data = ir_data + correction * correction_scale
+    
+    # Find optimal learning rate
+    def lr_finder(model, x, y, min_lr=1e-5, max_lr=1e-1, num_iters=100):
+        init_state = {name: param.clone().detach() for name, param in model.named_parameters()}
+        lrs = torch.logspace(math.log10(min_lr), math.log10(max_lr), num_iters)
+        losses = []
+        
+        for lr in lrs:
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr.item())
+            optimizer.zero_grad()
+            output = model(x)
+            loss = F.mse_loss(output.real, y.real) + F.mse_loss(output.imag, y.imag)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+            
+            if not torch.isfinite(loss):
+                break
+                    
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                param.copy_(init_state[name])
+            
+        smoothed_losses = torch.tensor(losses)
+        if len(smoothed_losses) > 1:
+            derivatives = (smoothed_losses[1:] - smoothed_losses[:-1]) / (lrs[1:len(smoothed_losses)] - lrs[:len(smoothed_losses)-1])
+            optimal_idx = torch.argmin(derivatives)
+        else:
+            optimal_idx = 0
+                
+        return lrs[optimal_idx].item()
+    
+    # Train with optimal learning rate and physics-based loss
+    optimal_lr = lr_finder(lifter.holographic_net, uv_data, ir_data)
+    optimizer = torch.optim.Adam(lifter.parameters(), lr=optimal_lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50)
+    
+    best_loss = float('inf')
+    for epoch in range(n_epochs):
+        optimizer.zero_grad()
+        pred_ir = lifter.holographic_net(uv_data)
+        
+        # MSE loss for basic reconstruction
+        mse_loss = F.mse_loss(pred_ir.real, ir_data.real) + F.mse_loss(pred_ir.imag, ir_data.imag)
+        
+        # Physics-based regularization
+        scale_ratios = torch.norm(pred_ir, dim=1) / torch.norm(uv_data, dim=1)
+        expected_ratio = z_ratio**(-lifter.dim)
+        scale_loss = F.mse_loss(scale_ratios, torch.full_like(scale_ratios, expected_ratio))
+        
+        # Total loss with physics constraints
+        loss = mse_loss + 0.1 * scale_loss
+        
+        loss.backward()
+        optimizer.step()
+        scheduler.step(loss)
+        
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch}: loss = {loss.item():.2e}")
+        
+        # Save best model
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+            torch.save(lifter.holographic_net.state_dict(), weights_path)
+    
+    return lifter
+
+
 class TestHolographicLift(TestBase):
     """Core test suite for holographic lifting."""
     
@@ -103,34 +205,38 @@ class TestHolographicLift(TestBase):
 
     def test_network_learning(self, lifter: HolographicLifter):
         """Test that the network learns by verifying loss decreases using optimal learning rate."""
-        # Create test data with correct shape for quantum attention
-        # Shape should be [batch_size, seq_len, hidden_dim]
-        hidden_dim = lifter.quantum_attention.hidden_dim
-        manifold_dim = lifter.quantum_attention.manifold_dim
-        head_dim = lifter.quantum_attention.head_dim
-        num_heads = lifter.quantum_attention.num_heads
+        # Create test data with correct shape for holographic network
+        # Shape should be [batch_size, seq_len, dim]
+        batch_size = 1
+        seq_len = 4
         
         print(f"\nNetwork dimensions:")
-        print(f"hidden_dim: {hidden_dim}")
-        print(f"manifold_dim: {manifold_dim}")
-        print(f"head_dim: {head_dim}")
-        print(f"num_heads: {num_heads}")
+        print(f"dim: {lifter.dim}")
+        print(f"batch_size: {batch_size}")
+        print(f"seq_len: {seq_len}")
         
-        # Create input with shape [batch_size, seq_len, hidden_dim]
-        test_input = torch.randn(1, 4, hidden_dim, dtype=lifter.dtype)
-        test_target = torch.randn(1, 4, hidden_dim, dtype=lifter.dtype)
+        # Create input with shape [batch_size, seq_len, dim]
+        test_input = torch.randn(batch_size, seq_len, lifter.dim, dtype=lifter.dtype)
+        test_target = torch.randn(batch_size, seq_len, lifter.dim, dtype=lifter.dtype)
         
         print(f"\nInput shapes:")
         print(f"test_input: {test_input.shape}")
         print(f"test_target: {test_target.shape}")
+        
+        # Custom complex MSE loss
+        def complex_mse_loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+            """Compute MSE loss for complex tensors by treating real and imaginary parts separately."""
+            real_loss = F.mse_loss(output.real, target.real)
+            imag_loss = F.mse_loss(output.imag, target.imag)
+            return real_loss + imag_loss
         
         # Learning rate finder
         def lr_finder(
             model: nn.Module,
             x: torch.Tensor,
             y: torch.Tensor,
-            min_lr: float = 1e-7,
-            max_lr: float = 10,
+            min_lr: float = 1e-5,
+            max_lr: float = 1e-1,  # More conservative range
             num_iters: int = 100
         ) -> float:
             # Store initial parameters
@@ -148,12 +254,14 @@ class TestHolographicLift(TestBase):
                 optimizer = torch.optim.Adam(model.parameters(), lr=lr.item())
                 optimizer.zero_grad()
                 
-                # Forward pass with attention mask
+                # Forward pass
                 output = model(x)
-                loss = F.mse_loss(output, y)
+                loss = complex_mse_loss(output, y)
                 losses.append(loss.item())
                 
                 loss.backward()
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 
                 # Check for divergence
@@ -166,9 +274,12 @@ class TestHolographicLift(TestBase):
                     param.copy_(init_state[name])
             
             # Find learning rate with steepest descent
-            smoothed_losses = torch.tensor(losses[:-1])  # Remove last potentially diverged loss
-            derivatives = (smoothed_losses[1:] - smoothed_losses[:-1]) / (lrs[1:] - lrs[:-1])
-            optimal_idx = torch.argmin(derivatives)
+            smoothed_losses = torch.tensor(losses)  # Include all losses
+            if len(smoothed_losses) > 1:  # Check if we have enough losses
+                derivatives = (smoothed_losses[1:] - smoothed_losses[:-1]) / (lrs[1:len(smoothed_losses)] - lrs[:len(smoothed_losses)-1])
+                optimal_idx = torch.argmin(derivatives)
+            else:
+                optimal_idx = 0  # Default to first learning rate if we don't have enough data
             
             print(f"\nLR finder results:")
             print(f"Optimal learning rate: {lrs[optimal_idx].item():.2e}")
@@ -177,12 +288,12 @@ class TestHolographicLift(TestBase):
             return lrs[optimal_idx].item()
         
         # Find optimal learning rate
-        optimal_lr = lr_finder(lifter.quantum_attention, test_input, test_target)
+        optimal_lr = lr_finder(lifter.holographic_net, test_input, test_target)
         
         # Store initial parameters
         initial_params = {
             name: param.clone().detach()
-            for name, param in lifter.quantum_attention.named_parameters()
+            for name, param in lifter.holographic_net.named_parameters()
         }
         
         # Create optimizer with found learning rate
@@ -195,17 +306,19 @@ class TestHolographicLift(TestBase):
         n_steps = 10
         for step in range(n_steps):
             optimizer.zero_grad()
-            output = lifter.quantum_attention(test_input)
-            loss = F.mse_loss(output, test_target)
+            output = lifter.holographic_net(test_input)
+            loss = complex_mse_loss(output, test_target)
             losses.append(loss.item())
             loss.backward()
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(lifter.holographic_net.parameters(), max_norm=1.0)
             optimizer.step()
             
             print(f"Step {step}: loss = {loss.item():.2e}")
         
         # Check if parameters changed
         changed = False
-        for name, param in lifter.quantum_attention.named_parameters():
+        for name, param in lifter.holographic_net.named_parameters():
             if not torch.allclose(param, initial_params[name]):
                 changed = True
                 break
@@ -263,6 +376,38 @@ class TestHolographicLift(TestBase):
         ope21 = lifter.operator_product_expansion(*reversed(ops))
         sym_error = torch.norm(torch.abs(ope12) - torch.abs(ope21)).item()
         assert sym_error < 0.1, f"OPE symmetry violated with error {sym_error:.2e}"
+
+    def test_holographic_convergence(self, pretrained_lifter: HolographicLifter):
+        """Test that the pre-trained network correctly implements the holographic lifting function."""
+        # Test on new data
+        test_uv = torch.randn(10, pretrained_lifter.dim, dtype=pretrained_lifter.dtype)
+        test_uv = test_uv / torch.norm(test_uv, dim=1, keepdim=True)
+        
+        # Compute network prediction
+        pred_ir = pretrained_lifter.holographic_net(test_uv)
+        
+        # Compute expected IR using analytical formula
+        z_uv = 0.1
+        z_ir = 10.0
+        z_ratio = z_ir / z_uv
+        expected_ir = test_uv * z_ratio**(-pretrained_lifter.dim)
+        
+        # Add quantum corrections
+        correction_scale = 0.1 / (1 + z_ratio**2)
+        for n in range(1, 4):
+            power = -pretrained_lifter.dim + 2*n
+            correction = (-1)**n * test_uv * z_ratio**power / math.factorial(n)
+            expected_ir = expected_ir + correction * correction_scale
+        
+        # Verify accuracy
+        rel_error = torch.norm(pred_ir - expected_ir) / torch.norm(expected_ir)
+        assert rel_error < 0.1, f"Network predictions deviate from theoretical values: {rel_error:.2e}"
+        
+        # Verify scaling behavior is preserved
+        scale_ratios = torch.norm(pred_ir, dim=1) / torch.norm(test_uv, dim=1)
+        expected_ratio = z_ratio**(-pretrained_lifter.dim)
+        scale_error = torch.abs(scale_ratios - expected_ratio).mean()
+        assert scale_error < 0.1, f"Network failed to preserve scaling behavior: {scale_error:.2e}"
 
 
 class TestHolographicLiftDebug(TestBase):

@@ -162,27 +162,17 @@ class HolographicLifter(nn.Module):
         )
         self.current_phase = 0
         
-        # # Initialize quantum geometric attention for operadic structure
-        # self.quantum_attention = QuantumGeometricAttention(
-        #     hidden_dim=self.dim * 2,
-        #     num_heads=4,  # Multiple heads for better representation
-        #     dropout=0.1,  # Some dropout for regularization
-        #     manifold_type="hyperbolic",  # Use hyperbolic geometry for RG flow
-        #     curvature=-1.0,  # Negative curvature for hyperbolic space
-        #     num_layers=3,  # Multiple layers for deep representation
-        #     tile_size=8,  # Small tile size for fine-grained attention
-        #     motive_rank=4,  # Rank for quantum features
-        #     dtype=self.dtype
-        # )
+        # Initialize neural network for holographic lifting
+        self.holographic_net = nn.Sequential(
+            nn.Linear(self.dim, self.dim * 2, dtype=self.dtype),
+            ComplexTanh(),
+            nn.Linear(self.dim * 2, self.dim * 4, dtype=self.dtype),
+            ComplexTanh(),
+            nn.Linear(self.dim * 4, self.dim * 2, dtype=self.dtype),
+            ComplexTanh(),
+            nn.Linear(self.dim * 2, self.dim, dtype=self.dtype)
+        ).to(device=self.device)
 
-        # # Initialize physics-based holographic map
-        # self.quantum_attention = nn.Sequential(
-        #     # Physical parameters based on conformal dimension
-        #     nn.Parameter(torch.tensor(1.0 / self.dim)),  # UV scale ~ 1/dim
-        #     nn.Parameter(torch.tensor(float(self.dim))),  # IR scale ~ dim
-        #     ComplexTanh(),  # Preserves conformal structure
-        # )
-                
         # Initialize operadic handler with quantum attention
         self.operad_handler = OperadicStructureHandler(
             base_dim=self.dim,
