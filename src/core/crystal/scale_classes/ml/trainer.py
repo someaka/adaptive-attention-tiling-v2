@@ -38,60 +38,87 @@ MetricsDict = Dict[str, float]
 LossComponents = Dict[str, float]
 
 class HolographicTrainer:
-    """Trainer for holographic neural networks.
-    
-    This class implements a physics-informed training approach that preserves
-    the essential properties of holographic systems while training neural networks
-    to approximate the UV/IR mapping.
-    
-    Attributes:
-        model: The holographic neural network model
-        save_dir: Directory for saving checkpoints and metrics
-        device: Device to use for training (CPU/GPU)
-        inverse_model: Inverse model for cycle consistency
-        metrics: Dictionary tracking training metrics
-    """
+    """Trainer for holographic networks."""
     
     def __init__(
         self,
-        model: HolographicNet,
-        save_dir: str = "pretrained",
-        device: Optional[torch.device] = None
+        model: nn.Module,
+        device: Optional[torch.device] = None,
+        checkpoint_dir: str = "pretrained"
     ):
-        """Initialize the trainer.
-        
-        Args:
-            model: The holographic neural network model
-            save_dir: Directory for saving checkpoints and metrics
-            device: Device to use for training (CPU/GPU)
-        """
+        """Initialize trainer with model and device."""
         self.model = model
-        self.save_dir = Path(save_dir)
-        self.device = device or torch.device("cpu")
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.checkpoint_dir = checkpoint_dir
         self.model.to(self.device)
         
-        # Create save directory and initialize inverse model
-        self.save_dir.mkdir(parents=True, exist_ok=True)
+        # Get model dimensions
+        if hasattr(model, 'layers') and len(model.layers) > 0:
+            self.hidden_dim = model.layers[0].out_features
+        else:
+            self.hidden_dim = 16  # Default value
+        
+        # Create checkpoint directory
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
         logger.info(f"Using device: {self.device}")
-        logger.info(f"Saving checkpoints to: {self.save_dir}")
-        
-        # Initialize inverse model with doubled hidden dimension
-        hidden_dim = model.output_proj.in_features
-        self.inverse_model = HolographicNet(
-            dim=model.dim,
-            hidden_dim=hidden_dim * 2,
-            n_layers=len(model.blocks),
-            z_uv=model.z_ir,
-            z_ir=model.z_uv
-        ).to(self.device)
-        
-        # Initialize metrics tracking
-        self.metrics: Dict[str, List[float]] = {
-            "train_loss": [], "val_loss": [],
-            "quantum_error": [], "scaling_error": [],
-            "phase_error": []
-        }
+        logger.info(f"Saving checkpoints to: {checkpoint_dir}")
     
+    def compute_loss(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        input: torch.Tensor,
+        return_components: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, LossComponents]]:
+        """Compute physics-informed loss function with improved stability."""
+        # Get the natural scale from z_ratio
+        z_ratio = self.model.z_ratio
+        N = z_ratio**self.model.dim
+        
+        # Convert N to tensor for operations
+        N_tensor = torch.tensor(N, device=self.device, dtype=pred.dtype)
+        
+        # Normalize inputs for stability
+        pred_norm = pred / (torch.norm(pred, dim=1, keepdim=True) + 1e-8)
+        target_norm = target / (torch.norm(target, dim=1, keepdim=True) + 1e-8)
+        input_norm = torch.norm(input, dim=1, keepdim=True)
+        input_normalized = input / (input_norm + 1e-8)
+        
+        # Holographic error with improved stability
+        holographic_error = N_tensor*pred_norm - input_normalized
+        conformal_factor = torch.maximum(
+            (N_tensor**2 + 1).real,
+            torch.tensor(1.0, device=self.device, dtype=torch.float32)
+        )
+        basic_loss = torch.mean(torch.abs(holographic_error)**2) / conformal_factor
+        
+        # Quantum corrections with proper scaling and stability
+        quantum_pred = self.model.compute_quantum_corrections(input_normalized, input_norm)
+        quantum_target = target_norm - input_normalized / N_tensor
+        quantum_loss = torch.mean(torch.abs(quantum_pred - quantum_target)**2) * N_tensor.abs()
+        
+        # Phase coherence with improved stability
+        cos_phase = torch.real(torch.sum(pred_norm * target_norm.conj(), dim=1))
+        phase_loss = torch.mean((1 - cos_phase)**2)
+        
+        # Adaptive loss weighting based on training progress
+        quantum_weight = 0.1 * torch.sigmoid(self.model.log_scale.real)
+        phase_weight = 0.01 * (1 - torch.exp(-basic_loss))
+        
+        # Total loss with adaptive weighting
+        total_loss = basic_loss + quantum_weight * quantum_loss + phase_weight * phase_loss
+        
+        if return_components:
+            components = {
+                "total": float(total_loss.real),
+                "basic": float(basic_loss.real),
+                "quantum": float(quantum_loss.real),
+                "phase": float(phase_loss.real)
+            }
+            return total_loss, components
+        return total_loss
+        
     def generate_training_data(
         self,
         batch_size: int,
@@ -159,78 +186,6 @@ class HolographicTrainer:
         ir_data = (uv_data[None, :, :] * z_powers * coeffs[:, None, None]).sum(dim=0)
         
         return uv_data, ir_data
-    
-    def compute_loss(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        input: torch.Tensor,
-        return_components: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, LossComponents]]:
-        """Compute physics-informed loss function.
-        
-        The loss combines:
-        1. Basic holographic error with conformal weight
-        2. Quantum corrections with proper scaling
-        3. Phase coherence with conformal coupling
-        
-        Args:
-            pred: Predicted IR state
-            target: Target IR state
-            input: Input UV state
-            return_components: Whether to return individual loss components
-            
-        Returns:
-            Total loss tensor or tuple of (total loss, components dict)
-        """
-        # Get the natural scale from z_ratio
-        z_ratio = self.model.z_ratio
-        N = z_ratio**self.model.dim
-        
-        # Convert N to tensor for operations
-        N_tensor = torch.tensor(N, device=self.device, dtype=pred.dtype)
-        
-        # Normalize inputs for stability
-        pred_norm = pred / (torch.norm(pred, dim=1, keepdim=True) + 1e-8)
-        target_norm = target / (torch.norm(target, dim=1, keepdim=True) + 1e-8)
-        input_norm = input / (torch.norm(input, dim=1, keepdim=True) + 1e-8)
-        
-        # Holographic error with conformal weight and stability
-        holographic_error = torch.norm(N_tensor*pred_norm - input_norm, dim=1)
-        # Take real part before using maximum for complex tensors
-        conformal_factor = torch.maximum(
-            (N_tensor**2 + 1).real,
-            torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        )
-        basic_loss = torch.mean(holographic_error**2) / conformal_factor
-        
-        # Quantum corrections with proper scaling and stability
-        quantum_pred = self.model.compute_quantum_corrections(input_norm)
-        quantum_target = target_norm - input_norm/N_tensor  # Remove classical scaling
-        quantum_diff = quantum_pred - quantum_target
-        quantum_error = torch.norm(quantum_diff, dim=1)**2
-        # Take real part and convert to float for scaling
-        N_real = torch.maximum(
-            N_tensor.real,
-            torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        )
-        quantum_loss = torch.mean(quantum_error) * N_real
-        
-        # Phase coherence with conformal coupling and stability
-        phase_diff = torch.angle(pred_norm + 1e-8) - torch.angle(input_norm/N_tensor + 1e-8)
-        phase_loss = torch.mean(torch.abs(input_norm)**2 * (1 - torch.cos(phase_diff))) / conformal_factor
-        
-        # Total loss combines conformal terms with balanced weights
-        total_loss = (0.5 * basic_loss + 0.3 * quantum_loss + 0.2 * phase_loss).real
-        
-        if return_components:
-            components: LossComponents = {
-                "basic": float(basic_loss.real),
-                "quantum": float(quantum_loss.real),
-                "phase": float(phase_loss.real)
-            }
-            return total_loss, components
-        return total_loss
     
     def train(
         self,
@@ -556,24 +511,46 @@ class HolographicTrainer:
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
     ) -> Dict[str, float]:
-        """Public interface for training a single epoch.
+        """Train for one epoch with improved stability."""
+        self.model.train()
+        total_metrics = defaultdict(float)
+        n_batches = 0
         
-        Returns metrics dictionary with all required keys:
-        - loss: Total loss
-        - basic: Basic holographic error
-        - quantum: Quantum correction error
-        - phase: Phase coherence error
-        """
-        metrics = self._train_epoch(train_loader, optimizer)
-        
-        # Ensure all required keys are present
-        metrics.update({
-            'basic': metrics.get('scaling', 0.0),  # Scaling error is our basic error
-            'quantum': metrics.get('quantum', 0.0),
-            'phase': metrics.get('phase', 0.0)
-        })
-        
-        if scheduler is not None:
-            scheduler.step()
+        for uv_batch, ir_batch in train_loader:
+            # Move data to device
+            uv_batch = uv_batch.to(self.device)
+            ir_batch = ir_batch.to(self.device)
             
+            # Forward pass with gradient clipping
+            optimizer.zero_grad()
+            pred_ir = self.model(uv_batch)
+            loss, components = self.compute_loss(pred_ir, ir_batch, uv_batch, return_components=True)
+            
+            # Backward pass with gradient clipping
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            # Update metrics
+            total_metrics['total'] += float(loss.real)
+            total_metrics['basic'] += float(components['basic'])
+            total_metrics['quantum'] += float(components['quantum'])
+            total_metrics['phase'] += float(components['phase'])
+            n_batches += 1
+            
+            # Check for NaN loss
+            if torch.isnan(loss):
+                raise ValueError("NaN loss detected")
+        
+        # Update learning rate
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(total_metrics['total'] / n_batches)
+            else:
+                scheduler.step()
+        
+        # Average metrics over batches
+        metrics = {k: v/n_batches for k, v in total_metrics.items()}
+        metrics['loss'] = metrics['total']  # Add loss alias for compatibility
+        
         return metrics 
