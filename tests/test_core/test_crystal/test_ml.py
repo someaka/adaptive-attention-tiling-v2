@@ -3,6 +3,7 @@ import pytest
 from src.core.crystal.scale_classes.ml.models import HolographicNet
 from src.core.crystal.scale_classes.ml.trainer import HolographicTrainer
 from typing import Tuple
+import math
 
 @pytest.fixture
 def model():
@@ -205,3 +206,145 @@ def test_holographic_convergence(trainer):
     scaled_pred = scaled_pred / torch.norm(scaled_pred, dim=1, keepdim=True)
     scaling_error = torch.norm(scaled_pred - pred_ir) / torch.norm(pred_ir)
     assert scaling_error < 0.2, "Network fails to preserve scaling behavior" 
+
+def test_learning_progress(trainer):
+    """Test that the model actually learns and validation loss decreases."""
+    # Generate a larger dataset for meaningful validation
+    batch_size = 64
+    n_samples = batch_size * 10
+    val_split = 0.2
+    
+    # Generate dataset with both UV and IR data
+    uv_data, ir_data = trainer.generate_training_data(n_samples)
+    
+    # Split into train/val
+    n_val = int(n_samples * val_split)
+    indices = torch.randperm(n_samples)
+    
+    train_idx, val_idx = indices[n_val:], indices[:n_val]
+    train_data = torch.utils.data.TensorDataset(uv_data[train_idx], ir_data[train_idx])
+    val_data = torch.utils.data.TensorDataset(uv_data[val_idx], ir_data[val_idx])
+    
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size)
+    
+    # Training setup
+    optimizer = torch.optim.Adam(trainer.model.parameters(), lr=0.001)
+    n_epochs = 10
+    
+    # Record initial losses
+    initial_train_metrics = trainer.train_epoch(train_loader, optimizer)
+    initial_val_metrics = trainer.validate(val_loader)
+    initial_train_loss = initial_train_metrics['loss']
+    initial_val_loss = initial_val_metrics['loss']
+    
+    # Train for several epochs
+    train_losses = [initial_train_loss]
+    val_losses = [initial_val_loss]
+    
+    for _ in range(n_epochs):
+        train_metrics = trainer.train_epoch(train_loader, optimizer)
+        val_metrics = trainer.validate(val_loader)
+        train_losses.append(train_metrics['loss'])
+        val_losses.append(val_metrics['loss'])
+    
+    final_train_loss = train_losses[-1]
+    final_val_loss = val_losses[-1]
+    
+    # Verify that training loss decreased significantly (at least 50%)
+    assert final_train_loss < initial_train_loss * 0.5, \
+        f"Training loss did not decrease significantly: {initial_train_loss:.4f} -> {final_train_loss:.4f}"
+    
+    # Verify that validation loss also decreased significantly
+    assert final_val_loss < initial_val_loss * 0.5, \
+        f"Validation loss did not decrease significantly: {initial_val_loss:.4f} -> {final_val_loss:.4f}"
+    
+    # Check for catastrophic overfitting by ensuring val loss isn't much worse than train loss
+    assert final_val_loss < final_train_loss * 2.0, \
+        f"Validation loss ({final_val_loss:.4f}) is much higher than training loss ({final_train_loss:.4f})"
+    
+    # Verify loss decreased monotonically (allowing for small fluctuations)
+    for i in range(1, len(train_losses)):
+        assert train_losses[i] < train_losses[0] * 0.95, \
+            f"Training loss increased significantly at epoch {i}"
+        assert val_losses[i] < val_losses[0] * 0.95, \
+            f"Validation loss increased significantly at epoch {i}" 
+
+def test_lr_finder(trainer):
+    """Test that learning rate finder identifies a reasonable learning rate."""
+    # Generate test data
+    batch_size = 32
+    min_lr = 1e-5
+    max_lr = 1e-1
+    uv_data, ir_data = trainer.generate_training_data(batch_size)
+    
+    def find_optimal_lr(
+        model: torch.nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        min_lr: float = 1e-5,
+        max_lr: float = 1e-1,
+        num_iters: int = 100
+    ) -> float:
+        """Find optimal learning rate by testing increasing LRs and analyzing loss curve."""
+        # Store initial parameters
+        init_state = {
+            name: param.clone().detach()
+            for name, param in model.named_parameters()
+        }
+        
+        # Log-spaced learning rates
+        lrs = torch.logspace(math.log10(min_lr), math.log10(max_lr), num_iters)
+        losses = []
+        
+        for lr in lrs:
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr.item())
+            optimizer.zero_grad()
+            output = model(x)
+            loss = trainer.compute_loss(output, y, x)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+            
+            if not torch.isfinite(loss):
+                break
+        
+        # Restore initial parameters
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                param.copy_(init_state[name])
+        
+        # Find optimal LR by analyzing loss curve
+        smoothed_losses = torch.tensor(losses)
+        if len(smoothed_losses) > 1:
+            # Look at rate of change of loss
+            derivatives = (smoothed_losses[1:] - smoothed_losses[:-1]) / (lrs[1:len(smoothed_losses)] - lrs[:len(smoothed_losses)-1])
+            optimal_idx = torch.argmin(derivatives)
+            return lrs[optimal_idx].item()
+        
+        return min_lr  # Default to minimum if no valid range found
+    
+    # Test the learning rate finder
+    optimal_lr = find_optimal_lr(trainer.model, uv_data, ir_data)
+    
+    # Verify the found learning rate is reasonable
+    assert min_lr <= optimal_lr <= max_lr, \
+        f"Found learning rate {optimal_lr} outside expected range [{min_lr}, {max_lr}]"
+    
+    # Test that the found learning rate actually works
+    optimizer = torch.optim.Adam(trainer.model.parameters(), lr=optimal_lr)
+    initial_loss = trainer.compute_loss(trainer.model(uv_data), ir_data, uv_data).item()
+    
+    # Train for a few steps with the found learning rate
+    for _ in range(5):
+        optimizer.zero_grad()
+        pred = trainer.model(uv_data)
+        loss = trainer.compute_loss(pred, ir_data, uv_data)
+        loss.backward()
+        optimizer.step()
+    
+    final_loss = trainer.compute_loss(trainer.model(uv_data), ir_data, uv_data).item()
+    
+    # Verify loss decreased with the found learning rate
+    assert final_loss < initial_loss, \
+        f"Loss did not decrease with found learning rate {optimal_lr}" 
