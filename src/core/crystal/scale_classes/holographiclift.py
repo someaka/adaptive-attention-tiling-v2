@@ -31,6 +31,20 @@ from src.validation.geometric.model import GeometricValidationResult
 from src.validation.base import ValidationResult
 from src.validation.geometric.symplectic import OperadicValidator
 from src.validation.geometric.operadic_structure import OperadicStructureValidator
+from src.core.crystal.scale_classes.ml.models import HolographicNet
+
+import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from typing import Optional, Dict, List, Tuple, Union
+import numpy as np
+from pathlib import Path
+import json
+from datetime import datetime
+from collections import defaultdict
 
 
 class ValidationError(Exception):
@@ -163,14 +177,13 @@ class HolographicLifter(nn.Module):
         self.current_phase = 0
         
         # Initialize neural network for holographic lifting
-        self.holographic_net = nn.Sequential(
-            nn.Linear(self.dim, self.dim * 2, dtype=self.dtype),
-            ComplexTanh(),
-            nn.Linear(self.dim * 2, self.dim * 4, dtype=self.dtype),
-            ComplexTanh(),
-            nn.Linear(self.dim * 4, self.dim * 2, dtype=self.dtype),
-            ComplexTanh(),
-            nn.Linear(self.dim * 2, self.dim, dtype=self.dtype)
+        self.holographic_net = HolographicNet(
+            dim=self.dim,
+            hidden_dim=self.dim * 4,  # Larger hidden dimension for better representation
+            n_layers=4,  # More layers for deeper network
+            dtype=self.dtype,
+            z_uv=self.Z_UV,
+            z_ir=self.Z_IR
         ).to(device=self.device)
 
         # Initialize operadic handler with quantum attention
@@ -486,50 +499,111 @@ class HolographicLifter(nn.Module):
         except Exception as e:
             raise MemoryError(f"Memory management failed in phase tracking: {str(e)}")
 
-    def _compute_radial_scaling(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute radial scaling factors for holographic lifting.
+    def _compute_radial_scaling(self, radial_points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute radial scaling factors for bulk field reconstruction.
         
-        The radial scaling determines how fields scale as we move from UV to IR.
-        It encodes both the classical scaling and quantum corrections.
+        This method computes the scaling factors needed for:
+        1. Classical scaling: field ~ r^(-dim)
+        2. Quantum corrections: ~ r^(2-dim)
         
         Physics Background:
-        - Classical scaling follows conformal dimension
-        - Quantum corrections modify IR behavior
-        - Phase factors preserve quantum coherence
-        - Complex coordinates handled properly
+        - Classical scaling follows from conformal invariance
+        - Quantum corrections represent relevant deformations
+        - The scaling dimensions determine the RG flow
         
         Args:
-            z: Radial coordinate tensor
+            radial_points: Radial coordinates for bulk reconstruction
             
         Returns:
-            Tuple of:
-            - dim_powers: Classical scaling factors (r^(-dim))
-            - correction_powers: Quantum correction factors (r^(2-dim))
-        """
-        # Ensure z is complex
-        z = z.to(dtype=self.dtype)
-        
-        # Compute dimensionless ratio z/z_uv
-        z_ratio = z / self.Z_UV
-        
-        # Classical scaling (power law) with proper normalization
-        dim_powers = torch.pow(torch.abs(z_ratio), -self.dim)
-        
-        # Quantum corrections (modified scaling) with proper normalization
-        correction_powers = torch.pow(torch.abs(z_ratio), 2 - self.dim)
-        
-        # Add phase factors for complex coordinates
-        if z.is_complex():
-            phase = torch.exp(-1j * torch.angle(z_ratio) * self.dim)
-            dim_powers = dim_powers * phase
-            correction_powers = correction_powers * phase.conj()  # Conjugate for corrections
+            Tuple of (classical_scaling, quantum_scaling) tensors
             
-        # Normalize the scaling factors
-        dim_powers = dim_powers / torch.norm(dim_powers)
-        correction_powers = correction_powers / torch.norm(correction_powers)
+        Raises:
+            ScalingError: If scaling computation fails
+        """
+        try:
+            # Validate input
+            validation = self._validate_tensor(radial_points, "radial_points")
+            if not validation.is_valid:
+                raise ValidationError(f"Invalid radial points: {validation.message}")
+                
+            # Ensure proper dtype
+            radial_points = self._ensure_dtype(radial_points)
+            
+            # Compute dimensionless ratios
+            z_ratios = torch.abs(radial_points / radial_points[0])
+            
+            # Classical scaling
+            classical_scaling = z_ratios**(-self.dim)
+            
+            # Quantum corrections
+            quantum_scaling = z_ratios**(2 - self.dim)  # Relevant deformation
+            
+            # Track memory usage
+            self._update_memory_pressure()
+            
+            return classical_scaling, quantum_scaling
+            
+        except Exception as e:
+            raise ScalingError(f"Failed to compute radial scaling: {str(e)}")
+            
+    def _apply_radial_scaling(self, field: torch.Tensor, z_ratio: torch.Tensor) -> torch.Tensor:
+        """Apply radial scaling to field.
         
-        return dim_powers, correction_powers
-
+        This method applies both:
+        1. Classical scaling: field ~ r^(-dim)
+        2. Quantum corrections: ~ r^(2-dim)
+        
+        Physics Background:
+        - Classical scaling preserves conformal invariance
+        - Quantum corrections capture relevant deformations
+        - The total scaling determines the RG flow
+        
+        Args:
+            field: Field to scale
+            z_ratio: Dimensionless ratio z/z_UV
+            
+        Returns:
+            Scaled field
+            
+        Raises:
+            ScalingError: If scaling application fails
+        """
+        try:
+            # Validate inputs
+            field = self._ensure_dtype(field)
+            z_ratio = self._ensure_dtype(z_ratio)
+            
+            # Compute classical scaling with proper normalization
+            field_norm = torch.norm(field)
+            if field_norm > self.EPSILON:
+                normalized_field = field / field_norm
+            else:
+                normalized_field = field
+                
+            # Apply classical scaling with phase preservation
+            if z_ratio.is_complex():
+                phase = torch.exp(-1j * torch.angle(z_ratio) * self.dim)
+                scaled_field = normalized_field * field_norm * (torch.abs(z_ratio)**(-self.dim)) * phase
+            else:
+                scaled_field = normalized_field * field_norm * (z_ratio**(-self.dim))
+            
+            # Add quantum corrections with proper normalization
+            quantum_power = 2 - self.dim  # Relevant deformation
+            correction_scale = self.CORRECTION_SCALE_UV / (1 + torch.abs(z_ratio)**2)
+            
+            if z_ratio.is_complex():
+                phase = torch.exp(-1j * torch.angle(z_ratio) * quantum_power)
+                correction = normalized_field * field_norm * (torch.abs(z_ratio)**quantum_power) * phase
+            else:
+                correction = normalized_field * field_norm * (z_ratio**quantum_power)
+                
+            scaled_field = scaled_field + correction * correction_scale
+            
+            return scaled_field
+            
+        except Exception as e:
+            raise ScalingError(f"Failed to apply radial scaling: {str(e)}")
+            
     def holographic_lift(self, boundary_field: torch.Tensor, radial_points: torch.Tensor) -> torch.Tensor:
         """Lift boundary field to bulk using holographic correspondence.
         
@@ -575,14 +649,8 @@ class HolographicLifter(nn.Module):
             
             # Pre-compute frequently used values
             num_points = len(radial_points)
-            z_ratios = torch.abs(radial_points / self.Z_UV)
+            z_ratios = torch.abs(radial_points / radial_points[0])
             boundary_norm = torch.norm(boundary_field)
-            
-            # Pre-compute scaling factors
-            try:
-                dim_powers, correction_powers = self._compute_radial_scaling(radial_points)
-            except Exception as e:
-                raise ScalingError(f"Failed to compute radial scaling: {str(e)}")
             
             # Initialize bulk field with memory tracking
             bulk_shape = (num_points,) + boundary_field.shape
@@ -597,7 +665,7 @@ class HolographicLifter(nn.Module):
                     # Store parameters for reconstruction
                     self.Z_UV = radial_points[0]
                     self.Z_IR = radial_points[-1]
-                    self.Z_RATIO = self.Z_UV / self.Z_IR
+                    self.Z_RATIO = self.Z_IR / self.Z_UV
                     self.boundary_norm = boundary_norm
                     
                     # Reset phase tracking
@@ -605,14 +673,14 @@ class HolographicLifter(nn.Module):
                     self.phase_evolution.zero_()
                     
                     # Main lifting loop with memory optimization
-                    for i, (z_ratio, dim_power, corr_power) in enumerate(zip(z_ratios, dim_powers, correction_powers)):
+                    for i, z_ratio in enumerate(z_ratios):
                         if i == 0:
                             continue
                             
-                        # Scale field (reuse memory)
-                        bulk_field[i] = boundary_field * dim_power
+                        # Apply radial scaling
+                        bulk_field[i] = self._apply_radial_scaling(boundary_field, z_ratio)
                         
-                        # Add quantum corrections
+                        # Add quantum corrections from OPE
                         prev_field = bulk_field[i-1]
                         norm = torch.norm(prev_field)
                         if norm > self.EPSILON:
@@ -621,26 +689,27 @@ class HolographicLifter(nn.Module):
                                 correction = self.compute_ope(prev_field)
                             except Exception as e:
                                 raise OperatorError(f"OPE computation failed at step {i}: {str(e)}")
-                            
+                                
                             # Handle phase evolution
                             self._track_phase(correction)
                             
                             # Scale and apply correction
                             correction_scale = self.CORRECTION_SCALE_UV / (1 + z_ratio**2)
-                            bulk_field[i].add_(correction * boundary_norm * corr_power * correction_scale)
-                        
+                            bulk_field[i].add_(correction * boundary_norm * correction_scale)
+                            
                         # Periodic memory optimization in main lifting loop
                         if i % self.CLEANUP_INTERVAL == 0:
                             self._update_memory_pressure()
                             self._ensure_memory_efficiency(min_free_memory=0.3)  # Higher threshold during lifting
-                        
+                            
                     return bulk_field
             except Exception as e:
                 raise MemoryError(f"Memory management failed: {str(e)}")
-        except (ValidationError, ScalingError, OperatorError, MemoryError) as e:
+                
+        except ValidationError:
             raise
         except Exception as e:
-            raise HolographicError(f"Unexpected error in holographic lifting: {str(e)}")
+            raise RuntimeError(f"Holographic lifting failed: {str(e)}")
     
 
     def extract_uv_data(self, field: torch.Tensor) -> torch.Tensor:
@@ -792,7 +861,6 @@ class HolographicLifter(nn.Module):
                 # Initialize UV data with leading term
                 uv_data = self._allocate_tensor(ir_data.shape, self.dtype, "uv_data")
                 uv_data.copy_(ir_data)
-                uv_data.mul_(self.Z_RATIO ** (-self.dim))  # Invert IR scaling
                 
                 # Track UV data
                 with self._track_tensor(uv_data, "uv_data"):
@@ -1034,16 +1102,6 @@ class HolographicLifter(nn.Module):
         - Handles both real and complex fields
         - Tracks memory usage for large fields
         - Preserves quantum phase information
-        
-        Args:
-            field: Input field to compute corrections for
-            
-        Returns:
-            OPE coefficients with same shape as input
-            
-        Raises:
-            OperatorError: If OPE computation fails
-            MemoryError: If memory management fails
         """
         try:
             # Validate input
@@ -1055,7 +1113,7 @@ class HolographicLifter(nn.Module):
             
             # Track input field
             with self._track_tensor(field, "input_field"):
-                # Split field into two operators for OPE
+                # For complex fields, compute OPE in a phase-preserving way
                 if field.is_complex():
                     # Pre-allocate real and imaginary parts
                     op1 = self._allocate_tensor(field.shape, torch.float32, "op1_real")
@@ -1068,11 +1126,19 @@ class HolographicLifter(nn.Module):
                     # Track operators and compute OPE
                     with self._track_tensor(op1, "op1_real"), \
                          self._track_tensor(op2, "op2_imag"):
-                        # Compute OPE between different operators
-                        correction = self.operator_product_expansion(op1, op2)
+                        # Compute OPE between real and imaginary parts
+                        real_ope = 0.5 * (op1 * op2 + op2 * op1)  # Symmetrized cross term
+                        imag_ope = 0.5 * (op2 * op1 - op1 * op2)  # Anti-symmetrized cross term
                         
-                        # Track phase if needed
-                        self._track_phase(correction)
+                        # Combine with proper phase
+                        correction = torch.complex(real_ope, imag_ope)
+                        
+                        # Normalize to preserve OPE symmetry
+                        norm = torch.norm(correction)
+                        if norm > self.EPSILON:
+                            correction = correction / norm
+                        else:
+                            correction = torch.zeros_like(correction)
                         
                         return correction
                 else:
@@ -1086,10 +1152,14 @@ class HolographicLifter(nn.Module):
                     # Track shifted operator and compute OPE
                     with self._track_tensor(op2, "op2_shifted"):
                         # Compute OPE between different operators
-                        correction = self.operator_product_expansion(op1, op2)
+                        correction = 0.5 * (op1 * op2 + op2 * op1)  # Symmetrized product
                         
-                        # Track phase if needed
-                        self._track_phase(correction)
+                        # Normalize to preserve OPE symmetry
+                        norm = torch.norm(correction)
+                        if norm > self.EPSILON:
+                            correction = correction / norm
+                        else:
+                            correction = torch.zeros_like(correction)
                         
                         return correction
                     
@@ -1362,7 +1432,7 @@ class HolographicLifter(nn.Module):
                     message="Radial points must be strictly increasing",
                     data={"min_diff": torch.min(radial_points[1:] - radial_points[:-1]).item()}
                 )
-    
+        
         return GeometricValidationResult(
             is_valid=True,
             message="Holographic data validated successfully",

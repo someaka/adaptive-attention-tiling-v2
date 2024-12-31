@@ -150,16 +150,23 @@ def pretrained_lifter():
         optimizer.zero_grad()
         pred_ir = lifter.holographic_net(uv_data)
         
-        # MSE loss for basic reconstruction
-        mse_loss = F.mse_loss(pred_ir.real, ir_data.real) + F.mse_loss(pred_ir.imag, ir_data.imag)
+        # Holographic error with conformal weight
+        N = z_ratio**lifter.dim
+        holographic_error = N*pred_ir - uv_data
+        conformal_factor = N**2 + 1
+        basic_loss = torch.mean(torch.abs(holographic_error)**2) / conformal_factor
         
-        # Physics-based regularization
-        scale_ratios = torch.norm(pred_ir, dim=1) / torch.norm(uv_data, dim=1)
-        expected_ratio = z_ratio**(-lifter.dim)
-        scale_loss = F.mse_loss(scale_ratios, torch.full_like(scale_ratios, expected_ratio))
+        # Quantum corrections with proper scaling
+        quantum_pred = lifter.holographic_net.compute_quantum_corrections(uv_data)
+        quantum_target = ir_data - uv_data/N  # Remove classical scaling
+        quantum_loss = torch.mean(torch.abs(quantum_pred - quantum_target)**2) * N
         
-        # Total loss with physics constraints
-        loss = mse_loss + 0.1 * scale_loss
+        # Phase coherence with conformal coupling
+        phase_diff = torch.angle(pred_ir) - torch.angle(uv_data/N)
+        phase_loss = torch.mean(torch.abs(uv_data)**2 * (1 - torch.cos(phase_diff))) / conformal_factor
+        
+        # Total loss combines all physics terms
+        loss = basic_loss + quantum_loss + phase_loss
         
         loss.backward()
         optimizer.step()
@@ -167,6 +174,9 @@ def pretrained_lifter():
         
         if epoch % 100 == 0:
             print(f"Epoch {epoch}: loss = {loss.item():.2e}")
+            print(f"  Basic: {basic_loss.item():.2e}")
+            print(f"  Quantum: {quantum_loss.item():.2e}")
+            print(f"  Phase: {phase_loss.item():.2e}")
         
         # Save best model
         if loss.item() < best_loss:
@@ -326,6 +336,42 @@ class TestHolographicLift(TestBase):
         assert changed, "Parameters did not change during training"
         assert losses[-1] < losses[0], "Loss did not decrease during training"
 
+
+
+    def test_holographic_convergence(self, pretrained_lifter: HolographicLifter):
+        """Test that the pre-trained network correctly implements the holographic lifting function."""
+        # Test on new data
+        test_uv = torch.randn(10, pretrained_lifter.dim, dtype=pretrained_lifter.dtype)
+        test_uv = test_uv / torch.norm(test_uv, dim=1, keepdim=True)
+        
+        # Compute network prediction
+        pred_ir = pretrained_lifter.holographic_net(test_uv)
+        
+        # Compute expected IR using analytical formula
+        z_uv = 0.1
+        z_ir = 10.0
+        z_ratio = z_ir / z_uv
+        expected_ir = test_uv * z_ratio**(-pretrained_lifter.dim)
+        
+        # Add quantum corrections
+        correction_scale = 0.1 / (1 + z_ratio**2)
+        for n in range(1, 4):
+            power = -pretrained_lifter.dim + 2*n
+            correction = (-1)**n * test_uv * z_ratio**power / math.factorial(n)
+            expected_ir = expected_ir + correction * correction_scale
+        
+        # Verify accuracy
+        rel_error = torch.norm(pred_ir - expected_ir) / torch.norm(expected_ir)
+        assert rel_error < 0.1, f"Network predictions deviate from theoretical values: {rel_error:.2e}"
+        
+        # Verify scaling behavior is preserved
+        scale_ratios = torch.norm(pred_ir, dim=1) / torch.norm(test_uv, dim=1)
+        expected_ratio = z_ratio**(-pretrained_lifter.dim)
+        scale_error = torch.abs(scale_ratios - expected_ratio).mean()
+        assert scale_error < 0.1, f"Network failed to preserve scaling behavior: {scale_error:.2e}"
+
+
+
     def test_uv_ir_connection(self, lifter: HolographicLifter, test_data: HolographicTestData):
         """Test UV/IR connection with detailed diagnostics."""
         reconstructed = lifter.reconstruct_from_ir(test_data.ir_data)
@@ -377,37 +423,6 @@ class TestHolographicLift(TestBase):
         sym_error = torch.norm(torch.abs(ope12) - torch.abs(ope21)).item()
         assert sym_error < 0.1, f"OPE symmetry violated with error {sym_error:.2e}"
 
-    def test_holographic_convergence(self, pretrained_lifter: HolographicLifter):
-        """Test that the pre-trained network correctly implements the holographic lifting function."""
-        # Test on new data
-        test_uv = torch.randn(10, pretrained_lifter.dim, dtype=pretrained_lifter.dtype)
-        test_uv = test_uv / torch.norm(test_uv, dim=1, keepdim=True)
-        
-        # Compute network prediction
-        pred_ir = pretrained_lifter.holographic_net(test_uv)
-        
-        # Compute expected IR using analytical formula
-        z_uv = 0.1
-        z_ir = 10.0
-        z_ratio = z_ir / z_uv
-        expected_ir = test_uv * z_ratio**(-pretrained_lifter.dim)
-        
-        # Add quantum corrections
-        correction_scale = 0.1 / (1 + z_ratio**2)
-        for n in range(1, 4):
-            power = -pretrained_lifter.dim + 2*n
-            correction = (-1)**n * test_uv * z_ratio**power / math.factorial(n)
-            expected_ir = expected_ir + correction * correction_scale
-        
-        # Verify accuracy
-        rel_error = torch.norm(pred_ir - expected_ir) / torch.norm(expected_ir)
-        assert rel_error < 0.1, f"Network predictions deviate from theoretical values: {rel_error:.2e}"
-        
-        # Verify scaling behavior is preserved
-        scale_ratios = torch.norm(pred_ir, dim=1) / torch.norm(test_uv, dim=1)
-        expected_ratio = z_ratio**(-pretrained_lifter.dim)
-        scale_error = torch.abs(scale_ratios - expected_ratio).mean()
-        assert scale_error < 0.1, f"Network failed to preserve scaling behavior: {scale_error:.2e}"
 
 
 class TestHolographicLiftDebug(TestBase):

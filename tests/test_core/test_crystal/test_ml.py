@@ -56,7 +56,7 @@ def test_loss_computation(trainer):
     # Test loss components
     loss, components = trainer.compute_loss(pred, y, x, return_components=True)
     assert isinstance(components, dict)
-    assert all(k in components for k in ['mse', 'scale', 'quantum'])
+    assert all(k in components for k in ['basic', 'quantum', 'phase'])
     assert all(isinstance(v, float) for v in components.values())
 
 def test_norm_preservation(model):
@@ -88,7 +88,7 @@ def test_training_step(trainer):
     metrics = trainer.train_epoch(loader, optimizer)
     
     assert isinstance(metrics, dict)
-    assert all(k in metrics for k in ['loss', 'mse', 'scale', 'quantum'])
+    assert all(k in metrics for k in ['loss', 'basic', 'quantum', 'phase'])
     assert all(isinstance(v, float) for v in metrics.values()) 
 
 def test_holographic_convergence(trainer):

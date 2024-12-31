@@ -103,11 +103,23 @@ class HolographicNet(nn.Module):
                         param.data.copy_(std * torch.randn_like(param))
                 elif 'bias' in name:
                     param.data.zero_()
+            
+            # Initialize correction weights close to analytical solution
+            self.correction_weights.data.copy_(torch.tensor(
+                [0.1/n for n in range(1, 4)],
+                dtype=self.dtype
+            ))
+            
+            # Initialize log_scale to match classical scaling
+            self.log_scale.data.copy_(torch.log(torch.tensor(
+                self.z_ratio**(-self.dim),
+                dtype=torch.float32
+            )))
     
     def compute_quantum_corrections(self, x: torch.Tensor) -> torch.Tensor:
         """Compute quantum corrections using OPE-inspired terms."""
         corrections = torch.zeros_like(x)
-        z_ratio = torch.exp(self.log_scale.real).item()**(1/self.dim)
+        z_ratio = self.z_ratio  # Use actual z_ratio instead of exp(log_scale)
         
         for n, weight in enumerate(self.correction_weights, 1):
             power = -self.dim + 2*n
@@ -118,12 +130,11 @@ class HolographicNet(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with residual connections and quantum corrections."""
-        # Initial scaling
-        scale = torch.exp(self.log_scale.real)
-        out = x * scale
+        # Compute quantum corrections first
+        corrections = self.compute_quantum_corrections(x)
         
-        # Initial projection
-        out = self.input_proj(out)
+        # Process input through network
+        out = self.input_proj(x)
         
         # Residual blocks
         for block in self.blocks:
@@ -132,7 +143,8 @@ class HolographicNet(nn.Module):
         # Output projection
         out = self.output_proj(out)
         
-        # Add quantum corrections
-        out = out + self.compute_quantum_corrections(x)
+        # Apply scaling and add corrections
+        scale = torch.exp(self.log_scale.real)
+        out = out * scale + corrections
         
         return out 
