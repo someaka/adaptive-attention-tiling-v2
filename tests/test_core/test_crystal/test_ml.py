@@ -434,3 +434,65 @@ def test_holographic_convergence(trainer):
     scaled_pred = scaled_pred / torch.norm(scaled_pred, dim=1, keepdim=True)
     scaling_error = torch.norm(scaled_pred - pred_ir) / torch.norm(pred_ir)
     assert scaling_error < 0.2, "Network fails to preserve scaling behavior" 
+
+def test_gradient_stability(trainer):
+    """Test gradient and loss stability during training."""
+    print("\nStarting gradient stability test...")
+    
+    # Generate a small batch of data
+    batch_size = 4
+    uv_data = torch.randn(batch_size, trainer.model.dim, dtype=trainer.model.dtype)
+    uv_data = uv_data / torch.norm(uv_data, dim=1, keepdim=True)
+    
+    z_ratio = trainer.model.z_ratio
+    print(f"\nModel parameters:")
+    print(f"z_ratio: {z_ratio}")
+    print(f"dim: {trainer.model.dim}")
+    
+    ir_data = uv_data * z_ratio**(-trainer.model.dim)
+    ir_data = ir_data / torch.norm(ir_data, dim=1, keepdim=True)
+    
+    # Track gradients and loss components
+    optimizer = torch.optim.Adam(trainer.model.parameters())
+    
+    for i in range(5):  # Test first few iterations
+        print(f"\n{'='*20} Iteration {i} {'='*20}")
+        optimizer.zero_grad()
+        
+        # Forward pass
+        pred_ir = trainer.model(uv_data)
+        print(f"\nTensor stats:")
+        print(f"UV data: mean={uv_data.abs().mean():.3f}, std={uv_data.abs().std():.3f}, norm={torch.norm(uv_data).item():.3f}")
+        print(f"IR data: mean={ir_data.abs().mean():.3f}, std={ir_data.abs().std():.3f}, norm={torch.norm(ir_data).item():.3f}")
+        print(f"Pred IR: mean={pred_ir.abs().mean():.3f}, std={pred_ir.abs().std():.3f}, norm={torch.norm(pred_ir).item():.3f}")
+        
+        # Loss computation
+        loss, components = trainer.compute_loss(pred_ir, ir_data, uv_data, return_components=True)
+        print(f"\nLoss components:")
+        for name, value in components.items():
+            print(f"{name}: {value:.6f}")
+        
+        # Backward pass
+        loss.backward()
+        
+        # Gradient analysis
+        print("\nGradient analysis:")
+        for name, param in trainer.model.named_parameters():
+            if param.grad is not None:
+                grad_norm = torch.norm(param.grad).item()
+                param_norm = torch.norm(param).item()
+                print(f"{name}:")
+                print(f"  param norm: {param_norm:.6f}")
+                print(f"  grad norm: {grad_norm:.6f}")
+                print(f"  grad/param ratio: {grad_norm/param_norm if param_norm > 0 else float('inf'):.6f}")
+        
+        optimizer.step()
+        
+        # Parameter check
+        print("\nParameter check:")
+        for name, param in trainer.model.named_parameters():
+            if torch.isnan(param).any():
+                raise ValueError(f"NaN detected in parameter {name}")
+            if param.grad is not None and torch.isnan(param.grad).any():
+                raise ValueError(f"NaN detected in gradient of {name}")
+            print(f"{name}: {param.abs().mean():.6f}") 

@@ -71,53 +71,39 @@ class HolographicTrainer:
         input: torch.Tensor,
         return_components: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, LossComponents]]:
-        """Compute physics-informed loss function with improved stability."""
+        """Compute the derived holographic loss function: L = (N^2 + q)/N^2 * ||Nx_IR - x_UV||^2"""
         # Get the natural scale from z_ratio
         z_ratio = self.model.z_ratio
         N = z_ratio**self.model.dim
         
-        # Convert N to tensor for operations
+        # Convert N to tensor for operations with same dtype as input
         N_tensor = torch.tensor(N, device=self.device, dtype=pred.dtype)
         
-        # Normalize inputs for stability
-        pred_norm = pred / (torch.norm(pred, dim=1, keepdim=True) + 1e-8)
-        target_norm = target / (torch.norm(target, dim=1, keepdim=True) + 1e-8)
-        input_norm = torch.norm(input, dim=1, keepdim=True)
-        input_normalized = input / (input_norm + 1e-8)
+        # Quantum correction strength (learnable or fixed)
+        q = torch.sigmoid(self.model.log_scale.real) if hasattr(self.model, 'log_scale') else torch.tensor(0.1, device=self.device)
         
-        # Holographic error with improved stability
-        holographic_error = N_tensor*pred_norm - input_normalized
-        conformal_factor = torch.maximum(
-            (N_tensor**2 + 1).real,
-            torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        )
-        basic_loss = torch.mean(torch.abs(holographic_error)**2) / conformal_factor
+        # Compute the holographic error: ||Nx_IR - x_UV||^2
+        holographic_error = N_tensor * pred - input
+        loss = torch.mean(torch.abs(holographic_error)**2)
         
-        # Quantum corrections with proper scaling and stability
-        quantum_pred = self.model.compute_quantum_corrections(input_normalized, input_norm)
-        quantum_target = target_norm - input_normalized / N_tensor
-        quantum_loss = torch.mean(torch.abs(quantum_pred - quantum_target)**2) * N_tensor.abs()
-        
-        # Phase coherence with improved stability
-        cos_phase = torch.real(torch.sum(pred_norm * target_norm.conj(), dim=1))
-        phase_loss = torch.mean((1 - cos_phase)**2)
-        
-        # Adaptive loss weighting based on training progress
-        quantum_weight = 0.1 * torch.sigmoid(self.model.log_scale.real)
-        phase_weight = 0.01 * (1 - torch.exp(-basic_loss))
-        
-        # Total loss with adaptive weighting
-        total_loss = basic_loss + quantum_weight * quantum_loss + phase_weight * phase_loss
+        # Scale by (N^2 + q)/N^2
+        scaling = (N_tensor**2 + q) / N_tensor**2
+        loss = scaling * loss
         
         if return_components:
+            # For debugging, separate the components
+            basic_loss = torch.mean(torch.abs(holographic_error)**2)
+            quantum_loss = q * basic_loss / N_tensor**2
+            phase_loss = torch.mean(1 - torch.cos(torch.angle(pred) - torch.angle(target)))
+            
             components = {
-                "total": float(total_loss.real),
-                "basic": float(basic_loss.real),
-                "quantum": float(quantum_loss.real),
-                "phase": float(phase_loss.real)
+                "total": float(loss),
+                "basic": float(basic_loss),
+                "quantum": float(quantum_loss),
+                "phase": float(phase_loss)
             }
-            return total_loss, components
-        return total_loss
+            return loss, components
+        return loss
         
     def generate_training_data(
         self,
