@@ -419,6 +419,14 @@ class HolographicLifter(nn.Module):
                             preserve_structure='quantum'
                         )
 
+                        # Extract U(1) phases before applying composition
+                        op1_u1_phase = torch.mean(torch.angle(op1_norm))
+                        op2_u1_phase = torch.mean(torch.angle(op2_norm))
+                        
+                        # Remove global U(1) phase for composition
+                        op1_norm_u1 = op1_norm * torch.exp(-1j * op1_u1_phase)
+                        op2_norm_u1 = op2_norm * torch.exp(-1j * op2_u1_phase)
+
                         # Let the operadic structure handle composition
                         composed_op, metrics = self.operad_handler.compose_operations(
                             operations=[op1_operation, op2_operation],
@@ -428,44 +436,41 @@ class HolographicLifter(nn.Module):
                         # Apply the composed operation to both operators
                         if len(op1_norm.shape) > 1:
                             # Batched version
-                            op1_flat = op1_mag.reshape(-1, self.dim).to(dtype=self.dtype)
-                            op2_flat = op2_mag.reshape(-1, self.dim).to(dtype=self.dtype)
+                            op1_flat = op1_norm_u1.reshape(-1, self.dim)
+                            op2_flat = op2_norm_u1.reshape(-1, self.dim)
 
-                            # Apply composition law to magnitudes
+                            # Apply composition law to phase-normalized tensors
                             result = torch.matmul(composed_op.composition_law, op1_flat.t()).t()
                             result2 = torch.matmul(composed_op.composition_law, op2_flat.t()).t()
 
-                            # Combine results with proper phase handling
+                            # Combine results with proper normalization
                             result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
                             result2 = result2 / (torch.norm(result2, dim=-1, keepdim=True) + self.EPSILON)
                             result = 0.5 * (result + result2)
                             result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
 
-                            # Apply composed phase
-                            composed_phase = 0.5 * (op1_phase + op2_phase)  # Average phase
-                            composed_phase = composed_phase.reshape(op1_norm.shape)
-                            result = result * torch.exp(1j * composed_phase)
+                            # Restore U(1) phase from first operator
+                            result = result * torch.exp(1j * op1_u1_phase)
 
                             # Reshape result back to original shape
                             result = result.view(op1_norm.shape)
                         else:
                             # Single input version
-                            op1_flat = op1_mag.reshape(-1, self.dim).to(dtype=self.dtype)
-                            op2_flat = op2_mag.reshape(-1, self.dim).to(dtype=self.dtype)
+                            op1_flat = op1_norm_u1.reshape(-1, self.dim)
+                            op2_flat = op2_norm_u1.reshape(-1, self.dim)
 
-                            # Apply composition law to magnitudes
+                            # Apply composition law to phase-normalized tensors
                             result = torch.matmul(composed_op.composition_law, op1_flat.t()).t()
                             result2 = torch.matmul(composed_op.composition_law, op2_flat.t()).t()
 
-                            # Combine results with proper phase handling
+                            # Combine results with proper normalization
                             result = result / (torch.norm(result) + self.EPSILON)
                             result2 = result2 / (torch.norm(result2) + self.EPSILON)
                             result = 0.5 * (result + result2)
                             result = result / (torch.norm(result) + self.EPSILON)
 
-                            # Apply composed phase
-                            composed_phase = 0.5 * (op1_phase + op2_phase)  # Average phase
-                            result = result * torch.exp(1j * composed_phase)
+                            # Restore U(1) phase from first operator
+                            result = result * torch.exp(1j * op1_u1_phase)
 
                             # Reshape result back to original shape
                             result = result.view(op1_norm.shape)
