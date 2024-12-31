@@ -4,56 +4,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from typing import Optional
 
 
 class ComplexLayerNorm(nn.Module):
-    """Layer normalization for complex tensors."""
-    
-    def __init__(self, normalized_shape: int, eps: float = 1e-5, dtype: torch.dtype = torch.complex64):
+    """Complex-valued layer normalization with improved stability."""
+    def __init__(self, eps=1e-5):
         super().__init__()
-        self.normalized_shape = normalized_shape
         self.eps = eps
-        self.dtype = dtype
-        
-        # Initialize learnable parameters with small non-zero values
-        if dtype.is_complex:
-            self.weight = nn.Parameter(torch.complex(
-                torch.ones(normalized_shape),
-                torch.zeros(normalized_shape)
-            ).to(dtype=dtype))
-            self.bias = nn.Parameter(torch.complex(
-                0.01 * torch.randn(normalized_shape),
-                0.01 * torch.randn(normalized_shape)
-            ).to(dtype=dtype))
-        else:
-            self.weight = nn.Parameter(torch.ones(normalized_shape, dtype=dtype))
-            self.bias = nn.Parameter(0.01 * torch.randn(normalized_shape, dtype=dtype))
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with complex normalization avoiding in-place operations."""
-        # Create a copy of input to prevent in-place modification
-        x = x.clone()
+        """Forward pass with stable complex normalization."""
+        # Ensure input is complex
+        if not x.is_complex():
+            x = x.to(dtype=torch.complex64)
         
-        # Compute mean and variance separately for real and imaginary parts
-        mean_real = x.real.mean(dim=-1, keepdim=True)
-        mean_imag = x.imag.mean(dim=-1, keepdim=True) if x.is_complex() else torch.zeros_like(mean_real)
+        # Compute mean and variance over last dimension only
+        mean = x.mean(dim=-1, keepdim=True)
+        var_real = (x.real - mean.real).pow(2).mean(dim=-1, keepdim=True)
+        var_imag = (x.imag - mean.imag).pow(2).mean(dim=-1, keepdim=True)
+        var = var_real + var_imag
         
-        var_real = ((x.real - mean_real) ** 2).mean(dim=-1, keepdim=True)
-        var_imag = ((x.imag - mean_imag) ** 2).mean(dim=-1, keepdim=True) if x.is_complex() else torch.zeros_like(var_real)
+        # Normalize with stable denominator
+        denom = (var + self.eps).sqrt()
+        x_centered = x - mean
+        x_norm = x_centered / denom
         
-        # Normalize real and imaginary parts without in-place operations
-        denom_real = torch.sqrt(var_real + self.eps)
-        denom_imag = torch.sqrt(var_imag + self.eps) if x.is_complex() else torch.ones_like(denom_real)
-        
-        x_real = (x.real - mean_real) / denom_real
-        x_imag = (x.imag - mean_imag) / denom_imag if x.is_complex() else torch.zeros_like(x_real)
-        
-        # Apply learnable parameters without in-place operations
-        out_real = x_real * self.weight.real + self.bias.real
-        out_imag = x_imag * self.weight.imag + self.bias.imag if x.is_complex() else torch.zeros_like(out_real)
-        
-        # Combine real and imaginary parts
-        return torch.complex(out_real, out_imag) if x.is_complex() else out_real
+        return x_norm
 
 
 class ComplexNorm(nn.Module):
@@ -66,9 +43,6 @@ class ComplexNorm(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Normalize complex tensor without in-place operations."""
-        # Create a copy of input to prevent in-place modification
-        x = x.clone()
-        
         # Compute norm along specified dimension
         norm = torch.norm(x, dim=self.dim, keepdim=True)
         
@@ -78,257 +52,254 @@ class ComplexNorm(nn.Module):
         # Normalize without in-place operations
         x_normalized = x / (scale + self.eps)  # Add eps to denominator for stability
         
-        return x_normalized * scale  # Scale back to original norm
+        # Scale back to original norm with stability check
+        return x_normalized * torch.where(scale > self.eps, scale, torch.ones_like(scale))
 
 
 class ResidualBlock(nn.Module):
-    """Residual block with complex support."""
-    
-    def __init__(self, dim: int, hidden_dim: int, dtype: torch.dtype):
+    """Residual block with complex support and improved stability."""
+    def __init__(self, dim: int, hidden_dim: int, dtype: Optional[torch.dtype] = None):
         super().__init__()
-        self.linear1 = nn.Linear(dim, hidden_dim, dtype=dtype)
-        self.linear2 = nn.Linear(hidden_dim, dim, dtype=dtype)
-        self.norm = ComplexNorm(dim=1)
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim, dtype=dtype),
+            ComplexLayerNorm(),
+            ComplexTanh(),
+            nn.Linear(hidden_dim, dim, dtype=dtype),
+            ComplexLayerNorm()
+        )
         
-        # Initialize weights with physics-informed values
-        with torch.no_grad():
-            # Glorot initialization for complex weights
-            std = math.sqrt(2.0 / (dim + hidden_dim))
-            if dtype.is_complex:
-                self.linear1.weight.data = std * (torch.randn_like(self.linear1.weight.real) + 1j * torch.randn_like(self.linear1.weight.imag))
-                self.linear2.weight.data = std * (torch.randn_like(self.linear2.weight.real) + 1j * torch.randn_like(self.linear2.weight.imag))
-                # Initialize biases with small complex values
-                self.linear1.bias.data = (std * 0.1) * (torch.randn_like(self.linear1.bias.real) + 1j * torch.randn_like(self.linear1.bias.imag))
-                self.linear2.bias.data = (std * 0.1) * (torch.randn_like(self.linear2.bias.real) + 1j * torch.randn_like(self.linear2.bias.imag))
-            else:
-                self.linear1.weight.data = std * torch.randn_like(self.linear1.weight)
-                self.linear2.weight.data = std * torch.randn_like(self.linear2.weight)
-                # Initialize biases with small values
-                self.linear1.bias.data = (std * 0.1) * torch.randn_like(self.linear1.bias)
-                self.linear2.bias.data = (std * 0.1) * torch.randn_like(self.linear2.bias)
-        
+        # Initialize with small values for stability
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if dtype is not None and dtype.is_complex:
+                    m.weight.data = m.weight.data.to(dtype=dtype)
+                    if m.bias is not None:
+                        m.bias.data = m.bias.data.to(dtype=dtype)
+                
+                # Initialize weights
+                if m.weight.is_complex():
+                    nn.init.uniform_(m.weight.real, -0.01, 0.01)
+                    nn.init.uniform_(m.weight.imag, -0.01, 0.01)
+                    if m.bias is not None:
+                        nn.init.uniform_(m.bias.real, -0.001, 0.001)
+                        nn.init.uniform_(m.bias.imag, -0.001, 0.001)
+                else:
+                    # Convert to complex if needed
+                    m.weight.data = m.weight.data.to(dtype=dtype)
+                    if m.bias is not None:
+                        m.bias.data = m.bias.data.to(dtype=dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with residual connection."""
-        # Store input for residual connection
-        identity = x.clone()
+        # Scale residual for stability
+        return x + 0.1 * self.net(x)
+
+
+class ComplexTanh(nn.Module):
+    """Complex-valued tanh activation function."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply complex tanh while preserving shape."""
+        if not x.is_complex():
+            x = x.to(dtype=torch.complex64)
+            
+        # Complex tanh(z) = (e^z - e^-z)/(e^z + e^-z)
+        # Use more stable implementation to avoid overflow
+        x_real = x.real
+        x_imag = x.imag
         
-        # First linear layer with activation
-        out = self.linear1(x)
-        out = torch.tanh(out)
+        # Compute real and imaginary parts separately
+        real_part = torch.tanh(x_real) * (1 - torch.tanh(x_imag).pow(2))
+        imag_part = torch.tanh(x_imag) * (1 - torch.tanh(x_real).pow(2))
         
-        # Second linear layer
-        out = self.linear2(out)
-        
-        # Add residual connection without in-place operation
-        out = torch.add(out, identity)
-        
-        # Normalize output
-        return self.norm(out)
+        return torch.complex(real_part, imag_part)
 
 
 class HolographicNet(nn.Module):
-    """Neural network for holographic lifting."""
-    
-    def __init__(self, dim: int, hidden_dim: int, n_layers: int, dtype: torch.dtype,
-                 z_uv: float = 0.1, z_ir: float = 10.0):
+    """Neural network for holographic transformations with improved stability."""
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        n_layers: int = 3,
+        dtype: torch.dtype = torch.complex64,
+        z_uv: float = 0.1,
+        z_ir: float = 10.0
+    ):
         super().__init__()
         self._dim = dim
         self._hidden_dim = hidden_dim
         self._n_layers = n_layers
         self._dtype = dtype
-        self._z_uv = z_uv
-        self._z_ir = z_ir
+        self.z_uv = z_uv
+        self.z_ir = z_ir
         
-        # Input projection with complex layer norm
+        # Input projection with careful initialization
         self.input_proj = nn.Sequential(
             nn.Linear(dim, hidden_dim, dtype=dtype),
-            ComplexLayerNorm(hidden_dim, dtype=dtype),
-            ComplexNorm(dim=1)
+            ComplexLayerNorm(),
+            ComplexTanh()
         )
         
-        # Residual blocks with complex layer norm
-        self.blocks = nn.ModuleList([
-            nn.Sequential(
-                ResidualBlock(hidden_dim, hidden_dim * 2, dtype),
-                ComplexLayerNorm(hidden_dim, dtype=dtype)
-            )
+        # Residual blocks with improved stability
+        self.layers = nn.ModuleList([
+            ResidualBlock(hidden_dim, hidden_dim * 2, dtype)
             for _ in range(n_layers)
         ])
         
-        # Output projection with complex layer norm
+        # Output projection with normalization
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, dim, dtype=dtype),
-            ComplexLayerNorm(dim, dtype=dtype)
+            ComplexLayerNorm()
         )
         
-        # Initialize learnable parameters with physics-informed values
-        with torch.no_grad():
-            # Initialize log_scale based on classical scaling
-            z_ratio = z_ir / z_uv
-            if dtype.is_complex:
-                self.log_scale = nn.Parameter(torch.complex(
-                    torch.tensor(math.log(z_ratio**(-dim))),
-                    torch.zeros(1)
-                ).to(dtype=dtype))
-            else:
-                self.log_scale = nn.Parameter(torch.tensor(
-                    math.log(z_ratio**(-dim)),
-                    dtype=dtype
-                ))
-            
-            # Initialize correction weights based on OPE coefficients
-            self.correction_weights = nn.Parameter(torch.tensor([
-                (-1)**n / math.factorial(n) for n in range(1, 4)
-            ], dtype=dtype))
-            
-            # Initialize input projection
-            std = math.sqrt(2.0 / (dim + hidden_dim))
-            if dtype.is_complex:
-                self.input_proj[0].weight.data = std * (torch.randn_like(self.input_proj[0].weight.real) + 1j * torch.randn_like(self.input_proj[0].weight.imag))
-                self.input_proj[0].bias.data = (std * 0.1) * (torch.randn_like(self.input_proj[0].bias.real) + 1j * torch.randn_like(self.input_proj[0].bias.imag))
-            else:
-                self.input_proj[0].weight.data = std * torch.randn_like(self.input_proj[0].weight)
-                self.input_proj[0].bias.data = (std * 0.1) * torch.randn_like(self.input_proj[0].bias)
-            
-            # Initialize output projection
-            std = math.sqrt(2.0 / (hidden_dim + dim))
-            if dtype.is_complex:
-                self.output_proj[0].weight.data = std * (torch.randn_like(self.output_proj[0].weight.real) + 1j * torch.randn_like(self.output_proj[0].weight.imag))
-                self.output_proj[0].bias.data = (std * 0.1) * (torch.randn_like(self.output_proj[0].bias.real) + 1j * torch.randn_like(self.output_proj[0].bias.imag))
-            else:
-                self.output_proj[0].weight.data = std * torch.randn_like(self.output_proj[0].weight)
-                self.output_proj[0].bias.data = (std * 0.1) * torch.randn_like(self.output_proj[0].bias)
-            
-            # Initialize layer norm parameters
-            for m in self.modules():
-                if isinstance(m, ComplexLayerNorm):
-                    if dtype.is_complex:
-                        m.weight.data = torch.complex(
-                            torch.ones_like(m.weight.real),
-                            torch.zeros_like(m.weight.imag)
-                        )
-                        m.bias.data = torch.complex(
-                            torch.zeros_like(m.bias.real),
-                            torch.zeros_like(m.bias.imag)
-                        )
-                    else:
-                        m.weight.data = torch.ones_like(m.weight)
-                        m.bias.data = torch.zeros_like(m.bias)
+        # Initialize all weights with improved stability
+        self._init_weights()
+        
+        # Correction weights for quantum effects
+        self.correction_weights = nn.Parameter(
+            0.01 * torch.randn(n_layers, dtype=dtype)
+        )
+    
+    def _init_weights(self):
+        """Initialize weights with improved stability."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if m.weight.is_complex():
+                    nn.init.uniform_(m.weight.real, -0.01, 0.01)
+                    nn.init.uniform_(m.weight.imag, -0.01, 0.01)
+                    if m.bias is not None:
+                        nn.init.uniform_(m.bias.real, -0.001, 0.001)
+                        nn.init.uniform_(m.bias.imag, -0.001, 0.001)
+                else:
+                    # Convert to complex if needed
+                    m.weight.data = m.weight.data.to(dtype=self._dtype)
+                    if m.bias is not None:
+                        m.bias.data = m.bias.data.to(dtype=self._dtype)
     
     @property
     def dim(self) -> int:
-        """Get dimension."""
+        """Get the dimension of the model."""
         return self._dim
     
     @property
     def hidden_dim(self) -> int:
-        """Get hidden dimension."""
+        """Get the hidden dimension of the model."""
         return self._hidden_dim
     
     @property
     def n_layers(self) -> int:
-        """Get number of layers."""
+        """Get the number of layers in the model."""
         return self._n_layers
     
     @property
     def dtype(self) -> torch.dtype:
-        """Get data type."""
+        """Get the data type of the model."""
         return self._dtype
     
-    @property
-    def z_uv(self) -> float:
-        """Get UV cutoff."""
-        return self._z_uv
-    
-    @property
-    def z_ir(self) -> float:
-        """Get IR cutoff."""
-        return self._z_ir
-    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with residual connections."""
-        # Store input norm for later
-        input_norm = torch.norm(x, dim=1, keepdim=True)
+        """Forward pass with improved stability and norm preservation."""
+        # Ensure input is complex
+        if not x.is_complex():
+            x = x.to(dtype=self._dtype)
         
-        # Create a copy of input to prevent in-place modification
-        x = x.clone()
+        # Store input norms for later
+        input_norms = torch.norm(x, dim=-1, keepdim=True)
         
         # Input projection
-        x = self.input_proj(x)
+        x = self.input_proj(x)  # Shape: [batch_size, hidden_dim]
         
-        # Residual blocks
-        for block in self.blocks:
-            x = block(x)
+        # Apply residual layers with accumulated normalization
+        for layer in self.layers:
+            x = layer(x)
+            x = x / (torch.norm(x, dim=-1, keepdim=True) + 1e-8)  # Normalize between layers
+            x = x * input_norms  # Rescale to preserve input norm
         
-        # Output projection with safe operations
-        x = self.output_proj(x)
+        # Output projection with final normalization
+        x = self.output_proj(x)  # Shape: [batch_size, dim]
         
-        # Normalize output to match input norm
-        norm = torch.norm(x, dim=1, keepdim=True)
-        x = torch.where(norm > 1e-8, x / norm, x)
-        x = x * input_norm
-        
+        # Final normalization to match input norms
+        output_norms = torch.norm(x, dim=-1, keepdim=True)
+        x = x * (input_norms / (output_norms + 1e-8))
+            
         return x
     
     def compute_quantum_corrections(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute quantum corrections using OPE with proper scaling."""
-        corrections = []
-        input_norm = torch.norm(x)
-        x = x.clone()  # Create a copy to prevent in-place modification
+        """Compute quantum corrections that scale linearly with input."""
+        # Ensure input is complex
+        if not x.is_complex():
+            x = x.to(dtype=self._dtype)
+            
+        # Get input norm for scaling
+        input_norm = torch.norm(x, dim=-1, keepdim=True)
         
-        # Base scaling factor - make corrections much smaller than input
-        base_scale = 0.001 * input_norm
+        # Normalize input to unit norm for consistent processing
+        x_normalized = x / (input_norm + 1e-8)
         
-        for n, weight in enumerate(self.correction_weights, 1):
-            # Compute power and scale for this order
-            power = -self.dim + 2*n
-            z_ratio = self.z_ir/self.z_uv
-            
-            # Scale correction by factorial and power
-            scale = base_scale / (math.factorial(n) * n)
-            correction = x * scale * z_ratio**power
-            
-            # Ensure correction norm is much smaller than input
-            corr_norm = torch.norm(correction)
-            if corr_norm > 0:
-                correction = correction * (0.1 / n) * (input_norm / corr_norm)
-            
-            corrections.append(correction * weight)
+        # Project to hidden space
+        h = self.input_proj(x_normalized)
         
-        # Sum corrections with exponential damping
-        total_correction = torch.zeros_like(x)
-        for n, corr in enumerate(corrections):
-            damping = torch.tensor(-float(n), device=x.device, dtype=x.dtype).exp()
-            total_correction = total_correction + corr * damping
+        # Compute corrections using residual connections
+        corrections = torch.zeros_like(x_normalized)
+        for i, layer in enumerate(self.layers):
+            # Apply layer and get residual
+            h_next = layer(h)
+            residual = h_next - h
             
-        return total_correction
+            # Project residual back to input space and scale
+            layer_correction = self.output_proj(residual)
+            corrections = corrections + self.correction_weights[i] * layer_correction
+            
+            # Update hidden state
+            h = h_next
+            
+        # Ensure corrections are much smaller than normalized input
+        corr_norm = torch.norm(corrections, dim=-1, keepdim=True)
+        scale_factor = torch.minimum(
+            torch.ones_like(corr_norm),
+            0.01 / (corr_norm + 1e-8)
+        )
+        corrections = corrections * scale_factor
+        
+        # Scale back by input norm to ensure linear scaling
+        corrections = corrections * input_norm
+        
+        return corrections
     
     def holographic_lift(self, boundary: torch.Tensor, radial_points: torch.Tensor) -> torch.Tensor:
-        """Lift boundary data to bulk using holographic principle."""
-        # Store boundary norm for later
-        boundary_norm = torch.norm(boundary)
+        """Lift boundary data to bulk data using holographic mapping."""
+        # Ensure inputs are complex
+        if not boundary.is_complex():
+            boundary = boundary.to(dtype=self._dtype)
+        if not radial_points.is_complex():
+            radial_points = radial_points.to(dtype=self._dtype)
+            
+        # Store original shape and flatten if needed
+        orig_shape = boundary.shape
+        if boundary.dim() > 2:
+            boundary = boundary.reshape(-1, self.dim)
+            
+        # Initialize bulk data tensor
+        bulk_shape = boundary.shape[:-1] + (len(radial_points),) + boundary.shape[-1:]
+        bulk_data = torch.zeros(bulk_shape, dtype=self._dtype, device=boundary.device)
         
-        # Create a copy of boundary to prevent in-place modification
-        boundary = boundary.clone()
-        
-        # Compute classical scaling with improved accuracy
-        z_ratios = torch.abs(radial_points / self.z_uv).reshape(-1, 1, 1)
-        bulk = boundary.unsqueeze(0) * z_ratios**(-self.dim)
-        
-        # Add quantum corrections with proper scaling
-        corrections = self.compute_quantum_corrections(boundary)
-        correction_scale = 0.001 / (1 + z_ratios**2)  # Increase correction scale
-        bulk = bulk + corrections.unsqueeze(0) * correction_scale
-        
-        # Apply network transformation with improved norm preservation
-        bulk = torch.stack([
-            self.forward(slice_.detach().clone())  # Create a copy to prevent in-place modification
-            for slice_ in bulk
-        ])
-        
-        # Normalize bulk to preserve boundary norm with improved accuracy
-        norm = torch.norm(bulk, dim=1, keepdim=True)
-        bulk = torch.where(norm > 1e-8, bulk / norm, bulk)
-        bulk = bulk * boundary_norm
-        
-        return bulk 
+        # Compute bulk data at each radial point
+        for i, z in enumerate(radial_points):
+            # Scale input based on radial position
+            scale = torch.abs(z / self.z_uv)
+            scaled_boundary = boundary * scale
+            
+            # Apply network transformation
+            bulk_slice = self(scaled_boundary)
+            
+            # Add quantum corrections scaled by radial position
+            corrections = self.compute_quantum_corrections(scaled_boundary)
+            bulk_slice = bulk_slice + corrections * (scale ** 2)
+            
+            # Store result
+            bulk_data[..., i, :] = bulk_slice
+            
+        # Restore original shape if needed
+        if len(orig_shape) > 2:
+            bulk_data = bulk_data.reshape(orig_shape[:-1] + (len(radial_points),) + orig_shape[-1:])
+            
+        return bulk_data

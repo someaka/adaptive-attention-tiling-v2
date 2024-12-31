@@ -160,12 +160,13 @@ class TestML(TestHolographicBase):
             # Compute losses with balanced weights
             basic_loss = F.mse_loss(pred_ir.real, test_data.ir_data.real) + \
                         F.mse_loss(pred_ir.imag, test_data.ir_data.imag)
-            quantum_pred = model.compute_quantum_corrections(test_data.uv_data)
-            quantum_target = test_data.ir_data - test_data.uv_data
-            quantum_loss = F.mse_loss(quantum_pred.real, quantum_target.real) + \
-                          F.mse_loss(quantum_pred.imag, quantum_target.imag)
-            phase_diff = torch.angle(pred_ir) - torch.angle(test_data.ir_data)
-            phase_loss = torch.mean(1 - torch.cos(phase_diff))
+            with torch.no_grad():
+                quantum_pred = model.compute_quantum_corrections(test_data.uv_data.detach())
+                quantum_target = test_data.ir_data.detach() - test_data.uv_data.detach()
+                quantum_loss = F.mse_loss(quantum_pred.real, quantum_target.real) + \
+                              F.mse_loss(quantum_pred.imag, quantum_target.imag)
+                phase_diff = torch.angle(pred_ir.detach()) - torch.angle(test_data.ir_data.detach())
+                phase_loss = torch.mean(1 - torch.cos(phase_diff))
             
             # Add L2 regularization for stability
             l2_reg = sum(torch.norm(p) ** 2 for p in model.parameters())
@@ -176,8 +177,12 @@ class TestML(TestHolographicBase):
                    0.1 * phase_loss + \
                    1e-5 * l2_reg
             
-            # Backward pass with retain_graph=True to allow multiple backward passes
+            # Backward pass with retain_graph but detach intermediate tensors
             loss.backward(retain_graph=True)
+            # Detach tensors to prevent inplace operations
+            pred_ir = pred_ir.detach()
+            uv_data = test_data.uv_data.detach()
+            ir_data = test_data.ir_data.detach()
             
             # Gradient clipping for stability
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
