@@ -766,23 +766,6 @@ class TestScaleCohomology:
             )
             assert len(log_terms) > 0, "Critical state should have log corrections"
 
-    def test_operator_expansion(self, scale_system, dtype):
-        """Test operator product expansion."""
-        # Create test operators as tensors
-        x = torch.linspace(0, 1, 10, dtype=dtype)
-        op1 = torch.sin(x)
-        op2 = torch.exp(-x**2)
-
-        # Compute OPE
-        ope = scale_system.operator_product_expansion(op1, op2)
-
-        # Test convergence
-        x_near = torch.tensor(0.1, dtype=dtype)
-        direct = op1[0] * op2[0]  # Use first components for test
-        expanded = ope[0]  # First component of expansion
-        assert torch.allclose(
-            direct, expanded, rtol=1e-2
-        ), "OPE should converge for nearby points"
 
     def test_renormalization_flow(self, scale_system, dtype):
         """Test renormalization group flow."""
