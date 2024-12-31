@@ -82,6 +82,11 @@ class HolographicError(Exception):
     pass
 
 
+class ReconstructionError(Exception):
+    """Error raised when UV reconstruction fails."""
+    pass
+
+
 class HolographicLifter(nn.Module):
     """Handles holographic lifting and UV/IR transformations.
     
@@ -339,118 +344,39 @@ class HolographicLifter(nn.Module):
         
     
     def operator_product_expansion(self, op1: torch.Tensor, op2: torch.Tensor) -> torch.Tensor:
-        """Compute operator product expansion between two operators.
-    
-        The OPE captures the short-distance behavior of quantum operators:
-        - Normalizes input operators
-        - Creates and composes operadic operations
-        - Applies scaling and phase tracking
-    
-        Physics Background:
-        - OPE = short-distance expansion of operator products
-        - Captures quantum corrections to classical behavior
-        - Preserves operator algebra structure
-        - Includes phase information for quantum coherence
-    
-        Args:
-            op1: First operator
-            op2: Second operator
-    
-        Returns:
-            OPE coefficients
-    
-        Raises:
-            ValidationError: If input validation fails
-            OperatorError: If OPE computation fails
-            MemoryError: If memory management fails
-        """
+        """Compute operator product expansion with improved symmetry."""
         try:
-            # Convert inputs to complex type if needed and ensure contiguous
-            op1 = op1.contiguous().to(dtype=self.dtype) if not op1.is_complex() else op1.contiguous()
-            op2 = op2.contiguous().to(dtype=self.dtype) if not op2.is_complex() else op2.contiguous()
-    
-            # Validate inputs after conversion
-            for name, op in [("op1", op1), ("op2", op2)]:
-                validation = self._validate_tensor(op, name)
-                if not validation.is_valid:
-                    raise ValidationError(f"Invalid {name}: {validation.message}")
-    
-            # Track input operators
-            with self._track_tensor(op1, "op1"), self._track_tensor(op2, "op2"):
-                # Normalize operators
-                norm1 = torch.norm(op1)
-                norm2 = torch.norm(op2)
-    
-                if norm1 > self.EPSILON and norm2 > self.EPSILON:
-                    # Allocate normalized operators
-                    op1_norm = self._allocate_tensor(op1.shape, self.dtype, "op1_norm")
-                    op2_norm = self._allocate_tensor(op2.shape, self.dtype, "op2_norm")
-    
-                    op1_norm.copy_(op1 / norm1)
-                    op2_norm.copy_(op2 / norm2)
-    
-                    # Track normalized operators
-                    with self._track_tensor(op1_norm, "op1_norm"), \
-                         self._track_tensor(op2_norm, "op2_norm"):
-    
-                        # Create operadic operations for each operator
-                        op1_operation = self.operad_handler.create_operation(
-                            source_dim=op1_norm.shape[-1],
-                            target_dim=self.dim,
-                            preserve_structure='quantum'
-                        )
-                        op2_operation = self.operad_handler.create_operation(
-                            source_dim=op2_norm.shape[-1],
-                            target_dim=self.dim,
-                            preserve_structure='quantum'
-                        )
-    
-                        # Compose the operations
-                        composed_op, metrics = self.operad_handler.compose_operations(
-                            operations=[op1_operation, op2_operation],
-                            with_motivic=True
-                        )
-    
-                        # Apply the composed operation to get OPE coefficients
-                        # Handle multi-dimensional tensors properly
-                        if len(op1_norm.shape) > 1:
-                            # For batched inputs, use batch-wise einsum
-                            result = torch.einsum('ij,bj->bi', composed_op.composition_law, op1_norm)
-                            result = torch.einsum('ij,bj->bi', composed_op.composition_law, result)
-                        else:
-                            # For single inputs, use standard einsum
-                            result = torch.einsum('ij,j->i', composed_op.composition_law, op1_norm)
-                            result = torch.einsum('ij,j->i', composed_op.composition_law, result)
-                            
-                        # Symmetrize the result
-                        if len(op2_norm.shape) > 1:
-                            result2 = torch.einsum('ij,bj->bi', composed_op.composition_law, op2_norm)
-                            result2 = torch.einsum('ij,bj->bi', composed_op.composition_law, result2)
-                        else:
-                            result2 = torch.einsum('ij,j->i', composed_op.composition_law, op2_norm)
-                            result2 = torch.einsum('ij,j->i', composed_op.composition_law, result2)
-                            
-                        # Average the two results for symmetry
-                        result = 0.5 * (result + result2)
-    
-                        # Scale result by geometric mean of input norms for symmetry
-                        result = result * torch.sqrt(norm1 * norm2)
-    
-                        # Ensure proper normalization
-                        result = result / torch.norm(result)
-    
-                        # Ensure result is contiguous
-                        result = result.contiguous()
-    
-                        return result
-                else:
-                    # Return zero tensor with proper shape and dtype
-                    return self._allocate_tensor(op1.shape, self.dtype, "zero_result")
-    
-        except ValidationError:
-            raise
+            # Validate inputs
+            op1 = self._ensure_dtype(op1)
+            op2 = self._ensure_dtype(op2)
+
+            # Normalize operators
+            op1_norm = torch.norm(op1)
+            op2_norm = torch.norm(op2)
+            if op1_norm > self.EPSILON:
+                op1 = op1 / op1_norm
+            if op2_norm > self.EPSILON:
+                op2 = op2 / op2_norm
+
+            # Compute symmetric combination
+            result = 0.5 * (op1 * op2 + op2 * op1)
+
+            # Add quantum corrections
+            overlap = torch.sum(torch.conj(op1) * op2).real
+            correction = overlap * (op1 + op2) / 2
+
+            # Ensure symmetry in final result
+            result = result + correction * self.CORRECTION_SCALE_UV
+
+            # Normalize result
+            result_norm = torch.norm(result)
+            if result_norm > self.EPSILON:
+                result = result / result_norm
+
+            return result
+
         except Exception as e:
-            raise OperatorError(f"Failed to compute OPE: {str(e)}")
+            raise OperatorError(f"OPE computation failed: {str(e)}")
 
     def _track_phase(self, correction: torch.Tensor) -> None:
         """Track phase evolution from correction tensor.
@@ -546,171 +472,93 @@ class HolographicLifter(nn.Module):
         except Exception as e:
             raise ScalingError(f"Failed to compute radial scaling: {str(e)}")
             
-    def _apply_radial_scaling(self, field: torch.Tensor, z_ratio: torch.Tensor) -> torch.Tensor:
-        """Apply radial scaling to field.
-        
-        This method applies both:
-        1. Classical scaling: field ~ r^(-dim)
-        2. Quantum corrections: ~ r^(2-dim)
-        
-        Physics Background:
-        - Classical scaling preserves conformal invariance
-        - Quantum corrections capture relevant deformations
-        - The total scaling determines the RG flow
+    def _apply_radial_scaling(self, tensor: torch.Tensor, z_ratio: torch.Tensor) -> torch.Tensor:
+        """Apply radial scaling to tensor.
         
         Args:
-            field: Field to scale
-            z_ratio: Dimensionless ratio z/z_UV
+            tensor: Input tensor to scale
+            z_ratio: Ratio of z coordinates to scale by (as tensor)
             
         Returns:
-            Scaled field
-            
-        Raises:
-            ScalingError: If scaling application fails
+            Scaled tensor
         """
-        try:
-            # Validate inputs
-            field = self._ensure_dtype(field)
-            z_ratio = self._ensure_dtype(z_ratio)
-            
-            # Compute classical scaling with proper normalization
-            field_norm = torch.norm(field)
-            if field_norm > self.EPSILON:
-                normalized_field = field / field_norm
-            else:
-                normalized_field = field
-                
-            # Apply classical scaling with phase preservation
-            if z_ratio.is_complex():
-                phase = torch.exp(-1j * torch.angle(z_ratio) * self.dim)
-                scaled_field = normalized_field * field_norm * (torch.abs(z_ratio)**(-self.dim)) * phase
-            else:
-                scaled_field = normalized_field * field_norm * (z_ratio**(-self.dim))
-            
-            # Add quantum corrections with proper normalization
-            quantum_power = 2 - self.dim  # Relevant deformation
-            correction_scale = self.CORRECTION_SCALE_UV / (1 + torch.abs(z_ratio)**2)
-            
-            if z_ratio.is_complex():
-                phase = torch.exp(-1j * torch.angle(z_ratio) * quantum_power)
-                correction = normalized_field * field_norm * (torch.abs(z_ratio)**quantum_power) * phase
-            else:
-                correction = normalized_field * field_norm * (z_ratio**quantum_power)
-                
-            scaled_field = scaled_field + correction * correction_scale
-            
-            return scaled_field
-            
-        except Exception as e:
-            raise ScalingError(f"Failed to apply radial scaling: {str(e)}")
-            
-    def holographic_lift(self, boundary_field: torch.Tensor, radial_points: torch.Tensor) -> torch.Tensor:
-        """Lift boundary field to bulk using holographic correspondence.
+        # Compute classical scaling
+        if z_ratio.is_complex():
+            phase = torch.exp(-1j * torch.angle(z_ratio) * self.dim)
+            classical_scale = torch.abs(z_ratio)**(-self.dim)
+        else:
+            phase = 1.0
+            classical_scale = z_ratio**(-self.dim)
         
-        This method implements the holographic lifting procedure:
-        1. Classical scaling: field ~ r^(-dim) following conformal scaling
-        2. Quantum corrections: computed through operator product expansion
-        3. Phase evolution: tracks quantum interference effects
+        # Apply classical scaling with proper phase
+        scaled_tensor = tensor * classical_scale * phase
         
-        Physics Details:
-        - The classical scaling follows from conformal invariance
-        - Quantum corrections scale as r^(2-dim), representing relevant deformations
-        - Phase evolution captures the quantum coherence of the corrections
-        - The UV/IR connection is maintained through the radial coordinate
+        # Add quantum corrections
+        quantum_power = 2 - self.dim  # Relevant deformation
+        correction_scale = self.CORRECTION_SCALE_UV / (1 + torch.abs(z_ratio)**2)
+        
+        # Compute quantum correction with proper phase
+        if z_ratio.is_complex():
+            phase = torch.exp(-1j * torch.angle(z_ratio) * quantum_power)
+            quantum_scale = torch.abs(z_ratio)**quantum_power
+        else:
+            phase = 1.0
+            quantum_scale = z_ratio**quantum_power
+        
+        # Apply quantum correction
+        correction = tensor * quantum_scale * phase * correction_scale
+        
+        # Combine classical scaling and quantum corrections
+        return scaled_tensor + correction
+
+    def holographic_lift(self, boundary_field: torch.Tensor, radial_points: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Lift boundary field to bulk using holographic principle.
+        
+        This method implements the holographic lifting by:
+        1. Computing classical scaling
+        2. Adding quantum corrections
+        3. Tracking phase evolution
         
         Args:
-            boundary_field: Field values at UV boundary (high energy)
-            radial_points: Radial coordinates for bulk reconstruction, must be strictly increasing
-                          from UV (small distance) to IR (large distance)
+            boundary_field: Field values at UV boundary
+            radial_points: Optional radial coordinates (default: None, uses preset)
             
         Returns:
-            Bulk field values at each radial point, with shape (len(radial_points), *boundary_field.shape)
+            Bulk field values at specified radial points
             
         Raises:
             ValidationError: If input validation fails
-            ScalingError: If radial scaling computation fails
-            OperatorError: If OPE computation fails
-            MemoryError: If memory management fails
-            
-        Notes:
-            The radial points must increase monotonically to represent proper RG flow
-            from UV to IR. The boundary field is treated as the microscopic (UV) data,
-            and the method computes the corresponding macroscopic (IR) behavior through
-            the holographic correspondence.
+            ScalingError: If scaling computation fails
         """
-        # Validate inputs
-        validation_result = self.validate_holographic_data(boundary_field, radial_points)
-        if not validation_result.is_valid:
-            raise ValidationError(f"Invalid holographic data: {validation_result.message}")
-            
         try:
+            # Validate and prepare inputs
             boundary_field = self._ensure_dtype(boundary_field)
+            if radial_points is None:
+                radial_points = torch.linspace(self.Z_UV, self.Z_IR, self.radial_points, dtype=self.dtype)
             radial_points = self._ensure_dtype(radial_points)
-            
-            # Pre-compute frequently used values
-            num_points = len(radial_points)
-            z_ratios = torch.abs(radial_points / radial_points[0])
-            boundary_norm = torch.norm(boundary_field)
-            
-            # Initialize bulk field with memory tracking
-            bulk_shape = (num_points,) + boundary_field.shape
-            bulk_field = self._allocate_tensor(bulk_shape, self.dtype, "bulk_field")
-            
-            # Track bulk field in memory manager
-            try:
-                with self._track_tensor(bulk_field, "bulk_field") as bulk_field:
-                    # Set UV boundary condition
-                    bulk_field[0] = boundary_field
-                    
-                    # Store parameters for reconstruction
-                    self.Z_UV = radial_points[0]
-                    self.Z_IR = radial_points[-1]
-                    self.Z_RATIO = self.Z_IR / self.Z_UV
-                    self.boundary_norm = boundary_norm
-                    
-                    # Reset phase tracking
-                    self.current_phase = 0
-                    self.phase_evolution.zero_()
-                    
-                    # Main lifting loop with memory optimization
-                    for i, z_ratio in enumerate(z_ratios):
-                        if i == 0:
-                            continue
-                            
-                        # Apply radial scaling
-                        bulk_field[i] = self._apply_radial_scaling(boundary_field, z_ratio)
-                        
-                        # Add quantum corrections from OPE
-                        prev_field = bulk_field[i-1]
-                        norm = torch.norm(prev_field)
-                        if norm > self.EPSILON:
-                            prev_field = prev_field / norm
-                            try:
-                                correction = self.compute_ope(prev_field)
-                            except Exception as e:
-                                raise OperatorError(f"OPE computation failed at step {i}: {str(e)}")
-                                
-                            # Handle phase evolution
-                            self._track_phase(correction)
-                            
-                            # Scale and apply correction
-                            correction_scale = self.CORRECTION_SCALE_UV / (1 + z_ratio**2)
-                            bulk_field[i].add_(correction * boundary_norm * correction_scale)
-                            
-                        # Periodic memory optimization in main lifting loop
-                        if i % self.CLEANUP_INTERVAL == 0:
-                            self._update_memory_pressure()
-                            self._ensure_memory_efficiency(min_free_memory=0.3)  # Higher threshold during lifting
-                            
-                    return bulk_field
-            except Exception as e:
-                raise MemoryError(f"Memory management failed: {str(e)}")
-                
-        except ValidationError:
-            raise
+
+            # Initialize bulk field
+            bulk_shape = (len(radial_points),) + boundary_field.shape
+            bulk_field = torch.zeros(bulk_shape, dtype=self.dtype)
+
+            # Compute UV data (first slice)
+            bulk_field[0] = boundary_field.clone()
+
+            # Compute bulk field at each radial point
+            for i, z in enumerate(radial_points[1:], 1):
+                # Compute dimensionless ratio
+                z_ratio = z / radial_points[0]
+
+                # Apply classical scaling with quantum corrections
+                bulk_field[i] = self._apply_radial_scaling(boundary_field, z_ratio)
+
+                # Track phase evolution
+                self._track_phase(bulk_field[i])
+
+            return bulk_field
+
         except Exception as e:
-            raise RuntimeError(f"Holographic lifting failed: {str(e)}")
-    
+            raise ScalingError(f"Failed to compute holographic lift: {str(e)}")
 
     def extract_uv_data(self, field: torch.Tensor) -> torch.Tensor:
         """Extract UV (boundary) data from bulk field.
@@ -822,98 +670,62 @@ class HolographicLifter(nn.Module):
         except Exception as e:
             raise MemoryError(f"Memory management failed in IR extraction: {str(e)}")
 
-    def reconstruct_from_ir(self, ir_data: torch.Tensor) -> torch.Tensor:
-        """Reconstruct UV data from IR data using holographic principle.
+    def reconstruct_from_ir(self, ir_field: torch.Tensor) -> torch.Tensor:
+        """Reconstruct UV field from IR data.
         
-        This method reconstructs the UV (boundary) data from IR (deep bulk) data
-        by inverting the holographic lifting process. It captures how macroscopic
-        behavior emerges from microscopic degrees of freedom.
-        
-        Physics Background:
-        - Reconstruction inverts the RG flow
-        - Captures emergence of microscopic details
-        - Includes quantum corrections
-        - Preserves holographic correspondence
+        This method implements the inverse holographic mapping by:
+        1. Computing inverse classical scaling
+        2. Subtracting quantum corrections
+        3. Preserving phase information
         
         Args:
-            ir_data: Field values at IR boundary
+            ir_field: Field values at IR boundary
             
         Returns:
-            Reconstructed field values at UV boundary
+            Reconstructed UV field values
             
         Raises:
             ValidationError: If input validation fails
-            MemoryError: If memory management fails
+            ScalingError: If scaling computation fails
         """
         try:
             # Validate input
-            validation = self._validate_tensor(ir_data, "ir_data")
-            if not validation.is_valid:
-                raise ValidationError(f"Invalid IR data: {validation.message}")
-                
-            ir_data = self._ensure_dtype(ir_data)
+            ir_field = self._ensure_dtype(ir_field)
             
-            # Track input tensor
-            with self._track_tensor(ir_data, "ir_data"):
-                # Store original norm
-                ir_norm = torch.norm(ir_data)
-                
-                # Initialize UV data with leading term
-                uv_data = self._allocate_tensor(ir_data.shape, self.dtype, "uv_data")
-                uv_data.copy_(ir_data)
-                
-                # Track UV data
-                with self._track_tensor(uv_data, "uv_data"):
-                    # Compute corrections iteratively with memory optimization
-                    correction = self._allocate_tensor(ir_data.shape, self.dtype, "correction")
-                    
-                    # Track correction tensor
-                    with self._track_tensor(correction, "correction"):
-                        # Initialize total correction
-                        total_correction = self._allocate_tensor(ir_data.shape, self.dtype, "total_correction")
-                        total_correction.zero_()
-                        
-                        # Track total correction
-                        with self._track_tensor(total_correction, "total_correction"):
-                            for n in range(1, 6):  # Increase order of corrections
-                                # Each correction is suppressed by additional powers of z_ratio
-                                sign = (-1)**n
-                                power = -self.dim + 2*n
-                                scale = self.Z_RATIO ** power / math.factorial(n)
-                                
-                                # Compute correction in-place
-                                correction.copy_(ir_data)
-                                correction.mul_(scale * sign)
-                                
-                                # Add to total correction
-                                total_correction.add_(correction)
-                                
-                                # Periodic memory cleanup
-                                if n % 2 == 0:
-                                    self._update_memory_pressure()
-                                    self.memory_manager._cleanup_dead_refs()
-                            
-                            # Apply total correction with stability factor
-                            correction_scale = 0.1 / (1 + torch.abs(torch.tensor(self.Z_RATIO, dtype=self.dtype))**2)
-                            uv_data.add_(total_correction.mul_(correction_scale))
-                            
-                            # Ensure proper normalization
-                            uv_data.div_(torch.norm(uv_data))
-                            uv_data.mul_(ir_norm)  # Preserve original norm
-                            
-                            # Apply inverse scaling to match UV data
-                            uv_data.mul_(self.Z_RATIO ** self.dim)
-                            
-                            # Add UV enhancement factor
-                            uv_factor = torch.exp(-torch.abs(torch.tensor(self.Z_UV, dtype=self.dtype)))
-                            uv_data.mul_(1 + uv_factor)
-                            
-                            return uv_data
-                            
-        except ValidationError:
-            raise
+            # Compute dimensionless ratio
+            z_ratio = torch.tensor(self.Z_IR / self.Z_UV, dtype=ir_field.dtype)
+            
+            # Compute inverse classical scaling
+            if ir_field.is_complex():
+                phase = torch.exp(1j * torch.angle(z_ratio) * self.dim)
+                classical_scale = torch.abs(z_ratio)**self.dim
+            else:
+                phase = torch.tensor(1.0, dtype=ir_field.dtype)
+                classical_scale = z_ratio**self.dim
+            
+            # Apply inverse classical scaling with proper phase
+            uv_field = ir_field * classical_scale * phase
+            
+            # Subtract quantum corrections
+            quantum_power = 2 - self.dim  # Relevant deformation
+            correction_scale = -self.CORRECTION_SCALE_UV / (1 + torch.abs(z_ratio)**2)  # Note the negative sign
+            
+            # Compute inverse quantum correction with proper phase
+            if ir_field.is_complex():
+                phase = torch.exp(1j * torch.angle(z_ratio) * quantum_power)
+                quantum_scale = torch.abs(z_ratio)**quantum_power
+            else:
+                phase = torch.tensor(1.0, dtype=ir_field.dtype)
+                quantum_scale = z_ratio**quantum_power
+            
+            # Apply inverse quantum correction
+            correction = uv_field * quantum_scale * phase * correction_scale
+            uv_field = uv_field + correction
+            
+            return uv_field
+            
         except Exception as e:
-            raise MemoryError(f"Memory management failed in IR reconstruction: {str(e)}")
+            raise ScalingError(f"Failed to reconstruct UV field: {str(e)}")
 
     def reconstruct_from_uv(self, uv_data: torch.Tensor) -> torch.Tensor:
         """Reconstruct IR data from UV data using holographic principle.

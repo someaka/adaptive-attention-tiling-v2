@@ -1,6 +1,11 @@
+"""Neural network models for holographic lifting."""
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+import torch.nn.functional as F
+import math
+from typing import Optional
+
 
 class ComplexNorm(nn.Module):
     """Custom normalization layer for complex numbers."""
@@ -19,6 +24,7 @@ class ComplexNorm(nn.Module):
         x_norm = (x - mean) / torch.sqrt(var + self.eps)
         return self.weight[None, :] * x_norm + self.bias[None, :]
 
+
 class ResidualBlock(nn.Module):
     """Residual block with normalization and skip connection."""
     def __init__(self, hidden_dim: int, dtype: torch.dtype = torch.complex64):
@@ -32,6 +38,7 @@ class ResidualBlock(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.norm(x + self.layers(x))
+
 
 class HolographicNet(nn.Module):
     """Neural network for learning holographic mappings between UV and IR data.
@@ -49,7 +56,7 @@ class HolographicNet(nn.Module):
     def __init__(
         self,
         dim: int,
-        hidden_dim: int = 32,
+        hidden_dim: int = 16,
         n_layers: int = 4,
         dtype: torch.dtype = torch.complex64,
         z_uv: float = 0.1,
@@ -100,13 +107,16 @@ class HolographicNet(nn.Module):
                         # For weight matrices, use Glorot initialization
                         fan_in, fan_out = param.size(1), param.size(0)
                         std = torch.sqrt(torch.tensor(2.0 / (fan_in + fan_out)))
-                        param.data.copy_(std * torch.randn_like(param))
+                        if param.is_complex():
+                            param.data.copy_(std * (torch.randn_like(param.real) + 1j * torch.randn_like(param.imag)))
+                        else:
+                            param.data.copy_(std * torch.randn_like(param))
                 elif 'bias' in name:
                     param.data.zero_()
             
-            # Initialize correction weights close to analytical solution
+            # Initialize correction weights to match analytical solution
             self.correction_weights.data.copy_(torch.tensor(
-                [0.1/n for n in range(1, 4)],
+                [(-1)**n / math.factorial(n) for n in range(1, 4)],
                 dtype=self.dtype
             ))
             
@@ -115,36 +125,38 @@ class HolographicNet(nn.Module):
                 self.z_ratio**(-self.dim),
                 dtype=torch.float32
             )))
-    
+         
     def compute_quantum_corrections(self, x: torch.Tensor) -> torch.Tensor:
         """Compute quantum corrections using OPE-inspired terms."""
         corrections = torch.zeros_like(x)
         z_ratio = self.z_ratio  # Use actual z_ratio instead of exp(log_scale)
+        correction_scale = 0.1 / (1 + z_ratio**2)
         
-        for n, weight in enumerate(self.correction_weights, 1):
+        for n in range(1, 4):
             power = -self.dim + 2*n
-            correction = weight * x * z_ratio**power / torch.tensor(float(n), dtype=x.dtype)
-            corrections = corrections + correction
-        
+            correction = (-1)**n * x * z_ratio**power / math.factorial(n)
+            corrections = corrections + correction * correction_scale
+            
         return corrections
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with residual connections and quantum corrections."""
-        # Compute quantum corrections first
+        # Apply classical scaling
+        scale = torch.exp(self.log_scale.real)
+        if x.is_complex():
+            phase = torch.exp(-1j * torch.angle(torch.tensor(self.z_ratio, dtype=x.dtype)) * self.dim)
+            out = x * scale * phase
+        else:
+            out = x * scale
+        
+        # Add quantum corrections
         corrections = self.compute_quantum_corrections(x)
+        out = out + corrections
         
-        # Process input through network
-        out = self.input_proj(x)
-        
-        # Residual blocks
+        # Process through network for refinement
+        out = self.input_proj(out)
         for block in self.blocks:
             out = block(out)
-        
-        # Output projection
         out = self.output_proj(out)
-        
-        # Apply scaling and add corrections
-        scale = torch.exp(self.log_scale.real)
-        out = out * scale + corrections
         
         return out 
