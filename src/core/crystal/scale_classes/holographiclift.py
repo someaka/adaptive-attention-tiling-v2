@@ -400,8 +400,14 @@ class HolographicLifter(nn.Module):
                     # Track normalized operators
                     with self._track_tensor(op1_norm, "op1_norm"), \
                          self._track_tensor(op2_norm, "op2_norm"):
-    
-                        # Create operadic operations for each operator
+
+                        # Extract phases and magnitudes
+                        op1_phase = torch.angle(op1_norm)
+                        op2_phase = torch.angle(op2_norm)
+                        op1_mag = torch.abs(op1_norm)
+                        op2_mag = torch.abs(op2_norm)
+
+                        # Create operadic operations with proper phase handling
                         op1_operation = self.operad_handler.create_operation(
                             source_dim=self.dim,
                             target_dim=self.dim,
@@ -412,105 +418,57 @@ class HolographicLifter(nn.Module):
                             target_dim=self.dim,
                             preserve_structure='quantum'
                         )
-    
-                        # Compose the operations and ensure complex dtype
+
+                        # Let the operadic structure handle composition
                         composed_op, metrics = self.operad_handler.compose_operations(
                             operations=[op1_operation, op2_operation],
                             with_motivic=True
                         )
-                        composed_op.composition_law = composed_op.composition_law.to(dtype=self.dtype)
 
-                        # Add global phase correction for better associativity
-                        global_phase = torch.angle(composed_op.composition_law).mean()
-                        composed_op.composition_law = composed_op.composition_law * torch.exp(-1j * global_phase)
-
-                        # Normalize composition law for better U(1) preservation
-                        composed_op.composition_law = composed_op.composition_law / torch.norm(composed_op.composition_law)
-                         
-                        # Apply the composed operation using quantum phase-preserving tensor product
-                        # This implementation strictly maintains U(1) symmetry
+                        # Apply the composed operation to both operators
                         if len(op1_norm.shape) > 1:
-                            # Batched version with quantum phase preservation
-                            phase1 = torch.angle(op1_norm).to(dtype=self.dtype)
-                            phase2 = torch.angle(op2_norm).to(dtype=self.dtype)
+                            # Batched version
+                            op1_flat = op1_mag.reshape(-1, self.dim).to(dtype=self.dtype)
+                            op2_flat = op2_mag.reshape(-1, self.dim).to(dtype=self.dtype)
 
-                            # Compute relative phase factor with complex dtype and add correction
-                            phase_factor = torch.exp(1j * (phase1 - phase2).to(dtype=self.dtype))
-                            phase_factor = phase_factor * torch.exp(-1j * torch.mean(torch.angle(phase_factor)))
+                            # Apply composition law to magnitudes
+                            result = torch.matmul(composed_op.composition_law, op1_flat.t()).t()
+                            result2 = torch.matmul(composed_op.composition_law, op2_flat.t()).t()
 
-                            # Flatten inputs for composition
-                            op1_flat = op1_norm.reshape(-1, self.dim)
-                            op2_flat = op2_norm.reshape(-1, self.dim)
-
-                            # Apply composition law to both operators simultaneously with U(1) preservation
-                            result = torch.einsum('ij,bj->bi', composed_op.composition_law.to(dtype=self.dtype),
-                                                (op1_flat * phase_factor.conj()).to(dtype=self.dtype))
-                            result2 = torch.einsum('ij,bj->bi', composed_op.composition_law.to(dtype=self.dtype),
-                                                 (op2_flat * phase_factor).to(dtype=self.dtype))
-                         
-                            # Combine results with phase coherence and normalization
+                            # Combine results with proper phase handling
                             result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
                             result2 = result2 / (torch.norm(result2, dim=-1, keepdim=True) + self.EPSILON)
-                            combined_result = 0.5 * (result + result2)
-                            combined_result = combined_result / (torch.norm(combined_result, dim=-1, keepdim=True) + self.EPSILON)
+                            result = 0.5 * (result + result2)
+                            result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
 
-                            # Apply phase correction with complex dtype
-                            final_phase = torch.angle(combined_result).to(dtype=self.dtype)
-                            final_phase = final_phase - torch.mean(final_phase, dim=-1, keepdim=True)  # Center phases
-                            result = torch.einsum('ij,bj->bi', composed_op.composition_law.to(dtype=self.dtype),
-                                                (combined_result * torch.exp(-1j * final_phase)).to(dtype=self.dtype))
-                            result = result * torch.exp(1j * final_phase)
+                            # Apply composed phase
+                            composed_phase = 0.5 * (op1_phase + op2_phase)  # Average phase
+                            composed_phase = composed_phase.reshape(op1_norm.shape)
+                            result = result * torch.exp(1j * composed_phase)
 
                             # Reshape result back to original shape
                             result = result.view(op1_norm.shape)
-
-                            # Apply additional phase correction for better associativity
-                            phase_correction = torch.exp(1j * torch.mean(torch.angle(result)) / 3)
-                            result = result * phase_correction
-
-                            # Normalize to maintain U(1) structure
-                            result = result / torch.norm(result)
                         else:
-                            # Single input version with quantum phase preservation
-                            phase1 = torch.angle(op1_norm).to(dtype=self.dtype)
-                            phase2 = torch.angle(op2_norm).to(dtype=self.dtype)
+                            # Single input version
+                            op1_flat = op1_mag.reshape(-1, self.dim).to(dtype=self.dtype)
+                            op2_flat = op2_mag.reshape(-1, self.dim).to(dtype=self.dtype)
 
-                            # Compute relative phase factor with complex dtype and add correction
-                            phase_factor = torch.exp(1j * (phase1 - phase2).to(dtype=self.dtype))
-                            phase_factor = phase_factor * torch.exp(-1j * torch.mean(torch.angle(phase_factor)))
+                            # Apply composition law to magnitudes
+                            result = torch.matmul(composed_op.composition_law, op1_flat.t()).t()
+                            result2 = torch.matmul(composed_op.composition_law, op2_flat.t()).t()
 
-                            # Flatten inputs for composition
-                            op1_flat = op1_norm.reshape(-1, self.dim)
-                            op2_flat = op2_norm.reshape(-1, self.dim)
+                            # Combine results with proper phase handling
+                            result = result / (torch.norm(result) + self.EPSILON)
+                            result2 = result2 / (torch.norm(result2) + self.EPSILON)
+                            result = 0.5 * (result + result2)
+                            result = result / (torch.norm(result) + self.EPSILON)
 
-                            # Apply composition law to both operators simultaneously with U(1) preservation
-                            result = torch.einsum('ij,bj->bi', composed_op.composition_law.to(dtype=self.dtype),
-                                                (op1_flat * phase_factor.conj()).to(dtype=self.dtype))
-                            result2 = torch.einsum('ij,bj->bi', composed_op.composition_law.to(dtype=self.dtype),
-                                                 (op2_flat * phase_factor).to(dtype=self.dtype))
-                         
-                            # Combine results with phase coherence and normalization
-                            result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
-                            result2 = result2 / (torch.norm(result2, dim=-1, keepdim=True) + self.EPSILON)
-                            combined_result = 0.5 * (result + result2)
-                            combined_result = combined_result / (torch.norm(combined_result, dim=-1, keepdim=True) + self.EPSILON)
-
-                            # Apply phase correction with complex dtype
-                            final_phase = torch.angle(combined_result).to(dtype=self.dtype)
-                            final_phase = final_phase - torch.mean(final_phase, dim=-1, keepdim=True)  # Center phases
-                            result = torch.einsum('ij,bj->bi', composed_op.composition_law.to(dtype=self.dtype),
-                                                (combined_result * torch.exp(-1j * final_phase)).to(dtype=self.dtype))
-                            result = result * torch.exp(1j * final_phase)
+                            # Apply composed phase
+                            composed_phase = 0.5 * (op1_phase + op2_phase)  # Average phase
+                            result = result * torch.exp(1j * composed_phase)
 
                             # Reshape result back to original shape
                             result = result.view(op1_norm.shape)
-
-                            # Apply additional phase correction for better associativity
-                            phase_correction = torch.exp(1j * torch.mean(torch.angle(result)) / 3)
-                            result = result * phase_correction
-
-                            # Normalize to maintain U(1) structure
-                            result = result / torch.norm(result)
 
                         # Estimate distance between operators using their overlap
                         overlap = torch.abs(torch.sum(torch.conj(op1_norm) * op2_norm))
@@ -528,20 +486,14 @@ class HolographicLifter(nn.Module):
                             quantum_scale = torch.exp(log_distance * (2 - self.dim))
 
                             # Weight quantum corrections using UV/IR ratio with reduced strength
-                            correction_weight = 0.05 / (1 + self.Z_RATIO**2)  # Reduced from 0.1 to 0.05
+                            correction_weight = 0.01 / (1 + self.Z_RATIO**2)  # Further reduced from 0.025 to 0.01
                          
                             # Combine classical and quantum scaling with reduced quantum contribution
                             scale_factor = classical_scale * (1 + correction_weight * quantum_scale)
                             result = result * scale_factor
 
-                        # Normalize the result to account for double application of composition law
-                        result = result / torch.norm(composed_op.composition_law)
-
                         # Scale by geometric mean of input norms
                         result = result * torch.sqrt(norm1 * norm2)
-
-                        # Reapply the combined phase
-                        result = result * combined_phase
 
                         # Ensure proper normalization
                         result = result / torch.norm(result)
