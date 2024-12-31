@@ -118,7 +118,7 @@ class TestHolographicLift(TestBase):
         ops = [op / torch.norm(op) for op in ops]  # Normalize
         
         # Test basic properties
-        result = lifter.operator_product_expansion(ops[0], ops[1])
+        result = lifter.operator_product_expansion(ops[0], ops[1], normalize=True)
         self.validate_tensor(result, "OPE result")
         
         # Test normalization preservation
@@ -128,19 +128,21 @@ class TestHolographicLift(TestBase):
         # Test U(1) phase structure
         phase1 = torch.exp(torch.tensor(1j * torch.pi / 4, dtype=lifter.dtype))
         phase2 = torch.exp(torch.tensor(1j * torch.pi / 3, dtype=lifter.dtype))
-        ope1 = lifter.operator_product_expansion(phase1 * ops[0], ops[1])
-        ope2 = lifter.operator_product_expansion(ops[0], phase2 * ops[1])
+        ope1 = lifter.operator_product_expansion(phase1 * ops[0], ops[1], normalize=True)
+        ope2 = lifter.operator_product_expansion(ops[0], phase2 * ops[1], normalize=True)
         phase_error = torch.norm(ope1 - phase1 * result).item()
         assert phase_error < 1e-2, f"OPE should respect U(1) structure, error: {phase_error:.2e}"
         
         # Test associativity through triple products
         ope12_3 = lifter.operator_product_expansion(
-            lifter.operator_product_expansion(ops[0], ops[1]),
-            ops[2]
+            lifter.operator_product_expansion(ops[0], ops[1], normalize=True),
+            ops[2],
+            normalize=True
         )
         ope1_23 = lifter.operator_product_expansion(
             ops[0],
-            lifter.operator_product_expansion(ops[1], ops[2])
+            lifter.operator_product_expansion(ops[1], ops[2], normalize=True),
+            normalize=True
         )
         assoc_error = torch.norm(ope12_3 - ope1_23).item()
         assert assoc_error < 0.1, f"OPE should be approximately associative, error: {assoc_error:.2e}"
@@ -148,7 +150,7 @@ class TestHolographicLift(TestBase):
         # Test scaling behavior with distance
         x = torch.linspace(0.1, 2.0, 10, dtype=lifter.dtype)
         scaled_ops = [op * torch.exp(-x[:, None]**2) for op in ops[:2]]  # Gaussian localization
-        opes = [lifter.operator_product_expansion(scaled_ops[0][i], scaled_ops[1][i]) 
+        opes = [lifter.operator_product_expansion(scaled_ops[0][i], scaled_ops[1][i], normalize=False)
                 for i in range(len(x))]
         opes = torch.stack(opes)
         

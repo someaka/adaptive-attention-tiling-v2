@@ -175,11 +175,6 @@ class AttentionOperad(OperadicComposition):
             [op.composition_law for op in operations],
             enrichments
         )
-        
-        # Normalize the composed law to preserve significant terms
-        norm = torch.norm(composed_law)
-        if norm > 1e-6:
-            composed_law = composed_law / norm
             
         # Combine enrichment data
         combined_enrichment = self._combine_enrichments(enrichments)
@@ -194,6 +189,12 @@ class AttentionOperad(OperadicComposition):
                 if op.natural_transformation is not None
             ]
         }
+        
+        # Normalize the composed law to preserve significant terms
+        # but only after all compositions are done
+        norm = torch.norm(composed_law)
+        if norm > 1e-6:
+            composed_law = composed_law / norm
         
         return OperadicOperation(
             source_dim=source_dim,
@@ -305,11 +306,16 @@ class AttentionOperad(OperadicComposition):
         Returns:
             The composed morphism tensor with preserved structure
         """
-        result = morphisms[0]
-        for morphism, enrichment in zip(morphisms[1:], enrichments):
+        # Extract phases and magnitudes
+        phases = [torch.angle(m) for m in morphisms]
+        magnitudes = [torch.abs(m) for m in morphisms]
+        
+        # Compose magnitudes first
+        result = magnitudes[0]
+        for magnitude, enrichment in zip(magnitudes[1:], enrichments):
             if enrichment.get('preserve_symplectic'):
                 # Compose while preserving symplectic structure
-                result = self._symplectic_compose(result, morphism)
+                result = self._symplectic_compose(result, magnitude)
                 
                 # Ensure result has correct shape after composition
                 source_dim = morphisms[0].shape[1]  # First morphism's input dimension
@@ -324,7 +330,7 @@ class AttentionOperad(OperadicComposition):
                     result = new_result
             else:
                 # Standard composition
-                result = torch.matmul(morphism, result)
+                result = torch.matmul(magnitude, result)
                 
                 # Ensure result has correct shape
                 source_dim = morphisms[0].shape[1]
@@ -335,6 +341,14 @@ class AttentionOperad(OperadicComposition):
                     min_cols = min(result.shape[1], source_dim)
                     new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
                     result = new_result
+        
+        # Compose phases by adding them
+        composed_phase = torch.zeros_like(result)
+        for phase in phases:
+            composed_phase = composed_phase + phase
+        
+        # Combine magnitude and phase
+        result = result * torch.exp(1j * composed_phase)
         
         return result
     
@@ -358,12 +372,6 @@ class AttentionOperad(OperadicComposition):
         if a2.dim() == 1:
             a2 = a2.unsqueeze(0)  # Shape becomes (1, N)
 
-        # Normalize inputs
-        if torch.norm(a1) > 0:
-            a1 = a1 / torch.norm(a1)
-        if torch.norm(a2) > 0:
-            a2 = a2 / torch.norm(a2)
-
         # Get target dimensions
         target_dim = a1.shape[0]
         source_dim = a2.shape[1] if a2.dim() > 1 else 1
@@ -377,6 +385,7 @@ class AttentionOperad(OperadicComposition):
             a1 = new_a1
 
         # Calculate the composition using matrix multiplication
+        # Preserve U(1) phase structure by not normalizing inputs
         result = torch.matmul(a1, a2)
 
         # Ensure result has correct shape (target_dim, source_dim)
@@ -386,10 +395,6 @@ class AttentionOperad(OperadicComposition):
             min_cols = min(result.shape[1], source_dim)
             new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
             result = new_result
-
-        # Normalize the result
-        if torch.norm(result) > 0:
-            result = result / torch.norm(result)
 
         return result
     

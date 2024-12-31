@@ -153,19 +153,8 @@ class OperadicStructureHandler(nn.Module):
             - Composed operadic operation
             - Dictionary of metrics and measures
         """
-        # Extract phases from composition laws
-        phases = [torch.angle(op.composition_law) for op in operations]
-        
-        # Compose operations while preserving phases
+        # Let the operadic structure handle phase composition naturally
         composed = self.operad.compose(operations)
-        
-        # Compute composed phases
-        composed_phases = torch.zeros_like(composed.composition_law, dtype=torch.float32)
-        for phase in phases:
-            composed_phases = composed_phases + phase
-            
-        # Apply composed phases to composition law
-        composed.composition_law = composed.composition_law.abs() * torch.exp(1j * composed_phases)
         
         metrics = {}
         if with_motivic:
@@ -179,7 +168,7 @@ class OperadicStructureHandler(nn.Module):
             )
             metrics.update(measure_metrics)
             metrics['measure'] = measure
-            
+        
         return composed, metrics
     
     def create_natural_transformation(

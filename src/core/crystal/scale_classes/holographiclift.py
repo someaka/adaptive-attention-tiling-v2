@@ -334,37 +334,22 @@ class HolographicLifter(nn.Module):
         return tensor.to(dtype=self.dtype) if tensor.dtype != self.dtype else tensor
         
     
-    def operator_product_expansion(self, op1: torch.Tensor, op2: torch.Tensor) -> torch.Tensor:
+    def operator_product_expansion(self, op1: torch.Tensor, op2: torch.Tensor, normalize: bool = True) -> torch.Tensor:
         """Compute operator product expansion between two operators.
     
         The OPE captures the short-distance behavior of quantum operators:
-        - Normalizes input operators
-        - Creates and composes operadic operations
-        - Applies scaling and phase tracking
-        - Preserves U(1) phase structure
+        - Uses operadic structure for composition
+        - Preserves U(1) phase structure naturally
         - Maintains amplitude scaling with distance
         - Respects associativity up to quantum corrections
-    
-        Physics Background:
-        - OPE = short-distance expansion of operator products
-        - Captures quantum corrections to classical behavior
-        - Preserves operator algebra structure
-        - Includes phase information for quantum coherence
-        - Respects U(1) symmetry
-        - Amplitude decays with operator separation
-        - Associativity holds in the classical limit
     
         Args:
             op1: First operator
             op2: Second operator
+            normalize: Whether to normalize the result (default: True)
     
         Returns:
             OPE coefficients
-    
-        Raises:
-            ValidationError: If input validation fails
-            OperatorError: If OPE computation fails
-            MemoryError: If memory management fails
         """
         try:
             # Convert inputs to complex type if needed and ensure contiguous
@@ -379,134 +364,90 @@ class HolographicLifter(nn.Module):
 
             # Track input operators
             with self._track_tensor(op1, "op1"), self._track_tensor(op2, "op2"):
-                # Extract phases before normalization
-                phase1 = torch.angle(op1).mean() if op1.is_complex() else torch.tensor(0.0, device=op1.device)
-                phase2 = torch.angle(op2).mean() if op2.is_complex() else torch.tensor(0.0, device=op2.device)
-                combined_phase = torch.exp(1j * (phase1 + phase2).to(self.dtype))
-
-                # Get magnitudes for normalization
+                # Get norms and phases for scaling
                 norm1 = torch.norm(op1)
                 norm2 = torch.norm(op2)
+                phase1 = torch.angle(op1)
+                phase2 = torch.angle(op2)
     
                 if norm1 > self.EPSILON and norm2 > self.EPSILON:
-                    # Allocate normalized operators (without phases)
-                    op1_norm = self._allocate_tensor(op1.shape, self.dtype, "op1_norm")
-                    op2_norm = self._allocate_tensor(op2.shape, self.dtype, "op2_norm")
-    
-                    # Normalize while preserving relative phases
-                    op1_norm.copy_(op1 / norm1)
-                    op2_norm.copy_(op2 / norm2)
-    
-                    # Track normalized operators
-                    with self._track_tensor(op1_norm, "op1_norm"), \
-                         self._track_tensor(op2_norm, "op2_norm"):
+                    # Create operadic operations with quantum structure preservation
+                    op1_operation = self.operad_handler.create_operation(
+                        source_dim=self.dim,
+                        target_dim=self.dim,
+                        preserve_structure='quantum'
+                    )
+                    op2_operation = self.operad_handler.create_operation(
+                        source_dim=self.dim,
+                        target_dim=self.dim,
+                        preserve_structure='quantum'
+                    )
 
-                        # Extract phases and magnitudes
-                        op1_phase = torch.angle(op1_norm)
-                        op2_phase = torch.angle(op2_norm)
-                        op1_mag = torch.abs(op1_norm)
-                        op2_mag = torch.abs(op2_norm)
+                    # Handle both 1D and 2D input tensors
+                    if op1.dim() == 1:
+                        # For 1D tensors, create 2D composition laws
+                        op1_2d = torch.zeros((self.dim, self.dim), dtype=self.dtype)
+                        op2_2d = torch.zeros((self.dim, self.dim), dtype=self.dtype)
+                        # Set magnitudes only, handle phases separately
+                        op1_2d[0] = torch.abs(op1) / norm1
+                        op2_2d[0] = torch.abs(op2) / norm2
+                    else:
+                        # For 2D tensors, use their magnitudes directly
+                        op1_2d = torch.abs(op1) / norm1
+                        op2_2d = torch.abs(op2) / norm2
 
-                        # Create operadic operations with proper phase handling
-                        op1_operation = self.operad_handler.create_operation(
-                            source_dim=self.dim,
-                            target_dim=self.dim,
-                            preserve_structure='quantum'
-                        )
-                        op2_operation = self.operad_handler.create_operation(
-                            source_dim=self.dim,
-                            target_dim=self.dim,
-                            preserve_structure='quantum'
-                        )
+                    # Set composition laws
+                    op1_operation.composition_law = op1_2d
+                    op2_operation.composition_law = op2_2d
 
-                        # Extract U(1) phases before applying composition
-                        op1_u1_phase = torch.mean(torch.angle(op1_norm))
-                        op2_u1_phase = torch.mean(torch.angle(op2_norm))
+                    # Let the operadic structure handle magnitude composition
+                    composed_op, metrics = self.operad_handler.compose_operations(
+                        operations=[op1_operation, op2_operation],
+                        with_motivic=True
+                    )
+
+                    # Extract result based on input dimensionality
+                    if op1.dim() == 1:
+                        result = composed_op.composition_law[0]
+                    else:
+                        result = composed_op.composition_law
+
+                    # Estimate distance between operators using their overlap
+                    overlap = torch.abs(torch.sum(torch.conj(op1) * op2) / (norm1 * norm2))
+                    distance = torch.sqrt(2.0 * (1.0 - overlap))  # Geodesic distance on unit sphere
+                         
+                    # Scale amplitude with distance using both classical and quantum terms
+                    if distance > self.EPSILON:
+                        # Use log(1+d) for associativity
+                        log_distance = torch.log1p(distance)
+
+                        # Classical scaling term (matches UV/IR classical scaling)
+                        classical_scale = torch.exp(-log_distance * self.dim)
+
+                        # Quantum correction term (matches UV/IR quantum corrections)
+                        quantum_scale = torch.exp(log_distance * (2 - self.dim))
+
+                        # Weight quantum corrections using UV/IR ratio with reduced strength
+                        correction_weight = 0.01 / (1 + self.Z_RATIO**2)
+                         
+                        # Combine classical and quantum scaling with reduced quantum contribution
+                        scale_factor = classical_scale * (1 + correction_weight * quantum_scale)
                         
-                        # Remove global U(1) phase for composition
-                        op1_norm_u1 = op1_norm * torch.exp(-1j * op1_u1_phase)
-                        op2_norm_u1 = op2_norm * torch.exp(-1j * op2_u1_phase)
+                        # Scale the result
+                        result = result * scale_factor
 
-                        # Let the operadic structure handle composition
-                        composed_op, metrics = self.operad_handler.compose_operations(
-                            operations=[op1_operation, op2_operation],
-                            with_motivic=True
-                        )
+                    # Scale by geometric mean of input norms
+                    result = result * torch.sqrt(norm1 * norm2)
 
-                        # Apply the composed operation to both operators
-                        if len(op1_norm.shape) > 1:
-                            # Batched version
-                            op1_flat = op1_norm_u1.reshape(-1, self.dim)
-                            op2_flat = op2_norm_u1.reshape(-1, self.dim)
+                    # Apply composed phase
+                    composed_phase = phase1 + phase2  # Add phases for U(1) structure
+                    result = result * torch.exp(1j * composed_phase)
 
-                            # Apply composition law to phase-normalized tensors
-                            result = torch.matmul(composed_op.composition_law, op1_flat.t()).t()
-                            result2 = torch.matmul(composed_op.composition_law, op2_flat.t()).t()
-
-                            # Combine results with proper normalization
-                            result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
-                            result2 = result2 / (torch.norm(result2, dim=-1, keepdim=True) + self.EPSILON)
-                            result = 0.5 * (result + result2)
-                            result = result / (torch.norm(result, dim=-1, keepdim=True) + self.EPSILON)
-
-                            # Restore U(1) phase from first operator
-                            result = result * torch.exp(1j * op1_u1_phase)
-
-                            # Reshape result back to original shape
-                            result = result.view(op1_norm.shape)
-                        else:
-                            # Single input version
-                            op1_flat = op1_norm_u1.reshape(-1, self.dim)
-                            op2_flat = op2_norm_u1.reshape(-1, self.dim)
-
-                            # Apply composition law to phase-normalized tensors
-                            result = torch.matmul(composed_op.composition_law, op1_flat.t()).t()
-                            result2 = torch.matmul(composed_op.composition_law, op2_flat.t()).t()
-
-                            # Combine results with proper normalization
-                            result = result / (torch.norm(result) + self.EPSILON)
-                            result2 = result2 / (torch.norm(result2) + self.EPSILON)
-                            result = 0.5 * (result + result2)
-                            result = result / (torch.norm(result) + self.EPSILON)
-
-                            # Restore U(1) phase from first operator
-                            result = result * torch.exp(1j * op1_u1_phase)
-
-                            # Reshape result back to original shape
-                            result = result.view(op1_norm.shape)
-
-                        # Estimate distance between operators using their overlap
-                        overlap = torch.abs(torch.sum(torch.conj(op1_norm) * op2_norm))
-                        distance = torch.sqrt(2.0 * (1.0 - overlap))  # Geodesic distance on unit sphere
-                         
-                        # Scale amplitude with distance using both classical and quantum terms
-                        if distance > self.EPSILON:
-                            # Use log(1+d) for associativity
-                            log_distance = torch.log1p(distance)
-
-                            # Classical scaling term (matches UV/IR classical scaling)
-                            classical_scale = torch.exp(-log_distance * self.dim)
-
-                            # Quantum correction term (matches UV/IR quantum corrections)
-                            quantum_scale = torch.exp(log_distance * (2 - self.dim))
-
-                            # Weight quantum corrections using UV/IR ratio with reduced strength
-                            correction_weight = 0.01 / (1 + self.Z_RATIO**2)  # Further reduced from 0.025 to 0.01
-                         
-                            # Combine classical and quantum scaling with reduced quantum contribution
-                            scale_factor = classical_scale * (1 + correction_weight * quantum_scale)
-                            result = result * scale_factor
-
-                        # Scale by geometric mean of input norms
-                        result = result * torch.sqrt(norm1 * norm2)
-
-                        # Ensure proper normalization
+                    # Normalize if requested
+                    if normalize:
                         result = result / torch.norm(result)
 
-                        # Ensure result is contiguous
-                        result = result.contiguous()
-
-                        return result
+                    return result.contiguous()
                 else:
                     # Return zero tensor with proper shape and dtype
                     return self._allocate_tensor(op1.shape, self.dtype, "zero_result")
