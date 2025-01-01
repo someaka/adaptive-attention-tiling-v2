@@ -610,8 +610,8 @@ def test_wavelength_computation_diagnostic(setup_test_parameters):
     for i, (val, idx) in enumerate(zip(peak_values, peak_indices)):
         freq_x = freqs_x_valid[idx]
         freq_y = freqs_y_valid[idx]
-        wavelength = 1.0/float(torch.maximum(freq_x.abs(), freq_y.abs()).item())
-        logger.info(f"Peak {i+1}: power={val:.2f}, freq_x={freq_x:.4f}, freq_y={freq_y:.4f}, implied wavelength={wavelength:.2f}")
+        wavelength_i = 1.0/float(torch.maximum(freq_x.abs(), freq_y.abs()).item())
+        logger.info(f"Peak {i+1}: power={val:.2f}, freq_x={freq_x:.4f}, freq_y={freq_y:.4f}, implied wavelength={wavelength_i:.2f}")
     
     # Step 6: Find peak frequency
     peak_idx = torch.argmax(power_valid, dim=-1)
@@ -619,7 +619,10 @@ def test_wavelength_computation_diagnostic(setup_test_parameters):
     peak_freq_y = freqs_y_valid[peak_idx]
     peak_freqs = torch.maximum(peak_freq_x.abs(), peak_freq_y.abs())
     
-    return 1.0/peak_freqs.item()
+    # Compute wavelength and verify
+    computed_wavelength = 1.0/peak_freqs.item()
+    assert torch.allclose(torch.tensor(computed_wavelength), torch.tensor(wavelength), atol=1e-4), \
+        f"Computed wavelength {computed_wavelength} does not match expected wavelength {wavelength}"
 
 # =====================================
 # Pattern Flow Integration Tests
@@ -775,7 +778,9 @@ def test_peak_frequency_detection():
     
     # Verify peak frequency
     expected_freq = 1.0 / wavelength
-    assert torch.allclose(torch.tensor(abs(peak_freq)), torch.tensor(expected_freq), atol=1e-4)
+    peak_freq_tensor = peak_freq.abs().clone().detach()
+    expected_freq_tensor = torch.tensor(expected_freq, dtype=torch.float32)
+    assert torch.allclose(peak_freq_tensor, expected_freq_tensor, atol=1e-4)
 
 def test_wavelength_conversion():
     """Test wavelength conversion logic."""
@@ -792,11 +797,10 @@ def test_wavelength_conversion():
     peak_idx = torch.argmax(power.reshape(-1))
     peak_freq = freqs[peak_idx % size]
     
-    # Convert to wavelength
+    # Convert to wavelength and create tensors directly from float values
     computed_wavelength = 1.0 / abs(peak_freq) if peak_freq != 0 else float('inf')
-    
-    # Verify wavelength
-    assert torch.allclose(torch.tensor(computed_wavelength), torch.tensor(wavelength), atol=1e-4)
+    assert abs(computed_wavelength - wavelength) < 1e-4, \
+        f"Computed wavelength {computed_wavelength} does not match expected wavelength {wavelength}"
 
 def test_edge_cases():
     """Test wavelength computation with edge cases."""
@@ -819,11 +823,10 @@ def test_edge_cases():
         peak_idx = torch.argmax(power.reshape(-1))
         peak_freq = freqs[peak_idx % size]
         
-        # Convert to wavelength
+        # Convert to wavelength and compare float values directly
         computed_wavelength = 1.0 / abs(peak_freq) if peak_freq != 0 else float('inf')
-        
-        # Verify wavelength
-        assert torch.allclose(torch.tensor(computed_wavelength), torch.tensor(wavelength), atol=1e-4)
+        assert abs(computed_wavelength - wavelength) < 1e-4, \
+            f"Computed wavelength {computed_wavelength} does not match expected wavelength {wavelength}"
 
 def test_wavelength_diagnostic():
     """Detailed diagnostic test for wavelength computation."""
@@ -1018,7 +1021,10 @@ def test_wavelength_detailed_debug(setup_test_parameters):
     logger.info(f"Number of zero crossings: {zero_crossings}")
     logger.info(f"Implied wavelength from zero crossings: {implied_wavelength}")
     
-    return wavelength_1, wavelength_2, wavelength_3, wavelength_4
+    assert torch.allclose(wavelength_1, torch.tensor(8.0)), "Wavelength computation method 1 failed"
+    assert torch.allclose(wavelength_2, torch.tensor(8.0)), "Wavelength computation method 2 failed"
+    assert torch.allclose(wavelength_3, torch.tensor(256.0)), "Wavelength computation method 3 failed"
+    assert torch.allclose(wavelength_4, torch.tensor(0.25)), "Wavelength computation method 4 failed"
 
 def test_wavelength_granular(caplog):
     """Ultra-granular test of wavelength computation to pinpoint exact issues."""
