@@ -141,18 +141,38 @@ class HilbertSpace:
             rho = torch.matmul(state_vector.conj().transpose(-2,-1), state_vector)
         else:
             rho = state.to(torch.complex128)
-            
-        # Compute reduced density matrix by partial trace
-        n = int(torch.sqrt(torch.tensor(rho.shape[0])))  # Assuming 2-qubit system
-        rho_reshaped = rho.reshape(n, n, n, n)
-        rho_reduced = torch.einsum('ijik->jk', rho_reshaped)
         
-        # Compute von Neumann entropy
-        eigenvals = torch.linalg.eigvalsh(rho_reduced).to(torch.float64)
-        eigenvals = torch.clamp(eigenvals, min=1e-10)  # Remove small negative eigenvalues
-        eigenvals = eigenvals / torch.sum(eigenvals)  # Normalize eigenvalues
-        entropy = -torch.sum(eigenvals * torch.log(eigenvals))  # Using natural log
-        return entropy.to(torch.float64)
+        # For a lattice state, we'll use the first dimension as the subsystem
+        if len(rho.shape) == 2:
+            # Compute the size of subsystems
+            total_size = rho.shape[0] * rho.shape[1]
+            subsystem_size = int(torch.sqrt(torch.tensor(total_size)))
+            
+            # Create density matrix from pure state if needed
+            if not torch.allclose(torch.matmul(rho.conj().transpose(-2,-1), rho), rho):
+                rho = torch.matmul(rho.conj().transpose(-2,-1), rho)
+            
+            # Reshape for partial trace
+            rho = rho.reshape(subsystem_size, subsystem_size, subsystem_size, subsystem_size)
+            
+            # Compute reduced density matrix
+            reduced_rho = torch.einsum('ijik->jk', rho)
+            
+            # Compute eigenvalues
+            eigenvalues = torch.linalg.eigvalsh(reduced_rho)
+            
+            # Remove small negative eigenvalues (numerical artifacts)
+            eigenvalues = torch.where(eigenvalues > 1e-10, eigenvalues, torch.zeros_like(eigenvalues))
+            
+            # Normalize eigenvalues
+            eigenvalues = eigenvalues / torch.sum(eigenvalues)
+            
+            # Compute von Neumann entropy
+            entropy = -torch.sum(eigenvalues * torch.log(eigenvalues + 1e-10))
+            
+            return entropy
+        else:
+            raise ValueError("Input state must be 2-dimensional")
 
     def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> QuantumState:
         """Evolve quantum state under Hamiltonian.

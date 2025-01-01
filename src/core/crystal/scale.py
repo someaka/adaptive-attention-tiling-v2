@@ -259,6 +259,7 @@ class ScaleCohomology:
         self.connection = ScaleConnection(dim, num_scales, dtype=dtype)
         self.rg_flow = RenormalizationFlow(dim, dtype=dtype)
         self.scale_invariance = ScaleInvariance(dim, num_scales, dtype=dtype)
+        self.hilbert_space = HilbertSpace(dim=dim, dtype=dtype)
 
         # Specialized networks for advanced computations
         self.callan_symanzik_net = nn.Sequential(
@@ -267,11 +268,6 @@ class ScaleCohomology:
             nn.Linear(dim * 4, dim, dtype=dtype)
         )
         
-        # self.ope_net = nn.Sequential(
-        #     nn.Linear(dim * 2, dim * 4, dtype=dtype),
-        #     activation,
-        #     nn.Linear(dim * 4, dim, dtype=dtype)
-        # )
 
         self.conformal_net = nn.Sequential(
             nn.Linear(dim, dim * 2, dtype=dtype),
@@ -288,7 +284,8 @@ class ScaleCohomology:
         # Register all parameters for memory tracking
         for module in [self.forms, self.riemann_computer, self.potential_grad,
                       self.cocycle_computer, self.coboundary_computer, 
-                      self.anomaly_detector.detector]:
+                      self.anomaly_detector.detector,
+                      self.holographic.holographic_net]:  # Add holographic net
             for param in module.parameters():
                 param.data = register_tensor(param.data)
 
@@ -1177,12 +1174,40 @@ class ScaleCohomology:
             is_conformal = self.conformal_symmetry(state)
             results[f'conformal_{i}'] = is_conformal
             
+        # Add holographic analysis
+        radial_points = torch.linspace(0.1, 10.0, 50, dtype=self.dtype)
+        for i, state in enumerate(states):
+            # Perform holographic lifting
+            bulk_field = self.holographic_lift(state, radial_points)
+            
+            # Extract UV/IR data
+            uv_data = self.extract_uv_data(bulk_field)
+            ir_data = self.extract_ir_data(bulk_field)
+            
+            # Compute c-function
+            c_function = self.compute_c_function(bulk_field, radial_points)
+            
+            # Store results
+            results[f'holographic_{i}'] = {
+                'bulk_field': bulk_field,
+                'uv_data': uv_data,
+                'ir_data': ir_data,
+                'c_function': c_function,
+                'radial_points': radial_points
+            }
+            
         # Convert cohomology results to output dtype
         for key, value in results.items():
             if isinstance(value, torch.Tensor):
                 results[key] = self._to_output_dtype(value)
             elif isinstance(value, (list, tuple)) and len(value) > 0 and isinstance(value[0], torch.Tensor):
                 results[key] = [self._to_output_dtype(v) if isinstance(v, torch.Tensor) else v for v in value]
+            elif isinstance(value, dict):
+                # Handle nested dictionaries for holographic results
+                results[key] = {
+                    k: self._to_output_dtype(v) if isinstance(v, torch.Tensor) else v
+                    for k, v in value.items()
+                }
             
         return results
 
@@ -1298,104 +1323,46 @@ class ScaleCohomology:
         return cs_operator
 
     def special_conformal_transform(self, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Apply special conformal transformation x' = (x + bx²)/(1 + 2bx + b²x²)."""
-        # Ensure inputs have correct dtype
-        x = self._ensure_dtype(x)
-        b = self._ensure_dtype(b)
-            
-        # Compute x² and b·x with improved numerical stability
-        x_sq = torch.sum(x * x.conj())  # Use conjugate for complex tensors
-        b_dot_x = torch.sum(b * x.conj())  # Use conjugate for complex tensors
-        b_sq = torch.sum(b * b.conj())  # Use conjugate for complex tensors
-        
-        # Add small epsilon to avoid division by zero
-        epsilon = 1e-8
-        
-        # Apply conformal transformation with improved stability
-        numerator = x + b * x_sq
-        denominator = 1 + 2 * b_dot_x + b_sq * x_sq + epsilon
-        
-        # Ensure transformation preserves angles by normalizing
-        result = numerator / denominator
-        result_norm = torch.norm(result)
-        if result_norm > 0:
-            # Scale to preserve original norm
-            result = result * (torch.norm(x) / result_norm)
-            
-            # Ensure angle preservation by projecting onto original direction
-            x_direction = x / (torch.norm(x) + epsilon)
-            result_direction = result / (torch.norm(result) + epsilon)
-            angle = torch.sum(x_direction * result_direction.conj()).real
-            if angle < 0:
-                result = -result  # Flip direction if angle is negative
-            
-        return result
-
-    def transform_vector(self, v: torch.Tensor, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        """Transform vector under conformal transformation with improved angle preservation."""
-        # Ensure inputs have correct dtype
-        v = self._ensure_dtype(v)
-        x = self._ensure_dtype(x)
-        b = self._ensure_dtype(b)
-            
-        # Compute transformation Jacobian with improved numerical stability
-        x_sq = torch.sum(x * x.conj())  # Use conjugate for complex tensors
-        b_dot_x = torch.sum(b * x.conj())  # Use conjugate for complex tensors
-        b_sq = torch.sum(b * b.conj())  # Use conjugate for complex tensors
-        
-        # Add small epsilon for numerical stability
-        epsilon = 1e-8
-        denom = 1 + 2 * b_dot_x + b_sq * x_sq + epsilon
-        
-        # Compute Jacobian matrix with improved angle preservation
-        identity = torch.eye(self.dim, dtype=self.dtype)
-        outer_term = torch.outer(b, x.conj())  # Use conjugate for complex tensors
-        
-        # Build Jacobian with careful normalization
-        jacobian = (identity / denom - 2 * outer_term / (denom * denom))
-        
-        # Apply transformation with angle preservation
-        transformed = jacobian @ v
-        
-        # Normalize to preserve vector magnitude and angles
-        v_norm = torch.norm(v)
-        if v_norm > 0:
-            # First normalize to unit vector
-            transformed = transformed / (torch.norm(transformed) + epsilon)
-            # Then scale back to original magnitude
-            transformed = transformed * v_norm
-            
-            # Ensure angle preservation by projecting onto original direction
-            v_direction = v / (torch.norm(v) + epsilon)
-            transformed_direction = transformed / (torch.norm(transformed) + epsilon)
-            angle = torch.sum(v_direction * transformed_direction.conj()).real
-            if angle < 0:
-                transformed = -transformed  # Flip direction if angle is negative
-            
-        return transformed
-
-
-    def entanglement_entropy(self, state: torch.Tensor, region: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Compute entanglement entropy using the implementation from HilbertSpace.
-        
-        This method delegates to the HilbertSpace implementation which:
-        1. Handles both pure and mixed states
-        2. Computes reduced density matrix via partial trace
-        3. Calculates von Neumann entropy
-        4. Includes numerical stability handling
+        """Apply special conformal transformation.
         
         Args:
-            state: Quantum state tensor
-            region: Optional tensor specifying the region for bipartition.
-                   Currently not used as the HilbertSpace implementation 
-                   uses a fixed bipartition.
-                   
+            x: Position vector
+            b: Transformation parameter
+            
         Returns:
-            Entanglement entropy as a tensor
+            Transformed position
         """
-        # Convert state to internal dtype for quantum computations
-        state = self._ensure_dtype(state)
-        return self.hilbert_space.entanglement_entropy(state)
+        # Compute denominator
+        denom = 1 + 2 * torch.dot(b, x) + torch.dot(b, b) * torch.dot(x, x)
+        
+        # Apply transformation preserving angles
+        transformed = (x + torch.dot(x, x) * b) / denom
+        
+        return transformed
+
+    def transform_vector(self, v: torch.Tensor, x: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Transform a vector under special conformal transformation.
+        
+        Args:
+            v: Vector to transform
+            x: Position where vector is attached
+            b: Transformation parameter
+            
+        Returns:
+            Transformed vector
+        """
+        # Compute Weyl factor
+        denom = 1 + 2 * torch.dot(b, x) + torch.dot(b, b) * torch.dot(x, x)
+        omega = 1 / denom
+        
+        # Apply Weyl rescaling to vector
+        transformed = omega * v
+        
+        # Normalize to preserve vector magnitude
+        transformed = transformed * torch.norm(v) / torch.norm(transformed)
+        
+        return transformed
+
 
     def _to_output_dtype(self, tensor: torch.Tensor) -> torch.Tensor:
         """Convert tensor to output dtype."""
@@ -1408,7 +1375,9 @@ class ScaleCohomology:
         """Ensure proper cleanup of resources."""
         # Clean up network parameters
         for module in [self.forms, self.riemann_computer, self.potential_grad,
-                      self.cocycle_computer, self.coboundary_computer]:
+                      self.cocycle_computer, self.coboundary_computer,
+                      self.anomaly_detector.detector,
+                      self.holographic.holographic_net]:
             del module
             
         # Clean up specialized components
@@ -1470,7 +1439,7 @@ class ScaleCohomology:
         # Optionally check for scale invariance
         invariants = None
         if check_invariance:
-            invariants = self.scale_invariance.find_invariant_structures(state)
+            invariants = self.scale_invariants(state)
             
         return anomalies, invariants
 
@@ -1522,6 +1491,117 @@ class ScaleCohomology:
         
         # Delegate to HolographicLifter for proper quantum-geometric implementation
         return self.holographic.operator_product_expansion(op1, op2)
+
+    def transform_primary(self, field: torch.Tensor, lambda_: torch.Tensor, dimension: torch.Tensor) -> torch.Tensor:
+        """Transform a primary field under scaling.
+        
+        Args:
+            field: Field to transform
+            lambda_: Scaling parameter
+            dimension: Scaling dimension of the field
+            
+        Returns:
+            Transformed field
+        """
+        return field * lambda_**dimension
+
+    def conformal_blocks(self, field: torch.Tensor, dimension: int) -> torch.Tensor:
+        """Compute conformal blocks for a field.
+        
+        Args:
+            field: Field to compute blocks for
+            dimension: Space dimension
+            
+        Returns:
+            Conformal blocks
+        """
+        # Initialize blocks with same shape as field
+        blocks = torch.zeros_like(field)
+        
+        # For each dimension, compute contribution to blocks
+        for d in range(dimension):
+            # Apply scaling transformation
+            lambda_ = torch.tensor(2.0, dtype=field.dtype)
+            scaled = self.transform_primary(field, lambda_, dimension=torch.tensor(float(d), dtype=field.dtype))
+            
+            # Add contribution to blocks
+            blocks = blocks + scaled
+            
+        return blocks
+
+    def entanglement_entropy(self, state: torch.Tensor, region: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Compute entanglement entropy using the implementation from HilbertSpace.
+        
+        This method delegates to the HilbertSpace implementation which:
+        1. Handles both pure and mixed states
+        2. Computes reduced density matrix via partial trace
+        3. Calculates von Neumann entropy
+        4. Includes numerical stability handling
+        
+        Args:
+            state: Quantum state tensor
+            region: Optional tensor specifying the region for bipartition.
+                   Currently not used as the HilbertSpace implementation 
+                   uses a fixed bipartition.
+            
+        Returns:
+            Entanglement entropy as a tensor
+        """
+        # Convert state to internal dtype for quantum computations
+        state = self._ensure_dtype(state)
+        
+        # For a state tensor of shape (batch_size, features)
+        # we treat each row as a separate state vector
+        if len(state.shape) == 2:
+            batch_size, features = state.shape
+            
+            # Normalize each state vector
+            state_norm = torch.norm(state, dim=1, keepdim=True)
+            state = state / (state_norm + 1e-8)
+            
+            # Create density matrix for each state
+            rho = torch.matmul(state.unsqueeze(-1), state.conj().unsqueeze(1))  # Shape: (batch_size, features, features)
+            
+            # Average over batch dimension
+            rho = torch.mean(rho, dim=0)  # Shape: (features, features)
+        else:
+            # For a single state vector
+            state_flat = state.reshape(-1)
+            state_norm = torch.norm(state_flat)
+            if state_norm > 0:
+                state_flat = state_flat / state_norm
+            rho = torch.outer(state_flat, state_flat.conj())
+        
+        # Convert to complex128 as required by HilbertSpace
+        rho = rho.to(torch.complex128)
+        
+        return self.hilbert_space.entanglement_entropy(rho)
+
+    def mutual_information(self, state: torch.Tensor, region1: torch.Tensor, region2: torch.Tensor) -> torch.Tensor:
+        """Compute mutual information between two regions.
+        
+        Args:
+            state: Quantum state
+            region1: First region
+            region2: Second region
+            
+        Returns:
+            Mutual information
+        """
+        # Convert state to internal dtype for quantum computations
+        state = self._ensure_dtype(state)
+        
+        # Compute entanglement entropy for each region
+        S1 = self.entanglement_entropy(state)
+        S2 = self.entanglement_entropy(state)
+        
+        # For a pure state, the joint entropy S12 = 0
+        S12 = torch.tensor(0.0, dtype=state.dtype)
+        
+        # Compute mutual information
+        I = S1 + S2 - S12
+        
+        return I
 
 
 class ScaleSystem:
