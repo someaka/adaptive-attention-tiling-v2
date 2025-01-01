@@ -31,18 +31,21 @@ class ArithmeticDynamics(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
-        motive_rank: int,
+        height_dim: Optional[int] = None,
+        motive_rank: int = 4,
+        manifold_dim: Optional[int] = None,  # Add manifold_dim parameter
         num_primes: int = 8,  # Number of prime bases for adelic structure
-        height_dim: Optional[int] = None,  # Dimension of height space
         quantum_weight: float = 0.1,  # Weight for quantum corrections
         dtype: Optional[torch.dtype] = None
     ):
         super().__init__()
 
+        # Initialize dimensions
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
         self.height_dim = motive_rank if height_dim is None else height_dim  # Use motive_rank as height_dim if not specified
+        self.manifold_dim = hidden_dim if manifold_dim is None else manifold_dim  # Use hidden_dim as manifold_dim if not specified
         self.quantum_weight = quantum_weight
         self.dtype = dtype if dtype is not None else torch.float32  # Default to float32 for better compatibility
 
@@ -84,27 +87,27 @@ class ArithmeticDynamics(nn.Module):
         # Output projection layers
         self.min_dim = hidden_dim  # Use hidden_dim as min_dim
         self.measure_proj = nn.Sequential(
-            nn.Linear(self.height_dim, hidden_dim // 2, dtype=self.dtype),
+            nn.Linear(self.height_dim, hidden_dim // 2, dtype=self.dtype),  # Input is height_dim
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, hidden_dim, dtype=self.dtype)
+            nn.Linear(hidden_dim // 2, hidden_dim, dtype=self.dtype)  # Output is hidden_dim
         )
         self.output_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
 
         # Quantum correction networks - ensure same output size as height_map
         self.quantum_height = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            nn.Linear(self.manifold_dim, self.manifold_dim // 2, dtype=self.dtype),  # Use manifold_dim/2 as intermediate
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, self.height_dim, dtype=self.dtype)  # Match height_map output size
+            nn.Linear(self.manifold_dim // 2, self.height_dim, dtype=self.dtype)  # Output height_dim
         )
         
         self.quantum_l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            nn.Linear(self.manifold_dim, self.manifold_dim // 2, dtype=self.dtype),  # Use manifold_dim/2 as intermediate
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)  # Match l_function output size
+            nn.Linear(self.manifold_dim // 2, motive_rank, dtype=self.dtype)  # Output motive_rank
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(hidden_dim, self.height_dim, dtype=self.dtype)  # Project to height_dim
+        self.quantum_proj = nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)  # Project to manifold_dim instead of height_dim
 
     @staticmethod
     def _get_first_n_primes(n: int) -> List[int]:
@@ -364,6 +367,39 @@ class ArithmeticDynamics(nn.Module):
         orig_shape = metric.shape[:-1]  # Remove last dimension
         metric_flat = metric.reshape(-1, metric.shape[-1])  # [batch_size * ..., hidden_dim]
         
+        # Project to manifold space first if needed
+        if metric_flat.shape[-1] != self.manifold_dim:
+            # First project to hidden_dim if needed
+            if metric_flat.shape[-1] != self.hidden_dim:
+                # Handle complex numbers by splitting real and imaginary parts
+                if metric_flat.is_complex():
+                    real_part = metric_flat.real.unsqueeze(1)  # Add channel dimension
+                    imag_part = metric_flat.imag.unsqueeze(1)  # Add channel dimension
+                    
+                    # Interpolate real and imaginary parts separately
+                    real_proj = torch.nn.functional.interpolate(
+                        real_part,
+                        size=self.hidden_dim,
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension
+                    
+                    imag_proj = torch.nn.functional.interpolate(
+                        imag_part,
+                        size=self.hidden_dim,
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension
+                    
+                    # Combine back into complex tensor
+                    metric_flat = torch.complex(real_proj, imag_proj)
+                else:
+                    metric_flat = torch.nn.functional.interpolate(
+                        metric_flat.unsqueeze(1),  # Add channel dimension
+                        size=self.hidden_dim,
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension
+            
+            metric_flat = self.quantum_proj(metric_flat)  # Project to manifold_dim
+        
         # Project to height space
         height_coords = self.quantum_height(metric_flat)  # [batch_size * ..., height_dim]
         
@@ -391,13 +427,13 @@ class ArithmeticDynamics(nn.Module):
         x_flat = x.reshape(-1, x.shape[-1])  # [batch_size * ..., hidden_dim]
         
         # Project to quantum space
-        quantum_state = self.project_quantum_state(x_flat)  # [batch_size * ..., height_dim]
+        quantum_state = self.project_quantum_state(x_flat)  # [batch_size * ..., manifold_dim]
         
         # Project back to hidden_dim
         quantum_measure = self.measure_proj(quantum_state)  # [batch_size * ..., hidden_dim]
         
         # Compute outer product to get metric tensor
-        quantum_metric = torch.einsum('bi,bj->bij', quantum_measure, quantum_measure)
+        quantum_metric = torch.einsum('bi,bj->bij', quantum_measure, quantum_measure.conj())
         
         # Reshape back to original dimensions plus metric dimensions
         if original_shape:
@@ -407,12 +443,44 @@ class ArithmeticDynamics(nn.Module):
 
     def project_quantum_state(self, x: torch.Tensor) -> torch.Tensor:
         """Project input to quantum state space."""
-        # Ensure input is in complex domain
-        x = x.to(dtype=torch.complex64)
+        # Project to hidden_dim if needed
+        if x.shape[-1] != self.hidden_dim:
+            x_flat = x.reshape(-1, x.shape[-1])  # [batch_size * ..., N]
+            
+            # Handle complex numbers by splitting real and imaginary parts
+            if x_flat.is_complex():
+                real_part = x_flat.real.unsqueeze(1)  # Add channel dimension
+                imag_part = x_flat.imag.unsqueeze(1)  # Add channel dimension
+                
+                # Interpolate real and imaginary parts separately
+                real_proj = torch.nn.functional.interpolate(
+                    real_part,
+                    size=self.hidden_dim,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+                
+                imag_proj = torch.nn.functional.interpolate(
+                    imag_part,
+                    size=self.hidden_dim,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+                
+                # Combine back into complex tensor
+                x_proj = torch.complex(real_proj, imag_proj)
+            else:
+                x_proj = torch.nn.functional.interpolate(
+                    x_flat.unsqueeze(1),  # Add channel dimension
+                    size=self.hidden_dim,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+        else:
+            x_proj = x
+
+        # Convert to complex domain after interpolation
+        x_proj = x_proj.to(dtype=torch.complex64)
 
         # Project to quantum state space
-        x_flat = x.view(-1, x.size(-1))  # [batch_size * ..., height_dim]
-        quantum_state = self.quantum_proj(x_flat)  # [batch_size * ..., height_dim]
+        quantum_state = self.quantum_proj(x_proj)  # [batch_size * ..., manifold_dim]
         
         # Normalize the quantum state
         quantum_state = quantum_state / torch.norm(quantum_state, dim=1, keepdim=True)

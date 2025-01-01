@@ -491,8 +491,8 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_v
     
     # Create geometric flow
     pattern_flow = GeometricFlow(
-        hidden_dim=128,
-        manifold_dim=32,
+        hidden_dim=32,
+        manifold_dim=16,
         motive_rank=4,
         num_charts=1,
         integration_steps=params['time_steps']

@@ -192,8 +192,19 @@ class GeometricFlow(RiemannianFlow):
     
     def compute_metric(self, x: Tensor) -> Tensor:
         """Compute metric with quantum geometric structure."""
-        # Project input to manifold dimension and ensure correct dtype
-        x_proj = x[..., :self.manifold_dim]
+        # Flatten spatial dimensions and project to manifold dimension
+        batch_size = x.shape[0]
+        x_flat = x.reshape(batch_size, -1)  # [batch_size, space_dim * grid_size * grid_size]
+        
+        # Project to manifold dimension using interpolation
+        if x_flat.shape[-1] != self.manifold_dim:
+            x_proj = torch.nn.functional.interpolate(
+                x_flat.unsqueeze(1),  # Add channel dimension
+                size=self.manifold_dim,
+                mode='linear'
+            ).squeeze(1)  # Remove channel dimension
+        else:
+            x_proj = x_flat
         
         # Determine if we need complex dtype
         needs_complex = x_proj.is_complex() or any(p.is_complex() for p in self.metric_net.parameters())
@@ -209,7 +220,6 @@ class GeometricFlow(RiemannianFlow):
         metric_features = self.metric_net(x_proj)
         
         # Reshape to metric tensor
-        batch_size = x_proj.shape[0]
         metric = metric_features.view(batch_size, self.manifold_dim, self.manifold_dim)
         
         # Make metric symmetric
@@ -220,7 +230,7 @@ class GeometricFlow(RiemannianFlow):
             self.manifold_dim,
             dtype=target_dtype,
             device=x.device
-        )
+        ).unsqueeze(0).expand(batch_size, -1, -1)
         
         # Handle complex eigenvalues
         if needs_complex:
