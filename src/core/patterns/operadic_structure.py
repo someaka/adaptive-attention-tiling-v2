@@ -535,10 +535,12 @@ class EnrichedAttention:
             
         # Create Gaussian wave packet
         sigma = 1.0  # Width parameter
-        norm = torch.exp(-torch.sum(position * position, dim=-1) / (4 * sigma**2))
-        phase = torch.sum(momentum * position, dim=-1)
+        # Keep the last dimension by not summing over it
+        norm = torch.exp(-torch.sum(position * position, dim=-1, keepdim=True) / (4 * sigma**2))
+        phase = torch.sum(momentum * position, dim=-1, keepdim=True)
         
-        return norm * torch.exp(1j * phase)
+        # Broadcast the wave packet to match input shape
+        return norm * torch.exp(1j * phase) * torch.ones_like(position, dtype=torch.complex64)
         
     def get_position(self, wave: Tensor) -> Tensor:
         """Extract position from wave packet.
@@ -564,8 +566,11 @@ class EnrichedAttention:
         Returns:
             Momentum tensor
         """
-        if not self.wave_enabled or not torch.is_complex(wave):
-            return wave.imag
+        if not self.wave_enabled:
+            return wave
+            
+        if not torch.is_complex(wave):
+            return wave
             
         # Extract momentum as expectation value
         return (-self._k * wave.imag).to(dtype=self.dtype)

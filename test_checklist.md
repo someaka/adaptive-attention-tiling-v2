@@ -14,7 +14,7 @@
 - [x] tests/test_core/test_pattern_processing.py
 - [x] tests/test_core/test_patterns/test_arithmetic_dynamics.py
 - [x] tests/test_core/test_patterns/test_cohomology.py
-- [ ] tests/test_core/test_patterns/test_enriched_attention.py
+- [x] tests/test_core/test_patterns/test_enriched_attention.py
 - [ ] tests/test_core/test_patterns/test_fiber_bundle.py
 - [x] tests/test_core/test_patterns/test_fiber_types.py
 - [x] tests/test_core/test_patterns/test_motivic_integration.py
