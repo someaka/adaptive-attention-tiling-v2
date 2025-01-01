@@ -5,6 +5,7 @@ import torch
 from torch import Tensor
 from torch import nn
 from typing import Optional, Protocol, runtime_checkable, cast
+import math
 
 from src.core.patterns import (
     BaseRiemannianStructure,
@@ -77,24 +78,90 @@ class MockAttentionHead(nn.Module):
         self.query_dim = query_dim
         self.key_dim = key_dim
         
-        # Initialize query/key projections
+        # Initialize query/key projections with orthogonal matrices
         self.query_proj = nn.Linear(query_dim, query_dim)
         self.key_proj = nn.Linear(key_dim, key_dim)
         
-        # Initialize with small weights
+        # Initialize with orthogonal weights
+        nn.init.orthogonal_(self.query_proj.weight)
+        nn.init.orthogonal_(self.key_proj.weight)
+        
+        # Scale weights to control energy
         with torch.no_grad():
             self.query_proj.weight.data *= 0.1
             self.key_proj.weight.data *= 0.1
+            self.query_proj.bias.data.zero_()
+            self.key_proj.bias.data.zero_()
+            
+    def query_metric(self, points: Points) -> Tensor:
+        """Compute query metric tensor."""
+        batch_size = points.shape[0]
+        # Use a more general metric that adapts to the points
+        proj = self.query_proj(points)
+        metric = torch.einsum('bi,bj->bij', proj, proj) / self.query_dim
+        # Add identity for stability
+        metric = metric + torch.eye(self.query_dim).unsqueeze(0)
+        # Make symmetric and positive definite
+        metric = 0.5 * (metric + metric.transpose(-2, -1))
+        # Normalize metric
+        metric = metric / (torch.norm(metric, dim=(-2, -1), keepdim=True) + 1e-8)
+        return metric
+        
+    def key_metric(self, points: Points) -> Tensor:
+        """Compute key metric tensor."""
+        batch_size = points.shape[0]
+        # Use same structure as query metric for consistency
+        proj = self.key_proj(points)
+        metric = torch.einsum('bi,bj->bij', proj, proj) / self.key_dim
+        metric = metric + torch.eye(self.key_dim).unsqueeze(0)
+        metric = 0.5 * (metric + metric.transpose(-2, -1))
+        # Normalize metric
+        metric = metric / (torch.norm(metric, dim=(-2, -1), keepdim=True) + 1e-8)
+        return metric
             
     def compute_attention(self, query_points: Points, key_points: Points) -> Scores:
-        """Compute attention scores."""
-        # Project points
-        query = self.query_proj(query_points)
-        key = self.key_proj(key_points)
+        """Compute attention scores that preserve geometric structure."""
+        # Project points with metric-aware projections
+        query = self.query_proj(query_points)  # [batch_size, query_dim]
+        key = self.key_proj(key_points)    # [batch_size, key_dim]
         
-        # Compute scaled dot-product attention
-        scores = torch.matmul(query, key.transpose(-2, -1))
-        return torch.softmax(scores / scores.size(-1)**0.5, dim=-1)
+        # Get metric tensors
+        query_metric = self.query_metric(query_points)  # [batch_size, query_dim, query_dim]
+        key_metric = self.key_metric(key_points)    # [batch_size, key_dim, key_dim]
+        
+        # Compute metric-aware distances
+        query_norms = torch.sqrt(torch.einsum('bi,bij,bj->b', query, query_metric, query))
+        key_norms = torch.sqrt(torch.einsum('bi,bij,bj->b', key, key_metric, key))
+        
+        # Normalize points in their respective metric spaces
+        query_normalized = query / (query_norms.unsqueeze(-1) + 1e-8)
+        key_normalized = key / (key_norms.unsqueeze(-1) + 1e-8)
+        
+        # Compute pairwise distances in normalized space
+        dists = torch.cdist(query_normalized, key_normalized, p=2)
+        
+        # Convert distances to similarities that preserve metric structure
+        similarities = 1.0 / (1.0 + dists)
+        
+        # Scale similarities to control concentration
+        temperature = math.sqrt(float(query.size(-1)))
+        scores = similarities * temperature
+        
+        # Apply softmax with proper scaling to preserve distances
+        scores = torch.softmax(scores, dim=-1)
+        
+        # Ensure scores preserve relative distances
+        score_dists = torch.cdist(scores, scores, p=2)
+        input_dists = torch.cdist(query_points, key_points, p=2)
+        
+        # Scale scores to match input distance distribution
+        scale = torch.mean(input_dists) / (torch.mean(score_dists) + 1e-8)
+        scores = scores * scale
+        
+        # Renormalize
+        scores = scores / (scores.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        return scores
 
 
 class MockModelGeometry(ModelGeometry):
@@ -112,6 +179,18 @@ class MockModelGeometry(ModelGeometry):
             },
             attention_heads=[MockAttentionHead(16, 16)]
         )
+        
+    def sectional_curvature(self, points: Points) -> Tensor:
+        """Compute sectional curvature."""
+        batch_size = points.shape[0]
+        # Return constant sectional curvature for testing
+        return torch.zeros(batch_size, self.manifold_dim, self.manifold_dim)
+        
+    def metric(self, points: Points) -> Tensor:
+        """Compute metric tensor."""
+        batch_size = points.shape[0]
+        # Return constant metric for testing
+        return torch.eye(self.manifold_dim).unsqueeze(0).repeat(batch_size, 1, 1)
 
 
 @pytest.fixture

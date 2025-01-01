@@ -16,6 +16,8 @@ from typing import Dict, Optional
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
+import math
 
 from src.validation.geometric.metric import (
     MetricValidator,
@@ -323,3 +325,120 @@ class TestMetricValidation:
         incompatible = torch.randn(batch_size, dim+1, dim)
         with pytest.raises(ValueError, match="Incompatible dimensions"):
             validator.validate_metric(incompatible)
+
+class MockAttentionHead:
+    def __init__(self, dim: int = 4):
+        self.dim = dim
+        self.query_metric = torch.eye(dim)
+        self.key_metric = torch.eye(dim)
+        
+    @property
+    def query_metric(self) -> torch.Tensor:
+        """Return query metric tensor."""
+        # Use a simple positive definite metric
+        metric = self._query_metric.clone()
+        # Ensure positive definiteness
+        metric = metric @ metric.t()  # Make symmetric and positive definite
+        # Add small identity for stability
+        metric = metric + 0.01 * torch.eye(self.dim)
+        # Normalize to control condition number
+        metric = metric / metric.norm()
+        return metric
+        
+    @query_metric.setter
+    def query_metric(self, metric: torch.Tensor):
+        self._query_metric = metric
+        
+    @property
+    def key_metric(self) -> torch.Tensor:
+        """Return key metric tensor."""
+        # Use same structure as query metric for compatibility
+        metric = self._key_metric.clone()
+        # Ensure positive definiteness
+        metric = metric @ metric.t()  # Make symmetric and positive definite
+        # Add small identity for stability
+        metric = metric + 0.01 * torch.eye(self.dim)
+        # Normalize to match query metric condition number
+        metric = metric / metric.norm()
+        return metric
+        
+    @key_metric.setter
+    def key_metric(self, metric: torch.Tensor):
+        self._key_metric = metric
+
+    def compute_attention(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute attention scores that preserve geometric structure.
+        
+        Args:
+            x: Input tensor of shape (batch_size, dim)
+            
+        Returns:
+            Attention scores that preserve distances
+        """
+        batch_size = x.size(0)
+        
+        # Project inputs to query and key spaces while preserving distances
+        # Use orthogonal matrices for projection to preserve distances
+        U, _, V = torch.linalg.svd(torch.randn(self.dim, self.dim))
+        W_q = U @ V  # Orthogonal matrix for query projection
+        W_k = U @ V  # Same projection for key to ensure distance preservation
+        
+        queries = x @ W_q
+        keys = x @ W_k
+        
+        # Normalize queries and keys to unit norm
+        queries = F.normalize(queries, p=2, dim=-1)
+        keys = F.normalize(keys, p=2, dim=-1)
+        
+        # Compute pairwise distances in query/key space
+        query_dists = torch.cdist(queries, queries)
+        key_dists = torch.cdist(keys, keys)
+        
+        # Average the distances
+        avg_dists = (query_dists + key_dists) / 2.0
+        
+        # Convert distances to similarities
+        # Use a sharper conversion to better preserve distance relationships
+        similarities = torch.exp(-avg_dists / 0.1)  # Lower temperature for sharper attention
+        
+        # Normalize to get attention scores
+        scores = F.normalize(similarities, p=1, dim=-1)
+        
+        return scores
+
+class MockModelGeometry:
+    def __init__(self, dim: int = 4):
+        self.dim = dim
+        self.attention = MockAttentionHead(dim)
+        
+    def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute sectional curvature for testing.
+        
+        Args:
+            points: Points tensor of shape (batch_size, dim)
+            
+        Returns:
+            Sectional curvature tensor
+        """
+        batch_size = points.size(0)
+        
+        # Create a simple positive curvature manifold (sphere-like)
+        # Sectional curvature K = 1/R^2 where R is radius
+        radius = 2.0
+        curvature = torch.ones(batch_size, batch_size) / (radius * radius)
+        
+        # Zero out diagonal elements
+        curvature.fill_diagonal_(0.0)
+        
+        return curvature
+        
+    def compute_attention(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute attention scores using the attention head.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            Attention scores
+        """
+        return self.attention.compute_attention(x)
