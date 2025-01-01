@@ -44,7 +44,7 @@ class ArithmeticDynamics(nn.Module):
         self.num_primes = num_primes
         self.height_dim = motive_rank if height_dim is None else height_dim  # Use motive_rank as height_dim if not specified
         self.quantum_weight = quantum_weight
-        self.dtype = dtype if dtype is not None else torch.complex64  # Default to complex64
+        self.dtype = dtype if dtype is not None else torch.float32  # Default to float32 for better compatibility
 
         # Initialize prime bases
         self.register_buffer(
@@ -221,58 +221,64 @@ class ArithmeticDynamics(nn.Module):
             flat_shape = (-1, x.shape[-1])
             x_flat = x.reshape(flat_shape)
             
-            # Project to hidden_dim using linear interpolation
-            x_real = x_flat.real
-            x_imag = x_flat.imag
-            
-            # Project real and imaginary parts separately
-            x_real_hidden = torch.nn.functional.interpolate(
-                x_real.unsqueeze(1),  # Add channel dimension
+            # Project to hidden_dim using nearest neighbor interpolation
+            x_proj = torch.nn.functional.interpolate(
+                x_flat.unsqueeze(1),  # Add channel dimension
                 size=self.hidden_dim,
-                mode='linear'
+                mode='nearest'  # Use nearest neighbor which works with complex numbers
             ).squeeze(1)  # Remove channel dimension
             
-            x_imag_hidden = torch.nn.functional.interpolate(
-                x_imag.unsqueeze(1),  # Add channel dimension
-                size=self.hidden_dim,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Combine real and imaginary parts
-            x_hidden = torch.complex(x_real_hidden, x_imag_hidden)
+            # Convert to complex if needed
+            if self.dtype.is_complex:
+                x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
         else:
-            x_hidden = x
+            x_proj = x
+            if self.dtype.is_complex:
+                x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
 
         # Apply height map
-        height = self.height_map(x_hidden)
+        height = self.height_map(x_proj)
 
         # Apply quantum flow
         flow = self.flow(height)
 
         # Project back to original size if needed
         if original_size != self.hidden_dim:
-            # Split into real and imaginary parts
-            flow_real = flow.real
-            flow_imag = flow.imag
+            # Handle complex tensors by splitting real and imaginary parts
+            if flow.is_complex():
+                # Split into real and imaginary parts
+                flow_real = flow.real.unsqueeze(1)  # Add channel dimension
+                flow_imag = flow.imag.unsqueeze(1)  # Add channel dimension
+                
+                # Interpolate real and imaginary parts separately
+                flow_real_proj = torch.nn.functional.interpolate(
+                    flow_real,
+                    size=original_size,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+                
+                flow_imag_proj = torch.nn.functional.interpolate(
+                    flow_imag,
+                    size=original_size,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+                
+                # Combine back into complex tensor
+                flow_proj = torch.complex(flow_real_proj, flow_imag_proj)
+            else:
+                # For real tensors, proceed as before
+                flow_proj = torch.nn.functional.interpolate(
+                    flow.unsqueeze(1),  # Add channel dimension
+                    size=original_size,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
             
-            # Project back using linear interpolation
-            flow_real_orig = torch.nn.functional.interpolate(
-                flow_real.unsqueeze(1),  # Add channel dimension
-                size=original_size,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            flow_imag_orig = torch.nn.functional.interpolate(
-                flow_imag.unsqueeze(1),  # Add channel dimension
-                size=original_size,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Combine real and imaginary parts
-            flow = torch.complex(flow_real_orig, flow_imag_orig)
+            # Reshape back to original shape
+            flow = flow_proj.reshape(original_shape)
+        else:
+            flow = flow.reshape(original_shape)
 
-        # Reshape back to original shape
-        return flow.reshape(original_shape)
+        return flow
 
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
@@ -280,18 +286,23 @@ class ArithmeticDynamics(nn.Module):
         """Apply arithmetic dynamics with quantum corrections.
         
         Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim) or (batch_size, hidden_dim)
             steps: Number of dynamics steps
             return_trajectory: Whether to return full trajectory
             
         Returns:
             Processed tensor and metrics dictionary
         """
-        batch_size, seq_len, _ = x.shape
-        metrics = {}
+        # Handle both 2D and 3D inputs
+        if x.dim() == 2:
+            batch_size, feat_dim = x.shape
+            x = x.unsqueeze(1)  # Add sequence dimension
+            seq_len = 1
+        else:
+            batch_size, seq_len, feat_dim = x.shape
         
         # Project to height space
-        height_coords = self.height_map(x.reshape(-1, self.hidden_dim))  # [batch_size * seq_len, height_dim]
+        height_coords = self.height_map(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
         
         # Apply flow
         base_flow = self.flow(height_coords)  # [batch_size * seq_len, height_dim]
@@ -303,21 +314,25 @@ class ArithmeticDynamics(nn.Module):
         l_values = self.l_function(base_flow_hidden)  # [batch_size * seq_len, motive_rank]
         
         # Apply quantum corrections
-        quantum_correction = self.quantum_height(x.reshape(-1, self.hidden_dim))  # [batch_size * seq_len, height_dim]
-        quantum_l = self.quantum_l_function(x.reshape(-1, self.hidden_dim))  # [batch_size * seq_len, motive_rank]
+        quantum_correction = self.quantum_height(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
+        quantum_l = self.quantum_l_function(x.reshape(-1, feat_dim))  # [batch_size * seq_len, motive_rank]
         
         # Combine classical and quantum terms
         output = base_flow_hidden + self.quantum_weight * self.measure_proj(quantum_correction)
         output = output.view(batch_size, seq_len, -1)  # Restore original shape
         
+        # Remove sequence dimension if input was 2D
+        if x.dim() == 3 and seq_len == 1:
+            output = output.squeeze(1)
+        
         # Update metrics
-        metrics.update({
+        metrics = {
             'height': torch.norm(height_coords).item(),
             'l_value': torch.mean(l_values).item(),
             'flow_magnitude': torch.norm(base_flow).item(),
             'quantum_correction': torch.norm(quantum_correction).item(),
             'quantum_l': torch.mean(quantum_l).item()
-        })
+        }
         
         return output, metrics
 
