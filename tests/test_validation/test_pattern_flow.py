@@ -206,8 +206,9 @@ def test_pattern_creation(setup_test_parameters) -> None:
     pattern = torch.zeros(1, 1, size, size, dtype=torch.float32)
     x = torch.linspace(0, 1, size, dtype=torch.float32)  # Use normalized coordinates [0, 1]
 
-    # Calculate cycles directly from wavelength
-    cycles = size / wavelength  # Number of cycles we want
+    # Calculate cycles based on normalized coordinates [0,1]
+    # Since x is normalized, cycles should be half of size/wavelength
+    cycles = (size / wavelength) / 2  # Number of cycles we want
     
     # Create pattern with specified wavelength
     for i in range(size):
@@ -255,7 +256,9 @@ def test_pattern_creation(setup_test_parameters) -> None:
     peak_freq = abs(freqs[peak_idx])  # Use absolute value of frequency
 
     # Compute wavelength from frequency
-    wavelength_value = size / peak_freq if peak_freq != 0 else float('inf')  # Convert frequency to wavelength in pixels
+    # FFT frequencies are normalized to [-0.5, 0.5], so multiply by size to get cycles per pattern
+    actual_freq = peak_freq * size
+    wavelength_value = size / actual_freq if actual_freq != 0 else float('inf')  # Convert frequency to wavelength in pixels
     computed_wavelength = torch.as_tensor([[wavelength_value]], dtype=torch.float32)
 
     # Debug logging
