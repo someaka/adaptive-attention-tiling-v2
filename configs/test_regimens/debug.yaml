@@ -26,9 +26,16 @@ euclidean_tests:
 
 parallel_transport:
   dimensions: 2
-  methods: ["schild"]  # Single method
-  test_cases: 1        # Single test case
+  methods: ["schild"]
+  test_cases: 1
   hidden_dim: 8
+  section_batch_size: 1
+  path_points: 10
+  fiber_dim: 3
+  dtype: "float32"
+  batch_size: 1
+  max_path_length: 1.0
+  tolerance: 1e-5
 
 quantum_geometric:
   fisher_rao_weight: 0.1    # Reduced weight for debugging

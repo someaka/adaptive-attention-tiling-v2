@@ -1,0 +1,50 @@
+# Test configuration for pattern fiber bundle tests
+
+# Test regimes
+regimes:
+  debug:
+    # Minimal dimensions for debugging
+    base_dim: 2
+    fiber_dim: 3
+    batch_size: 1
+    path_points: 10
+    max_path_length: 1.0
+    tolerance: 1e-5
+    dtype: "float32"
+
+  tiny:
+    # Small dimensions for quick tests
+    base_dim: 3
+    fiber_dim: 3
+    batch_size: 8
+    path_points: 50
+    max_path_length: 2.0
+    tolerance: 1e-5
+    dtype: "float32"
+
+  standard:
+    # Moderate dimensions for thorough tests
+    base_dim: 4
+    fiber_dim: 3
+    batch_size: 32
+    path_points: 100
+    max_path_length: 5.0
+    tolerance: 1e-6
+    dtype: "float64"
+
+# Active regime (change this to switch between regimes)
+active_regime: debug
+
+# Common parameters across all regimes
+common:
+  # Parallel transport parameters
+  methods: ["schild"]
+  test_cases: 1
+  hidden_dim: 8
+
+  # Debug settings
+  debug:
+    log_level: "DEBUG"
+    log_metrics: true
+    check_nan: true
+    break_on_nan: true 
