@@ -144,19 +144,42 @@ class HilbertSpace:
         
         # For a lattice state, we'll use the first dimension as the subsystem
         if len(rho.shape) == 2:
-            # Compute the size of subsystems
-            total_size = rho.shape[0] * rho.shape[1]
-            subsystem_size = int(torch.sqrt(torch.tensor(total_size)))
-            
             # Create density matrix from pure state if needed
             if not torch.allclose(torch.matmul(rho.conj().transpose(-2,-1), rho), rho):
                 rho = torch.matmul(rho.conj().transpose(-2,-1), rho)
-            
-            # Reshape for partial trace
-            rho = rho.reshape(subsystem_size, subsystem_size, subsystem_size, subsystem_size)
-            
-            # Compute reduced density matrix
-            reduced_rho = torch.einsum('ijik->jk', rho)
+
+            # Handle 2-qubit systems (4x4 density matrix) specially
+            if rho.shape == (4, 4):
+                # Reshape into 2x2x2x2 tensor for qubit subsystems
+                rho = rho.reshape(2, 2, 2, 2)
+                # Perform partial trace over second subsystem
+                reduced_rho = torch.einsum('ijik->jk', rho)
+            else:
+                # For larger systems, perform partial trace using matrix operations
+                # Calculate subsystem dimensions
+                dim1 = rho.shape[0]
+                dim2 = rho.shape[1]
+                
+                # Verify matrix is square
+                if dim1 != dim2:
+                    raise ValueError(f"Input matrix must be square, got {dim1}x{dim2}")
+                
+                # Calculate subsystem dimensions (try to find factors)
+                factors = []
+                for i in range(1, int(np.sqrt(dim1)) + 1):
+                    if dim1 % i == 0:
+                        factors.append((i, dim1 // i))
+                
+                if not factors:
+                    raise ValueError(f"Cannot factorize matrix dimension {dim1}")
+                
+                # Use largest possible subsystem dimensions
+                d1, d2 = factors[-1]
+                
+                # Reshape into [d1, d2, d1, d2] tensor
+                rho = rho.reshape(d1, d2, d1, d2)
+                # Perform partial trace over second subsystem
+                reduced_rho = torch.einsum('ijik->jk', rho)
             
             # Compute eigenvalues
             eigenvalues = torch.linalg.eigvalsh(reduced_rho)
