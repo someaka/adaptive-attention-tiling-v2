@@ -30,6 +30,7 @@ from src.validation.patterns.formation import (
     EmergenceMetrics,
     SpatialMetrics,
     TemporalMetrics,
+    FormationValidationResult,
 )
 
 
@@ -188,11 +189,14 @@ class TestPatternFormation:
 
         # Test complete validation
         result = validator.validate(None, trajectory[0], time_steps)
-        assert isinstance(result, tuple)
-        assert len(result) == 3
-        assert isinstance(result[0], EmergenceValidation)
-        assert isinstance(result[1], SpatialValidation)
-        assert isinstance(result[2], TemporalValidation)
+        assert isinstance(result, FormationValidationResult)
+        assert hasattr(result, 'is_valid')
+        assert hasattr(result, 'message')
+        assert hasattr(result, 'data')
+        assert result.data is not None, "Validation result data should not be None"
+        assert 'emergence' in result.data
+        assert 'spatial' in result.data
+        assert 'temporal' in result.data
 
     def test_reaction_diffusion(
         self, validator: PatternFormationValidator, batch_size: int, spatial_dim: int
