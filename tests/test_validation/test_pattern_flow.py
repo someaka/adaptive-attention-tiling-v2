@@ -229,7 +229,8 @@ def test_pattern_creation(setup_test_parameters) -> None:
         peak_freq = 1.0 - peak_freq
     
     # Compute wavelength from frequency, accounting for Nyquist normalization
-    computed_wavelength = (2.0 / peak_freq if peak_freq != 0 else float('inf')).clone().detach()
+    wavelength_value = 2.0 / peak_freq if peak_freq != 0 else float('inf')
+    computed_wavelength = torch.as_tensor([[wavelength_value]], dtype=torch.float32)
     
     # Debug logging
     logger.info(f"Pattern size: {size}")
@@ -242,7 +243,7 @@ def test_pattern_creation(setup_test_parameters) -> None:
     # Check wavelength with larger tolerance for FFT discretization
     expected_wavelength = torch.tensor(wavelength, dtype=torch.float32)
     tolerance = max(setup_test_parameters['tolerance'], 2.0/size)  # At least two grid points
-    assert torch.allclose(computed_wavelength.clone().detach(), expected_wavelength.clone().detach(),
+    assert torch.allclose(computed_wavelength, expected_wavelength,
                          rtol=tolerance,
                          atol=tolerance)
 
