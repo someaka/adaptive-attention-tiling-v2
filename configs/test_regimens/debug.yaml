@@ -56,3 +56,18 @@ memory_management:
   defrag_threshold: 0.5
   gc_frequency: 100
   tensor_lifecycle: "short"
+
+# Quantum arithmetic parameters
+quantum_arithmetic:
+  dtype: "complex64"  # Fixed complex number type for quantum operations
+  tolerances:
+    state_norm: 1e-4
+    phase_comparison: 1e-4
+    geometric_phase: 1e-4
+    quantum_metric: 1e-4
+    berry_connection: 1e-4
+  validation:
+    max_iterations: 10
+    convergence_threshold: 1e-4
+    stability_threshold: 1e-4
+    entanglement_threshold: 0.5

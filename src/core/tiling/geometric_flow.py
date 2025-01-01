@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple, Any, Optional, cast
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+import math
 
 from ..patterns.arithmetic_dynamics import ArithmeticDynamics
 from ..patterns.riemannian_flow import RiemannianFlow
@@ -50,6 +51,12 @@ class GeometricFlow(RiemannianFlow):
             stability_threshold: Threshold for stability checks
             dtype: Data type for tensors
         """
+        # Convert dtype to complex if it's not already
+        if dtype == torch.float32:
+            dtype = torch.complex64
+        elif dtype == torch.float64:
+            dtype = torch.complex128
+            
         super().__init__(
             manifold_dim=manifold_dim,
             hidden_dim=hidden_dim,
@@ -73,8 +80,10 @@ class GeometricFlow(RiemannianFlow):
         )
         
         # Chart embeddings for local coordinates
+        real_chart = torch.randn(num_charts, manifold_dim) * 0.02
+        imag_chart = torch.randn(num_charts, manifold_dim) * 0.02
         self.chart_embedding = nn.Parameter(
-            torch.randn(num_charts, manifold_dim, dtype=self.dtype)
+            torch.complex(real_chart, imag_chart).to(dtype=self.dtype)
         )
         
         # Initialize flow layers with complex weights
@@ -97,13 +106,11 @@ class GeometricFlow(RiemannianFlow):
                 weight_shape = m.weight.shape
                 real_weight = torch.randn(*weight_shape) * 0.02
                 imag_weight = torch.randn(*weight_shape) * 0.02
-                m.weight = nn.Parameter(torch.complex(real_weight, imag_weight))
-                
+                m.weight.data = torch.complex(real_weight, imag_weight).to(dtype=self.dtype)
                 if m.bias is not None:
-                    bias_shape = m.bias.shape
-                    real_bias = torch.zeros(*bias_shape)
-                    imag_bias = torch.zeros(*bias_shape)
-                    m.bias = nn.Parameter(torch.complex(real_bias, imag_bias))
+                    real_bias = torch.randn(m.bias.shape) * 0.02
+                    imag_bias = torch.randn(m.bias.shape) * 0.02
+                    m.bias.data = torch.complex(real_bias, imag_bias).to(dtype=self.dtype)
         
         # Hamiltonian structure with adaptive input projection
         self.hamiltonian = nn.Sequential(
@@ -140,10 +147,20 @@ class GeometricFlow(RiemannianFlow):
             
             # Reshape quantum term to match ricci dimensions
             quantum_term = quantum_term.reshape(batch_size, -1, quantum_term.shape[-1])
-            quantum_term = F.adaptive_avg_pool2d(
-                quantum_term.unsqueeze(1),  # Add channel dimension
+            
+            # Handle complex numbers by splitting real and imaginary parts
+            real_part = F.adaptive_avg_pool2d(
+                quantum_term.real.unsqueeze(1),  # Add channel dimension
                 output_size=(h, w)  # Target size
             ).squeeze(1)  # Remove channel dimension
+            
+            imag_part = F.adaptive_avg_pool2d(
+                quantum_term.imag.unsqueeze(1),  # Add channel dimension
+                output_size=(h, w)  # Target size
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Recombine complex tensor
+            quantum_term = torch.complex(real_part, imag_part)
             
             # Ensure final shape matches ricci tensor
             quantum_term = quantum_term.reshape(batch_size, h, w)
@@ -178,7 +195,7 @@ class GeometricFlow(RiemannianFlow):
         
         # Reshape metric for hamiltonian computation
         batch_size = metric.shape[0]
-        metric_flat = metric.reshape(batch_size, 1, -1)  # [batch_size, 1, N]
+        metric_flat = metric.reshape(batch_size, self.manifold_dim, self.manifold_dim)  # Use actual manifold_dim
         
         # Add quantum geometric metrics
         metrics.update({
@@ -198,11 +215,27 @@ class GeometricFlow(RiemannianFlow):
         
         # Project to manifold dimension using interpolation
         if x_flat.shape[-1] != self.manifold_dim:
-            x_proj = torch.nn.functional.interpolate(
-                x_flat.unsqueeze(1),  # Add channel dimension
-                size=self.manifold_dim,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
+            # Handle complex interpolation by splitting real and imaginary parts
+            if x_flat.is_complex():
+                x_real = torch.nn.functional.interpolate(
+                    x_flat.real.unsqueeze(1),  # Add channel dimension
+                    size=self.manifold_dim,
+                    mode='linear'
+                ).squeeze(1)  # Remove channel dimension
+                
+                x_imag = torch.nn.functional.interpolate(
+                    x_flat.imag.unsqueeze(1),  # Add channel dimension
+                    size=self.manifold_dim,
+                    mode='linear'
+                ).squeeze(1)  # Remove channel dimension
+                
+                x_proj = torch.complex(x_real, x_imag)
+            else:
+                x_proj = torch.nn.functional.interpolate(
+                    x_flat.unsqueeze(1),  # Add channel dimension
+                    size=self.manifold_dim,
+                    mode='linear'
+                ).squeeze(1)  # Remove channel dimension
         else:
             x_proj = x_flat
         
@@ -277,6 +310,10 @@ class GeometricFlow(RiemannianFlow):
         Returns:
             Tuple of (flowed_tensor, flow_metrics)
         """
+        # Convert input to complex if needed
+        if not x.is_complex() and next(self.parameters()).is_complex():
+            x = torch.complex(x, torch.zeros_like(x))
+            
         # Initialize path if requested
         path: List[Tensor] = [x] if return_path else []
         
@@ -301,26 +338,21 @@ class GeometricFlow(RiemannianFlow):
             # Compute Ricci tensor
             ricci = self.compute_ricci_tensor(metric)
             
-            # Flow step
+            # Update metric and get step metrics
             metric, step_metrics = self.flow_step(metric, ricci, self.dt)
-            metrics[f'step_{i}'] = step_metrics
+            metrics.update({f'step_{i}_{k}': v for k, v in step_metrics.items()})
             
-            # Update position
-            current = self.flow_layers[0](current)
-            current = F.tanh(current)
-            current = self.flow_layers[1](current)
+            # Apply flow layers
+            for layer in self.flow_layers:
+                current = layer(current)
             
+            # Store path if requested
             if return_path:
                 path.append(current)
         
-        # Final metrics
-        metrics.update({
-            'final_metric_norm': torch.norm(metric).item(),
-            'total_steps': self.integration_steps
-        })
-        
+        # Add path to metrics if requested
         if return_path:
-            metrics['path'] = path
+            metrics['flow_path'] = torch.stack(path, dim=1)
         
         return current, metrics
     
@@ -333,8 +365,19 @@ class GeometricFlow(RiemannianFlow):
         for param in self.parameters():
             param.data = param.data.to(dtype=torch.complex64)
             
-        # Compute quantum state
-        quantum_state = self.quantum_proj(x_proj)  # [batch_size * ..., height_dim]
+        # Compute quantum state with proper dimension handling
+        batch_size = x_proj.shape[0]
+        x_flat = x_proj.reshape(batch_size, -1)  # Flatten spatial dimensions
+        
+        # Project to expected input dimension for quantum_proj
+        if x_flat.shape[-1] != self.arithmetic.hidden_dim:
+            x_flat = torch.nn.functional.interpolate(
+                x_flat.unsqueeze(1),  # Add channel dimension
+                size=self.arithmetic.hidden_dim,
+                mode='linear'
+            ).squeeze(1)  # Remove channel dimension
+            
+        quantum_state = self.arithmetic.quantum_proj(x_flat)  # [batch_size, manifold_dim]
         
         # Compute metric using quantum Fisher information
         metric = torch.abs(quantum_state @ quantum_state.conj().transpose(-2, -1))
@@ -345,4 +388,29 @@ class GeometricFlow(RiemannianFlow):
         ).unsqueeze(0).expand_as(metric)
         
         return metric
+    
+    def hamiltonian(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute Hamiltonian energy of the metric tensor.
+        
+        Args:
+            metric: Metric tensor of shape [batch_size, n, n]
+            
+        Returns:
+            Hamiltonian energy tensor
+        """
+        # Compute determinant and trace
+        det = torch.linalg.det(metric).real  # Take real part for energy
+        trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
+        
+        # Compute Ricci scalar (simplified)
+        ricci_scalar = -torch.log(det.abs() + 1e-8)
+        
+        # Combine terms for energy
+        energy = (
+            ricci_scalar +  # Curvature term
+            0.1 * trace +   # Kinetic term
+            0.01 * det      # Volume term
+        )
+        
+        return energy.unsqueeze(-1)  # Add dimension for consistency
 

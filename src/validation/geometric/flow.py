@@ -453,26 +453,55 @@ class TilingFlowValidator:
             flow_field: Flow field tensor to validate. Can be either:
                        - [time_steps, batch_size, space_dim, height, width] for tiling patterns
                        - [time_steps, batch_size, dim] for simpler flows
+                       - [batch_size, space_dim, height, width] for single time step
             
         Returns:
             Validation result for energy conservation
         """
         try:
+            # Handle single time step input
+            if len(flow_field.shape) == 4:  # [batch_size, space_dim, height, width]
+                flow_field = flow_field.unsqueeze(0)  # Add time dimension
+            
             # Handle different input formats
             if len(flow_field.shape) == 3:  # [time_steps, batch_size, dim]
                 # For simpler flows, compute energy directly
-                energy = torch.sum(flow_field ** 2, dim=-1)  # [time_steps, batch_size]
+                energy = torch.sum(flow_field.abs() ** 2, dim=-1)  # [time_steps, batch_size]
             elif len(flow_field.shape) == 5:  # [time_steps, batch_size, space_dim, height, width]
                 # For tiling patterns, use full energy computation
                 energy = self.compute_energy(flow_field)  # [time_steps, batch_size]
             else:
                 raise ValueError(f"Invalid flow field shape: {flow_field.shape}")
             
+            # For single time step, we just check if energy is finite
+            if energy.shape[0] == 1:
+                is_finite = bool(torch.all(torch.isfinite(energy)))
+                is_bounded = bool(torch.all(energy.abs() < self.max_energy))
+                is_conserved = is_finite and is_bounded
+                
+                validation_data = {
+                    'energy': energy.detach().cpu(),
+                    'is_finite': is_finite,
+                    'is_bounded': is_bounded,
+                    'max_allowed': self.max_energy
+                }
+                
+                message = (
+                    f"Energy validation {'passed' if is_conserved else 'failed'}: "
+                    f"finite={is_finite}, bounded={is_bounded}"
+                )
+                
+                return TilingFlowValidationResult(
+                    is_valid=is_conserved,
+                    message=message,
+                    data=validation_data
+                )
+            
             # Compute energy differences between consecutive time steps
             energy_diffs = torch.abs(energy[1:] - energy[:-1])  # [time_steps-1, batch_size]
             
             # Compute relative energy differences
-            mean_energy = float(energy.mean())
+            mean_energy = float(energy.abs().mean())
             relative_diffs = energy_diffs / (mean_energy + 1e-8)
             max_relative_diff = float(relative_diffs.max())
             
@@ -716,3 +745,57 @@ class TilingFlowValidator:
                 message=f"Error validating geometric flow: {str(e)}",
                 data={"error": str(e)}
             )
+
+    def validate_long_time_existence(
+        self,
+        flow_field: torch.Tensor,
+        time_steps: int = 100
+    ) -> TilingFlowValidationResult:
+        """Validate that the flow exists for a long time.
+        
+        Args:
+            flow_field: Flow field tensor
+            time_steps: Number of time steps to check
+            
+        Returns:
+            Validation result indicating if flow exists for long time
+        """
+        # Check energy conservation
+        energy_result = self.validate_energy_conservation(flow_field)
+        if not energy_result.is_valid:
+            return energy_result
+            
+        # Check flow stability
+        metrics_history = []
+        current = flow_field
+        
+        for _ in range(time_steps):
+            # Evolve flow field
+            output, metrics = self.flow(current)
+            metrics_history.append(metrics)
+            
+            # Check for instabilities
+            if torch.any(torch.isnan(output)) or torch.any(torch.isinf(output)):
+                return TilingFlowValidationResult(
+                    is_valid=False,
+                    message="Flow field contains NaN or Inf values",
+                    data={"time_steps": len(metrics_history)}
+                )
+                
+            # Update current state
+            current = output
+            
+        # Check stability of metrics
+        stability_result = self.validate_flow_stability(metrics_history)
+        if not stability_result.is_valid:
+            return stability_result
+            
+        return TilingFlowValidationResult(
+            is_valid=True,
+            message=f"Flow exists stably for {time_steps} time steps",
+            data={
+                "time_steps": time_steps,
+                "final_energy": metrics_history[-1].get("energy", 0.0),
+                "metrics_history": metrics_history
+            }
+        )

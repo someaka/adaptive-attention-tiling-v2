@@ -213,24 +213,45 @@ class PatternValidator:
         dim = initial_state.shape[-1]
         perturbations = torch.eye(dim, device=initial_state.device)
         
+        # Define wrapper functions that return real and imaginary parts
+        def forward_real(x):
+            output, _ = pattern_flow(x)
+            return output.real
+
+        def forward_imag(x):
+            output, _ = pattern_flow(x)
+            return output.imag
+        
         # Evolve perturbations
         exponents = []
         state = initial_state.clone()
         
         for _ in range(time_steps):
             # Evolve state and perturbations
-            new_state = pattern_flow(state)
-            jacobian = torch.autograd.functional.jacobian(pattern_flow, state)
+            new_state, _ = pattern_flow(state)
             
-            # Convert jacobian tuple to tensor if needed
-            if isinstance(jacobian, tuple):
-                jacobian = torch.stack(list(jacobian))
+            # Compute Jacobians for real and imaginary parts
+            jacobian_real = torch.autograd.functional.jacobian(forward_real, state)
+            jacobian_imag = torch.autograd.functional.jacobian(forward_imag, state)
             
-            # Update perturbations
-            perturbations = torch.matmul(jacobian.float(), perturbations.float())
+            # Convert jacobian tuples to tensors if needed
+            if isinstance(jacobian_real, tuple):
+                jacobian_real = torch.stack(list(jacobian_real))
+            if isinstance(jacobian_imag, tuple):
+                jacobian_imag = torch.stack(list(jacobian_imag))
             
-            # Compute local exponents
-            norms = torch.norm(perturbations, dim=-1)
+            # Combine real and imaginary Jacobians
+            jacobian = jacobian_real + 1j * jacobian_imag
+            
+            # Convert perturbations to complex if needed
+            if not perturbations.is_complex():
+                perturbations = perturbations.to(dtype=torch.complex64)
+            
+            # Update perturbations using complex arithmetic
+            perturbations = torch.matmul(jacobian, perturbations)
+            
+            # Compute local exponents using complex norm
+            norms = torch.norm(perturbations.abs(), dim=-1)
             exponents.append(torch.log(norms))
             
             # Normalize perturbations
@@ -251,16 +272,19 @@ class PatternValidator:
         
         # Test small random perturbations
         perturbed = initial_state + 0.01 * torch.randn_like(initial_state)
-        evolved_orig = pattern_flow(initial_state)
-        evolved_pert = pattern_flow(perturbed)
+        evolved_orig, _ = pattern_flow(initial_state)
+        evolved_pert, _ = pattern_flow(perturbed)
         responses["random"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
         
         # Test structured perturbations
-        for mode in range(min(3, initial_state.shape[-1])):
-            perturbation = torch.zeros_like(initial_state)
-            perturbation[..., mode] = 0.01
-            perturbed = initial_state + perturbation
-            evolved_pert = pattern_flow(perturbed)
-            responses[f"mode_{mode}"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
+        for mode in ["uniform", "gaussian"]:
+            if mode == "uniform":
+                noise = torch.rand_like(initial_state) * 0.01
+            else:
+                noise = torch.randn_like(initial_state) * 0.01
+                
+            perturbed = initial_state + noise
+            evolved_pert, _ = pattern_flow(perturbed)
+            responses[mode] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
             
         return responses

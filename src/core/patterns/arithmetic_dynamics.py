@@ -44,7 +44,8 @@ class ArithmeticDynamics(nn.Module):
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
-        self.height_dim = motive_rank if height_dim is None else height_dim  # Use motive_rank as height_dim if not specified
+        # Set height_dim to match hidden_dim to ensure dimension compatibility
+        self.height_dim = hidden_dim if height_dim is None else height_dim
         self.manifold_dim = hidden_dim if manifold_dim is None else manifold_dim  # Use hidden_dim as manifold_dim if not specified
         self.quantum_weight = quantum_weight
         self.dtype = dtype if dtype is not None else torch.float32  # Default to float32 for better compatibility
@@ -644,66 +645,3 @@ class ModularFormComputer(nn.Module):
         
         return q_coeffs, metrics
     
-
-
-
-
-
-# class ArithmeticDynamics:
-#     """Implement arithmetic dynamics for attention evolution."""
-
-#     def __init__(self, hidden_dim: int, motive_rank: int, num_primes: int = 8, dtype: Optional[torch.dtype] = None):
-#         self.hidden_dim = hidden_dim
-#         self.motive_rank = motive_rank
-#         self.num_primes = num_primes
-#         self.dtype = dtype if dtype is not None else torch.float32
-
-#         # Project to hidden dimension first using adaptive pooling
-#         self.hidden_proj = nn.Sequential(
-#             nn.AdaptiveAvgPool1d(hidden_dim),  # Handle variable input sizes
-#             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
-#         )
-
-#         # L-function computation
-#         self.l_function = nn.Sequential(
-#             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
-#             nn.Tanh(),
-#             nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
-#         )
-
-#         # Flow computation
-#         self.flow = nn.Linear(motive_rank, motive_rank, dtype=self.dtype)
-
-#     def compute_dynamics(self, state: torch.Tensor) -> torch.Tensor:
-#         """Compute one step of arithmetic dynamics.
-#         
-#         Args:
-#             state: Input tensor of shape [batch_size, *]
-#             
-#         Returns:
-#             Tensor of shape [batch_size, motive_rank]
-#         """
-#         # Ensure input is 2D: [batch_size, features]
-#         if state.dim() == 1:
-#             state = state.unsqueeze(0)
-#             
-#         # Flatten all dimensions after batch
-#         batch_size = state.shape[0]
-#         state_flat = state.reshape(batch_size, -1)  # [batch_size, num_features]
-#         
-#         # Add channel dimension for adaptive pooling
-#         state_channels = state_flat.unsqueeze(1)  # [batch_size, 1, num_features]
-#         
-#         # Project to hidden dimension using adaptive pooling
-#         hidden_state = self.hidden_proj[0](state_channels)  # [batch_size, 1, hidden_dim]
-#         hidden_state = hidden_state.squeeze(1)  # [batch_size, hidden_dim]
-#         hidden_state = self.hidden_proj[1](hidden_state)  # [batch_size, hidden_dim]
-#         
-#         # Compute L-function values
-#         l_values = self.l_function(hidden_state)  # [batch_size, motive_rank]
-
-#         # Evolve using flow
-#         evolved = self.flow(l_values)  # [batch_size, motive_rank]
-
-#         return evolved
-

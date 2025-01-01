@@ -269,8 +269,9 @@ class NonlinearStabilityValidator:
     ) -> float:
         """Estimate stability basin size."""
         # Sample perturbations
-        perturbs = torch.randn_like(state).unsqueeze(0).repeat(self.basin_samples, 1)
-        scales = torch.logspace(-3, 0, self.basin_samples).unsqueeze(1)
+        perturbs = torch.randn_like(state)
+        perturbs = perturbs.unsqueeze(0).repeat(self.basin_samples, 1, 1, 1, 1)
+        scales = torch.logspace(-3, 0, self.basin_samples).view(-1, 1, 1, 1, 1)
         
         perturbed = state.unsqueeze(0) + scales * perturbs
         
@@ -376,22 +377,41 @@ class StructuralStabilityValidator:
         self, flow: GeometricFlow, state: torch.Tensor
     ) -> torch.Tensor:
         """Compute parameter sensitivity."""
-        # Get nominal parameters
-        params = list(flow.parameters())  # Use parameters() instead of get_parameters()
-
-        sensitivities = []
+        # Get parameters
+        params = list(flow.parameters())
+        
+        # Forward pass
+        output, _ = flow.forward(state)
+        
+        # Split complex output into real and imaginary parts
+        output_real = output.real
+        output_imag = output.imag
+        
+        # Compute gradients for real and imaginary parts
+        sensitivity = 0.0
         for param in params:
-            # Compute parameter gradient
-            param.requires_grad_(True)
-            output, _ = flow.forward(state)
-            grad = torch.autograd.grad(output.sum(), param, create_graph=True)[0]
-            param.requires_grad_(False)
-
-            # Normalize sensitivity
-            sensitivity = torch.norm(grad) * torch.norm(param) / torch.norm(output)
-            sensitivities.append(sensitivity)
-
-        return torch.stack(sensitivities).mean()
+            # Real part gradient
+            grad_real = torch.autograd.grad(
+                output_real.sum(), param, create_graph=True, retain_graph=True,
+                allow_unused=True
+            )[0]
+            
+            # Imaginary part gradient
+            grad_imag = torch.autograd.grad(
+                output_imag.sum(), param, create_graph=True,
+                allow_unused=True
+            )[0]
+            
+            # Handle None gradients
+            if grad_real is None:
+                grad_real = torch.zeros_like(param)
+            if grad_imag is None:
+                grad_imag = torch.zeros_like(param)
+            
+            # Combine gradients
+            sensitivity += torch.norm(grad_real + 1j * grad_imag).item()
+        
+        return torch.tensor(sensitivity / len(params))
 
     def _measure_robustness(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int
@@ -446,6 +466,15 @@ class StructuralStabilityValidator:
         params = list(flow.parameters())  # Use parameters() instead of get_parameters()
         original_params = [p.clone().detach() for p in params]  # Store original parameters
 
+        # Define wrapper functions that return real and imaginary parts
+        def forward_real(x):
+            output, _ = flow.forward(x)
+            return output.real
+
+        def forward_imag(x):
+            output, _ = flow.forward(x)
+            return output.imag
+
         # Compute eigenvalues at different parameter values
         eigenvalues = []
 
@@ -454,14 +483,19 @@ class StructuralStabilityValidator:
             for param, orig_param in zip(params, original_params):
                 param.data = orig_param + eps * torch.randn_like(orig_param)
 
-            # Compute stability using autograd
+            # Compute stability using autograd for real and imaginary parts
             state.requires_grad_(True)
-            jacobian_tuple = torch.autograd.functional.jacobian(flow.forward, state)
+            jacobian_real = torch.autograd.functional.jacobian(forward_real, state)
+            jacobian_imag = torch.autograd.functional.jacobian(forward_imag, state)
             state.requires_grad_(False)
 
-            # Convert tuple to tensor if needed
-            if isinstance(jacobian_tuple, tuple):
-                jacobian = torch.stack(list(jacobian_tuple))
+            # Convert tuple to tensor if needed and combine real and imaginary parts
+            if isinstance(jacobian_real, tuple):
+                jacobian_real = torch.stack(list(jacobian_real))
+            if isinstance(jacobian_imag, tuple):
+                jacobian_imag = torch.stack(list(jacobian_imag))
+            
+            jacobian = jacobian_real + 1j * jacobian_imag
             
             batch_size = state.size(0) if len(state.shape) > 1 else 1
             state_size = state.numel() // batch_size
