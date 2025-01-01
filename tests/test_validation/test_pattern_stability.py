@@ -13,16 +13,18 @@ Tests cover:
 """
 
 from typing import Dict
-
+import os
 import numpy as np
 import pytest
 import torch
+import yaml
 
 from validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     LinearStabilityValidation,
-    NonlinearStabilityValidation
+    NonlinearStabilityValidation,
+    StabilityValidationResult
 )
 from src.validation.patterns.perturbation import (
     PerturbationAnalyzer,
@@ -34,31 +36,37 @@ from src.core.tiling.geometric_flow import GeometricFlow
 
 class TestPatternStability:
     @pytest.fixture
-    def batch_size(self) -> int:
-        return 16
+    def test_config(self):
+        """Load test configuration based on environment."""
+        config_name = os.environ.get("TEST_REGIME", "debug")
+        config_path = f"configs/test_regimens/{config_name}.yaml"
+        
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        return config
 
     @pytest.fixture
-    def spatial_dim(self) -> int:
-        return 32
+    def setup_test_parameters(self, test_config):
+        """Setup test parameters from configuration."""
+        return {
+            'batch_size': int(test_config['fiber_bundle']['batch_size']),
+            'spatial_dim': int(test_config['geometric_tests']['dimensions']),
+            'time_steps': int(test_config['parallel_transport']['path_points']),
+            'hidden_dim': int(test_config['geometric_tests']['hidden_dim']),
+            'manifold_dim': int(test_config['quantum_geometric']['manifold_dim']),
+            'dt': float(test_config['quantum_geometric']['dt']),
+            'tolerance': float(test_config['fiber_bundle']['tolerance'])
+        }
 
     @pytest.fixture
-    def time_steps(self) -> int:
-        return 100
-
-    @pytest.fixture
-    def hidden_dim(self) -> int:
-        return 64
-
-    @pytest.fixture
-    def manifold_dim(self) -> int:
-        return 16
-
-    @pytest.fixture
-    def flow(self, hidden_dim: int, manifold_dim: int) -> GeometricFlow:
-        return GeometricFlow(hidden_dim=hidden_dim, manifold_dim=manifold_dim)
+    def flow(self, setup_test_parameters) -> GeometricFlow:
+        return GeometricFlow(
+            hidden_dim=setup_test_parameters['hidden_dim'],
+            manifold_dim=setup_test_parameters['manifold_dim']
+        )
 
     def test_linear_stability(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test linear stability analysis."""
         # Create linear stability analyzer
@@ -67,34 +75,48 @@ class TestPatternStability:
         # Generate test patterns with known stability
         def generate_stable_pattern():
             """Generate linearly stable pattern."""
-            x = torch.linspace(0, 2 * np.pi, spatial_dim)
-            return torch.sin(x) + 0.1 * torch.randn_like(x)
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            pattern = torch.sin(X) + torch.sin(Y) + 0.1 * torch.randn_like(X)
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
 
         def generate_unstable_pattern():
             """Generate linearly unstable pattern."""
-            x = torch.linspace(0, 2 * np.pi, spatial_dim)
-            return torch.exp(0.1 * x) * torch.sin(x)
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            pattern = torch.exp(0.1 * X) * torch.sin(Y)
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
 
         # Test stable patterns
-        stable_patterns = torch.stack(
-            [generate_stable_pattern() for _ in range(batch_size)]
+        stable_patterns = torch.cat(
+            [generate_stable_pattern() for _ in range(setup_test_parameters['batch_size'])], dim=0
         )
         stable_result = analyzer.validate_stability(flow, stable_patterns)
-        assert isinstance(stable_result, LinearStabilityValidation)
-        assert stable_result.stable
-        assert torch.all(stable_result.growth_rates < 1.0)
+        assert isinstance(stable_result, (LinearStabilityValidation, StabilityValidationResult))
+        assert stable_result.is_valid
+        assert stable_result.data is not None
+        assert 'eigenvalues' in stable_result.data
+        assert 'growth_rates' in stable_result.data
+        assert torch.all(stable_result.data['growth_rates'] < 1.0)
 
         # Test unstable patterns
-        unstable_patterns = torch.stack(
-            [generate_unstable_pattern() for _ in range(batch_size)]
+        unstable_patterns = torch.cat(
+            [generate_unstable_pattern() for _ in range(setup_test_parameters['batch_size'])], dim=0
         )
         unstable_result = analyzer.validate_stability(flow, unstable_patterns)
-        assert isinstance(unstable_result, LinearStabilityValidation)
-        assert not unstable_result.stable
-        assert torch.any(unstable_result.growth_rates > 1.0)
+        assert isinstance(unstable_result, (LinearStabilityValidation, StabilityValidationResult))
+        assert not unstable_result.is_valid
+        assert unstable_result.data is not None
+        assert 'eigenvalues' in unstable_result.data
+        assert 'growth_rates' in unstable_result.data
+        assert torch.any(unstable_result.data['growth_rates'] > 1.0)
 
     def test_nonlinear_stability(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test nonlinear stability analysis."""
         # Create nonlinear stability analyzer
@@ -103,33 +125,38 @@ class TestPatternStability:
         # Generate test patterns with nonlinear dynamics
         def generate_pattern(stability: str) -> torch.Tensor:
             """Generate pattern with specified stability."""
-            x = torch.linspace(0, 2 * np.pi, spatial_dim)
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
             if stability == "stable":
-                return torch.tanh(torch.sin(x))
-            return torch.sin(x) + 0.1 * torch.sin(2 * x)
+                pattern = torch.tanh(torch.sin(X) + torch.sin(Y))
+            else:
+                pattern = torch.sin(X) + torch.sin(Y) + 0.1 * torch.sin(2 * X + Y)
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
 
         # Test stable patterns
-        stable_patterns = torch.stack(
-            [generate_pattern("stable") for _ in range(batch_size)]
+        stable_patterns = torch.cat(
+            [generate_pattern("stable") for _ in range(setup_test_parameters['batch_size'])], dim=0
         )
         stable_result = analyzer.validate_stability(flow, stable_patterns)
-        assert isinstance(stable_result, NonlinearStabilityValidation)
-        assert stable_result.stable
-        assert stable_result.basin_size > 0
+        assert isinstance(stable_result, (NonlinearStabilityValidation, StabilityValidationResult))
+        assert stable_result.is_valid
+        assert stable_result.data is not None
+        assert 'basin_size' in stable_result.data
+        assert stable_result.data['basin_size'] > 0
 
         # Test marginally stable patterns
-        unstable_patterns = torch.stack(
-            [generate_pattern("unstable") for _ in range(batch_size)]
+        unstable_patterns = torch.cat(
+            [generate_pattern("unstable") for _ in range(setup_test_parameters['batch_size'])], dim=0
         )
         unstable_result = analyzer.validate_stability(flow, unstable_patterns)
-        assert isinstance(unstable_result, NonlinearStabilityValidation)
-        assert not unstable_result.stable
+        assert isinstance(unstable_result, (NonlinearStabilityValidation, StabilityValidationResult))
+        assert not unstable_result.is_valid
 
     def test_perturbation_response(
         self,
-        batch_size: int,
-        spatial_dim: int,
-        time_steps: int,
+        setup_test_parameters: Dict,
     ):
         """Test perturbation response analysis."""
         # Create perturbation analyzer
@@ -139,11 +166,17 @@ class TestPatternStability:
         dynamics = PatternDynamics()
 
         # Generate test patterns and perturbations
-        patterns = torch.stack(
-            [
-                torch.sin(torch.linspace(0, 2 * np.pi, spatial_dim))
-                for _ in range(batch_size)
-            ]
+        def generate_pattern():
+            """Generate test pattern."""
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            pattern = torch.sin(X) + torch.sin(Y)
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
+
+        patterns = torch.cat(
+            [generate_pattern() for _ in range(setup_test_parameters['batch_size'])], dim=0
         )
         perturbation = 0.1 * torch.randn_like(patterns[0])
 
@@ -161,13 +194,13 @@ class TestPatternStability:
         assert result.max_amplitude >= 0
 
         # Test evolution response
-        evolved = dynamics.evolve_pattern(patterns[0] + perturbation, steps=time_steps)
+        evolved = dynamics.evolve_pattern(patterns[0] + perturbation, steps=setup_test_parameters['time_steps'])
         assert isinstance(evolved, torch.Tensor)
-        assert evolved.shape[0] == time_steps
-        assert evolved.shape[-1] == spatial_dim
+        assert evolved.shape[0] == setup_test_parameters['time_steps']
+        assert evolved.shape[-1] == setup_test_parameters['spatial_dim']
 
     def test_lyapunov_analysis(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test Lyapunov stability analysis."""
         # Create nonlinear stability validator for Lyapunov analysis
@@ -176,48 +209,59 @@ class TestPatternStability:
         # Generate test trajectory
         def generate_trajectory() -> torch.Tensor:
             """Generate test trajectory."""
-            t = torch.linspace(0, 10, 100)
-            x = torch.linspace(0, 2 * np.pi, spatial_dim)
-            X, T = torch.meshgrid(x, t, indexing="ij")
-            return torch.sin(X - 0.3 * T) + 0.1 * torch.randn_like(X)
+            # Use fewer time points and avoid meshgrid
+            t = torch.linspace(0, 5, 25)  # Reduced time range and points
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            trajectory = torch.zeros(1, 1, setup_test_parameters['spatial_dim'], setup_test_parameters['spatial_dim'], len(t))
+            for i, ti in enumerate(t):
+                pattern = torch.sin(X - 0.3 * ti) + torch.sin(Y - 0.2 * ti) + 0.1 * torch.randn_like(X)
+                trajectory[..., i] = pattern
+            return trajectory.squeeze(-1)
 
-        trajectories = torch.stack([generate_trajectory() for _ in range(batch_size)])
+        trajectories = torch.cat([generate_trajectory() for _ in range(setup_test_parameters['batch_size'])], dim=0)
 
         # Test nonlinear stability validation
         result = analyzer.validate_stability(flow, trajectories)
-        assert isinstance(result, NonlinearStabilityValidation)
-        assert hasattr(result, "lyapunov_function")
-        assert result.lyapunov_function >= 0
+        assert isinstance(result, (NonlinearStabilityValidation, StabilityValidationResult))
+        assert result.data is not None
+        assert 'lyapunov_function' in result.data
+        assert result.data['lyapunov_function'] >= 0
 
     def test_mode_stability(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test stability analysis of pattern modes."""
         # Create linear stability validator for mode analysis
         analyzer = LinearStabilityValidator()
 
         # Generate test patterns with multiple modes
-        x = torch.linspace(0, 2 * np.pi, spatial_dim)
-        patterns = []
-        for _ in range(batch_size):
-            # Combine multiple modes with different stabilities
+        def generate_pattern():
+            """Generate test pattern with multiple modes."""
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
             pattern = (
-                torch.sin(x)  # Stable mode
-                + 0.5 * torch.sin(2 * x)  # Less stable mode
-                + 0.1 * torch.sin(3 * x)
-            )  # Least stable mode
-            patterns.append(pattern)
-        patterns = torch.stack(patterns)
+                torch.sin(X) + torch.sin(Y)  # Stable mode
+                + 0.5 * torch.sin(2 * X + Y)  # Less stable mode
+                + 0.1 * torch.sin(3 * X + 2 * Y)  # Least stable mode
+            )
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
+
+        patterns = torch.cat([generate_pattern() for _ in range(setup_test_parameters['batch_size'])], dim=0)
 
         # Test stability validation with mode decomposition
         result = analyzer.validate_stability(flow, patterns)
-        assert isinstance(result, LinearStabilityValidation)
-        assert hasattr(result, "eigenvectors")
-        assert hasattr(result, "eigenvalues")
-        assert result.eigenvectors.shape[-1] == patterns.shape[-1]
+        assert isinstance(result, (LinearStabilityValidation, StabilityValidationResult))
+        assert result.data is not None
+        assert 'eigenvalues' in result.data
+        assert 'eigenvectors' in result.data
+        assert result.data['eigenvectors'].shape[-1] == patterns.shape[-1]
 
     def test_stability_metrics(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test stability metrics computation and aggregation."""
         # Create both linear and nonlinear analyzers
@@ -225,29 +269,33 @@ class TestPatternStability:
         nonlinear_analyzer = NonlinearStabilityValidator()
 
         # Generate test patterns
-        patterns = torch.stack(
-            [
-                torch.sin(torch.linspace(0, 2 * np.pi, spatial_dim))
-                for _ in range(batch_size)
-            ]
-        )
+        def generate_pattern():
+            """Generate test pattern."""
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            pattern = torch.sin(X) + torch.sin(Y)
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
+
+        patterns = torch.cat([generate_pattern() for _ in range(setup_test_parameters['batch_size'])], dim=0)
 
         # Test both types of stability analysis
         linear_result = linear_analyzer.validate_stability(flow, patterns)
         nonlinear_result = nonlinear_analyzer.validate_stability(flow, patterns)
 
         # Verify metric properties
-        assert isinstance(linear_result, LinearStabilityValidation)
-        assert isinstance(nonlinear_result, NonlinearStabilityValidation)
-        assert hasattr(linear_result, "stable")
-        assert hasattr(nonlinear_result, "stable")
+        assert isinstance(linear_result, (LinearStabilityValidation, StabilityValidationResult))
+        assert isinstance(nonlinear_result, (NonlinearStabilityValidation, StabilityValidationResult))
+        assert linear_result.data is not None
+        assert nonlinear_result.data is not None
+        assert 'eigenvalues' in linear_result.data
+        assert 'lyapunov_function' in nonlinear_result.data
 
     def test_validation_integration(
         self,
         flow: GeometricFlow,
-        batch_size: int,
-        spatial_dim: int,
-        time_steps: int,
+        setup_test_parameters: Dict,
     ):
         """Test integrated stability validation."""
         # Create analyzers
@@ -257,42 +305,51 @@ class TestPatternStability:
         dynamics = PatternDynamics()
 
         # Generate test pattern evolution
-        time_series = []
-        for _ in range(batch_size):
-            t = torch.linspace(0, 10, time_steps)
-            x = torch.linspace(0, 2 * np.pi, spatial_dim)
-            X, T = torch.meshgrid(x, t, indexing="ij")
-            pattern = torch.sin(X - 0.3 * T) + 0.1 * torch.randn_like(X)
-            time_series.append(pattern)
-        time_series = torch.stack(time_series)
+        def generate_pattern():
+            """Generate test pattern evolution."""
+            t = torch.linspace(0, 10, setup_test_parameters['time_steps'])
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            pattern = torch.zeros(1, 1, setup_test_parameters['spatial_dim'], setup_test_parameters['spatial_dim'], setup_test_parameters['time_steps'])
+            for i, ti in enumerate(t):
+                pattern[..., i] = torch.sin(X - 0.3 * ti) + torch.sin(Y - 0.2 * ti) + 0.1 * torch.randn_like(X)
+            return pattern.squeeze(-1)
+
+        time_series = torch.cat([generate_pattern() for _ in range(setup_test_parameters['batch_size'])], dim=0)
 
         # Run stability validations
-        linear_result = linear_analyzer.validate_stability(flow, time_series[:, 0])
-        nonlinear_result = nonlinear_analyzer.validate_stability(flow, time_series[:, 0])
+        linear_result = linear_analyzer.validate_stability(flow, time_series[..., 0])
+        nonlinear_result = nonlinear_analyzer.validate_stability(flow, time_series[..., 0])
         perturbation_result = perturbation_analyzer.analyze_perturbation(
-            dynamics, time_series[0, 0]
+            dynamics, time_series[0, ..., 0], 0.1 * torch.randn_like(time_series[0, ..., 0])
         )
 
         # Verify results
-        assert isinstance(linear_result, LinearStabilityValidation)
-        assert isinstance(nonlinear_result, NonlinearStabilityValidation)
+        assert isinstance(linear_result, (LinearStabilityValidation, StabilityValidationResult))
+        assert isinstance(nonlinear_result, (NonlinearStabilityValidation, StabilityValidationResult))
         assert isinstance(perturbation_result, PerturbationMetrics)
 
     def test_dynamical_system(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test dynamical system properties."""
         # Create pattern dynamics
         dynamics = PatternDynamics()
 
         # Generate test pattern
-        pattern = torch.sin(torch.linspace(0, 2 * np.pi, spatial_dim))
+        x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+        y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+        X, Y = torch.meshgrid(x, y, indexing="ij")
+        pattern = torch.sin(X) + torch.sin(Y)
+        # Reshape to [1, 1, spatial_dim, spatial_dim]
+        pattern = pattern.unsqueeze(0).unsqueeze(0)
 
         # Test evolution
-        evolved = dynamics.evolve_pattern(pattern, steps=10)
+        evolved = dynamics.evolve_pattern(pattern, steps=setup_test_parameters['time_steps'])
         assert isinstance(evolved, torch.Tensor)
-        assert evolved.shape[0] == 10  # Number of time steps
-        assert evolved.shape[-1] == spatial_dim
+        assert evolved.shape[0] == setup_test_parameters['time_steps']  # Number of time steps
+        assert evolved.shape[-1] == setup_test_parameters['spatial_dim']
 
         # Test Jacobian computation
         jacobian = dynamics.compute_jacobian(pattern)
@@ -300,28 +357,35 @@ class TestPatternStability:
         assert jacobian.shape == (pattern.numel(), pattern.numel())
 
     def test_bifurcation_theory(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test bifurcation theory properties."""
         # Create nonlinear stability validator
         analyzer = NonlinearStabilityValidator()
 
         # Generate test patterns at different parameter values
-        patterns = []
-        for param in torch.linspace(0, 1, batch_size):
-            x = torch.linspace(0, 2 * np.pi, spatial_dim)
-            pattern = torch.sin(x) + param * torch.sin(2 * x)
-            patterns.append(pattern)
-        patterns = torch.stack(patterns)
+        def generate_pattern(param: float) -> torch.Tensor:
+            """Generate test pattern with parameter."""
+            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+            X, Y = torch.meshgrid(x, y, indexing="ij")
+            pattern = torch.sin(X) + torch.sin(Y) + param * torch.sin(2 * X + Y)
+            # Reshape to [1, 1, spatial_dim, spatial_dim]
+            return pattern.unsqueeze(0).unsqueeze(0)
+
+        patterns = torch.cat(
+            [generate_pattern(float(param)) for param in torch.linspace(0, 1, setup_test_parameters['batch_size'])],
+            dim=0
+        )
 
         # Test stability across parameter range
         result = analyzer.validate_stability(flow, patterns)
-        assert isinstance(result, NonlinearStabilityValidation)
-        assert hasattr(result, "stable")
-        assert hasattr(result, "basin_size")
+        assert isinstance(result, (NonlinearStabilityValidation, StabilityValidationResult))
+        assert result.data is not None
+        assert 'basin_size' in result.data
 
     def test_stability_analysis(
-        self, flow: GeometricFlow, batch_size: int, spatial_dim: int
+        self, flow: GeometricFlow, setup_test_parameters: Dict
     ):
         """Test stability analysis methods."""
         # Create analyzers
@@ -330,22 +394,29 @@ class TestPatternStability:
         dynamics = PatternDynamics()
 
         # Generate test pattern
-        pattern = torch.sin(torch.linspace(0, 2 * np.pi, spatial_dim))
+        x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+        y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
+        X, Y = torch.meshgrid(x, y, indexing="ij")
+        pattern = torch.sin(X) + torch.sin(Y)
+        # Reshape to [1, 1, spatial_dim, spatial_dim]
+        pattern = pattern.unsqueeze(0).unsqueeze(0)
 
         # Test linear stability
         linear_result = linear_analyzer.validate_stability(flow, pattern)
-        assert isinstance(linear_result, LinearStabilityValidation)
-        assert hasattr(linear_result, "eigenvalues")
-        assert hasattr(linear_result, "eigenvectors")
+        assert isinstance(linear_result, (LinearStabilityValidation, StabilityValidationResult))
+        assert linear_result.data is not None
+        assert 'eigenvalues' in linear_result.data
+        assert 'eigenvectors' in linear_result.data
 
         # Test nonlinear stability
         nonlinear_result = nonlinear_analyzer.validate_stability(flow, pattern)
-        assert isinstance(nonlinear_result, NonlinearStabilityValidation)
-        assert hasattr(nonlinear_result, "lyapunov_function")
-        assert hasattr(nonlinear_result, "basin_size")
+        assert isinstance(nonlinear_result, (NonlinearStabilityValidation, StabilityValidationResult))
+        assert nonlinear_result.data is not None
+        assert 'lyapunov_function' in nonlinear_result.data
+        assert 'basin_size' in nonlinear_result.data
 
         # Test evolution stability
-        evolved = dynamics.evolve_pattern(pattern, steps=10)
+        evolved = dynamics.evolve_pattern(pattern, steps=setup_test_parameters['time_steps'])
         assert isinstance(evolved, torch.Tensor)
-        assert evolved.shape[0] == 10
-        assert evolved.shape[-1] == spatial_dim
+        assert evolved.shape[0] == setup_test_parameters['time_steps']
+        assert evolved.shape[-1] == setup_test_parameters['spatial_dim']
