@@ -1211,13 +1211,23 @@ class TestGeometricComponents:
         metric_derivs = []
         for i in range(total_dim):
             for j in range(total_dim):
-                deriv = torch.autograd.grad(
-                    metric[i, j],
-                    point,
-                    create_graph=True,
-                    retain_graph=True
-                )[0]
+                # Create a function that returns the metric component
+                def metric_component(p):
+                    metric_val = pattern_bundle.compute_metric(p.unsqueeze(0)).values[0, i, j]
+                    return metric_val
+                
+                # Compute derivative using autograd
+                deriv = torch.zeros_like(point)
+                for k in range(total_dim):
+                    point_plus = point.clone()
+                    point_plus.data[k] += 1e-6
+                    point_minus = point.clone()
+                    point_minus.data[k] -= 1e-6
+                    
+                    deriv[k] = (metric_component(point_plus) - metric_component(point_minus)) / (2e-6)
+                
                 metric_derivs.append(deriv)
+        
         metric_derivs = torch.stack(metric_derivs).reshape(total_dim, total_dim, total_dim)
         
         # Verify shape

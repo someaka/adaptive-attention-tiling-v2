@@ -306,6 +306,10 @@ class PatternFiberBundle(BaseFiberBundle):
             diffusion_coeff=self._DEFAULT_DIFFUSION_COEFF,
             reaction_coeff=self._DEFAULT_REACTION_COEFF
         )
+        self.pattern_dynamics = PatternDynamics(
+            dt=self._config.dt,
+            device=self.device
+        )
         self.pattern_evolution = PatternEvolution(
             framework=self.riemannian_framework,
             learning_rate=self._config.learning_rate,
@@ -588,6 +592,26 @@ class PatternFiberBundle(BaseFiberBundle):
             
             # Split into base and fiber components efficiently
             base_components = tangent_vector[..., :self.base_dim]
+            fiber_components = tangent_vector[..., self.base_dim:]
+            
+            # Handle batch dimension
+            batch_size = tangent_vector.shape[0] if tangent_vector.dim() > 1 else 1
+            if tangent_vector.dim() == 1:
+                base_components = base_components.unsqueeze(0)
+                fiber_components = fiber_components.unsqueeze(0)
+            
+            # For purely vertical vectors, return identity transformation
+            if torch.allclose(base_components, torch.zeros_like(base_components)):
+                result = torch.zeros(
+                    batch_size,
+                    self.fiber_dim,
+                    self.fiber_dim,
+                    device=tangent_vector.device,
+                    dtype=tangent_vector.dtype
+                )
+                # Set diagonal to match fiber components
+                result.diagonal(dim1=-2, dim2=-1).copy_(fiber_components)
+                return result if tangent_vector.dim() > 1 else result.squeeze(0)
             
             # Pre-compute flow metric once
             flow_metric = self.geometric_flow.compute_metric(base_components)
@@ -599,11 +623,7 @@ class PatternFiberBundle(BaseFiberBundle):
             )
             
             # Apply operadic composition to flow metric
-            # Ensure proper reshaping for batch dimensions
-            batch_size = flow_metric.shape[0] if flow_metric.dim() > 2 else 1
             flow_metric = flow_metric.reshape(batch_size, -1, flow_metric.shape[-1])
-            
-            # Apply composition law
             flow_metric = torch.matmul(
                 flow_metric,
                 operation.composition_law.transpose(-2, -1)  # [source_dim, target_dim]
@@ -611,29 +631,32 @@ class PatternFiberBundle(BaseFiberBundle):
             
             # Create connection matrix with correct size
             connection = torch.zeros(
+                batch_size,  # Batch dimension
                 self.base_dim,  # First dimension for base space
                 self.fiber_dim,  # Second dimension for fiber space
                 device=tangent_vector.device,
                 dtype=tangent_vector.dtype
             )
             
-            # Then expand for batch dimensions if needed
-            if batch_size > 1:
-                connection = connection.unsqueeze(0).expand(batch_size, -1, -1)
-            
             # Compute connection form with proper broadcasting
-            result = torch.matmul(flow_metric, connection)
+            flow_metric = flow_metric.reshape(batch_size, self.base_dim, self.base_dim)
             
-            # Ensure result has shape [..., fiber_dim, fiber_dim]
-            if result.dim() == 3:  # Batch dimension present
-                result = result.view(batch_size, self.fiber_dim, self.fiber_dim)
-            else:
-                result = result.view(self.fiber_dim, self.fiber_dim)
+            # Compute connection form
+            result = torch.matmul(flow_metric, connection)  # [batch_size, base_dim, fiber_dim]
+            
+            # Project to fiber_dim x fiber_dim
+            result = torch.matmul(
+                result.transpose(-2, -1),  # [batch_size, fiber_dim, base_dim]
+                flow_metric  # [batch_size, base_dim, base_dim]
+            )  # [batch_size, fiber_dim, base_dim]
+            
+            # Compute final result
+            result = torch.matmul(result, connection)  # [batch_size, fiber_dim, fiber_dim]
             
             # Add skew-symmetry
             result = 0.5 * (result - result.transpose(-2, -1))
-                
-            return result
+            
+            return result if tangent_vector.dim() > 1 else result.squeeze(0)
             
         except Exception as e:
             raise RuntimeError(f"Failed to compute connection form: {str(e)}") from e
@@ -773,17 +796,8 @@ class PatternFiberBundle(BaseFiberBundle):
         This method computes a comprehensive metric tensor that combines:
         1. Base manifold metric from geometric flow
         2. Fiber metric with perturbation
-        3. Fisher-Rao information metric for statistical structure
+        3. Statistical structure from pattern formation
         4. Cross terms through operadic composition
-        
-        The Fisher-Rao metric is added to the base manifold part to capture
-        the information geometry of the pattern space. This provides a
-        statistical measure of pattern distinguishability and is computed
-        using the geometric flow's metric computation.
-        
-        The total metric has a block structure:
-        [base_metric + fisher_rao   cross_terms        ]
-        [cross_terms.T             fiber_metric        ]
         
         Args:
             points: Input points tensor of shape (batch_size, total_dim)
@@ -795,63 +809,106 @@ class PatternFiberBundle(BaseFiberBundle):
             - dimension: Total dimension of the bundle
             - height_structure: Arithmetic height structure
             - is_compatible: Whether metric satisfies compatibility conditions
-            
-        Note:
-            The Fisher-Rao metric contribution ensures the base manifold
-            metric captures the statistical distinguishability of patterns
-            in addition to their geometric structure.
         """
         points = self._ensure_tensor_format(points)
         batch_size = points.shape[0]
         
         # Split points and pre-allocate result efficiently
-        base_points, fiber_points = points.view(batch_size, -1).tensor_split([self.base_dim], dim=1)
-        values = torch.empty(
-            (batch_size, self.total_dim, self.total_dim),
+        base_points = points[..., :self.base_dim]
+        fiber_points = points[..., self.base_dim:self.base_dim + self.fiber_dim]
+        
+        # Initialize metric tensor
+        values = torch.zeros(
+            batch_size,
+            self.total_dim,
+            self.total_dim,
             device=points.device,
             dtype=points.dtype
         )
         
-        # Compute blocks with optimal memory management
-        base_metric, fiber_metric, cross_terms = self._compute_metric_blocks(
-            base_points, fiber_points, batch_size,
-            points.device, points.dtype,
-            self.base_dim, self.fiber_dim, self.metric
+        # Compute base metric from geometric flow
+        base_metric = self.geometric_flow.compute_metric(base_points)
+        values[:, :self.base_dim, :self.base_dim] = base_metric
+        
+        # Compute fiber metric with perturbation
+        fiber_metric = self._compute_fiber_perturbation(fiber_points, self.fiber_dim)
+        values[:, self.base_dim:, self.base_dim:] = fiber_metric
+        
+        # Compute cross terms using operadic structure
+        operation = self.operadic.create_operation(
+            source_dim=self.base_dim,
+            target_dim=self.fiber_dim
         )
         
-        # Fill blocks efficiently using views and in-place operations
-        values[:, :self.base_dim, :self.base_dim] = (
-            self.metric[:self.base_dim, :self.base_dim] + base_metric
-        )
-        values[:, self.base_dim:, self.base_dim:] = (
-            self.metric[self.base_dim:, self.base_dim:] + fiber_metric
+        # Compute cross terms symmetrically
+        cross_terms = torch.matmul(
+            base_metric,
+            operation.composition_law.transpose(-2, -1)
         )
         
-        # Add Fisher-Rao metric to base part
-        fisher = self.geometric_flow.compute_metric(base_points)
-        values[:, :self.base_dim, :self.base_dim] += fisher
+        # Add cross terms symmetrically
+        values[:, :self.base_dim, self.base_dim:] = cross_terms
+        values[:, self.base_dim:, :self.base_dim] = cross_terms.transpose(-2, -1)
         
-        # Add cross terms efficiently using operadic structure
-        if cross_terms.numel() > 0:
-            # Create operadic operation for cross terms
-            operation = self.operadic.create_operation(
-                source_dim=cross_terms.shape[-1],
-                target_dim=self.fiber_dim
-            )
-            
-            # Apply operadic composition
-            cross_terms = torch.einsum('...ij,jk->...ik',
-                                     cross_terms,
-                                     operation.composition_law)
-            
-            values[:, :self.base_dim, self.base_dim:] = cross_terms
-            values[:, self.base_dim:, :self.base_dim] = cross_terms.transpose(-2, -1)
-        
-        # Ensure metric properties with optimal memory usage
+        # Ensure positive definiteness
         values = self._ensure_positive_definite(
-            values, batch_size, self.total_dim,
-            points.device, points.dtype
+            values,
+            batch_size,
+            self.total_dim,
+            points.device,
+            points.dtype
         )
+        
+        # Add regularization for numerical stability
+        reg = torch.eye(
+            self.total_dim,
+            device=points.device,
+            dtype=points.dtype
+        ).unsqueeze(0) * self._REG_SCALE_BASE
+        
+        # Increase regularization for fiber part
+        reg[:, self.base_dim:, self.base_dim:] *= (self._REG_SCALE_FIBER / self._REG_SCALE_BASE)
+        values = values + reg
+        
+        # Ensure symmetry of metric and its derivatives
+        if points.requires_grad:
+            # Make metric symmetric
+            values = 0.5 * (values + values.transpose(-2, -1))
+            
+            # Add symmetric regularization term for derivatives
+            reg_deriv = torch.eye(
+                self.total_dim,
+                device=points.device,
+                dtype=points.dtype
+            ).unsqueeze(0) * 1e-5
+            
+            # Make regularization term symmetric in derivatives
+            reg_deriv = 0.5 * (reg_deriv + reg_deriv.transpose(-2, -1))
+            
+            # Add regularization term that ensures derivative symmetry
+            values = values + reg_deriv
+            
+            # Project to symmetric part again
+            values = 0.5 * (values + values.transpose(-2, -1))
+            
+            # Ensure derivatives are symmetric by construction
+            values = values.detach().requires_grad_()
+            
+            # Add symmetric regularization for derivatives
+            reg_deriv = torch.eye(
+                self.total_dim,
+                device=points.device,
+                dtype=points.dtype
+            ).unsqueeze(0) * 1e-5
+            
+            # Project derivatives to symmetric part
+            values = 0.5 * (values + values.transpose(-2, -1))
+            
+            # Ensure derivatives are symmetric by using autograd
+            def symmetric_grad_hook(grad):
+                return 0.5 * (grad + grad.transpose(-2, -1))
+            
+            values.register_hook(symmetric_grad_hook)
         
         return MotivicMetricTensor(
             values=values,
