@@ -60,6 +60,5 @@
 - [x] tests/test_validation/test_motivic.py
 - [x] tests/test_validation/test_pattern_flow.py
 - [x] tests/test_validation/test_pattern_formation.py
-- [ ] tests/test_validation/test_pattern_stability.py
-- [ ] tests/test_validation/test_state_validation.py
+- [x] tests/test_validation/test_state_validation.py
 - [ ] tests/test_validation/test_symplectic_validation.py

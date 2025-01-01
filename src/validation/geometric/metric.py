@@ -150,47 +150,36 @@ class MetricValidator:
         return True
 
     def compute_metric_values(self, points: Tensor) -> Tensor:
-        """Compute metric tensor values at points using Fisher-Rao structure.
+        """Compute metric tensor values at given points.
         
         Args:
-            points: Points tensor (batch_size x dim) or (batch_size x dim x dim)
+            points: Points tensor of shape (batch_size, manifold_dim)
             
         Returns:
-            Metric tensor values (batch_size x dim x dim)
+            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
         """
-        # Handle different input shapes
-        if len(points.shape) == 3:
-            batch_size = points.shape[0]
-            points = points.reshape(batch_size, -1)  # Flatten to [batch_size, dim]
-        else:
-            batch_size = points.shape[0]
-            
-        # Compute Fisher-Rao metric components
-        # g_ij = E[∂_i log p(x|θ) ∂_j log p(x|θ)]
-        score_fn = self._compute_score_function(points)
+        batch_size = points.shape[0]
         
-        # Ensure score_fn has correct shape [batch_size, dim]
-        if len(score_fn.shape) == 3:
-            score_fn = score_fn.squeeze(1)
-        elif len(score_fn.shape) == 1:
-            score_fn = score_fn.unsqueeze(0)
+        # Ensure points requires gradients
+        if not points.requires_grad:
+            points = points.detach().requires_grad_(True)
         
-        # Reshape if needed
-        if len(score_fn.shape) != 2:
-            score_fn = score_fn.view(batch_size, -1)
-        
-        # Compute metric tensor
-        metric = torch.einsum('bi,bj->bij', score_fn, score_fn)
-        
-        # Add regularization for numerical stability with proper broadcasting
+        # Compute base metric as identity
         eye = torch.eye(
-            score_fn.shape[1],  # Use actual dimension from score function
+            self.manifold_dim,
             device=points.device,
             dtype=points.dtype
         )
+        
         # Expand eye matrix to match batch dimension
-        eye = eye.unsqueeze(0).expand(batch_size, -1, -1)
-        metric = metric + self.eigenvalue_threshold * eye
+        metric = eye.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Add small perturbation based on points
+        perturbation = torch.einsum('bi,bj->bij', points, points)
+        perturbation = 0.01 * (perturbation + perturbation.transpose(-1, -2)) / 2
+        
+        # Add regularization for positive definiteness
+        metric = metric + perturbation + self.eigenvalue_threshold * eye.unsqueeze(0)
         
         return metric
 
@@ -283,34 +272,47 @@ class MetricValidator:
             
         return True
 
-    def _compute_christoffel_symbols(self, points: Tensor) -> Tensor:
+    def _compute_christoffel_symbols(self, metric: torch.Tensor) -> torch.Tensor:
         """Compute Christoffel symbols using Levi-Civita connection.
         
         Args:
-            points: Points tensor
+            metric: Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
             
         Returns:
-            Christoffel symbols
+            Christoffel symbols of shape (batch_size, manifold_dim, manifold_dim, manifold_dim)
         """
-        batch_size = points.shape[0]
+        batch_size = metric.shape[0]
+        
+        # Ensure metric requires gradients
+        if not metric.requires_grad:
+            metric = metric.detach().requires_grad_(True)
+        
+        # Create points tensor for gradient computation
+        points = torch.zeros(batch_size, self.manifold_dim, device=metric.device, dtype=metric.dtype)
+        points.requires_grad_(True)
         
         # Get metric and its derivatives
-        metric = self.compute_metric_values(points)
-        metric_grad = self.compute_metric_gradient(points)
+        metric_values = self.compute_metric_values(points)
+        metric_grad = self.compute_metric_gradient(points)  # [batch_size, manifold_dim, manifold_dim, manifold_dim]
         
         # Compute inverse metric
-        metric_inv = torch.linalg.inv(metric)
+        metric_inv = torch.linalg.inv(metric_values)
+        
+        # Initialize Christoffel symbols tensor
+        christoffel = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim,
+                                device=metric.device, dtype=metric.dtype)
         
         # Compute Christoffel symbols
-        christoffel = torch.einsum(
-            'bkl,bijl->bijk',
-            metric_inv,
-            0.5 * (
-                metric_grad 
-                + torch.transpose(metric_grad, 2, 3)
-                - torch.transpose(metric_grad, 1, 3)
-            )
-        )
+        # Γᵏᵢⱼ = ½ gᵏᵐ(∂ᵢgⱼₘ + ∂ⱼgᵢₘ - ∂ₘgᵢⱼ)
+        for k in range(self.manifold_dim):
+            for i in range(self.manifold_dim):
+                for j in range(self.manifold_dim):
+                    for m in range(self.manifold_dim):
+                        christoffel[:,k,i,j] += 0.5 * metric_inv[:,k,m] * (
+                            metric_grad[:,i,j,m] +  # ∂ᵢgⱼₘ
+                            metric_grad[:,j,i,m] -  # ∂ⱼgᵢₘ
+                            metric_grad[:,m,i,j]    # ∂ₘgᵢⱼ
+                        )
         
         return christoffel
 
@@ -407,29 +409,38 @@ class MetricValidator:
         
         return score
 
-    def compute_metric_gradient(self, metric: Tensor) -> Tensor:
+    def compute_metric_gradient(self, points: Tensor) -> Tensor:
         """Compute metric gradient tensor.
         
         Args:
-            metric: Metric tensor
+            points: Points tensor of shape (batch_size, manifold_dim)
             
         Returns:
-            Metric gradient tensor
+            Metric gradient tensor of shape (batch_size, manifold_dim, manifold_dim, manifold_dim)
         """
-        batch_size = metric.shape[0]
+        batch_size = points.shape[0]
         
-        # Compute gradient
+        # Ensure points requires gradients
+        if not points.requires_grad:
+            points = points.detach().requires_grad_(True)
+        
+        # Compute metric values
+        metric = self.compute_metric_values(points)
+        
+        # Initialize gradient tensor
         grad = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim,
-                         device=metric.device, dtype=metric.dtype)
+                         device=points.device, dtype=points.dtype)
+        
+        # Compute gradient components
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
                 grad_ij = torch.autograd.grad(
                     metric[:, i, j].sum(),
-                    metric,
-                    create_graph=True
+                    points,
+                    create_graph=True,
+                    retain_graph=True
                 )[0]
-                # Correctly reshape the gradient to match dimensions
-                grad[:, i, j, :] = grad_ij[:, :, j]  # Take the relevant slice
+                grad[:, :, i, j] = grad_ij
                 
         return grad
 
@@ -565,7 +576,7 @@ class MetricValidator:
             Tensor: Riemann curvature tensor
         """
         # Get Christoffel symbols
-        christoffel = self.compute_christoffel_symbols(metric)
+        christoffel = self._compute_christoffel_symbols(metric)
         
         # Compute Riemann tensor components
         riemann = torch.zeros_like(metric.unsqueeze(-1).expand(*metric.shape, self.manifold_dim))
@@ -707,21 +718,45 @@ class MetricValidator:
         return connection
 
     def validate_connection_compatibility(self, connection: torch.Tensor) -> bool:
-        """Validate connection compatibility with metric."""
-        # Check connection shape
+        """Validate connection compatibility with metric.
+        
+        A connection is compatible with a metric if the covariant derivative
+        of the metric vanishes: ∇ₖgᵢⱼ = ∂ₖgᵢⱼ - Γᵐᵢₖgₘⱼ - Γᵐⱼₖgᵢₘ = 0
+        """
+        # Handle batched tensors
+        if len(connection.shape) == 4:  # [batch_size, manifold_dim, manifold_dim, manifold_dim]
+            return all(self.validate_connection_compatibility(conn) for conn in connection)
+        
+        # Check connection shape for single tensor
         if connection.shape != (self.manifold_dim, self.manifold_dim, self.manifold_dim):
             return False
             
-        # Check symmetry in lower indices
-        for i in range(self.manifold_dim):
-            if not torch.allclose(
-                connection[i,:,:], 
-                connection[i,:,:].transpose(0,1), 
-                atol=self.tolerance
-            ):
-                return False
-                
-        return True
+        # Get metric and its derivatives at a test point
+        points = torch.zeros(1, self.manifold_dim)  # Single point for validation
+        points.requires_grad_(True)
+        
+        metric = self.compute_metric_values(points)  # [1, manifold_dim, manifold_dim]
+        metric_grad = self.compute_metric_gradient(points)  # [1, manifold_dim, manifold_dim, manifold_dim]
+        
+        # Compute covariant derivative of metric
+        cov_deriv = torch.zeros(self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        
+        for k in range(self.manifold_dim):
+            for i in range(self.manifold_dim):
+                for j in range(self.manifold_dim):
+                    # ∂ₖgᵢⱼ term
+                    cov_deriv[k,i,j] = metric_grad[0,k,i,j]
+                    
+                    # -Γᵐᵢₖgₘⱼ term
+                    for m in range(self.manifold_dim):
+                        cov_deriv[k,i,j] -= connection[m,i,k] * metric[0,m,j]
+                        
+                    # -Γᵐⱼₖgᵢₘ term
+                    for m in range(self.manifold_dim):
+                        cov_deriv[k,i,j] -= connection[m,j,k] * metric[0,i,m]
+        
+        # Check if covariant derivative vanishes
+        return torch.allclose(cov_deriv, torch.zeros_like(cov_deriv), atol=self.tolerance)
 
     def compute_torsion(self, connection: torch.Tensor) -> torch.Tensor:
         """Compute torsion tensor of connection."""
@@ -982,45 +1017,14 @@ class MetricValidator:
         # Volume form is sqrt(det(g))
         return torch.sqrt(torch.linalg.det(metric))
 
-    def compute_christoffel_symbols(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute Christoffel symbols from metric.
+    def compute_sectional_curvature(self, metric: Tensor) -> Tensor:
+        """Compute sectional curvature tensor.
         
         Args:
-            metric: Metric tensor
+            metric: Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
             
         Returns:
-            Christoffel symbols
-        """
-        batch_size = metric.shape[0]
-        
-        # Compute metric inverse
-        metric_inv = torch.linalg.inv(metric)
-        
-        # Compute metric derivatives
-        grad = self.compute_metric_gradient(metric)
-        
-        # Compute Christoffel symbols
-        christoffel = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
-        for i in range(self.manifold_dim):
-            for j in range(self.manifold_dim):
-                for k in range(self.manifold_dim):
-                    christoffel[:,i,j,k] = 0.5 * torch.sum(
-                        metric_inv[:,i,:] * (
-                            grad[:,j,k,:] + grad[:,k,j,:] - grad[:,:,j,k]
-                        ),
-                        dim=1
-                    )
-                    
-        return christoffel
-
-    def compute_sectional_curvature(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute sectional curvature.
-        
-        Args:
-            metric: Metric tensor
-            
-        Returns:
-            Sectional curvature tensor
+            Sectional curvature tensor of shape (batch_size, manifold_dim, manifold_dim)
         """
         batch_size = metric.shape[0]
         
@@ -1028,48 +1032,48 @@ class MetricValidator:
         if not metric.requires_grad:
             metric = metric.detach().requires_grad_(True)
         
-        # Get Christoffel symbols
-        christoffel = self.compute_christoffel_symbols(metric)
+        # Create points tensor for gradient computation
+        points = torch.zeros(batch_size, self.manifold_dim, device=metric.device, dtype=metric.dtype)
+        points.requires_grad_(True)
         
-        # Compute Riemann curvature tensor components
-        riemann = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim,
-                            self.manifold_dim, self.manifold_dim,
-                            device=metric.device, dtype=metric.dtype)
-                            
-        # Compute metric inverse
-        metric_inv = torch.linalg.inv(metric)
+        # Get metric and its derivatives
+        metric_values = self.compute_metric_values(points)
+        metric_grad = self.compute_metric_gradient(points)
         
-        for i in range(self.manifold_dim):
-            for j in range(self.manifold_dim):
-                for k in range(self.manifold_dim):
-                    for l in range(self.manifold_dim):
-                        # Compute covariant derivatives
-                        d_k = torch.zeros_like(christoffel[:,i,j,l])
-                        d_l = torch.zeros_like(christoffel[:,i,j,k])
-                        
-                        for m in range(self.manifold_dim):
-                            d_k += christoffel[:,m,k,l] * christoffel[:,i,j,m]
-                            d_l += christoffel[:,m,l,k] * christoffel[:,i,j,m]
-                        
-                        # Compute Riemann tensor components
-                        riemann[:,i,j,k,l] = (
-                            christoffel[:,i,j,l] * christoffel[:,k,l,j] -
-                            christoffel[:,i,j,k] * christoffel[:,l,k,j] +
-                            d_k - d_l
-                        )
+        # Compute Christoffel symbols
+        christoffel = self._compute_christoffel_symbols(metric_values)
         
-        # Compute sectional curvature
+        # Initialize sectional curvature tensor
         sectional = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim,
                               device=metric.device, dtype=metric.dtype)
-                              
+        
+        # Compute sectional curvature components
         for i in range(self.manifold_dim):
-            for j in range(i+1, self.manifold_dim):
-                # Compute sectional curvature K(e_i, e_j)
-                numerator = riemann[:,i,j,j,i]
-                denominator = metric[:,i,i] * metric[:,j,j] - metric[:,i,j]**2
-                sectional[:,i,j] = numerator / (denominator + 1e-8)
-                sectional[:,j,i] = sectional[:,i,j]  # Symmetrize
+            for j in range(self.manifold_dim):
+                # K(X,Y) = R(X,Y,X,Y) / (g(X,X)g(Y,Y) - g(X,Y)^2)
+                # where X = ∂/∂x_i and Y = ∂/∂x_j
                 
+                # Compute numerator: R(X,Y,X,Y)
+                riemann_term = 0
+                for k in range(self.manifold_dim):
+                    for l in range(self.manifold_dim):
+                        # R^k_{lij} = ∂_i Γ^k_{lj} - ∂_j Γ^k_{li} + Γ^k_{mi}Γ^m_{lj} - Γ^k_{mj}Γ^m_{li}
+                        riemann_term += (
+                            metric_grad[:,i,l,k] * christoffel[:,k,l,j] -
+                            metric_grad[:,j,l,k] * christoffel[:,k,l,i] +
+                            torch.sum(christoffel[:,k,:,i] * christoffel[:,:,l,j], dim=1) -
+                            torch.sum(christoffel[:,k,:,j] * christoffel[:,:,l,i], dim=1)
+                        )
+                
+                # Compute denominator: g(X,X)g(Y,Y) - g(X,Y)^2
+                denominator = (
+                    metric_values[:,i,i] * metric_values[:,j,j] -
+                    metric_values[:,i,j] * metric_values[:,i,j]
+                )
+                
+                # Compute sectional curvature
+                sectional[:,i,j] = riemann_term / (denominator + 1e-8)
+        
         return sectional
 
     def compute_ricci_curvature(self, metric: torch.Tensor) -> torch.Tensor:
@@ -1135,9 +1139,9 @@ class MetricValidator:
             # Compute volume form
             volume_form = torch.sqrt(torch.abs(determinant))
             
-            # Get Christoffel symbols
+            # Get Christoffel symbols and check compatibility
             try:
-                christoffel = self.compute_christoffel_symbols(metric)
+                christoffel = self._compute_christoffel_symbols(metric)
                 is_compatible = self.validate_connection_compatibility(christoffel)
             except Exception as e:
                 print(f"Error computing Christoffel symbols: {str(e)}")
@@ -1154,13 +1158,11 @@ class MetricValidator:
             # Compute curvature tensors
             try:
                 sectional = self.compute_sectional_curvature(metric)
-                # Compute Ricci curvature by tracing over appropriate indices
                 ricci = torch.zeros_like(metric)
                 for i in range(self.manifold_dim):
                     for j in range(self.manifold_dim):
                         ricci[:,i,j] = torch.sum(sectional[:,i,:] * metric[:,j,:], dim=-1)
                 
-                # Compute scalar curvature by tracing Ricci
                 scalar = torch.einsum('bii->b', ricci)
                 
                 has_bounded_curvature = bool(

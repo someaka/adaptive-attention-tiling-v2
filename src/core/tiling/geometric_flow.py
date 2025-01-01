@@ -193,16 +193,15 @@ class GeometricFlow(RiemannianFlow):
         # Basic Riemannian flow step
         new_metric, metrics = super().flow_step(metric, ricci, timestep)
         
-        # Reshape metric for hamiltonian computation
-        batch_size = metric.shape[0]
-        metric_flat = metric.reshape(batch_size, self.manifold_dim, self.manifold_dim)  # Use actual manifold_dim
+        # The metric is already in the correct shape [batch_size, manifold_dim, manifold_dim]
+        # No need to reshape it
         
         # Add quantum geometric metrics
         metrics.update({
             'quantum_correction': torch.norm(
                 self.arithmetic.compute_quantum_correction(metric)
             ).item(),
-            'hamiltonian': self.hamiltonian(metric_flat).squeeze(-1).mean().item()
+            'hamiltonian': self.hamiltonian(metric).squeeze(-1).mean().item()
         })
         
         return new_metric, metrics

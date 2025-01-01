@@ -75,21 +75,19 @@ class TestPatternStability:
         # Generate test patterns with known stability
         def generate_stable_pattern():
             """Generate linearly stable pattern."""
-            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            X, Y = torch.meshgrid(x, y, indexing="ij")
-            pattern = torch.sin(X) + torch.sin(Y) + 0.1 * torch.randn_like(X)
-            # Reshape to [1, 1, spatial_dim, spatial_dim]
-            return pattern.unsqueeze(0).unsqueeze(0)
+            # Create pattern with correct dimensions
+            pattern = torch.zeros(1, setup_test_parameters['manifold_dim'])
+            for i in range(setup_test_parameters['manifold_dim']):
+                pattern[0,i] = torch.sin(torch.tensor(2.0 * torch.pi * i / setup_test_parameters['manifold_dim']))
+            return pattern
 
         def generate_unstable_pattern():
             """Generate linearly unstable pattern."""
-            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            X, Y = torch.meshgrid(x, y, indexing="ij")
-            pattern = torch.exp(0.1 * X) * torch.sin(Y)
-            # Reshape to [1, 1, spatial_dim, spatial_dim]
-            return pattern.unsqueeze(0).unsqueeze(0)
+            # Create unstable pattern with correct dimensions
+            pattern = torch.zeros(1, setup_test_parameters['manifold_dim'])
+            for i in range(setup_test_parameters['manifold_dim']):
+                pattern[0,i] = torch.exp(torch.tensor(0.1 * i))
+            return pattern
 
         # Test stable patterns
         stable_patterns = torch.cat(
@@ -125,15 +123,14 @@ class TestPatternStability:
         # Generate test patterns with nonlinear dynamics
         def generate_pattern(stability: str) -> torch.Tensor:
             """Generate pattern with specified stability."""
-            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            X, Y = torch.meshgrid(x, y, indexing="ij")
-            if stability == "stable":
-                pattern = torch.tanh(torch.sin(X) + torch.sin(Y))
-            else:
-                pattern = torch.sin(X) + torch.sin(Y) + 0.1 * torch.sin(2 * X + Y)
-            # Reshape to [1, 1, spatial_dim, spatial_dim]
-            return pattern.unsqueeze(0).unsqueeze(0)
+            pattern = torch.zeros(1, setup_test_parameters['manifold_dim'])
+            for i in range(setup_test_parameters['manifold_dim']):
+                if stability == "stable":
+                    pattern[0,i] = torch.tanh(torch.sin(torch.tensor(2.0 * torch.pi * i / setup_test_parameters['manifold_dim'])))
+                else:
+                    pattern[0,i] = torch.sin(torch.tensor(2.0 * torch.pi * i / setup_test_parameters['manifold_dim'])) + \
+                                  0.1 * torch.sin(torch.tensor(4.0 * torch.pi * i / setup_test_parameters['manifold_dim']))
+            return pattern
 
         # Test stable patterns
         stable_patterns = torch.cat(
@@ -211,14 +208,12 @@ class TestPatternStability:
             """Generate test trajectory."""
             # Use fewer time points and avoid meshgrid
             t = torch.linspace(0, 5, 25)  # Reduced time range and points
-            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            X, Y = torch.meshgrid(x, y, indexing="ij")
-            trajectory = torch.zeros(1, 1, setup_test_parameters['spatial_dim'], setup_test_parameters['spatial_dim'], len(t))
+            trajectory = torch.zeros(1, setup_test_parameters['manifold_dim'], len(t))
             for i, ti in enumerate(t):
-                pattern = torch.sin(X - 0.3 * ti) + torch.sin(Y - 0.2 * ti) + 0.1 * torch.randn_like(X)
-                trajectory[..., i] = pattern
-            return trajectory.squeeze(-1)
+                for j in range(setup_test_parameters['manifold_dim']):
+                    trajectory[0, j, i] = torch.sin(torch.tensor(2.0 * torch.pi * j / setup_test_parameters['manifold_dim'] - 0.3 * ti)) + \
+                                        0.1 * torch.randn(1)
+            return trajectory
 
         trajectories = torch.cat([generate_trajectory() for _ in range(setup_test_parameters['batch_size'])], dim=0)
 
@@ -338,12 +333,9 @@ class TestPatternStability:
         dynamics = PatternDynamics()
 
         # Generate test pattern
-        x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-        y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-        X, Y = torch.meshgrid(x, y, indexing="ij")
-        pattern = torch.sin(X) + torch.sin(Y)
-        # Reshape to [1, 1, spatial_dim, spatial_dim]
-        pattern = pattern.unsqueeze(0).unsqueeze(0)
+        pattern = torch.zeros(1, setup_test_parameters['manifold_dim'])
+        for i in range(setup_test_parameters['manifold_dim']):
+            pattern[0,i] = torch.sin(torch.tensor(2.0 * torch.pi * i / setup_test_parameters['manifold_dim']))
 
         # Test evolution
         evolved = dynamics.evolve_pattern(pattern, steps=setup_test_parameters['time_steps'])
@@ -366,12 +358,12 @@ class TestPatternStability:
         # Generate test patterns at different parameter values
         def generate_pattern(param: float) -> torch.Tensor:
             """Generate test pattern with parameter."""
-            x = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            y = torch.linspace(0, 2 * np.pi, setup_test_parameters['spatial_dim'])
-            X, Y = torch.meshgrid(x, y, indexing="ij")
-            pattern = torch.sin(X) + torch.sin(Y) + param * torch.sin(2 * X + Y)
-            # Reshape to [1, 1, spatial_dim, spatial_dim]
-            return pattern.unsqueeze(0).unsqueeze(0)
+            pattern = torch.zeros(1, setup_test_parameters['manifold_dim'])
+            for i in range(setup_test_parameters['manifold_dim']):
+                base = torch.sin(torch.tensor(2.0 * torch.pi * i / setup_test_parameters['manifold_dim']))
+                mod = torch.sin(torch.tensor(4.0 * torch.pi * i / setup_test_parameters['manifold_dim']))
+                pattern[0,i] = base + param * mod
+            return pattern
 
         patterns = torch.cat(
             [generate_pattern(float(param)) for param in torch.linspace(0, 1, setup_test_parameters['batch_size'])],

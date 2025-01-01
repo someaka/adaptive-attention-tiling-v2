@@ -7,7 +7,7 @@ This module validates quantum state properties:
 - State tomography
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional, Any, Union
 from enum import Enum
 
@@ -37,6 +37,7 @@ class QuantumStateValidationResult(ValidationResult[Dict[str, Any]]):
     - State tomography
     """
     error_type: Optional[StateValidationErrorType] = None
+    data: Dict[str, Any] = field(default_factory=dict)
     
     def __init__(
         self,
@@ -53,15 +54,33 @@ class QuantumStateValidationResult(ValidationResult[Dict[str, Any]]):
             data: Optional validation data containing quantum metrics and tensors
             error_type: Type of validation error if any
         """
-        super().__init__(is_valid, message, data)
+        super().__init__(is_valid, message, data if data is not None else {})
         self.error_type = error_type
+        self.data = data if data is not None else {}
     
     def merge(self, other: ValidationResult) -> 'QuantumStateValidationResult':
         """Merge with another validation result."""
-        merged = super().merge(other)
-        if isinstance(other, QuantumStateValidationResult):
-            self.error_type = other.error_type if not self.is_valid else None
-        return self
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+            
+        # Merge metrics dictionaries carefully
+        merged_data = {**(self.data or {})}
+        other_data = other.data or {}
+        
+        # Special handling for metrics
+        for key, value in other_data.items():
+            if key in merged_data and isinstance(value, dict):
+                merged_data[key].update(value)
+            else:
+                merged_data[key] = value
+        
+        result = QuantumStateValidationResult(
+            is_valid=self.is_valid and other.is_valid,
+            message=f"{self.message}; {other.message}",
+            data=merged_data,
+            error_type=other.error_type if isinstance(other, QuantumStateValidationResult) and not self.is_valid else None
+        )
+        return result
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with proper tensor handling."""
@@ -239,6 +258,9 @@ class StatePreparationValidator:
         prepared: QuantumState
     ) -> QuantumStateValidationResult:
         """Validate prepared quantum state against target."""
+        # Initialize metrics dictionary
+        metrics = {}
+        
         # Check norm
         norm = torch.norm(prepared.amplitudes)
         target_norm = torch.tensor(1.0, dtype=norm.dtype, device=norm.device)
@@ -270,13 +292,22 @@ class StatePreparationValidator:
                 error_type=StateValidationErrorType.INVALID_DIMENSIONS,
                 data={"error_value": float(abs(len(target.basis_labels) - len(prepared.basis_labels)))}
             )
-        
+
+        # Compute validation metrics
+        fidelity = self._compute_fidelity(target, prepared.state_vector())
+        trace_distance = self._compute_trace_distance(target, prepared)
+        purity = self._compute_purity(prepared)
+
+        metrics["fidelity"] = float(abs(fidelity.item()))
+        metrics["trace_distance"] = float(abs(trace_distance.item()))
+        metrics["purity"] = float(abs(purity.item()))
+
         # All checks passed
         return QuantumStateValidationResult(
             is_valid=True,
             message="State preparation validation successful",
             error_type=None,
-            data={"error_value": 0.0}
+            data={"metrics": metrics}
         )
 
     def _compute_fidelity(
@@ -410,9 +441,9 @@ class StatePreparationValidator:
         confidence = self._compute_tomography_confidence(state, reconstructed, projectors)
 
         return TomographyValidation(
-            reconstruction_error=float(error.item()),
-            completeness=float(completeness.item()),
-            confidence=float(confidence.item()),
+            reconstruction_error=float(abs(error.item())),
+            completeness=float(abs(completeness.item())),
+            confidence=float(abs(confidence.item())),
             estimated_state=reconstructed
         )
 
@@ -486,18 +517,22 @@ class StatePreparationValidator:
         """Compute statistical confidence in reconstruction."""
         # Get measurement probabilities from true state
         true_probs = torch.stack([
-            torch.trace(torch.matmul(state.density_matrix(), proj))
+            torch.abs(torch.trace(torch.matmul(state.density_matrix(), proj)))
             for proj in projectors
         ])
 
         # Compute expected measurements from reconstructed state
+        # Handle batched case by taking first batch element
+        if len(reconstructed.shape) == 3:
+            reconstructed = reconstructed[0]
+            
         expected = torch.stack([
-            torch.trace(torch.matmul(reconstructed, proj))
+            torch.abs(torch.trace(torch.matmul(reconstructed, proj)))
             for proj in projectors
         ])
 
         # Compute chi-squared statistic
-        chi_squared = torch.sum((true_probs - expected.real)**2 / (true_probs + 1e-10))
+        chi_squared = torch.sum((true_probs - expected)**2 / (true_probs + 1e-10))
         
         # Convert to confidence level (using exponential decay)
         confidence = torch.exp(-chi_squared / len(projectors))
