@@ -808,15 +808,15 @@ class SpatialValidator:
         peak_idx = torch.argmax(power_valid, dim=-1)  # Shape: (batch_size, channels)
         peak_freq_x = freqs_x_valid[peak_idx]
         peak_freq_y = freqs_y_valid[peak_idx]
-        
+
         # For 2D patterns, we need to consider that peaks can appear in either x or y direction
         # The wavelength is determined by the highest frequency component
         peak_freqs = torch.maximum(peak_freq_x.abs(), peak_freq_y.abs())
         
         # Convert to wavelength in pixels
-        # fftfreq gives frequencies in cycles per N samples, normalized by N
-        # To get wavelength in pixels: wavelength = 1 / f_fft
-        wavelength = 1.0 / peak_freqs  # Since freqs are already normalized
+        # fftfreq gives frequencies in cycles per N samples
+        # To get wavelength in pixels: wavelength = N / (f_fft * N) = N / (f_fft * N)
+        wavelength = N / (peak_freqs * N)  # Since freqs are already normalized by N
         
         # Ensure output shape is correct for batched input
         if len(pattern.shape) == 4:  # Batch case

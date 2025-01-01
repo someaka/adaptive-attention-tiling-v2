@@ -127,13 +127,15 @@ def create_test_pattern(size: int, wavelength: float, dtype: torch.dtype = torch
         Pattern tensor of shape (1, 1, size, size)
     """
     # Create pattern in float32 first
+    # Scale x to be in units of cycles per sample
     x = torch.linspace(0, size-1, size, dtype=torch.float32)
+    freq = 1.0 / wavelength  # Convert wavelength to frequency in cycles per sample
     
     # Create pattern with exact wavelength using sine
     pattern = torch.zeros(1, 1, size, size, dtype=torch.float32)
     for i in range(size):
-        # Create 4 complete cycles across the grid
-        pattern[0, 0, i, :] = torch.sin(2*np.pi*x/wavelength)
+        # Create pattern with specified wavelength
+        pattern[0, 0, i, :] = torch.sin(2*np.pi*freq*x)  # freq*x gives cycles
     
     # Normalize pattern to [-1, 1] range
     pattern = pattern / pattern.abs().max()
@@ -171,11 +173,12 @@ def create_complex_pattern(
         amplitudes = [1.0] * len(wavelengths)
     
     # Create pattern in float32 first
-    x = torch.arange(size, dtype=torch.float32)
     pattern = torch.zeros(1, 1, size, size, dtype=torch.float32)
+    x = torch.linspace(0, size-1, size, dtype=torch.float32)
     
     for wavelength, amplitude in zip(wavelengths, amplitudes):
-        component = amplitude * torch.sin(2*np.pi*x/wavelength).view(1, 1, 1, -1)
+        freq = 1.0 / wavelength  # Convert wavelength to frequency in cycles per sample
+        component = amplitude * torch.sin(2*np.pi*freq*x).view(1, 1, 1, -1)
         component = component.repeat(1, 1, size, 1)
         pattern = pattern + component
     
@@ -194,7 +197,7 @@ def create_complex_pattern(
 def test_pattern_creation(setup_test_parameters) -> None:
     """Test that pattern creation works as expected."""
     size = setup_test_parameters['grid_size']
-    wavelength = size / 4.0  # Create 4 complete cycles
+    wavelength = size/4.0  # Create 4 complete cycles
     pattern = create_test_pattern(size, wavelength, dtype=setup_test_parameters['dtype'])
     
     # Check shape
@@ -229,8 +232,8 @@ def test_pattern_creation(setup_test_parameters) -> None:
     if peak_freq > 0.5:
         peak_freq = 1.0 - peak_freq
     
-    # Compute wavelength from frequency, accounting for Nyquist normalization
-    wavelength_value = 2.0 / peak_freq if peak_freq != 0 else float('inf')
+    # Compute wavelength from frequency
+    wavelength_value = 1.0 / peak_freq if peak_freq != 0 else float('inf')
     computed_wavelength = torch.as_tensor([[wavelength_value]], dtype=torch.float32)
     
     # Debug logging
@@ -353,11 +356,9 @@ def test_pattern_wavelength_scaling(setup_test_parameters) -> None:
     wavelength = size/4.0  # Should see 4 complete cycles in the pattern
     
     # Create pattern with correct scaling (use float32 for linspace)
-    x = torch.linspace(0, 2*np.pi*size/wavelength, size, dtype=torch.float32)
-    y = torch.linspace(0, 2*np.pi*size/wavelength, size, dtype=torch.float32)
-    X, Y = torch.meshgrid(x, y, indexing='ij')
-    pattern = torch.sin(X) + torch.sin(Y)
-    pattern = pattern.unsqueeze(0).unsqueeze(0)
+    x = torch.linspace(0, size-1, size, dtype=torch.float32)
+    freq = 1.0 / wavelength  # Convert wavelength to frequency in cycles per sample
+    pattern = torch.sin(2*np.pi*freq*x).view(1, 1, 1, -1).repeat(1, 1, size, 1)
     
     # Convert to target dtype if needed
     if setup_test_parameters['dtype'] != torch.float32:
@@ -507,7 +508,7 @@ def test_wavelength_noise(setup_test_parameters):
 def test_wavelength_high_frequency(setup_test_parameters) -> None:
     """Test wavelength computation for high frequency patterns."""
     size = setup_test_parameters['grid_size']
-    wavelength = size / 8.0  # High frequency - 8 cycles
+    wavelength = size/8.0  # High frequency - 8 cycles
     pattern = create_test_pattern(size, wavelength, dtype=setup_test_parameters['dtype'])
     
     validator = SpatialValidator()
