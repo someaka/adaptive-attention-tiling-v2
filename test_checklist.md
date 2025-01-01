@@ -57,7 +57,7 @@
 - [ ] tests/test_validation/test_framework.py
 - [x] tests/test_validation/test_metric_validation.py
 - [x] tests/test_validation/test_model_geometric.py
-- [ ] tests/test_validation/test_motivic.py
+- [x] tests/test_validation/test_motivic.py
 - [ ] tests/test_validation/test_pattern_flow.py
 - [ ] tests/test_validation/test_pattern_formation.py
 - [ ] tests/test_validation/test_pattern_stability.py

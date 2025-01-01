@@ -321,10 +321,6 @@ class ArithmeticDynamics(nn.Module):
         output = base_flow_hidden + self.quantum_weight * self.measure_proj(quantum_correction)
         output = output.view(batch_size, seq_len, -1)  # Restore original shape
         
-        # Remove sequence dimension if input was 2D
-        if x.dim() == 3 and seq_len == 1:
-            output = output.squeeze(1)
-        
         # Update metrics
         metrics = {
             'height': torch.norm(height_coords).item(),

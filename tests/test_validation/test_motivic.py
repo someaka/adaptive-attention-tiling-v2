@@ -272,6 +272,9 @@ class MockMotivicRiemannianStructure(MotivicRiemannianStructure):
         connection_values = self.connection_map(points)  # [batch_size, manifold_dim^3]
         connection_values = connection_values.view(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
         
+        # Ensure symmetry in lower indices
+        connection_values = 0.5 * (connection_values + connection_values.transpose(-2, -1))
+        
         # Create dynamics with projected input
         dynamics = ArithmeticDynamics(
             hidden_dim=self.hidden_dim,
@@ -665,7 +668,7 @@ class TestDynamicsValidation:
         points_seq = projected_points.unsqueeze(1)  # [batch_size, 1, hidden_dim]
         
         # Test dynamics computation
-        output = dynamics(points_seq)
+        output, metrics = dynamics(points_seq)
         assert output.shape == points_seq.shape
         assert torch.all(torch.isfinite(output)), "Output should be finite"
         assert not torch.any(torch.isnan(output)), "Output should not contain NaN"
