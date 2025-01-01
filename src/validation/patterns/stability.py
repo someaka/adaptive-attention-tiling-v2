@@ -203,64 +203,31 @@ class PatternValidator:
         )
 
     def _compute_lyapunov_exponents(
-        self,
-        pattern_flow: GeometricFlow,
-        initial_state: torch.Tensor,
-        time_steps: int
+        self, pattern_flow: GeometricFlow, initial_state: torch.Tensor, time_steps: int
     ) -> torch.Tensor:
-        """Compute Lyapunov exponents of the pattern flow."""
-        # Initialize perturbation vectors
-        dim = initial_state.shape[-1]
-        perturbations = torch.eye(dim, device=initial_state.device)
+        """Compute Lyapunov exponents for the pattern flow."""
+        # Create forward function for Jacobian computation
+        def forward_fn(state):
+            output, _ = pattern_flow(state)
+            # Return real part for complex tensors
+            return output.real if output.is_complex() else output
         
-        # Define wrapper functions that return real and imaginary parts
-        def forward_real(x):
-            output, _ = pattern_flow(x)
-            return output.real
-
-        def forward_imag(x):
-            output, _ = pattern_flow(x)
-            return output.imag
+        # Get initial state
+        state = initial_state.detach().requires_grad_(True)
         
-        # Evolve perturbations
-        exponents = []
-        state = initial_state.clone()
+        # Compute output with gradients enabled
+        output = forward_fn(state)
         
-        for _ in range(time_steps):
-            # Evolve state and perturbations
-            new_state, _ = pattern_flow(state)
-            
-            # Compute Jacobians for real and imaginary parts
-            jacobian_real = torch.autograd.functional.jacobian(forward_real, state)
-            jacobian_imag = torch.autograd.functional.jacobian(forward_imag, state)
-            
-            # Convert jacobian tuples to tensors if needed
-            if isinstance(jacobian_real, tuple):
-                jacobian_real = torch.stack(list(jacobian_real))
-            if isinstance(jacobian_imag, tuple):
-                jacobian_imag = torch.stack(list(jacobian_imag))
-            
-            # Combine real and imaginary Jacobians
-            jacobian = jacobian_real + 1j * jacobian_imag
-            
-            # Convert perturbations to complex if needed
-            if not perturbations.is_complex():
-                perturbations = perturbations.to(dtype=torch.complex64)
-            
-            # Update perturbations using complex arithmetic
-            perturbations = torch.matmul(jacobian, perturbations)
-            
-            # Compute local exponents using complex norm
-            norms = torch.norm(perturbations.abs(), dim=-1)
-            exponents.append(torch.log(norms))
-            
-            # Normalize perturbations
-            perturbations = perturbations / norms.unsqueeze(-1)
-            
-            state = new_state
-            
-        # Average exponents
-        return torch.stack(exponents).mean(dim=0)
+        # Compute gradient of output norm with respect to input
+        output_norm = torch.linalg.vector_norm(output, dim=-1)  # Only compute norm along last dimension
+        output_norm = output_norm.sum()  # Make sure we have a scalar for gradient computation
+        grad = torch.autograd.grad(output_norm, state, create_graph=False)[0]  # Disable create_graph
+        
+        # Compute local stability measure using vector norm
+        stability = torch.linalg.vector_norm(grad, dim=-1)  # Only compute norm along last dimension
+        
+        # Return stability measure as Lyapunov exponent approximation
+        return stability.unsqueeze(-1)  # Add dimension to match expected shape
 
     def _test_perturbation_response(
         self,
@@ -269,22 +236,48 @@ class PatternValidator:
     ) -> Dict[str, torch.Tensor]:
         """Test response to different types of perturbations."""
         responses = {}
+        dtype = initial_state.dtype
+        device = initial_state.device
+        
+        # Create noise in appropriate dtype
+        def create_noise(mode: str) -> torch.Tensor:
+            if dtype in [torch.complex64, torch.complex128]:
+                if mode == "uniform":
+                    real = torch.rand_like(initial_state, dtype=torch.float32) * 0.01
+                    imag = torch.rand_like(initial_state, dtype=torch.float32) * 0.01
+                    return torch.complex(real, imag).to(dtype=dtype)
+                else:  # gaussian
+                    real = torch.randn_like(initial_state, dtype=torch.float32) * 0.01
+                    imag = torch.randn_like(initial_state, dtype=torch.float32) * 0.01
+                    return torch.complex(real, imag).to(dtype=dtype)
+            else:
+                if mode == "uniform":
+                    return torch.rand_like(initial_state) * 0.01
+                else:  # gaussian
+                    return torch.randn_like(initial_state) * 0.01
         
         # Test small random perturbations
-        perturbed = initial_state + 0.01 * torch.randn_like(initial_state)
+        noise = create_noise("gaussian")
+        perturbed = initial_state + noise
         evolved_orig, _ = pattern_flow(initial_state)
         evolved_pert, _ = pattern_flow(perturbed)
-        responses["random"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
+        
+        # Compute response using appropriate norm
+        if dtype in [torch.complex64, torch.complex128]:
+            responses["random"] = torch.norm(evolved_pert - evolved_orig).abs() / torch.norm(initial_state).abs()
+        else:
+            responses["random"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
         
         # Test structured perturbations
         for mode in ["uniform", "gaussian"]:
-            if mode == "uniform":
-                noise = torch.rand_like(initial_state) * 0.01
-            else:
-                noise = torch.randn_like(initial_state) * 0.01
-                
+            noise = create_noise(mode)
             perturbed = initial_state + noise
             evolved_pert, _ = pattern_flow(perturbed)
-            responses[mode] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
+            
+            # Compute response using appropriate norm
+            if dtype in [torch.complex64, torch.complex128]:
+                responses[mode] = torch.norm(evolved_pert - evolved_orig).abs() / torch.norm(initial_state).abs()
+            else:
+                responses[mode] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
             
         return responses

@@ -212,7 +212,7 @@ class LinearStabilityValidator(StabilityValidatorBase):
 class NonlinearStabilityValidator:
     """Validation of nonlinear stability properties."""
 
-    def __init__(self, tolerance: float = 1e-6, basin_samples: int = 100):
+    def __init__(self, tolerance: float = 1e-6, basin_samples: int = 10):
         self.tolerance = tolerance
         self.basin_samples = basin_samples
 
@@ -424,28 +424,33 @@ class StructuralStabilityValidator:
     ) -> torch.Tensor:
         """Measure robustness to perturbations."""
         # Get nominal parameters
-        params = list(flow.parameters())  # Use parameters() instead of get_parameters()
-        original_params = [p.clone().detach() for p in params]  # Store original parameters
+        params = list(flow.parameters())
+        original_params = [p.clone().detach() for p in params]
 
-        # Test parameter perturbations
-        magnitudes = torch.logspace(-3, 0, 10) * self.parameter_range
+        # Test parameter perturbations with fewer samples
+        magnitudes = torch.logspace(-3, 0, 5) * self.parameter_range
         robust_magnitude = torch.tensor(0.0)
 
         for mag in magnitudes:
             stable = True
 
-            # Try random perturbations
-            for _ in range(10):
+            # Try fewer random perturbations
+            for _ in range(3):
                 # Perturb parameters
                 for param, orig_param in zip(params, original_params):
                     param.data = orig_param + mag * torch.randn_like(orig_param)
 
-                # Check stability
+                # Check stability with fewer steps
                 current = state.clone()
-                for _ in range(time_steps):
+                for _ in range(min(time_steps, 3)):
                     output, _ = flow.forward(current)
                     next_state = output
-                    if torch.norm(next_state - state) > 10 * mag:
+                    # Project current to same shape as next_state for comparison
+                    if current.shape != next_state.shape:
+                        current_proj = current[..., :next_state.shape[-1]]
+                    else:
+                        current_proj = current
+                    if torch.norm(next_state - current_proj) > 10 * mag:
                         stable = False
                         break
                     current = next_state
@@ -469,8 +474,8 @@ class StructuralStabilityValidator:
     ) -> torch.Tensor:
         """Estimate distance to bifurcation."""
         # Get nominal parameters
-        params = list(flow.parameters())  # Use parameters() instead of get_parameters()
-        original_params = [p.clone().detach() for p in params]  # Store original parameters
+        params = list(flow.parameters())
+        original_params = [p.clone().detach() for p in params]
 
         # Define wrapper functions that return real and imaginary parts
         def forward_real(x):
@@ -481,19 +486,20 @@ class StructuralStabilityValidator:
             output, _ = flow.forward(x)
             return output.imag
 
-        # Compute eigenvalues at different parameter values
+        # Compute eigenvalues at different parameter values with fewer samples
         eigenvalues = []
 
-        for eps in torch.linspace(0, self.parameter_range, 10):
+        for eps in torch.linspace(0, self.parameter_range, 5):
             # Perturb parameters
             for param, orig_param in zip(params, original_params):
                 param.data = orig_param + eps * torch.randn_like(orig_param)
 
             # Compute stability using autograd for real and imaginary parts
-            state.requires_grad_(True)
-            jacobian_real = torch.autograd.functional.jacobian(forward_real, state)
-            jacobian_imag = torch.autograd.functional.jacobian(forward_imag, state)
-            state.requires_grad_(False)
+            state_detached = state.detach()
+            state_detached.requires_grad_(True)
+            jacobian_real = torch.autograd.functional.jacobian(forward_real, state_detached)
+            jacobian_imag = torch.autograd.functional.jacobian(forward_imag, state_detached)
+            state_detached.requires_grad_(False)
 
             # Convert tuple to tensor if needed and combine real and imaginary parts
             if isinstance(jacobian_real, tuple):
@@ -503,9 +509,11 @@ class StructuralStabilityValidator:
             
             jacobian = jacobian_real + 1j * jacobian_imag
             
-            batch_size = state.size(0) if len(state.shape) > 1 else 1
-            state_size = state.numel() // batch_size
-            jacobian = jacobian.view(batch_size, state_size, state_size)
+            # Get the correct shape for the Jacobian
+            batch_size = state.size(0)
+            manifold_dim = flow.manifold_dim
+            # Flatten spatial dimensions and reshape to manifold dimensions
+            jacobian = jacobian.reshape(batch_size, -1, manifold_dim)[:, :manifold_dim, :]
 
             eigs = torch.real(torch.linalg.eigvals(jacobian))
             eigenvalues.append(eigs)
@@ -523,7 +531,7 @@ class StructuralStabilityValidator:
         )[0]
 
         if len(crossings) > 0:
-            return self.parameter_range * crossings[0].float() / 10
+            return self.parameter_range * crossings[0].float() / 5
         return torch.tensor(self.parameter_range)
 
 

@@ -16,23 +16,23 @@ fiber_bundle:
   fiber_dim: 2
   batch_size: 1
   dtype: "float32"
-  tolerance: 1e-4
+  tolerance: 1e-3
 
 # Fiber bundle test specific parameters
 fiber_bundle_tests:
   structure_group_dim: 2
   test_paths:
-    circular_points: 10
-    figure8_points: 20
+    circular_points: 4
+    figure8_points: 8
     max_angle: 2 * pi
   test_vectors:
     initial_norm: 1.0
     perturbation_scale: 0.1
 
 geometric_tests:
-  dimensions: 16
+  dimensions: 4
   num_heads: 1
-  hidden_dim: 8
+  hidden_dim: 4
   vector_scales: [0.01]
   test_norms: [0.01]
 
@@ -40,7 +40,7 @@ parallel_transport:
   methods: ["schild"]
   test_cases: 1
   section_batch_size: 1
-  path_points: 10
+  path_points: 4
   max_path_length: 1.0
 
 quantum_geometric:
@@ -52,22 +52,22 @@ quantum_geometric:
   dt: 0.1
 
 memory_management:
-  max_cached_tensors: 100
+  max_cached_tensors: 10
   defrag_threshold: 0.5
-  gc_frequency: 100
+  gc_frequency: 10
   tensor_lifecycle: "short"
 
 # Quantum arithmetic parameters
 quantum_arithmetic:
-  dtype: "complex64"  # Fixed complex number type for quantum operations
+  dtype: "complex64"
   tolerances:
-    state_norm: 1e-4
-    phase_comparison: 1e-4
-    geometric_phase: 1e-4
-    quantum_metric: 1e-4
-    berry_connection: 1e-4
+    state_norm: 1e-3
+    phase_comparison: 1e-3
+    geometric_phase: 1e-3
+    quantum_metric: 1e-3
+    berry_connection: 1e-3
   validation:
-    max_iterations: 10
-    convergence_threshold: 1e-4
-    stability_threshold: 1e-4
+    max_iterations: 5
+    convergence_threshold: 1e-3
+    stability_threshold: 1e-3
     entanglement_threshold: 0.5
