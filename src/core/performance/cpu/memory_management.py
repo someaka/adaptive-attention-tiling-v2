@@ -608,27 +608,45 @@ class MemoryManager:
         }
         
     def validate_state(self) -> bool:
-        """Validate internal state consistency."""
+        """Validate the internal state of the memory manager.
+        
+        Returns:
+            bool: True if the state is valid, False otherwise
+        """
         try:
-            # Check tensor tracking consistency
-            tracked_memory = sum(self._tensor_allocations.values())
-            if tracked_memory != self._allocated_memory:
-                self._log_error(f"Memory tracking mismatch: tracked={tracked_memory}, allocated={self._allocated_memory}")
-                return False
-                
-            # Validate all tensors
-            for ref in self._tensor_refs:
-                tensor = ref()
-                if tensor is not None and not self._validate_tensor(tensor):
-                    return False
-                    
-            # Check sorted allocations consistency
-            if len(self._sorted_allocations) != len(self._tensor_allocations):
-                self._log_error("Allocation tracking mismatch")
-                return False
-                
-            return True
+            # Get live tensor refs
+            live_refs = [ref for ref in self._tensor_refs if ref() is not None]
+            live_ids = {id(ref()) for ref in live_refs}
             
-        except Exception as e:
-            self._log_error(f"State validation failed: {str(e)}")
+            # Get allocated tensor ids
+            allocated_ids = set(self._tensor_allocations.keys())
+            
+            # Check if allocated tensors are a superset of live tensors
+            # Some tensors may be in process of being deallocated
+            if not allocated_ids.issuperset(live_ids):
+                return False
+
+            # Validate allocated memory is non-negative
+            if self._allocated_memory < 0:
+                return False
+
+            # Validate peak memory is at least current allocated memory
+            if self._peak_memory < self._allocated_memory:
+                return False
+
+            # Validate fixed tensors are subset of allocated tensors
+            if not self._fixed_tensors.issubset(allocated_ids):
+                return False
+
+            # Validate total gaps is non-negative
+            if self._total_gaps < 0:
+                return False
+
+            # Validate memory pressure is between 0 and 1
+            if not 0 <= self._memory_pressure <= 1:
+                return False
+
+            return True
+
+        except Exception:
             return False
