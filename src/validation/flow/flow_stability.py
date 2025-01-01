@@ -259,10 +259,16 @@ class NonlinearStabilityValidator:
         _, metrics = flow.forward(state)
         energy = metrics.get("energy", 0.0)
         
-        # Add regularization for stability
-        reg_energy = energy + 1e-6 * torch.sum(state ** 2)
+        # For complex state, use squared magnitude
+        if state.is_complex():
+            reg_term = torch.sum(state.abs() ** 2)
+        else:
+            reg_term = torch.sum(state ** 2)
         
-        return float(reg_energy)
+        # Add regularization for stability (use float32 for intermediate calculations)
+        reg_energy = float(energy) + 1e-6 * float(reg_term)
+        
+        return reg_energy
 
     def _estimate_basin(
         self, flow: GeometricFlow, state: torch.Tensor

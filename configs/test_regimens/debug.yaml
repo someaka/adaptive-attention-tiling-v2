@@ -30,7 +30,7 @@ fiber_bundle_tests:
     perturbation_scale: 0.1
 
 geometric_tests:
-  dimensions: 2
+  dimensions: 16
   num_heads: 1
   hidden_dim: 8
   vector_scales: [0.01]
