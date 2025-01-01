@@ -53,7 +53,7 @@ TEST_TIMEOUT = 2  # 2 seconds max per test
 OPERATION_TIMEOUT = 0.5  # 0.5 seconds max per operation
 MEMORY_LIMIT = 512 * 1024 * 1024  # 512MB memory limit
 
-@contextmanager
+@pytest.fixture
 def test_timeout():
     """Context manager for test timeouts."""
     start_time = time.time()
