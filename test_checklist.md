@@ -8,8 +8,8 @@
 - [x] tests/performance/cpu/test_vectorization.py
 - [x] tests/test_core/test_cpu_operations.py
 - [x] tests/test_core/test_crystal/test_refraction.py
-- [ ] tests/test_core/test_crystal/test_anomaly_polynomial.py
-- [ ] tests/test_core/test_crystal/test_scale.py
+- [x] tests/test_core/test_crystal/test_anomaly_polynomial.py
+- [x] tests/test_core/test_crystal/test_scale.py
 - [x] tests/test_core/test_flow/test_neural.py
 - [x] tests/test_core/test_pattern_processing.py
 - [ ] tests/test_core/test_patterns/test_arithmetic_dynamics.py
