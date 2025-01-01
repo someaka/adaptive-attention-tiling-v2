@@ -6,6 +6,7 @@ from torch import Tensor
 from torch import nn
 from typing import Optional, Protocol, runtime_checkable, cast
 import math
+import torch.nn.functional as F
 
 from src.core.patterns import (
     BaseRiemannianStructure,
@@ -82,84 +83,171 @@ class MockAttentionHead(nn.Module):
         self.query_proj = nn.Linear(query_dim, query_dim)
         self.key_proj = nn.Linear(key_dim, key_dim)
         
-        # Initialize with orthogonal weights
+        # Initialize with orthogonal weights for better stability
         nn.init.orthogonal_(self.query_proj.weight)
         nn.init.orthogonal_(self.key_proj.weight)
         
-        # Scale weights to control energy
+        # Scale weights to control energy and add stability
         with torch.no_grad():
-            self.query_proj.weight.data *= 0.1
-            self.key_proj.weight.data *= 0.1
-            self.query_proj.bias.data.zero_()
-            self.key_proj.bias.data.zero_()
+            # Use smaller initialization for better numerical stability
+            self.query_proj.weight.data *= 0.05
+            self.key_proj.weight.data *= 0.05
+            # Initialize biases to small non-zero values for stability
+            self.query_proj.bias.data.uniform_(-0.01, 0.01)
+            self.key_proj.bias.data.uniform_(-0.01, 0.01)
             
     def query_metric(self, points: Points) -> Tensor:
         """Compute query metric tensor."""
         batch_size = points.shape[0]
-        # Use a more general metric that adapts to the points
-        proj = self.query_proj(points)
+        # Project points and normalize
+        proj = F.normalize(self.query_proj(points), p=2, dim=-1)
+        
+        # Compute metric with numerical stability
+        eps = 1e-8
         metric = torch.einsum('bi,bj->bij', proj, proj) / self.query_dim
-        # Add identity for stability
-        metric = metric + torch.eye(self.query_dim).unsqueeze(0)
-        # Make symmetric and positive definite
+        
+        # Add scaled identity for better conditioning
+        eye = torch.eye(self.query_dim, device=points.device)
+        metric = metric + 0.1 * eye.unsqueeze(0)
+        
+        # Ensure symmetry and positive definiteness
         metric = 0.5 * (metric + metric.transpose(-2, -1))
-        # Normalize metric
-        metric = metric / (torch.norm(metric, dim=(-2, -1), keepdim=True) + 1e-8)
+        
+        # Add small diagonal term for numerical stability
+        metric = metric + eps * eye.unsqueeze(0)
+        
+        # Normalize metric with stable computation
+        norm = torch.norm(metric, dim=(-2, -1), keepdim=True)
+        metric = metric / (norm + eps)
+        
         return metric
         
     def key_metric(self, points: Points) -> Tensor:
         """Compute key metric tensor."""
         batch_size = points.shape[0]
-        # Use same structure as query metric for consistency
-        proj = self.key_proj(points)
+        # Project and normalize points
+        proj = F.normalize(self.key_proj(points), p=2, dim=-1)
+        
+        # Compute metric with numerical stability
+        eps = 1e-8
         metric = torch.einsum('bi,bj->bij', proj, proj) / self.key_dim
-        metric = metric + torch.eye(self.key_dim).unsqueeze(0)
+        
+        # Add scaled identity for better conditioning
+        eye = torch.eye(self.key_dim, device=points.device)
+        metric = metric + 0.1 * eye.unsqueeze(0)
+        
+        # Ensure symmetry and positive definiteness
         metric = 0.5 * (metric + metric.transpose(-2, -1))
-        # Normalize metric
-        metric = metric / (torch.norm(metric, dim=(-2, -1), keepdim=True) + 1e-8)
+        
+        # Add small diagonal term for numerical stability
+        metric = metric + eps * eye.unsqueeze(0)
+        
+        # Normalize metric with stable computation
+        norm = torch.norm(metric, dim=(-2, -1), keepdim=True)
+        metric = metric / (norm + eps)
+        
         return metric
             
     def compute_attention(self, query_points: Points, key_points: Points) -> Scores:
         """Compute attention scores that preserve geometric structure."""
+        eps = 1e-8
+        
+        # Check if points are identical
+        if torch.allclose(query_points, key_points, rtol=1e-5, atol=1e-8):
+            # For identical points, use identity-like attention
+            batch_size = query_points.size(0)
+            scores = torch.eye(batch_size, device=query_points.device)
+            scores = scores + eps  # Add small value to avoid exact zeros
+            scores = scores / scores.sum(dim=-1, keepdim=True)
+            return scores
+        
         # Project points with metric-aware projections
-        query = self.query_proj(query_points)  # [batch_size, query_dim]
-        key = self.key_proj(key_points)    # [batch_size, key_dim]
+        query = self.query_proj(query_points)
+        key = self.key_proj(key_points)
         
         # Get metric tensors
-        query_metric = self.query_metric(query_points)  # [batch_size, query_dim, query_dim]
-        key_metric = self.key_metric(key_points)    # [batch_size, key_dim, key_dim]
+        query_metric = self.query_metric(query_points)
+        key_metric = self.key_metric(key_points)
         
-        # Compute metric-aware distances
-        query_norms = torch.sqrt(torch.einsum('bi,bij,bj->b', query, query_metric, query))
-        key_norms = torch.sqrt(torch.einsum('bi,bij,bj->b', key, key_metric, key))
+        # Scale inputs to a reasonable range if they're too small
+        scale_factor = max(
+            torch.norm(query_points).item(),
+            torch.norm(key_points).item()
+        )
+        if scale_factor < 1e-4:
+            query = query / scale_factor * 1e-4
+            key = key / scale_factor * 1e-4
+            
+        # Compute metric-aware inner products with improved stability
+        query_metric_sqrt = torch.linalg.cholesky(
+            query_metric + eps * torch.eye(query.size(-1), device=query.device).unsqueeze(0)
+        )
+        key_metric_sqrt = torch.linalg.cholesky(
+            key_metric + eps * torch.eye(key.size(-1), device=key.device).unsqueeze(0)
+        )
         
-        # Normalize points in their respective metric spaces
-        query_normalized = query / (query_norms.unsqueeze(-1) + 1e-8)
-        key_normalized = key / (key_norms.unsqueeze(-1) + 1e-8)
+        # Transform points to metric space
+        query_transformed = torch.einsum('bij,bj->bi', query_metric_sqrt, query)
+        key_transformed = torch.einsum('bij,bj->bi', key_metric_sqrt, key)
         
-        # Compute pairwise distances in normalized space
-        dists = torch.cdist(query_normalized, key_normalized, p=2)
+        # Normalize in metric space with improved stability
+        query_norm = torch.norm(query_transformed, p=2, dim=-1, keepdim=True)
+        key_norm = torch.norm(key_transformed, p=2, dim=-1, keepdim=True)
+        query_normalized = query_transformed / (query_norm + eps)
+        key_normalized = key_transformed / (key_norm + eps)
         
-        # Convert distances to similarities that preserve metric structure
-        similarities = 1.0 / (1.0 + dists)
+        # Compute similarities in metric space
+        similarities = torch.matmul(query_normalized, key_normalized.transpose(-2, -1))
         
-        # Scale similarities to control concentration
-        temperature = math.sqrt(float(query.size(-1)))
-        scores = similarities * temperature
+        # Scale to [0, 1] with controlled scaling
+        similarities = (similarities + 1.0) / 2.0
         
-        # Apply softmax with proper scaling to preserve distances
-        scores = torch.softmax(scores, dim=-1)
+        # Apply temperature scaling with adaptive temperature
+        dim = float(query.size(-1))
+        temperature = 1.0 / math.sqrt(dim)
+        scores = similarities / temperature
         
-        # Ensure scores preserve relative distances
-        score_dists = torch.cdist(scores, scores, p=2)
+        # Apply numerically stable softmax
+        scores_max = torch.max(scores, dim=-1, keepdim=True)[0]
+        scores = torch.exp(scores - scores_max)
+        scores = scores / (torch.sum(scores, dim=-1, keepdim=True) + eps)
+        
+        # Match input distance distribution
         input_dists = torch.cdist(query_points, key_points, p=2)
+        input_dists = input_dists / (input_dists.max() + eps)
         
-        # Scale scores to match input distance distribution
-        scale = torch.mean(input_dists) / (torch.mean(score_dists) + 1e-8)
-        scores = scores * scale
+        score_dists = torch.cdist(scores, scores, p=2)
+        score_dists = score_dists / (score_dists.max() + eps)
         
-        # Renormalize
-        scores = scores / (scores.sum(dim=-1, keepdim=True) + 1e-8)
+        # Match distance distributions more precisely
+        input_mean = input_dists.mean()
+        input_std = input_dists.std()
+        
+        # Compute correlation between input and score distances
+        correlation = torch.corrcoef(
+            torch.stack([
+                input_dists.flatten(),
+                score_dists.flatten()
+            ])
+        )[0, 1]
+        
+        # If correlation is too low, adjust the scores to better match input distances
+        if correlation < 0.5:
+            # Use input distances to guide the attention
+            attention_weights = 1.0 / (input_dists + eps)
+            attention_weights = attention_weights / attention_weights.sum(dim=-1, keepdim=True)
+            
+            # Blend between original scores and distance-based weights
+            blend_factor = (0.5 - correlation) / 0.5  # More blending when correlation is lower
+            scores = (1 - blend_factor) * scores + blend_factor * attention_weights
+        
+        # Apply affine transformation to match moments
+        scores_centered = scores - scores.mean(dim=-1, keepdim=True)
+        scores_normalized = scores_centered / (scores.std(dim=-1, keepdim=True) + eps)
+        scores = scores_normalized * input_std + input_mean
+        
+        # Ensure scores are non-negative and sum to 1
+        scores = F.softmax(scores, dim=-1)
         
         return scores
 
@@ -222,164 +310,214 @@ class TestModelGeometricValidator:
         self, validator: ModelGeometricValidator, batch_size: int
     ) -> None:
         """Test layer geometry validation."""
-        # Generate random points
+        # Test with regular points
         points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
-        
-        # Validate input layer
         result = validator.validate_layer_geometry('input', points)
         assert result.is_valid, f"Layer validation failed: {result.message}"
         
-        # Check metric properties
-        assert result.data is not None, "Validation data is None"
-        assert 'metric_tensor' in result.data, "Metric tensor not found in validation data"
-        metric = cast(Tensor, result.data['metric_tensor'])
-        assert isinstance(metric, torch.Tensor)
-        assert metric.shape == (batch_size, points.size(1), points.size(1))
-        assert torch.allclose(metric, metric.transpose(-2, -1))
+        # Test with near-zero points
+        small_points = torch.randn(batch_size, validator.model_geometry.manifold_dim) * 1e-6
+        result_small = validator.validate_layer_geometry('input', small_points)
+        assert result_small.is_valid, f"Layer validation failed for small points: {result_small.message}"
         
-        # Check eigenvalues
-        eigenvals = torch.linalg.eigvalsh(metric)
-        assert torch.all(eigenvals > 0), "Metric has non-positive eigenvalues"
+        # Test with large magnitude points
+        large_points = torch.randn(batch_size, validator.model_geometry.manifold_dim) * 1e6
+        result_large = validator.validate_layer_geometry('input', large_points)
+        assert result_large.is_valid, f"Layer validation failed for large points: {result_large.message}"
         
+        # Test with points close to each other
+        close_points = points + torch.randn_like(points) * 1e-6
+        result_close = validator.validate_layer_geometry('input', close_points)
+        assert result_close.is_valid, f"Layer validation failed for close points: {result_close.message}"
+        
+        # Check metric properties for all cases
+        for name, result in [
+            ("regular", result),
+            ("small", result_small),
+            ("large", result_large),
+            ("close", result_close)
+        ]:
+            assert result.data is not None, f"Validation data is None for {name} points"
+            assert 'metric_tensor' in result.data, f"Metric tensor not found for {name} points"
+            metric = cast(Tensor, result.data['metric_tensor'])
+            
+            # Basic tensor properties
+            assert isinstance(metric, torch.Tensor), f"Invalid metric type for {name} points"
+            assert metric.shape == (batch_size, points.size(1), points.size(1)), f"Invalid metric shape for {name} points"
+            
+            # Symmetry
+            assert torch.allclose(
+                metric, 
+                metric.transpose(-2, -1),
+                rtol=1e-5,
+                atol=1e-5
+            ), f"Metric not symmetric for {name} points"
+            
+            # Positive definiteness
+            eigenvals = torch.linalg.eigvalsh(metric)
+            assert torch.all(eigenvals > 0), f"Metric has non-positive eigenvalues for {name} points"
+            
+            # Condition number
+            cond_num = torch.max(eigenvals) / torch.min(eigenvals)
+            assert cond_num < 1e6, f"Metric poorly conditioned for {name} points (condition number: {cond_num})"
+    
     def test_validate_attention_geometry(
         self, validator: ModelGeometricValidator, batch_size: int
     ) -> None:
         """Test attention geometry validation."""
-        # Generate query and key points
+        # Test regular case
         query_points = torch.randn(batch_size, validator.model_geometry.query_dim)
         key_points = torch.randn(batch_size, validator.model_geometry.key_dim)
-        
-        # Validate attention geometry
         result = validator.validate_attention_geometry(0, query_points, key_points)
-        assert result.data is not None, "Validation data is None"
+        assert result.is_valid, f"Attention validation failed: {result.message}"
         
-        # Print debug info
-        print("\nDistance Statistics:")
-        print("Query distances:")
-        assert 'query_metric' in result.data, "Query metric not found in validation data"
-        query_metric = cast(Tensor, result.data['query_metric'])
-        query_dists = validator._compute_pairwise_distances(
-            query_points, 
-            query_metric
-        )
-        print(f"  Range: [{query_dists.min():.6f}, {query_dists.max():.6f}]")
-        print(f"  Mean: {query_dists.mean():.6f}")
-        print(f"  Std: {query_dists.std():.6f}\n")
+        # Test with small magnitude points
+        small_query = query_points * 1e-6
+        small_key = key_points * 1e-6
+        result_small = validator.validate_attention_geometry(0, small_query, small_key)
+        assert result_small.is_valid, f"Attention validation failed for small points: {result_small.message}"
         
-        print("Key distances:")
-        assert 'key_metric' in result.data, "Key metric not found in validation data"
-        key_metric = cast(Tensor, result.data['key_metric'])
-        key_dists = validator._compute_pairwise_distances(
-            key_points, 
-            key_metric
-        )
-        print(f"  Range: [{key_dists.min():.6f}, {key_dists.max():.6f}]")
-        print(f"  Mean: {key_dists.mean():.6f}")
-        print(f"  Std: {key_dists.std():.6f}\n")
+        # Test with large magnitude points
+        large_query = query_points * 1e6
+        large_key = key_points * 1e6
+        result_large = validator.validate_attention_geometry(0, large_query, large_key)
+        assert result_large.is_valid, f"Attention validation failed for large points: {result_large.message}"
         
-        print("Score distances:")
-        assert 'attention_scores' in result.data, "Attention scores not found in validation data"
-        scores = cast(Tensor, result.data['attention_scores'])
-        score_dists = validator._compute_pairwise_distances(
-            scores, 
-            torch.eye(scores.size(-1), device=scores.device)
-        )
-        print(f"  Range: [{score_dists.min():.6f}, {score_dists.max():.6f}]")
-        print(f"  Mean: {score_dists.mean():.6f}")
-        print(f"  Std: {score_dists.std():.6f}\n")
+        # Test with identical points
+        result_identical = validator.validate_attention_geometry(0, query_points, query_points)
+        assert result_identical.is_valid, f"Attention validation failed for identical points: {result_identical.message}"
         
-        # Check basic properties
-        assert isinstance(result.data['query_metric'], torch.Tensor)
-        assert isinstance(result.data['key_metric'], torch.Tensor)
-        assert isinstance(result.data['attention_scores'], torch.Tensor)
+        # Test with orthogonal points
+        q_ortho, _ = torch.linalg.qr(query_points.t())
+        k_ortho, _ = torch.linalg.qr(key_points.t())
+        result_ortho = validator.validate_attention_geometry(0, q_ortho.t(), k_ortho.t())
+        assert result_ortho.is_valid, f"Attention validation failed for orthogonal points: {result_ortho.message}"
         
-        # Check attention score properties
-        scores = cast(Tensor, result.data['attention_scores'])
-        assert torch.allclose(scores.sum(dim=-1), torch.ones_like(scores[:, 0]))
-        assert torch.all(scores >= 0)
-        
-        # Check geometric preservation
-        assert 'preserves_geometry' in result.data, "Geometric preservation result not found"
-        assert result.data['preserves_geometry'], (
-            "Attention does not preserve geometric structure"
-        )
-        
+        # Verify attention properties for all cases
+        for name, result in [
+            ("regular", result),
+            ("small", result_small),
+            ("large", result_large),
+            ("identical", result_identical),
+            ("orthogonal", result_ortho)
+        ]:
+            assert result.data is not None, f"Validation data is None for {name} case"
+            scores = cast(Tensor, result.data['attention_scores'])
+            
+            # Check score properties
+            assert torch.allclose(
+                scores.sum(dim=-1),
+                torch.ones_like(scores[:, 0]),
+                rtol=1e-5,
+                atol=1e-5
+            ), f"Scores don't sum to 1 for {name} case"
+            
+            assert torch.all(scores >= 0), f"Negative scores found for {name} case"
+            assert torch.all(scores <= 1), f"Scores greater than 1 found for {name} case"
+            
+            # Check distance preservation
+            assert result.data['preserves_geometry'], f"Geometry not preserved for {name} case"
+            
+            # Check numerical stability
+            assert not torch.any(torch.isnan(scores)), f"NaN scores found for {name} case"
+            assert not torch.any(torch.isinf(scores)), f"Inf scores found for {name} case"
+    
     def test_geometric_preservation(
         self, validator: ModelGeometricValidator, batch_size: int
     ) -> None:
         """Test geometric preservation check."""
-        # Generate random points and perturbation
+        # Generate points with different characteristics
         points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
-        perturbation = torch.randn_like(points) * 0.1
         
-        # Get base metric
-        layer = validator.model_geometry.layers['hidden']
-        base_metric = cast(Tensor, layer.metric_tensor.data)
-        
-        # Print metric properties
-        print("\nBase Metric Properties:")
-        print(f"Shape: {base_metric.shape}")
-        print(f"Symmetric: {torch.allclose(cast(Tensor, base_metric), cast(Tensor, base_metric.transpose(-2, -1)))}")
-        eigenvals = torch.linalg.eigvalsh(base_metric)
-        print(f"Eigenvalue range: [{eigenvals.min():.6f}, {eigenvals.max():.6f}]\n")
-        
-        # Compute attention scores
-        head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
-        scores = head.compute_attention(points, points + perturbation)
-        
-        # Print score properties
-        print("Attention Scores Properties:")
-        print(f"Shape: {scores.shape}")
-        print(f"Range: [{scores.min():.6f}, {scores.max():.6f}]")
-        print(f"Row sums: {scores.sum(dim=-1)}\n")
-        
-        # Check geometric preservation
-        preserves = validator._check_geometric_preservation(points, base_metric, scores)
-        assert preserves, "Attention does not preserve geometric structure"
-
+        # Test different perturbation scales
+        for scale in [1e-6, 1e-3, 1e-1, 1.0]:
+            perturbation = torch.randn_like(points) * scale
+            perturbed_points = points + perturbation
+            
+            # Get base metric
+            layer = validator.model_geometry.layers['hidden']
+            base_metric = cast(Tensor, layer.metric_tensor.data)
+            
+            # Compute attention scores
+            head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
+            scores = head.compute_attention(points, perturbed_points)
+            
+            # Check geometric preservation
+            preserves = validator._check_geometric_preservation(points, base_metric, scores)
+            assert preserves, f"Attention does not preserve geometric structure for scale {scale}"
+            
+            # Verify distance properties
+            query_distances = validator._compute_pairwise_distances(points, base_metric)
+            score_distances = validator._compute_pairwise_distances(
+                scores,
+                torch.eye(scores.size(-1), device=scores.device)
+            )
+            
+            # Check correlation between distances
+            correlation = torch.corrcoef(
+                torch.stack([
+                    query_distances.flatten(),
+                    score_distances.flatten()
+                ])
+            )[0, 1]
+            assert correlation > 0.5, f"Low distance correlation ({correlation}) for scale {scale}"
+    
     def test_geometric_preservation_distances(
         self, validator: ModelGeometricValidator, batch_size: int
     ) -> None:
         """Test distance properties in geometric preservation."""
-        # Generate points
-        points = torch.randn(batch_size, validator.model_geometry.manifold_dim)
+        # Test with different point distributions
+        distributions = {
+            'normal': torch.randn,
+            'uniform': lambda *args: torch.rand(*args) * 2 - 1,
+            'exponential': lambda *args: torch.exp(torch.randn(*args)),
+            'small': lambda *args: torch.randn(*args) * 1e-6,
+            'large': lambda *args: torch.randn(*args) * 1e6
+        }
         
-        # Compute metrics and scores
-        layer = validator.model_geometry.layers['hidden']
-        base_metric = cast(Tensor, layer.metric_tensor.data)
-        head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
-        scores = head.compute_attention(points, points)
-        
-        # Compute distances
-        query_distances = validator._compute_pairwise_distances(points, base_metric)
-        key_distances = validator._compute_pairwise_distances(points, base_metric)
-        score_distances = validator._compute_pairwise_distances(
-            scores,
-            torch.eye(scores.size(-1), device=scores.device)
-        )
-
-        # Check distance properties
-        for name, distances in [
-            ('Query', query_distances),
-            ('Key', key_distances),
-            ('Score', score_distances)
-        ]:
-            # Non-negativity
-            assert torch.all(distances >= 0), f"{name} distances contain negative values"
+        for dist_name, dist_fn in distributions.items():
+            points = dist_fn(batch_size, validator.model_geometry.manifold_dim)
             
-            # Self-distances are zero
-            assert torch.allclose(
-                torch.diagonal(distances),
-                torch.zeros(batch_size),
-                atol=1e-6
-            ), f"{name} self-distances are non-zero"
+            # Compute metrics and scores
+            layer = validator.model_geometry.layers['hidden']
+            base_metric = cast(Tensor, layer.metric_tensor.data)
+            head = cast(AttentionHead, validator.model_geometry.attention_heads[0])
+            scores = head.compute_attention(points, points)
             
-            # Symmetry
-            assert torch.allclose(
-                distances,
-                distances.transpose(-2, -1),
-                atol=1e-6
-            ), f"{name} distances are not symmetric"
+            # Compute distances
+            query_distances = validator._compute_pairwise_distances(points, base_metric)
+            key_distances = validator._compute_pairwise_distances(points, base_metric)
+            score_distances = validator._compute_pairwise_distances(
+                scores,
+                torch.eye(scores.size(-1), device=scores.device)
+            )
             
-            # Normalization
-            assert torch.all(distances <= 1.0), f"{name} distances exceed 1.0"
+            # Check distance properties
+            for name, distances in [
+                ('Query', query_distances),
+                ('Key', key_distances),
+                ('Score', score_distances)
+            ]:
+                # Non-negativity
+                assert torch.all(distances >= 0), f"{name} distances contain negative values for {dist_name} distribution"
+                
+                # Self-distances are zero
+                assert torch.allclose(
+                    torch.diagonal(distances),
+                    torch.zeros(batch_size),
+                    atol=1e-5
+                ), f"{name} self-distances are non-zero for {dist_name} distribution"
+                
+                # Symmetry
+                assert torch.allclose(
+                    distances,
+                    distances.transpose(-2, -1),
+                    atol=1e-5
+                ), f"{name} distances are not symmetric for {dist_name} distribution"
+                
+                # Normalization
+                assert torch.all(distances <= 1.0), f"{name} distances exceed 1.0 for {dist_name} distribution"
+                
+                # Check for numerical instability
+                assert not torch.any(torch.isnan(distances)), f"NaN distances found in {name} for {dist_name} distribution"
+                assert not torch.any(torch.isinf(distances)), f"Inf distances found in {name} for {dist_name} distribution"

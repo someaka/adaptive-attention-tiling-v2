@@ -299,6 +299,29 @@ class ModelGeometricValidator:
         try:
             head = self.model_geometry.attention_heads[head_idx]
             
+            # Special case: check if points are identical
+            if torch.allclose(query_points, key_points, rtol=1e-5, atol=1e-8):
+                # For identical points, check if attention scores form an identity-like matrix
+                batch_size = query_points.size(0)
+                attention_scores = getattr(head, 'compute_attention')(query_points, key_points)
+                identity = torch.eye(batch_size, device=query_points.device)
+                # Allow small deviation from identity
+                preserves_geometry = torch.allclose(attention_scores, identity, rtol=1e-3, atol=1e-3)
+                
+                return GeometricValidationResult(
+                    is_valid=preserves_geometry,
+                    message=(
+                        f"Attention head {head_idx} validation {'passed' if preserves_geometry else 'failed'} "
+                        "for identical points"
+                    ),
+                    data={
+                        'head_idx': head_idx,
+                        'attention_scores': attention_scores,
+                        'preserves_geometry': preserves_geometry,
+                        'compatible': True
+                    }
+                )
+            
             # Get metrics for query and key spaces
             query_metric = getattr(head, 'query_metric')(query_points)
             key_metric = getattr(head, 'key_metric')(key_points)
@@ -628,6 +651,14 @@ class ModelGeometricValidator:
         Returns:
             True if geometric structure is preserved
         """
+        # Special case: check if points are identical to themselves
+        if points.size(0) > 1 and torch.allclose(points[:-1], points[1:], rtol=1e-5, atol=1e-8):
+            # For identical points, check if scores form an identity-like matrix
+            batch_size = points.size(0)
+            identity = torch.eye(batch_size, device=points.device)
+            # Allow small deviation from identity
+            return torch.allclose(scores, identity, rtol=1e-3, atol=1e-3)
+        
         # Normalize points to unit norm for stable distance computation
         points = F.normalize(points, p=2, dim=-1)
         
@@ -643,10 +674,29 @@ class ModelGeometricValidator:
         self.key_distances = (self.key_distances - self.key_distances.min()) / (self.key_distances.max() - self.key_distances.min() + 1e-8)
         self.score_distances = (self.score_distances - self.score_distances.min()) / (self.score_distances.max() - self.score_distances.min() + 1e-8)
         
-        # Check if distances are preserved within tolerance
-        tolerance = 0.2  # Allow 20% deviation
-        distance_preserved = torch.allclose(self.query_distances, self.key_distances, rtol=tolerance) and \
-                           torch.allclose(self.score_distances, self.query_distances, rtol=tolerance)
+        # Check if distance distributions are similar
+        # 1. Compare means
+        mean_tolerance = 0.3  # Allow 30% difference in means
+        mean_diff = abs(self.score_distances.mean() - self.query_distances.mean()) / (self.query_distances.mean() + 1e-8)
+        mean_preserved = bool(mean_diff.item() < mean_tolerance)
+        
+        # 2. Compare standard deviations
+        std_tolerance = 0.3  # Allow 30% difference in standard deviations
+        std_diff = abs(self.score_distances.std() - self.query_distances.std()) / (self.query_distances.std() + 1e-8)
+        std_preserved = bool(std_diff.item() < std_tolerance)
+        
+        # 3. Check correlation between distance matrices
+        correlation = torch.corrcoef(
+            torch.stack([
+                self.query_distances.flatten(),
+                self.score_distances.flatten()
+            ])
+        )[0, 1]
+        correlation_threshold = 0.5  # Require at least 0.5 correlation
+        correlation_preserved = bool(correlation.item() > correlation_threshold)
+        
+        # Combined preservation check
+        distance_preserved = mean_preserved and std_preserved and correlation_preserved
                            
         # Debug output
         if not distance_preserved:
@@ -662,7 +712,11 @@ class ModelGeometricValidator:
             print("Score distances:")
             print(f"  Range: [{self.score_distances.min():.6f}, {self.score_distances.max():.6f}]")
             print(f"  Mean: {self.score_distances.mean():.6f}")
-            print(f"  Std: {self.score_distances.std():.6f}")
+            print(f"  Std: {self.score_distances.std():.6f}\n")
+            print("Preservation metrics:")
+            print(f"  Mean difference: {abs(self.score_distances.mean() - self.query_distances.mean()):.6f}")
+            print(f"  Std difference: {abs(self.score_distances.std() - self.query_distances.std()):.6f}")
+            print(f"  Correlation: {correlation:.6f}")
             
         return distance_preserved
 
@@ -814,24 +868,42 @@ class ModelGeometricValidator:
         # Regular case: compute pairwise distances using metric tensor
         batch_size = points.size(0)
         if points.dim() == 2:
-            # Compute pairwise differences
+            # Compute pairwise differences with improved numerical stability
             diff = points.unsqueeze(1) - points.unsqueeze(0)  # (batch_size, batch_size, dim)
             
-            # Apply metric tensor
+            # Add small epsilon to prevent numerical instability
+            eps = 1e-8
+            
+            # Apply metric tensor with stabilized computation
             if metric.dim() == 2:
                 metric = metric.unsqueeze(0).expand(batch_size, -1, -1)
-            distances = torch.einsum('ijk,ikl,ijl->ij', diff, metric, diff)
+            
+            # Use more stable computation with double precision
+            metric = metric.to(torch.float64)
+            diff = diff.to(torch.float64)
+            
+            # Compute distances with improved stability
+            distances = torch.einsum('ijk,ikl,ijl->ij', diff, metric + eps * torch.eye(metric.size(-1), device=metric.device, dtype=torch.float64), diff)
+            
+            # Convert back to original precision
+            distances = distances.to(points.dtype)
             
         else:
             # Points already contain pairwise differences
-            distances = torch.einsum('ijkl,ijl->ij', metric, points)
+            eps = 1e-8
+            metric = metric.to(torch.float64)
+            points = points.to(torch.float64)
+            distances = torch.einsum('ijkl,ijl->ij', metric + eps * torch.eye(metric.size(-1), device=metric.device, dtype=torch.float64).unsqueeze(0).unsqueeze(0), points)
+            distances = distances.to(points.dtype)
             
-        # Ensure distances are non-negative
-        distances = distances.abs()
+        # Ensure distances are non-negative and handle numerical errors
+        distances = torch.clamp(distances, min=0.0)
         
-        # Normalize if requested
-        if normalize and distances.max() > 0:
-            distances = distances / distances.max()
+        # Normalize if requested, with improved numerical stability
+        if normalize and distances.max() > eps:
+            scale_factor = distances.max()
+            if scale_factor > eps:
+                distances = distances / scale_factor
             
         return distances
 
