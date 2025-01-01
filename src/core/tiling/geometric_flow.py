@@ -192,8 +192,18 @@ class GeometricFlow(RiemannianFlow):
     
     def compute_metric(self, x: Tensor) -> Tensor:
         """Compute metric with quantum geometric structure."""
-        # Project input to manifold dimension
+        # Project input to manifold dimension and ensure correct dtype
         x_proj = x[..., :self.manifold_dim]
+        
+        # Determine if we need complex dtype
+        needs_complex = x_proj.is_complex() or any(p.is_complex() for p in self.metric_net.parameters())
+        target_dtype = torch.complex64 if needs_complex else self.dtype
+        
+        # Convert input and parameters to target dtype
+        x_proj = x_proj.to(dtype=target_dtype)
+        for param in self.metric_net.parameters():
+            if param.dtype != target_dtype:
+                param.data = param.data.to(dtype=target_dtype)
         
         # Get base metric components
         metric_features = self.metric_net(x_proj)
@@ -208,38 +218,31 @@ class GeometricFlow(RiemannianFlow):
         # Add initial regularization term
         eye = torch.eye(
             self.manifold_dim,
-            device=x_proj.device,
-            dtype=x_proj.dtype
-        ).unsqueeze(0).expand(batch_size, -1, -1)
-        metric = metric + 1e-3 * eye
+            dtype=target_dtype,
+            device=x.device
+        )
         
-        # For complex numbers, preserve phase while ensuring positive definiteness
-        if torch.is_complex(metric):
-            # Compute eigendecomposition preserving complex phase
-            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-            magnitude = torch.abs(eigenvalues)
-            phase = eigenvalues / (magnitude + 1e-8)  # Preserve phase
-            
-            # Clamp magnitude while preserving phase
-            bounded_magnitude = torch.clamp(magnitude, min=1e-2)  # Increased minimum eigenvalue
-            eigenvalues = bounded_magnitude * phase
-            
-            # Convert eigenvalues to complex dtype
-            eigenvalues = eigenvalues.to(dtype=metric.dtype)
-            
-            # Reconstruct metric with bounded eigenvalues
-            metric = torch.matmul(
-                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                eigenvectors.transpose(-2, -1).conj()
-            )
+        # Handle complex eigenvalues
+        if needs_complex:
+            # Use eig for complex case
+            eigenvalues, eigenvectors = torch.linalg.eig(metric)
+            # Take absolute values for clamping
+            magnitudes = torch.abs(eigenvalues)
+            phases = torch.angle(eigenvalues)
+            # Clamp magnitudes while preserving phases
+            magnitudes = torch.clamp(magnitudes, min=1e-2)
+            # Reconstruct complex eigenvalues
+            eigenvalues = magnitudes * torch.exp(1j * phases)
         else:
             # Real case - standard eigenvalue projection
             eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-            eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
-            metric = torch.matmul(
-                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                eigenvectors.transpose(-2, -1)
-            )
+            eigenvalues = torch.clamp(eigenvalues, min=1e-2)
+        
+        # Reconstruct metric with adjusted eigenvalues
+        metric = torch.matmul(
+            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+            eigenvectors.conj().transpose(-2, -1)
+        )
         
         # Add final regularization to ensure stability
         metric = metric + 1e-3 * eye
@@ -310,4 +313,26 @@ class GeometricFlow(RiemannianFlow):
             metrics['path'] = path
         
         return current, metrics
+    
+    def compute_quantum_metric(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute metric with quantum geometric structure."""
+        # Project input to manifold dimension
+        x_proj = self.proj(x)
+        
+        # Ensure parameters have the same dtype as input
+        for param in self.parameters():
+            param.data = param.data.to(dtype=torch.complex64)
+            
+        # Compute quantum state
+        quantum_state = self.quantum_proj(x_proj)  # [batch_size * ..., height_dim]
+        
+        # Compute metric using quantum Fisher information
+        metric = torch.abs(quantum_state @ quantum_state.conj().transpose(-2, -1))
+        
+        # Ensure positive definiteness and stability
+        metric = metric + self.epsilon * torch.eye(
+            metric.size(-1), dtype=metric.dtype, device=metric.device
+        ).unsqueeze(0).expand_as(metric)
+        
+        return metric
 

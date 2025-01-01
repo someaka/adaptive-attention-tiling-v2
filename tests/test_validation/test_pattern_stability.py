@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.validation.flow.stability import (
+from validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     LinearStabilityValidation,

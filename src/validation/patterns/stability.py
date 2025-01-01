@@ -16,7 +16,7 @@ import torch.nn as nn
 import numpy as np
 
 from src.validation.base import ValidationResult
-from src.validation.flow.stability import (
+from validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     StructuralStabilityValidator,
@@ -161,41 +161,43 @@ class PatternValidator:
         
         # Combine results
         is_valid = bool(
-            linear_result.stable
-            and nonlinear_result.stable
-            and structural_result.stable
+            linear_result.is_valid
+            and nonlinear_result.is_valid
+            and structural_result.is_valid
             and torch.all(lyapunov_exponents < self.lyapunov_threshold)
             and all(v < self.perturbation_threshold for v in perturbation_response.values())
         )
         
+        # Extract stability data from validation results
+        linear_data = linear_result.data or {}
+        nonlinear_data = nonlinear_result.data or {}
+        structural_data = structural_result.data or {}
+        
+        # Create combined message
+        max_perturbation = max(float(v.max()) for v in perturbation_response.values())
+        message = "; ".join([
+            linear_result.message,
+            nonlinear_result.message,
+            structural_result.message,
+            f"Lyapunov exponents: {lyapunov_exponents.max():.2e}",
+            f"Perturbation response: {max_perturbation:.2e}"
+        ])
+        
         return PatternStabilityResult(
             is_valid=is_valid,
-            message="Pattern stability validation complete",
+            message=message,
             data={
-                "linear_result": {
-                    "stable": linear_result.stable,
-                    "eigenvalues": linear_result.eigenvalues.tolist(),
-                    "eigenvectors": linear_result.eigenvectors.tolist(),
-                    "growth_rates": linear_result.growth_rates.tolist()
-                },
-                "nonlinear_result": {
-                    "stable": nonlinear_result.stable,
-                    "lyapunov_function": nonlinear_result.lyapunov_function,
-                    "basin_size": nonlinear_result.basin_size,
-                    "perturbation_bound": nonlinear_result.perturbation_bound
-                },
-                "structural_result": {
-                    "stable": structural_result.stable,
-                    "sensitivity": structural_result.sensitivity,
-                    "robustness": structural_result.robustness,
-                    "bifurcation_distance": structural_result.bifurcation_distance
-                },
-                "lyapunov_exponents": lyapunov_exponents,
-                "perturbation_response": perturbation_response
+                "linear_result": linear_data,
+                "nonlinear_result": nonlinear_data,
+                "structural_result": structural_data,
+                "lyapunov_exponents": lyapunov_exponents.tolist(),
+                "perturbation_response": {
+                    k: v.tolist() for k, v in perturbation_response.items()
+                }
             },
-            linear_stability=linear_result.stable,
-            nonlinear_stability=nonlinear_result.stable,
-            structural_stability=structural_result.stable,
+            linear_stability=linear_result.is_valid,
+            nonlinear_stability=nonlinear_result.is_valid,
+            structural_stability=structural_result.is_valid,
             lyapunov_exponents=lyapunov_exponents,
             perturbation_response=perturbation_response
         )

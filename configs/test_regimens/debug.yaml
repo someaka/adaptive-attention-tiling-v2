@@ -1,4 +1,7 @@
 # Test configuration for debugging (absolute minimal settings)
+# Extends base.yaml with minimal values for debugging
+
+# Hardware profile
 hardware_profile:
   name: "debug"
   description: "Extreme minimal configuration for debugging"
@@ -7,53 +10,49 @@ hardware_profile:
   cpu: "minimal"
   memory: "minimal"
 
-geometric_tests:
-  dimensions: 2     # Absolute minimal dimension
-  num_heads: 1      # Single head
-  batch_size: 1     # Single item batch
-  dtype: "float32"  # Lower precision
-  hidden_dim: 8     # Extremely small hidden dimension
-  
-hyperbolic_tests:
-  vector_scales: [0.01]  # Single scale
-  test_norms: [0.01]    # Single norm
-  precision: "float32"   # Lower precision for all ops
+# Override base parameters with minimal values
+fiber_bundle:
+  base_dim: 2
+  fiber_dim: 2
+  batch_size: 1
+  dtype: "float32"
+  tolerance: 1e-4
 
-euclidean_tests:
+# Fiber bundle test specific parameters
+fiber_bundle_tests:
+  structure_group_dim: 2
+  test_paths:
+    circular_points: 10
+    figure8_points: 20
+    max_angle: 2 * pi
+  test_vectors:
+    initial_norm: 1.0
+    perturbation_scale: 0.1
+
+geometric_tests:
   dimensions: 2
-  test_batch_size: 1
+  num_heads: 1
   hidden_dim: 8
+  vector_scales: [0.01]
+  test_norms: [0.01]
 
 parallel_transport:
-  dimensions: 2
   methods: ["schild"]
   test_cases: 1
-  hidden_dim: 8
   section_batch_size: 1
   path_points: 10
-  fiber_dim: 3
-  dtype: "float32"
-  batch_size: 1
   max_path_length: 1.0
-  tolerance: 1e-5
 
 quantum_geometric:
-  fisher_rao_weight: 0.1    # Reduced weight for debugging
-  quantum_weight: 0.01      # Minimal quantum contribution
-  stress_energy_weight: 0.1 # Reduced stress-energy coupling
-  manifold_dim: 2          # Minimal manifold dimension
-  hidden_dim: 4            # Absolute minimal hidden dimension
-  dt: 0.1                  # Larger timestep for faster convergence
-
-anomaly_detection:
-  polynomial_degree: 2     # Reduced from 4 to minimum needed
-  cohomology_dim: 2       # Minimal dimension
-  batch_size_geometric: 1  # Process one at a time
-  cache_size: 100         # Small cache for testing
-  precision: "float32"    # Use lower precision
+  fisher_rao_weight: 0.1
+  quantum_weight: 0.01
+  stress_energy_weight: 0.1
+  manifold_dim: 2
+  hidden_dim: 4
+  dt: 0.1
 
 memory_management:
-  max_cached_tensors: 100  # Limit tensor cache
-  defrag_threshold: 0.5    # Aggressive defragmentation
-  gc_frequency: 100        # Frequent garbage collection
-  tensor_lifecycle: "short" # Short tensor lifetime
+  max_cached_tensors: 100
+  defrag_threshold: 0.5
+  gc_frequency: 100
+  tensor_lifecycle: "short"

@@ -1,26 +1,16 @@
-# Test configuration for standard hardware (workstations with decent resources)
-# Extends base.yaml with standard values
+# Base configuration schema for all test regimens
+# All test configs should extend this base config
 
-# Hardware profile
-hardware_profile:
-  name: "standard"
-  description: "Configuration for workstations with decent resources"
-  target_hardware:
-    ram_gb: 32
-  cpu: "standard"
-  memory: "standard"
-
-# Override base parameters with standard values
+# Required parameters for fiber bundle tests
 fiber_bundle:
   base_dim: 3
   fiber_dim: 3
-  batch_size: 128
+  batch_size: 32
   dtype: "float32"
   tolerance: 1e-5
 
 # Fiber bundle test specific parameters
 fiber_bundle_tests:
-  structure_group_dim: 4
   test_tolerances:
     projection: 1e-5
     trivialization: 1e-5
@@ -41,27 +31,8 @@ fiber_bundle_tests:
     loop_triviality: 1e-4
     symmetry: 1e-5
     metric_compatibility: 1e-5
-  test_paths:
-    circular_points: 100
-    figure8_points: 200
-    max_angle: 2 * pi
-  test_vectors:
-    initial_norm: 1.0
-    perturbation_scale: 0.1
 
-# Numerical constants
-numerical_constants:
-  epsilons:
-    finite_diff: 1e-6
-    small_angle: 1e-4
-    tensor_compare: 1e-8
-  test_values:
-    small_loop_scale: 0.1
-    arc_angle: 0.7853981633974483  # pi/4
-    max_skew_error: 5e-5
-    max_torsion_error: 5e-5
-    max_group_error: 5e-5
-
+# Geometric test parameters
 geometric_tests:
   dimensions: 3
   num_heads: 8
@@ -69,6 +40,7 @@ geometric_tests:
   vector_scales: [0.1, 1.0, 10.0]
   test_norms: [0.1, 1.0, 10.0]
 
+# Parallel transport parameters
 parallel_transport:
   methods: ["schild", "exponential"]
   test_cases: 10
@@ -76,6 +48,7 @@ parallel_transport:
   path_points: 100
   max_path_length: 10.0
 
+# Quantum geometric parameters
 quantum_geometric:
   fisher_rao_weight: 0.5
   quantum_weight: 0.1
@@ -83,6 +56,7 @@ quantum_geometric:
   manifold_dim: 3
   dt: 0.01
 
+# Memory management parameters
 memory_management:
   max_cached_tensors: 1000
   defrag_threshold: 0.8

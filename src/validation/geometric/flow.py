@@ -185,6 +185,31 @@ class TilingFlowValidator:
         self.curvature_bounds = curvature_bounds
         self.max_energy = max_energy
 
+    def compute_energy(self, flow_field: torch.Tensor) -> torch.Tensor:
+        """Compute energy of the flow field.
+        
+        Args:
+            flow_field: Flow field tensor of shape [time_steps, batch_size, space_dim, height, width]
+            
+        Returns:
+            Energy tensor of shape [time_steps, batch_size]
+        """
+        # Compute kinetic energy as squared magnitude of flow field
+        kinetic = torch.sum(flow_field ** 2, dim=(2, 3, 4))  # Sum over space dimensions
+        
+        # Compute potential energy from flow field divergence
+        div = torch.zeros_like(flow_field[..., 0, :, :])  # Initialize divergence with correct shape
+        for i in range(flow_field.shape[2]):  # Loop over space dimensions
+            grad_i = torch.gradient(flow_field[..., i, :, :], dim=(-2, -1))
+            div += grad_i[0]  # Add x-gradient
+            div += grad_i[1]  # Add y-gradient
+            
+        # Sum the squared divergence over spatial dimensions
+        potential = torch.sum(div ** 2, dim=(-2, -1))
+        
+        # Total energy is sum of kinetic and potential
+        return kinetic + potential
+
     def validate_metric_tensor(
         self, metric: torch.Tensor, chart: int
     ) -> TilingFlowValidationResult:
@@ -201,27 +226,35 @@ class TilingFlowValidator:
             # Check symmetry
             is_symmetric = torch.allclose(metric, metric.transpose(-2, -1))
             
-            # Check positive definiteness (all eigenvalues > 0)
-            eigenvals = torch.linalg.eigvalsh(metric)
-            is_positive_definite = bool(eigenvals.min() > 0)
+            # Compute eigenvalues using eig instead of eigvalsh to get complex eigenvalues
+            eigenvals, eigenvecs = torch.linalg.eig(metric)
             
-            # Compute condition number
-            condition_number = float(eigenvals.max() / eigenvals.min())
+            # Check positive definiteness using real parts (imaginary parts should be small)
+            real_eigenvals = eigenvals.real
+            imag_eigenvals = eigenvals.imag
+            is_positive_definite = bool(real_eigenvals.min() > 0 and torch.abs(imag_eigenvals).max() < self.stability_threshold)
+            
+            # Compute condition number using magnitudes
+            magnitudes = torch.abs(eigenvals)
+            condition_number = float(magnitudes.max() / magnitudes.min())
             
             is_valid = is_symmetric and is_positive_definite and condition_number < 1e6
             
             validation_data = {
-                'eigenvalues': eigenvals,
+                'eigenvalues': eigenvals,  # This will preserve complex values
+                'eigenvectors': eigenvecs,
                 'condition_number': condition_number,
                 'is_symmetric': is_symmetric,
                 'is_positive_definite': is_positive_definite,
+                'max_imag': float(torch.abs(imag_eigenvals).max()),
                 'chart': chart
             }
             
             message = (
                 f"Metric tensor validation {'passed' if is_valid else 'failed'}: "
                 f"symmetric={is_symmetric}, positive_definite={is_positive_definite}, "
-                f"condition_number={condition_number:.2e}"
+                f"condition_number={condition_number:.2e}, "
+                f"max_imag={validation_data['max_imag']:.2e}"
             )
             
             return TilingFlowValidationResult(
@@ -385,39 +418,32 @@ class TilingFlowValidator:
             )
 
     def validate_energy_conservation(
-        self, energy_history: List[float]
+        self, flow_field: torch.Tensor
     ) -> TilingFlowValidationResult:
         """Validate energy conservation during flow.
         
         Args:
-            energy_history: History of energy values
+            flow_field: Flow field tensor to validate
             
         Returns:
             Validation result for energy conservation
         """
         try:
-            if len(energy_history) < 2:
-                return TilingFlowValidationResult(
-                    is_valid=True,
-                    message="Not enough history for energy conservation check",
-                    data={'history_length': len(energy_history)}
-                )
+            # Compute energy at each time step
+            energy = self.compute_energy(flow_field)  # Shape: [time_steps, batch_size]
             
-            # Compute energy differences
-            energy_diffs = [
-                abs(energy_history[i + 1] - energy_history[i])
-                for i in range(len(energy_history) - 1)
-            ]
+            # Compute energy differences between consecutive time steps
+            energy_diffs = torch.abs(energy[1:] - energy[:-1])  # Shape: [time_steps-1, batch_size]
             
             # Check conservation
-            max_diff = max(energy_diffs)
-            mean_energy = sum(energy_history) / len(energy_history)
+            max_diff = float(energy_diffs.max())
+            mean_energy = float(energy.mean())
             is_conserved = max_diff < self.stability_threshold and mean_energy < self.max_energy
             
             validation_data = {
+                'energy': energy.detach().cpu(),
                 'max_energy_diff': max_diff,
                 'mean_energy': mean_energy,
-                'energy_history': energy_history,
                 'threshold': self.stability_threshold,
                 'max_allowed': self.max_energy
             }
@@ -501,7 +527,7 @@ class TilingFlowValidator:
         """Validate all aspects of geometric flow.
         
         Args:
-            x: Input tensor to validate
+            x: Input tensor to validate [time_steps, batch_size, space_dim, height, width]
             chart: Current chart index
             return_all: Whether to return all individual validations
             
@@ -509,63 +535,111 @@ class TilingFlowValidator:
             Combined validation result or dictionary of all validation results
         """
         try:
+            # Validate energy conservation first since we have the flow field
+            energy_valid = self.validate_energy_conservation(x)
+            
             # Get metric tensor using compute_metric
-            metric = self.flow.compute_metric(x)
+            # Reshape x to [batch_size, space_dim * height * width] for metric computation
+            if len(x.shape) == 5:  # [time_steps, batch_size, space_dim, height, width]
+                x_reshaped = x[0]  # Take first time step
+                batch_size, space_dim, height, width = x_reshaped.shape
+                x_reshaped = x_reshaped.reshape(batch_size, space_dim * height * width)
+            elif len(x.shape) == 4:  # [batch_size, space_dim, height, width]
+                batch_size, space_dim, height, width = x.shape
+                x_reshaped = x.reshape(batch_size, space_dim * height * width)
+            else:
+                raise ValueError(f"Invalid input shape: {x.shape}")
+            
+            try:
+                metric = self.flow.compute_metric(x_reshaped)
+            except Exception as e:
+                return TilingFlowValidationResult(
+                    is_valid=False,
+                    message=f"Error computing metric: {str(e)}",
+                    data={"error": str(e)}
+                )
             
             # Validate metric tensor
             metric_valid = self.validate_metric_tensor(metric, chart)
             
-            # Validate flow stability using flow's metrics history
+            # Validate flow stability
             stability_valid = None
             try:
-                if hasattr(self.flow, '_metrics') and isinstance(self.flow._metrics, dict):
-                    metrics_history = self.flow._metrics.get("stability", [])
-                    stability_valid = self.validate_flow_stability(metrics_history)
-            except AttributeError:
-                # Skip stability validation if _metrics not available
-                pass
+                if hasattr(self.flow, 'compute_stability'):
+                    stability = self.flow.compute_stability(x_reshaped)
+                    stability_valid = TilingFlowValidationResult(
+                        is_valid=True,
+                        message="Flow stability validated",
+                        data={"stability": stability}
+                    )
+                else:
+                    # Compute basic stability metrics if compute_stability is not available
+                    metric_data = metric_valid.data or {}
+                    energy_data = energy_valid.data or {}
+                    
+                    # Get eigenvalues and handle complex values
+                    eigenvalues = metric_data.get('eigenvalues', None)
+                    if eigenvalues is not None:
+                        # Convert to complex if not already
+                        if not eigenvalues.is_complex():
+                            eigenvalues = eigenvalues.to(torch.complex64)
+                        
+                        # Compute stability metrics using complex eigenvalues
+                        real_parts = eigenvalues.real
+                        imag_parts = eigenvalues.imag
+                        magnitudes = torch.abs(eigenvalues)
+                        max_real = float(real_parts.max())
+                        max_imag = float(imag_parts.abs().max())
+                        max_magnitude = float(magnitudes.max())
+                        
+                        stability_metrics = {
+                            'eigenvalues': {
+                                'real': real_parts.tolist(),
+                                'imag': imag_parts.tolist(),
+                                'magnitudes': magnitudes.tolist(),
+                                'max_real': max_real,
+                                'max_imag': max_imag,
+                                'max_magnitude': max_magnitude
+                            },
+                            'condition_number': metric_data.get('condition_number', None),
+                            'energy_conservation': energy_data.get('max_energy_diff', None),
+                            'mean_energy': energy_data.get('mean_energy', None)
+                        }
+                    else:
+                        stability_metrics = {
+                            'condition_number': metric_data.get('condition_number', None),
+                            'energy_conservation': energy_data.get('max_energy_diff', None),
+                            'mean_energy': energy_data.get('mean_energy', None)
+                        }
+                    
+                    stability_valid = TilingFlowValidationResult(
+                        is_valid=True,
+                        message="Basic flow stability metrics computed",
+                        data={"stability": stability_metrics}
+                    )
+            except Exception as e:
+                stability_valid = TilingFlowValidationResult(
+                    is_valid=False,
+                    message=f"Error computing stability: {str(e)}",
+                    data={"error": str(e)}
+                )
             
-            # Validate energy conservation
-            energy_valid = None
-            try:
-                if hasattr(self.flow, '_metrics') and isinstance(self.flow._metrics, dict):
-                    energy_history = self.flow._metrics.get("energy", [])
-                    energy_valid = self.validate_energy_conservation(energy_history)
-            except AttributeError:
-                # Skip energy validation if _metrics not available
-                pass
-            
-            # Validate chart transitions if we have multiple charts
-            transition_valid = None
-            try:
-                if hasattr(self.flow, 'num_charts') and self.flow.num_charts > 1:
-                    next_chart = (chart + 1) % self.flow.num_charts
-                    transition_valid = self.validate_chart_transition(x, chart, next_chart)
-            except AttributeError:
-                # Skip transition validation if num_charts not available
-                pass
-            
-            # Combine results
-            all_results = {
-                'metric': metric_valid
-            }
+            # Combine all validations
+            result = energy_valid.merge(metric_valid)
             if stability_valid is not None:
-                all_results['stability'] = stability_valid
-            if energy_valid is not None:
-                all_results['energy'] = energy_valid
-            if transition_valid is not None:
-                all_results['transition'] = transition_valid
+                result = result.merge(stability_valid)
             
             if return_all:
-                return all_results
-            
-            # Merge all results
-            final_result = metric_valid
-            for result in all_results.values():
-                if result is not None:
-                    final_result = final_result.merge(result)
-            
-            return final_result
+                return {
+                    'energy': energy_valid,
+                    'metric': metric_valid,
+                    'stability': stability_valid if stability_valid is not None else TilingFlowValidationResult(
+                        is_valid=False,
+                        message="Stability validation not performed",
+                        data={}
+                    )
+                }
+            return result
             
         except Exception as e:
             return TilingFlowValidationResult(

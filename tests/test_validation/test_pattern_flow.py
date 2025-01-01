@@ -13,7 +13,7 @@ import logging
 import numpy as np
 import math
 from src.validation.patterns.formation import SpatialValidator
-from src.validation.flow.stability import (
+from validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     LinearStabilityValidation
@@ -434,7 +434,7 @@ def setup_test_parameters():
 @pytest.fixture
 def pattern_validator(setup_test_parameters):
     """Create pattern validator."""
-    from src.validation.flow.stability import (
+    from validation.flow.flow_stability import (
         LinearStabilityValidator,
         NonlinearStabilityValidator,
         StructuralStabilityValidator

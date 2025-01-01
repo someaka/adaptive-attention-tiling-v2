@@ -44,7 +44,7 @@ class ArithmeticDynamics(nn.Module):
         self.num_primes = num_primes
         self.height_dim = motive_rank if height_dim is None else height_dim  # Use motive_rank as height_dim if not specified
         self.quantum_weight = quantum_weight
-        self.dtype = dtype if dtype is not None else torch.float32
+        self.dtype = dtype if dtype is not None else torch.complex64  # Default to complex64
 
         # Initialize prime bases
         self.register_buffer(
@@ -380,7 +380,7 @@ class ArithmeticDynamics(nn.Module):
         x_flat = x.reshape(-1, x.shape[-1])  # [batch_size * ..., hidden_dim]
         
         # Project to quantum space
-        quantum_state = self.quantum_proj(x_flat)  # [batch_size * ..., height_dim]
+        quantum_state = self.project_quantum_state(x_flat)  # [batch_size * ..., height_dim]
         
         # Project back to hidden_dim
         quantum_measure = self.measure_proj(quantum_state)  # [batch_size * ..., hidden_dim]
@@ -393,6 +393,20 @@ class ArithmeticDynamics(nn.Module):
             quantum_metric = quantum_metric.reshape(*original_shape, self.hidden_dim, self.hidden_dim)
         
         return quantum_metric
+
+    def project_quantum_state(self, x: torch.Tensor) -> torch.Tensor:
+        """Project input to quantum state space."""
+        # Ensure input is in complex domain
+        x = x.to(dtype=torch.complex64)
+
+        # Project to quantum state space
+        x_flat = x.view(-1, x.size(-1))  # [batch_size * ..., height_dim]
+        quantum_state = self.quantum_proj(x_flat)  # [batch_size * ..., height_dim]
+        
+        # Normalize the quantum state
+        quantum_state = quantum_state / torch.norm(quantum_state, dim=1, keepdim=True)
+        
+        return quantum_state
 
 
 class ArithmeticPattern(nn.Module):

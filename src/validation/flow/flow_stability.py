@@ -8,21 +8,82 @@ This module validates flow stability properties:
 """
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Any, Dict, Optional, Protocol, ClassVar, Type
 
 import torch
+import torch.nn as nn
+from ..base import ValidationResult
 
 from src.core.tiling.geometric_flow import GeometricFlow
 
 
+class StabilityValidatorProtocol(Protocol):
+    """Base protocol for stability validators."""
+    
+    tolerance: float
+    
+    def compute_stability(self, dynamics: Any, pattern: torch.Tensor) -> 'LinearStabilityValidation':
+        """Compute stability analysis of pattern under dynamics."""
+        ...
+
+
+@dataclass
+class StabilityValidationResult(ValidationResult[Dict[str, Any]]):
+    """Validation result for stability analysis."""
+    
+    def __init__(self, is_valid: bool, message: str, data: Optional[Dict[str, Any]] = None):
+        super().__init__(is_valid, message, data)
+    
+    def merge(self, other: ValidationResult) -> 'StabilityValidationResult':
+        if not isinstance(other, ValidationResult):
+            raise TypeError(f"Cannot merge with {type(other)}")
+        return StabilityValidationResult(
+            is_valid=self.is_valid and other.is_valid,
+            message=f"{self.message}; {other.message}",
+            data={**(self.data or {}), **(other.data or {})}
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "is_valid": self.is_valid,
+            "message": self.message,
+            "data": self.data
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'StabilityValidationResult':
+        """Create from dictionary.
+        
+        Args:
+            data: Dictionary containing validation data
+            
+        Returns:
+            New StabilityValidationResult instance
+            
+        Raises:
+            ValueError: If required fields are missing
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Input must be a dictionary")
+            
+        required_fields = {"is_valid", "message"}
+        if not all(field in data for field in required_fields):
+            raise ValueError(f"Missing required fields: {required_fields - set(data.keys())}")
+            
+        return cls(
+            is_valid=bool(data["is_valid"]),
+            message=data["message"],
+            data=data.get("data")
+        )
+
+
 @dataclass
 class LinearStabilityValidation:
-    """Results of linear stability validation."""
-
-    stable: bool  # Linear stability
-    eigenvalues: torch.Tensor  # Stability eigenvalues
-    eigenvectors: torch.Tensor  # Stability modes
-    growth_rates: torch.Tensor  # Modal growth rates
+    """Results of linear stability analysis."""
+    stable: bool
+    eigenvalues: torch.Tensor
+    eigenvectors: torch.Tensor
+    growth_rates: torch.Tensor
 
 
 @dataclass
@@ -45,47 +106,106 @@ class StructuralStabilityValidation:
     bifurcation_distance: float  # Distance to bifurcation
 
 
-class LinearStabilityValidator:
+class StabilityValidatorBase:
+    """Base class for stability validators."""
+    
+    def __init__(self, tolerance: float = 1e-6):
+        self.tolerance = tolerance
+    
+    def compute_stability(self, dynamics: Any, pattern: torch.Tensor) -> LinearStabilityValidation:
+        """Compute stability analysis of pattern under dynamics."""
+        raise NotImplementedError
+
+
+class LinearStabilityValidator(StabilityValidatorBase):
     """Validation of linear stability properties."""
 
     def __init__(self, tolerance: float = 1e-6, stability_threshold: float = 0.0):
-        self.tolerance = tolerance
+        super().__init__(tolerance)
         self.stability_threshold = stability_threshold
 
-    def validate_stability(
-        self, flow: GeometricFlow, state: torch.Tensor
+    def compute_stability(
+        self, flow: nn.Module, state: torch.Tensor
     ) -> LinearStabilityValidation:
-        """Validate linear stability."""
-        # Compute Jacobian at state using autograd
-        state.requires_grad_(True)
-        jacobian_tuple = torch.autograd.functional.jacobian(flow.forward, state)
-        state.requires_grad_(False)
+        """Compute stability analysis of flow at given state."""
+        try:
+            # Define wrapper function that returns tensor from dict if needed
+            def forward_fn(x):
+                output = flow.forward(x)
+                if isinstance(output, dict):
+                    # Extract the main tensor from the output dictionary
+                    # Assuming it's the first tensor value in the dict
+                    return next(v for v in output.values() if isinstance(v, torch.Tensor))
+                return output
+            
+            # Compute Jacobian using wrapped function
+            jacobian_tuple = torch.autograd.functional.jacobian(forward_fn, state)
+            
+            # Convert tuple to tensor if needed
+            if isinstance(jacobian_tuple, tuple):
+                jacobian = jacobian_tuple[0]
+            else:
+                jacobian = jacobian_tuple
+            
+            # Compute eigenvalues and eigenvectors
+            eigenvals, eigenvecs = torch.linalg.eig(jacobian)
+            
+            # Check stability based on eigenvalue real parts
+            real_parts = eigenvals.real
+            is_stable = bool((real_parts <= self.stability_threshold).all())
+            
+            # Compute growth rates
+            growth_rates = torch.exp(real_parts)
+            
+            return LinearStabilityValidation(
+                stable=is_stable,
+                eigenvalues=eigenvals,
+                eigenvectors=eigenvecs,
+                growth_rates=growth_rates
+            )
+            
+        except Exception as e:
+            # Return validation result with empty tensors on error
+            device = state.device if hasattr(state, 'device') else 'cpu'
+            empty_tensor = torch.zeros(1, device=device)
+            return LinearStabilityValidation(
+                stable=False,
+                eigenvalues=empty_tensor,
+                eigenvectors=empty_tensor,
+                growth_rates=empty_tensor
+            )
 
-        # Convert tuple to tensor and reshape to 2D matrix if needed
-        if isinstance(jacobian_tuple, tuple):
-            jacobian = torch.stack(list(jacobian_tuple))
+    def validate_stability(
+        self, dynamics: Any, pattern: torch.Tensor
+    ) -> StabilityValidationResult:
+        """Validate stability of pattern under dynamics.
         
-        batch_size = state.size(0) if len(state.shape) > 1 else 1
-        state_size = state.numel() // batch_size
-        jacobian = jacobian.view(batch_size, state_size, state_size)
-
-        # Compute eigendecomposition
-        eigenvalues, eigenvectors = torch.linalg.eig(jacobian)
-
-        # Get real parts for stability
-        real_parts = torch.real(eigenvalues)
-
-        # Compute growth rates
-        growth_rates = torch.exp(real_parts)
-
-        # Check stability - convert tensor to bool
-        stable = bool(torch.all(real_parts <= self.stability_threshold).item())
-
-        return LinearStabilityValidation(
-            stable=stable,
-            eigenvalues=eigenvalues,
-            eigenvectors=eigenvectors,
-            growth_rates=growth_rates,
+        Args:
+            dynamics: Pattern dynamics to validate
+            pattern: Pattern tensor to validate
+            
+        Returns:
+            ValidationResult with stability analysis
+        """
+        # Compute stability analysis
+        stability = self.compute_stability(dynamics, pattern)
+        
+        # Create validation message
+        message = f"Pattern {'is' if stability.stable else 'is not'} stable under dynamics"
+        if not stability.stable:
+            max_eigenval = float(stability.eigenvalues.abs().max())
+            message += f" (max eigenvalue: {max_eigenval:.2e})"
+            
+        # Return ValidationResult with stability data
+        return StabilityValidationResult(
+            is_valid=stability.stable,
+            message=message,
+            data={
+                'eigenvalues': stability.eigenvalues,
+                'eigenvectors': stability.eigenvectors,
+                'growth_rates': stability.growth_rates,
+                'stability_threshold': self.stability_threshold
+            }
         )
 
 
@@ -98,7 +218,7 @@ class NonlinearStabilityValidator:
 
     def validate_stability(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int = 100
-    ) -> NonlinearStabilityValidation:
+    ) -> StabilityValidationResult:
         """Validate nonlinear stability."""
         # Compute Lyapunov function with conditioning
         lyapunov = self._compute_lyapunov(flow, state)
@@ -110,17 +230,25 @@ class NonlinearStabilityValidator:
         bound = self._find_perturbation_bound(flow, state, time_steps)
         
         # Check overall stability
-        stable = bool(
+        is_stable = bool(
             lyapunov < 1.0 and  # Energy bounded
             basin > 0.01 and  # Reasonable basin size
             bound > 1e-3  # Meaningful perturbation tolerance
         )
         
-        return NonlinearStabilityValidation(
-            stable=stable,
-            lyapunov_function=float(lyapunov),
-            basin_size=float(basin),
-            perturbation_bound=float(bound),
+        # Create validation message
+        message = f"Nonlinear stability validation {'passed' if is_stable else 'failed'}"
+        if not is_stable:
+            message += f" (lyapunov={lyapunov:.2e}, basin={basin:.2e}, bound={bound:.2e})"
+        
+        return StabilityValidationResult(
+            is_valid=is_stable,
+            message=message,
+            data={
+                'lyapunov_function': float(lyapunov),
+                'basin_size': float(basin),
+                'perturbation_bound': float(bound)
+            }
         )
 
     def _compute_lyapunov(
@@ -211,7 +339,7 @@ class StructuralStabilityValidator:
 
     def validate_stability(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int = 100
-    ) -> StructuralStabilityValidation:
+    ) -> StabilityValidationResult:
         """Validate structural stability."""
         # Compute parameter sensitivity
         sensitivity = self._compute_sensitivity(flow, state)
@@ -223,17 +351,25 @@ class StructuralStabilityValidator:
         bifurcation = self._estimate_bifurcation(flow, state)
 
         # Check stability
-        stable = bool(
+        is_stable = bool(
             sensitivity < 1.0 / self.tolerance
             and robustness > self.tolerance
             and bifurcation > self.tolerance
         )
 
-        return StructuralStabilityValidation(
-            stable=stable,
-            sensitivity=float(sensitivity),
-            robustness=float(robustness),
-            bifurcation_distance=float(bifurcation),
+        # Create validation message
+        message = f"Structural stability validation {'passed' if is_stable else 'failed'}"
+        if not is_stable:
+            message += f" (sensitivity={sensitivity:.2e}, robustness={robustness:.2e}, bifurcation={bifurcation:.2e})"
+
+        return StabilityValidationResult(
+            is_valid=is_stable,
+            message=message,
+            data={
+                'sensitivity': float(sensitivity),
+                'robustness': float(robustness),
+                'bifurcation_distance': float(bifurcation)
+            }
         )
 
     def _compute_sensitivity(
@@ -361,18 +497,26 @@ class StabilityValidator:
         basin_samples: int = 100,
         parameter_range: float = 0.1,
     ):
+        self.tolerance = tolerance
+        self.stability_threshold = stability_threshold
         self.linear_validator = LinearStabilityValidator(tolerance, stability_threshold)
         self.nonlinear_validator = NonlinearStabilityValidator(tolerance, basin_samples)
         self.structural_validator = StructuralStabilityValidator(
             tolerance, parameter_range
         )
 
+    def compute_stability(
+        self, dynamics: Any, pattern: torch.Tensor
+    ) -> LinearStabilityValidation:
+        """Compute stability analysis of pattern under dynamics."""
+        return self.linear_validator.compute_stability(dynamics, pattern)
+
     def validate(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int = 100
     ) -> Tuple[
-        LinearStabilityValidation,
-        NonlinearStabilityValidation,
-        StructuralStabilityValidation,
+        StabilityValidationResult,
+        StabilityValidationResult,
+        StabilityValidationResult,
     ]:
         """Perform complete stability validation."""
         # Validate linear stability
@@ -387,3 +531,36 @@ class StabilityValidator:
         )
 
         return linear, nonlinear, structural
+
+    def validate_stability(self, dynamics: Any, pattern: torch.Tensor) -> StabilityValidationResult:
+        """Validate stability of pattern under dynamics.
+        
+        Args:
+            dynamics: Pattern dynamics to validate
+            pattern: Pattern tensor to validate
+            
+        Returns:
+            ValidationResult with stability analysis
+        """
+        # Compute stability analysis
+        stability = self.compute_stability(dynamics, pattern)
+        
+        # Check if all eigenvalues are within stability threshold
+        is_stable = bool((stability.eigenvalues.abs() <= self.tolerance).all())
+        
+        # Create validation message
+        message = f"Pattern {'is' if is_stable else 'is not'} stable under dynamics"
+        if not is_stable:
+            max_eigenval = float(stability.eigenvalues.abs().max())
+            message += f" (max eigenvalue: {max_eigenval:.2e})"
+            
+        # Return ValidationResult with stability data
+        return StabilityValidationResult(
+            is_valid=is_stable,
+            message=message,
+            data={
+                'eigenvalues': stability.eigenvalues,
+                'eigenvectors': stability.eigenvectors,
+                'stability_threshold': self.tolerance
+            }
+        )

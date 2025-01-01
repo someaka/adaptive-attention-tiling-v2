@@ -1,8 +1,8 @@
 """Analyzers for model validation."""
 
 from ..patterns.formation import BifurcationAnalyzer
-from ..flow.stability import LinearStabilityValidator as LinearStabilityAnalyzer
-from ..flow.stability import NonlinearStabilityValidator as NonlinearStabilityAnalyzer
+from ..flow.flow_stability import LinearStabilityValidator as LinearStabilityAnalyzer
+from ..flow.flow_stability import NonlinearStabilityValidator as NonlinearStabilityAnalyzer
 from ..patterns.decomposition import ModeDecomposer
 
 __all__ = [

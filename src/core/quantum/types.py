@@ -184,8 +184,13 @@ class QuantumState:
             bool: True if the state is pure, False otherwise
         """
         rho = self.density_matrix()
-        purity = torch.trace(torch.matmul(rho, rho)).real
-        return bool(abs(purity - 1.0) < tolerance)
+        if len(rho.shape) == 3:  # Batched case
+            # Compute purity for each state in batch
+            purity = torch.diagonal(torch.matmul(rho, rho), dim1=-2, dim2=-1).sum(-1).real
+            return bool(torch.all(torch.abs(purity - 1.0) < tolerance))
+        else:  # Single state case
+            purity = torch.trace(torch.matmul(rho, rho)).real
+            return bool(abs(purity - 1.0) < tolerance)
 
     def state_vector(self) -> torch.Tensor:
         """Get the state vector representation.

@@ -50,7 +50,7 @@
 - [ ] tests/test_neural/test_flow/test_hamiltonian.py
 - [ ] tests/test_neural/test_flow/test_tensor_shapes.py
 - [x] tests/test_utils/test_hardware/test_hardware_utils.py
-- [ ] tests/test_utils/test_helpers.py
+- [x] tests/test_utils/test_helpers.py
 - [ ] tests/test_validation/test_debug_flow.py
 - [ ] tests/test_validation/test_flow_validation.py
 - [ ] tests/test_validation/test_framework_motivic.py
@@ -63,5 +63,3 @@
 - [ ] tests/test_validation/test_pattern_stability.py
 - [ ] tests/test_validation/test_state_validation.py
 - [ ] tests/test_validation/test_symplectic_validation.py
-- [ ] tests/unit/utils/test_helpers.py
-- [ ] tests/utils/test_helpers.py

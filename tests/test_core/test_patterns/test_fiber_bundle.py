@@ -10,7 +10,9 @@ The tests are organized to ensure both implementations correctly
 satisfy the FiberBundle protocol while maintaining their specific features.
 """
 
+from typing import Any
 import numpy as np
+import math
 import pytest
 import torch
 import yaml
@@ -32,7 +34,7 @@ from src.validation.geometric.metric import ConnectionValidator, ConnectionValid
 
 
 @pytest.fixture
-def test_config():
+def test_config() -> dict[str, Any]:
     """Load test configuration based on environment."""
     config_name = os.environ.get("TEST_REGIME", "debug")
     config_path = f"configs/test_regimens/{config_name}.yaml"
@@ -76,9 +78,9 @@ def pattern_bundle(test_config):
 
 
 @pytest.fixture
-def structure_group():
+def structure_group(test_config):
     """Create a structure group for the bundle."""
-    return torch.eye(4)  # Match fiber dimension
+    return torch.eye(test_config["fiber_bundle_tests"]["structure_group_dim"])
 
 
 class TestFiberBundleProtocol:
@@ -114,7 +116,7 @@ class TestFiberBundleProtocol:
         return connection
 
     @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
-    def test_bundle_projection(self, bundle, request, base_manifold):
+    def test_bundle_projection(self, bundle, request, base_manifold, test_config):
         """Test that bundle projection satisfies protocol requirements."""
         bundle = request.getfixturevalue(bundle)
         batch_size = base_manifold.shape[0]
@@ -132,7 +134,7 @@ class TestFiberBundleProtocol:
         assert torch.allclose(
             bundle.bundle_projection(padded_projected),
             projected,
-            rtol=1e-5,
+            rtol=test_config["fiber_bundle_tests"]["test_tolerances"]["projection"],
         ), "Projection should be idempotent"
 
     @pytest.mark.parametrize("bundle", ["base_bundle", "pattern_bundle"])
@@ -203,7 +205,7 @@ class TestFiberBundleProtocol:
             assert torch.allclose(
                 metric_compat,
                 torch.zeros_like(metric_compat),
-                rtol=1e-5
+                rtol=test_config["fiber_bundle_tests"]["test_tolerances"]["connection"]
             ), "Connection should preserve pattern metric structure"
         
         # 3. Torsion-free property
@@ -313,7 +315,7 @@ class TestFiberBundleProtocol:
         assert torch.allclose(
             transported_norms,
             section_norm * torch.ones_like(transported_norms),
-            rtol=1e-4
+            rtol=test_config["fiber_bundle_tests"]["test_tolerances"]["transport"]
         ), "Parallel transport should preserve the fiber metric"
         
         # Test 2: Path independence for contractible loops
@@ -546,14 +548,14 @@ class TestBaseFiberBundle:
         holonomy_group = base_bundle.compute_holonomy_group(holonomies)
         assert len(holonomy_group.shape) == 3, "Invalid holonomy group shape"
 
-    def test_holonomy_algebra(self, base_bundle):
+    def test_holonomy_algebra(self, base_bundle, test_config):
         """Test holonomy algebra computation specific to base implementation."""
         holonomies = [torch.eye(3) for _ in range(3)]
         algebra = base_bundle.compute_holonomy_algebra(holonomies)
         assert torch.allclose(
             algebra + algebra.transpose(-1, -2),
             torch.zeros_like(algebra),
-            rtol=1e-5
+            rtol=test_config["tolerance"]
         ), "Algebra should be anti-symmetric"
 
 
@@ -604,7 +606,7 @@ class TestPatternFiberBundle:
         assert torch.allclose(
             vertical_components,
             vertical_vector[..., pattern_bundle.base_dim:],
-            rtol=1e-5
+            rtol=test_config["tolerance"]
         ), "Connection should preserve pure vertical vectors"
 
         # Test 2: Pure horizontal vectors
@@ -619,7 +621,7 @@ class TestPatternFiberBundle:
         assert torch.allclose(
             skew_check,
             torch.zeros_like(skew_check),
-            rtol=1e-5
+            rtol=test_config["tolerance"]
         ), "Connection should be skew-symmetric for horizontal vectors"
 
         # Test 3: Individual Christoffel symbols
@@ -629,7 +631,7 @@ class TestPatternFiberBundle:
             assert torch.allclose(
                 matrix + matrix.transpose(-2, -1),
                 torch.zeros_like(matrix),
-                rtol=1e-5
+                rtol=test_config["tolerance"]
             ), f"Connection component {i} should be skew-symmetric"
 
     def test_parallel_transport_components(self, pattern_bundle, test_config):
@@ -984,7 +986,7 @@ class TestConnectionFormHypothesis:
                 assert torch.allclose(
                     connections[i][..., :fiber_dim, :fiber_dim],
                     connections[j][..., :fiber_dim, :fiber_dim],
-                    rtol=1e-5
+                    rtol=1e-5  # Use a fixed tolerance for hypothesis tests
                 ), f"Connection should be symmetric in base indices {i}, {j}"
 
     @given(
@@ -1256,7 +1258,7 @@ class TestGeometricComponents:
             ), f"Metric derivatives should be symmetric in last two indices for i={i}"
             
         # Verify consistency with finite differences
-        eps = 1e-6
+        eps = test_config["numerical_constants"]["epsilons"]["finite_diff"]
         for i in range(total_dim):
             point_plus = point.clone()
             point_plus[i] += eps

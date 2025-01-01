@@ -220,8 +220,12 @@ class ModelGeometricValidator:
             Validation results for the layer
             
         Raises:
-            ValueError: If layer_name does not exist in the model
+            ValueError: If layer_name does not exist in the model or points have invalid shape
         """
+        # Validate input shape
+        if not isinstance(points, torch.Tensor) or len(points.shape) != 2:
+            raise ValueError("Invalid points shape: expected 2D tensor")
+            
         if layer_name not in self.layer_validators:
             return GeometricValidationResult(
                 is_valid=False,
