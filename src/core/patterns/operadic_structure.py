@@ -554,8 +554,11 @@ class EnrichedAttention:
         if not self.wave_enabled or not torch.is_complex(wave):
             return wave.real
             
-        # Extract position as expectation value
-        return wave.real.to(dtype=self.dtype)
+        # Calculate position expectation value
+        # <x> = <ψ|x|ψ> = ∫ ψ*(x) x ψ(x) dx
+        prob_density = torch.abs(wave) ** 2
+        position = torch.linspace(-1, 1, wave.shape[-1], device=wave.device)
+        return torch.sum(prob_density * position, dim=-1).to(dtype=self.dtype)
         
     def get_momentum(self, wave: Tensor) -> Tensor:
         """Extract momentum from wave packet.

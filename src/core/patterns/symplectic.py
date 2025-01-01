@@ -507,26 +507,19 @@ class SymplecticStructure:
         batch_size = pattern.shape[0]
         dim = pattern.shape[-1]
         
-        # Create metric tensor (positive definite by construction)
-        metric = torch.eye(dim, dtype=self.dtype, device=pattern.device)
-        metric = metric.unsqueeze(0).expand(batch_size, -1, -1)
-        
-        # Add low-rank perturbation for non-triviality
-        U = torch.randn(batch_size, dim, dim // 4, 
-                       dtype=self.dtype, device=pattern.device) * 0.1
-        metric = metric + U @ U.transpose(-1, -2)
-        
-        # Create symplectic form (antisymmetric by construction)
+        # Create standard symplectic form (antisymmetric by construction)
         n = dim // 2
-        symplectic = torch.zeros(batch_size, dim, dim,
-                               dtype=self.dtype, device=pattern.device)
+        J = torch.zeros(batch_size, dim, dim, dtype=self.dtype, device=pattern.device)
+        J[..., :n, n:] = torch.eye(n, dtype=self.dtype, device=pattern.device)
+        J[..., n:, :n] = -torch.eye(n, dtype=self.dtype, device=pattern.device)
         
-        # Fill in standard symplectic form blocks
-        symplectic[..., :n, n:] = torch.eye(n, dtype=self.dtype, device=pattern.device)
-        symplectic[..., n:, :n] = -torch.eye(n, dtype=self.dtype, device=pattern.device)
+        # Create compatible metric (g = J^T J + I)
+        # This ensures g and J are compatible by construction
+        metric = torch.matmul(J.transpose(-2, -1), J)
+        metric = metric + torch.eye(dim, dtype=self.dtype, device=pattern.device).unsqueeze(0)
         
         # Combine into quantum geometric tensor
-        Q = metric + 1j * symplectic * self._SYMPLECTIC_WEIGHT
+        Q = metric + 1j * J * self._SYMPLECTIC_WEIGHT
         
         return Q
 
