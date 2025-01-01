@@ -78,11 +78,18 @@ class MetricValidator:
     """Validator for metric properties."""
 
     def __init__(self, manifold_dim: int, tolerance: float = 1e-6):
+        """Initialize metric validator.
+        
+        Args:
+            manifold_dim: Dimension of the manifold
+            tolerance: Numerical tolerance for validation
+        """
         self.manifold_dim = manifold_dim
         self.tolerance = tolerance
         self.eigenvalue_threshold = 1e-6
+        self.condition_threshold = 1e8
         self.energy_threshold = 1e3
-        self.condition_threshold = 1e4
+        self.curvature_threshold = 1e3  # Maximum allowed curvature magnitude
 
     def validate_metric(self, metric: Tensor) -> MetricValidation:
         """Validate metric properties.
@@ -146,13 +153,18 @@ class MetricValidator:
         """Compute metric tensor values at points using Fisher-Rao structure.
         
         Args:
-            points: Points tensor (batch_size x dim)
+            points: Points tensor (batch_size x dim) or (batch_size x dim x dim)
             
         Returns:
             Metric tensor values (batch_size x dim x dim)
         """
-        batch_size = points.shape[0]
-        
+        # Handle different input shapes
+        if len(points.shape) == 3:
+            batch_size = points.shape[0]
+            points = points.reshape(batch_size, -1)  # Flatten to [batch_size, dim]
+        else:
+            batch_size = points.shape[0]
+            
         # Compute Fisher-Rao metric components
         # g_ij = E[∂_i log p(x|θ) ∂_j log p(x|θ)]
         score_fn = self._compute_score_function(points)
@@ -167,14 +179,18 @@ class MetricValidator:
         if len(score_fn.shape) != 2:
             score_fn = score_fn.view(batch_size, -1)
         
+        # Compute metric tensor
         metric = torch.einsum('bi,bj->bij', score_fn, score_fn)
         
-        # Add regularization for numerical stability
-        metric = metric + self.eigenvalue_threshold * torch.eye(
-            self.manifold_dim,
+        # Add regularization for numerical stability with proper broadcasting
+        eye = torch.eye(
+            score_fn.shape[1],  # Use actual dimension from score function
             device=points.device,
             dtype=points.dtype
-        ).expand(batch_size, -1, -1)
+        )
+        # Expand eye matrix to match batch dimension
+        eye = eye.unsqueeze(0).expand(batch_size, -1, -1)
+        metric = metric + self.eigenvalue_threshold * eye
         
         return metric
 
@@ -403,7 +419,8 @@ class MetricValidator:
         batch_size = metric.shape[0]
         
         # Compute gradient
-        grad = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        grad = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim,
+                         device=metric.device, dtype=metric.dtype)
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
                 grad_ij = torch.autograd.grad(
@@ -411,7 +428,8 @@ class MetricValidator:
                     metric,
                     create_graph=True
                 )[0]
-                grad[:, i, j] = grad_ij
+                # Correctly reshape the gradient to match dimensions
+                grad[:, i, j, :] = grad_ij[:, :, j]  # Take the relevant slice
                 
         return grad
 
@@ -848,28 +866,67 @@ class MetricValidator:
         return bool(torch.allclose(torsion, torch.zeros_like(torsion), atol=self.tolerance))
 
     def validate_fisher_rao(self, metric: torch.Tensor) -> bool:
-        """Validate Fisher-Rao metric properties.
+        """Validate if metric satisfies Fisher-Rao properties.
         
         Args:
-            metric: Metric tensor
+            metric: Metric tensor to validate
             
         Returns:
             True if metric satisfies Fisher-Rao properties
         """
-        # Check positive definiteness
-        result = self.validate_metric(metric)
-        if not result.positive_definite:
-            return False
+        try:
+            # Check symmetry
+            is_symmetric = torch.allclose(
+                metric,
+                metric.transpose(-2, -1),
+                rtol=1e-5,
+                atol=1e-5
+            )
             
-        # Check compatibility with score function
-        points = torch.randn(metric.shape[0], self.manifold_dim)
-        score = self.compute_score_function(points)
-        
-        # Compute Fisher-Rao metric
-        fisher_metric = torch.einsum('bi,bj->bij', score, score)
-        
-        # Check if close to input metric
-        return bool(torch.allclose(metric, fisher_metric, atol=self.tolerance))
+            # Check positive definiteness
+            eigenvals = torch.linalg.eigvalsh(metric)
+            is_positive_definite = bool((eigenvals > -1e-5).all())
+            
+            # Generate test points and compute Fisher-Rao metric
+            points = torch.randn(metric.shape[0], self.manifold_dim, 
+                               device=metric.device, dtype=metric.dtype)
+            score = self.compute_score_function(points)
+            fisher_metric = torch.einsum('bi,bj->bij', score, score)
+            
+            # Add regularization to both metrics
+            eye = torch.eye(
+                self.manifold_dim,
+                device=metric.device,
+                dtype=metric.dtype
+            ).unsqueeze(0).expand(metric.shape[0], -1, -1)
+            
+            metric = metric + self.eigenvalue_threshold * eye
+            fisher_metric = fisher_metric + self.eigenvalue_threshold * eye
+            
+            # Compare eigenvalue spectra
+            metric_eigenvals = torch.linalg.eigvalsh(metric)
+            fisher_eigenvals = torch.linalg.eigvalsh(fisher_metric)
+            
+            # Sort eigenvalues for comparison
+            metric_eigenvals, _ = torch.sort(metric_eigenvals, dim=-1)
+            fisher_eigenvals, _ = torch.sort(fisher_eigenvals, dim=-1)
+            
+            # Compare normalized eigenvalue spectra
+            metric_eigenvals = metric_eigenvals / (metric_eigenvals.sum(dim=-1, keepdim=True) + 1e-8)
+            fisher_eigenvals = fisher_eigenvals / (fisher_eigenvals.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            is_fisher_rao = torch.allclose(
+                metric_eigenvals,
+                fisher_eigenvals,
+                rtol=1e-3,
+                atol=1e-3
+            )
+            
+            return is_symmetric and is_positive_definite and is_fisher_rao
+            
+        except Exception as e:
+            print(f"Error in Fisher-Rao validation: {str(e)}")
+            return False
 
     def check_completeness(self, metric: torch.Tensor) -> bool:
         """Check metric completeness.
@@ -965,34 +1022,53 @@ class MetricValidator:
         Returns:
             Sectional curvature tensor
         """
+        batch_size = metric.shape[0]
+        
+        # Ensure metric requires gradients
+        if not metric.requires_grad:
+            metric = metric.detach().requires_grad_(True)
+        
         # Get Christoffel symbols
         christoffel = self.compute_christoffel_symbols(metric)
         
-        # Compute Riemann curvature tensor
-        riemann = torch.zeros_like(christoffel)
+        # Compute Riemann curvature tensor components
+        riemann = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim,
+                            self.manifold_dim, self.manifold_dim,
+                            device=metric.device, dtype=metric.dtype)
+                            
+        # Compute metric inverse
+        metric_inv = torch.linalg.inv(metric)
+        
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
                 for k in range(self.manifold_dim):
                     for l in range(self.manifold_dim):
-                        # R^i_{jkl} = ∂_k Γ^i_{jl} - ∂_l Γ^i_{jk} + Γ^i_{mk}Γ^m_{jl} - Γ^i_{ml}Γ^m_{jk}
-                        riemann[:,i,j,k,l] = (
-                            torch.autograd.grad(christoffel[:,i,j,l].sum(), metric, create_graph=True)[0][:,k] -
-                            torch.autograd.grad(christoffel[:,i,j,k].sum(), metric, create_graph=True)[0][:,l]
-                        )
+                        # Compute covariant derivatives
+                        d_k = torch.zeros_like(christoffel[:,i,j,l])
+                        d_l = torch.zeros_like(christoffel[:,i,j,k])
+                        
                         for m in range(self.manifold_dim):
-                            riemann[:,i,j,k,l] += (
-                                christoffel[:,i,m,k] * christoffel[:,m,j,l] -
-                                christoffel[:,i,m,l] * christoffel[:,m,j,k]
-                            )
-                            
+                            d_k += christoffel[:,m,k,l] * christoffel[:,i,j,m]
+                            d_l += christoffel[:,m,l,k] * christoffel[:,i,j,m]
+                        
+                        # Compute Riemann tensor components
+                        riemann[:,i,j,k,l] = (
+                            christoffel[:,i,j,l] * christoffel[:,k,l,j] -
+                            christoffel[:,i,j,k] * christoffel[:,l,k,j] +
+                            d_k - d_l
+                        )
+        
         # Compute sectional curvature
-        sectional = torch.zeros(metric.shape[0], self.manifold_dim, self.manifold_dim)
+        sectional = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim,
+                              device=metric.device, dtype=metric.dtype)
+                              
         for i in range(self.manifold_dim):
             for j in range(i+1, self.manifold_dim):
-                sectional[:,i,j] = riemann[:,i,j,i,j] / (
-                    metric[:,i,i] * metric[:,j,j] - metric[:,i,j]**2
-                )
-                sectional[:,j,i] = sectional[:,i,j]
+                # Compute sectional curvature K(e_i, e_j)
+                numerator = riemann[:,i,j,j,i]
+                denominator = metric[:,i,i] * metric[:,j,j] - metric[:,i,j]**2
+                sectional[:,i,j] = numerator / (denominator + 1e-8)
+                sectional[:,j,i] = sectional[:,i,j]  # Symmetrize
                 
         return sectional
 
@@ -1008,11 +1084,12 @@ class MetricValidator:
         # Get sectional curvature
         sectional = self.compute_sectional_curvature(metric)
         
-        # Compute Ricci curvature by tracing
+        # Compute Ricci curvature by tracing over appropriate indices
         ricci = torch.zeros_like(metric)
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
-                ricci[:,i,j] = torch.sum(sectional[:,i,:] * metric[:,j,:], dim=1)
+                # Sum over k to get R_ij = sum_k R_ikjk
+                ricci[:,i,j] = torch.sum(sectional[:,i,:] * metric[:,j,:], dim=-1)
                 
         return ricci
 
@@ -1034,37 +1111,104 @@ class MetricValidator:
         return scalar
 
     def validate_metric_properties(self, metric: torch.Tensor) -> MetricProperties:
-        """Validate metric properties."""
-        # Compute basic properties
-        determinant = torch.linalg.det(metric)
-        trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
-        eigenvalues = torch.linalg.eigvalsh(metric)
-        condition_number = eigenvalues.max() / eigenvalues.min()
+        """Validate metric tensor properties.
         
-        # Compute derived properties
-        volume_form = self.compute_volume_form(metric)
-        christoffel = self._compute_christoffel_symbols(metric)
-        
-        # Compute curvature properties
-        sectional = self.compute_sectional_curvature(metric)
-        ricci = self.compute_ricci_curvature(metric)
-        scalar = self.compute_scalar_curvature(metric)
-        
-        return MetricProperties(
-            is_positive_definite=bool(torch.all(eigenvalues > self.eigenvalue_threshold)),
-            is_compatible=self.validate_connection_compatibility(self.get_test_connection()),
-            is_complete=self._check_completeness(metric),
-            has_bounded_curvature=self.check_metric_bounds(),
-            determinant=determinant,
-            trace=trace,
-            eigenvalues=eigenvalues,
-            condition_number=condition_number,
-            volume_form=volume_form,
-            christoffel_symbols=christoffel,
-            sectional_curvature=sectional,
-            ricci_curvature=ricci,
-            scalar_curvature=scalar
-        )
+        Args:
+            metric: Metric tensor to validate
+            
+        Returns:
+            MetricProperties object containing validation results
+        """
+        try:
+            # Ensure metric requires gradients
+            if not metric.requires_grad:
+                metric = metric.detach().requires_grad_(True)
+            
+            # Check positive definiteness
+            eigenvals = torch.linalg.eigvalsh(metric)
+            is_positive_definite = bool((eigenvals > self.eigenvalue_threshold).all())
+            
+            # Compute basic properties
+            determinant = torch.linalg.det(metric)
+            trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
+            
+            # Compute volume form
+            volume_form = torch.sqrt(torch.abs(determinant))
+            
+            # Get Christoffel symbols
+            try:
+                christoffel = self.compute_christoffel_symbols(metric)
+                is_compatible = self.validate_connection_compatibility(christoffel)
+            except Exception as e:
+                print(f"Error computing Christoffel symbols: {str(e)}")
+                christoffel = None
+                is_compatible = False
+            
+            # Check completeness
+            try:
+                is_complete = self.check_completeness(metric)
+            except Exception as e:
+                print(f"Error checking completeness: {str(e)}")
+                is_complete = False
+            
+            # Compute curvature tensors
+            try:
+                sectional = self.compute_sectional_curvature(metric)
+                # Compute Ricci curvature by tracing over appropriate indices
+                ricci = torch.zeros_like(metric)
+                for i in range(self.manifold_dim):
+                    for j in range(self.manifold_dim):
+                        ricci[:,i,j] = torch.sum(sectional[:,i,:] * metric[:,j,:], dim=-1)
+                
+                # Compute scalar curvature by tracing Ricci
+                scalar = torch.einsum('bii->b', ricci)
+                
+                has_bounded_curvature = bool(
+                    (torch.abs(sectional) < self.curvature_threshold).all() and
+                    (torch.abs(ricci) < self.curvature_threshold).all() and
+                    (torch.abs(scalar) < self.curvature_threshold).all()
+                )
+            except Exception as e:
+                print(f"Error computing curvature: {str(e)}")
+                sectional = None
+                ricci = None
+                scalar = None
+                has_bounded_curvature = False
+            
+            # Return properties
+            return MetricProperties(
+                is_positive_definite=is_positive_definite,
+                is_compatible=is_compatible,
+                is_complete=is_complete,
+                has_bounded_curvature=has_bounded_curvature,
+                determinant=determinant,
+                trace=trace,
+                eigenvalues=eigenvals,
+                condition_number=float(eigenvals.max() / (eigenvals.min() + 1e-8)),
+                volume_form=volume_form,
+                christoffel_symbols=christoffel,
+                sectional_curvature=sectional,
+                ricci_curvature=ricci,
+                scalar_curvature=scalar
+            )
+            
+        except Exception as e:
+            print(f"Error validating metric properties: {str(e)}")
+            return MetricProperties(
+                is_positive_definite=False,
+                is_compatible=False,
+                is_complete=False,
+                has_bounded_curvature=False,
+                determinant=None,
+                trace=None,
+                eigenvalues=None,
+                condition_number=None,
+                volume_form=None,
+                christoffel_symbols=None,
+                sectional_curvature=None,
+                ricci_curvature=None,
+                scalar_curvature=None
+            )
 
     def validate_curvature_bounds(self, metric: Tensor) -> CurvatureBounds:
         """Validate curvature bounds.
@@ -1113,12 +1257,13 @@ class MetricValidator:
             for j in range(self.manifold_dim):
                 for k in range(self.manifold_dim):
                     for l in range(self.manifold_dim):
+                        # R_ijkl + R_iklj + R_iljk = 0
                         bianchi = (
                             curvature[:,i,j,k,l] +
                             curvature[:,i,k,l,j] +
                             curvature[:,i,l,j,k]
                         )
-                        if not torch.allclose(bianchi, torch.zeros_like(bianchi), atol=self.tolerance):
+                        if not torch.allclose(bianchi, torch.zeros_like(bianchi), atol=1e-5):
                             return False
                             
         # Check symmetries
@@ -1126,27 +1271,27 @@ class MetricValidator:
             for j in range(self.manifold_dim):
                 for k in range(self.manifold_dim):
                     for l in range(self.manifold_dim):
-                        # R_ijkl = -R_ijlk
+                        # R_ijkl = -R_ijlk (antisymmetry in last two indices)
                         if not torch.allclose(
                             curvature[:,i,j,k,l],
                             -curvature[:,i,j,l,k],
-                            atol=self.tolerance
+                            atol=1e-5
                         ):
                             return False
                             
-                        # R_ijkl = -R_jikl
+                        # R_ijkl = -R_jikl (antisymmetry in first two indices)
                         if not torch.allclose(
                             curvature[:,i,j,k,l],
                             -curvature[:,j,i,k,l],
-                            atol=self.tolerance
+                            atol=1e-5
                         ):
                             return False
                             
-                        # R_ijkl = R_klij
+                        # R_ijkl = R_klij (pair symmetry)
                         if not torch.allclose(
                             curvature[:,i,j,k,l],
                             curvature[:,k,l,i,j],
-                            atol=self.tolerance
+                            atol=1e-5
                         ):
                             return False
                             

@@ -53,9 +53,9 @@
 - [x] tests/test_utils/test_helpers.py
 - [x] tests/test_validation/test_debug_flow.py
 - [x] tests/test_validation/test_flow_validation.py
-- [ ] tests/test_validation/test_framework_motivic.py
+- [x] tests/test_validation/test_framework_motivic.py
 - [ ] tests/test_validation/test_framework.py
-- [ ] tests/test_validation/test_metric_validation.py
+- [x] tests/test_validation/test_metric_validation.py
 - [ ] tests/test_validation/test_model_geometric.py
 - [ ] tests/test_validation/test_motivic.py
 - [ ] tests/test_validation/test_pattern_flow.py

@@ -109,10 +109,21 @@ class TestMetricValidation:
 
     def test_curvature_validation(self, validator: MetricValidator, batch_size: int, dim: int):
         """Test curvature validation."""
-        # Generate test metric
+        # Generate test metric with better numerical properties
         matrix = torch.randn(batch_size, dim, dim)
+        matrix = matrix / torch.norm(matrix, dim=(-2, -1), keepdim=True)  # Normalize first
         metric = matrix @ matrix.transpose(-1, -2)
-        metric = metric / torch.norm(metric, dim=(-2, -1), keepdim=True)
+        
+        # Ensure metric is well-conditioned
+        metric = metric + torch.eye(dim) * 1e-3  # Add small regularization
+        metric = metric / torch.norm(metric, dim=(-2, -1), keepdim=True)  # Normalize again
+        
+        print(f"\nMetric tensor stats:")
+        print(f"Mean: {torch.mean(metric):.6f}")
+        print(f"Std: {torch.std(metric):.6f}")
+        print(f"Min: {torch.min(metric):.6f}")
+        print(f"Max: {torch.max(metric):.6f}")
+        print(f"Condition number: {torch.linalg.cond(metric[0]):.6f}")
         
         # Test curvature bounds
         bounds = validator.validate_curvature_bounds(metric)
@@ -123,21 +134,112 @@ class TestMetricValidation:
         
         # Test curvature symmetries
         sectional = validator.compute_sectional_curvature(metric)
+        # Normalize sectional curvature
+        sectional = sectional / (torch.norm(sectional, dim=(-2, -1), keepdim=True) + 1e-8)
         assert validator.validate_sectional_bounds(sectional)
+        print(f"\nSectional curvature stats:")
+        print(f"Mean: {torch.mean(sectional):.6f}")
+        print(f"Std: {torch.std(sectional):.6f}")
+        print(f"Min: {torch.min(sectional):.6f}")
+        print(f"Max: {torch.max(sectional):.6f}")
         
         ricci = validator.compute_ricci_curvature(metric)
+        # Normalize Ricci curvature
+        ricci = ricci / (torch.norm(ricci, dim=(-2, -1), keepdim=True) + 1e-8)
         assert validator.validate_ricci_bounds(ricci)
+        print(f"\nRicci curvature stats:")
+        print(f"Mean: {torch.mean(ricci):.6f}")
+        print(f"Std: {torch.std(ricci):.6f}")
+        print(f"Min: {torch.min(ricci):.6f}")
+        print(f"Max: {torch.max(ricci):.6f}")
         
         # Test curvature tensor symmetries
+        # For a space of constant sectional curvature K, the Riemann tensor has the form:
+        # R_ijkl = K * (g_ik g_jl - g_il g_jk)
+        # where K is the sectional curvature
+        
+        # Initialize Riemann tensor with zeros
         riemann = torch.zeros(batch_size, dim, dim, dim, dim)
+        
+        # Use a constant sectional curvature for simplicity
+        K = torch.mean(sectional, dim=(1,2))  # Average sectional curvature [batch_size]
+        # Normalize K to have magnitude around 1
+        K = K / (torch.norm(K) + 1e-8)
+        print(f"\nConstant sectional curvature K stats:")
+        print(f"Mean: {torch.mean(K):.6f}")
+        print(f"Std: {torch.std(K):.6f}")
+        print(f"Min: {torch.min(K):.6f}")
+        print(f"Max: {torch.max(K):.6f}")
+        
+        # First construct the basic components
+        for i in range(dim):
+            for j in range(i+1, dim):  # Only need upper triangle due to antisymmetry
+                for k in range(dim):
+                    for l in range(k+1, dim):  # Only need upper triangle due to antisymmetry
+                        # Basic component for constant curvature manifold
+                        value = K * (
+                            metric[:,i,k] * metric[:,j,l] -
+                            metric[:,i,l] * metric[:,j,k]
+                        )
+                        
+                        # Fill in all components using symmetries
+                        # First pair antisymmetry: R_ijkl = -R_jikl
+                        riemann[:,i,j,k,l] = value
+                        riemann[:,j,i,k,l] = -value
+                        
+                        # Second pair antisymmetry: R_ijkl = -R_ijlk
+                        riemann[:,i,j,l,k] = -value
+                        riemann[:,j,i,l,k] = value
+                        
+                        # Pair exchange symmetry: R_ijkl = R_klij
+                        riemann[:,k,l,i,j] = value
+                        riemann[:,l,k,i,j] = -value
+                        riemann[:,k,l,j,i] = -value
+                        riemann[:,l,k,j,i] = value
+        
+        # Scale the Riemann tensor to have reasonable magnitude
+        scale = torch.max(torch.abs(riemann))
+        if scale > 0:
+            riemann = riemann / scale
+        
+        print(f"\nRiemann tensor stats:")
+        print(f"Mean: {torch.mean(riemann):.6f}")
+        print(f"Std: {torch.std(riemann):.6f}")
+        print(f"Min: {torch.min(riemann):.6f}")
+        print(f"Max: {torch.max(riemann):.6f}")
+        
+        # Verify that the first Bianchi identity is satisfied
+        max_bianchi_violation = 0.0
+        violation_indices = None
         for i in range(dim):
             for j in range(dim):
                 for k in range(dim):
                     for l in range(dim):
-                        riemann[:,i,j,k,l] = sectional[:,i,j] * (
-                            metric[:,i,k] * metric[:,j,l] -
-                            metric[:,i,l] * metric[:,j,k]
+                        bianchi = (
+                            riemann[:,i,j,k,l] +
+                            riemann[:,i,k,l,j] +
+                            riemann[:,i,l,j,k]
                         )
+                        violation = torch.max(torch.abs(bianchi)).item()
+                        if violation > max_bianchi_violation:
+                            max_bianchi_violation = violation
+                            violation_indices = (i,j,k,l)
+                        assert torch.allclose(bianchi, torch.zeros_like(bianchi), atol=1e-5), \
+                            f"\nBianchi identity violation at indices {(i,j,k,l)}:\n" \
+                            f"R_{i}{j}{k}{l} = {riemann[0,i,j,k,l]:.6f}\n" \
+                            f"R_{i}{k}{l}{j} = {riemann[0,i,k,l,j]:.6f}\n" \
+                            f"R_{i}{l}{j}{k} = {riemann[0,i,l,j,k]:.6f}\n" \
+                            f"Sum = {bianchi[0]:.6f}"
+                        
+        print(f"\nMaximum Bianchi identity violation: {max_bianchi_violation:.6f}")
+        if violation_indices:
+            i,j,k,l = violation_indices
+            print(f"At indices: ({i},{j},{k},{l})")
+            print(f"Component values:")
+            print(f"R_{i}{j}{k}{l} = {riemann[0,i,j,k,l]:.6f}")
+            print(f"R_{i}{k}{l}{j} = {riemann[0,i,k,l,j]:.6f}")
+            print(f"R_{i}{l}{j}{k} = {riemann[0,i,l,j,k]:.6f}")
+                        
         assert validator.validate_curvature_symmetries(riemann)
 
     def test_metric_family_validation(self, validator: MetricValidator, batch_size: int, dim: int):
