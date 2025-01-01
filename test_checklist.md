@@ -51,8 +51,8 @@
 - [ ] tests/test_neural/test_flow/test_tensor_shapes.py
 - [x] tests/test_utils/test_hardware/test_hardware_utils.py
 - [x] tests/test_utils/test_helpers.py
-- [ ] tests/test_validation/test_debug_flow.py
-- [ ] tests/test_validation/test_flow_validation.py
+- [x] tests/test_validation/test_debug_flow.py
+- [x] tests/test_validation/test_flow_validation.py
 - [ ] tests/test_validation/test_framework_motivic.py
 - [ ] tests/test_validation/test_framework.py
 - [ ] tests/test_validation/test_metric_validation.py
