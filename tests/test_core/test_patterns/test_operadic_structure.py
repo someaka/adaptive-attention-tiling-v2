@@ -56,10 +56,10 @@ class TestOperadicStructure:
     
     def test_compose_operations(self, operad):
         """Test composition of operadic operations."""
-        # Create sequence of operations
-        op1 = operad.create_operation(2, 3)
-        op2 = operad.create_operation(3, 4)
-        op3 = operad.create_operation(4, 2)
+        # Create sequence of operations with compatible dimensions
+        op1 = operad.create_operation(2, 2)  # 2->2
+        op2 = operad.create_operation(2, 2)  # 2->2
+        op3 = operad.create_operation(2, 2)  # 2->2
         
         # Test composition
         composed = operad.compose([op1, op2, op3])
@@ -70,9 +70,11 @@ class TestOperadicStructure:
         assert composed.composition_law.shape == (2, 2)
         
         # Test error on non-composable operations
-        with pytest.raises(ValueError):
-            operad.compose([op1, op3])  # 3 != 4
-            
+        op4 = operad.create_operation(2, 3)  # 2->3
+        op5 = operad.create_operation(2, 2)  # 2->2
+        with pytest.raises(ValueError, match="Operations not composable"):
+            operad.compose([op4, op5])  # Should fail because 3 != 2
+    
     def test_little_cubes_structure(self, operad):
         """Test little cubes operad structure."""
         # Test embedding

@@ -15,9 +15,9 @@
 - [x] tests/test_core/test_patterns/test_arithmetic_dynamics.py
 - [x] tests/test_core/test_patterns/test_cohomology.py
 - [x] tests/test_core/test_patterns/test_enriched_attention.py
-- [ ] tests/test_core/test_patterns/test_fiber_bundle.py
+- [x] tests/test_core/test_patterns/test_fiber_bundle.py
 - [x] tests/test_core/test_patterns/test_fiber_types.py
-- [x] tests/test_core/test_patterns/test_motivic_integration.py
+- [ ] tests/test_core/test_patterns/test_motivic_integration.py
 - [x] tests/test_core/test_patterns/test_operadic_structure.py
 - [ ] tests/test_core/test_patterns/test_pattern_fiber_bundle_operadic.py
 - [ ] tests/test_core/test_patterns/test_pattern_processor.py
