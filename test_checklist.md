@@ -12,7 +12,7 @@
 - [x] tests/test_core/test_crystal/test_scale.py
 - [x] tests/test_core/test_flow/test_neural.py
 - [x] tests/test_core/test_pattern_processing.py
-- [ ] tests/test_core/test_patterns/test_arithmetic_dynamics.py
+- [x] tests/test_core/test_patterns/test_arithmetic_dynamics.py
 - [x] tests/test_core/test_patterns/test_cohomology.py
 - [ ] tests/test_core/test_patterns/test_enriched_attention.py
 - [ ] tests/test_core/test_patterns/test_fiber_bundle.py
