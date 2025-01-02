@@ -229,6 +229,17 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         result = torch.zeros(num_points, batch_size, self.fiber_dim, device=path.device, dtype=path.dtype)
         result[0] = section  # Initial condition
         
+        # Ensure path has correct base dimension
+        if path.shape[-1] != self.base_dim:
+            # If path has more dimensions, truncate
+            if path.shape[-1] > self.base_dim:
+                path = path[..., :self.base_dim]
+            else:
+                # If path has fewer dimensions, pad with zeros
+                padding = torch.zeros(*path.shape[:-1], self.base_dim - path.shape[-1], 
+                                   device=path.device, dtype=path.dtype)
+                path = torch.cat([path, padding], dim=-1)
+        
         # Compute path tangent vectors and normalize
         path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
         path_lengths = torch.norm(path_tangent, dim=-1, keepdim=True)
