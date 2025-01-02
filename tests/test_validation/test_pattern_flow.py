@@ -204,11 +204,10 @@ def test_pattern_creation(setup_test_parameters) -> None:
     # Create pattern with exact frequency
     freq = 1.0 / wavelength  # Convert wavelength to frequency in cycles per sample
     pattern = torch.zeros(1, 1, size, size, dtype=torch.float32)
-    x = torch.linspace(0, 1, size, dtype=torch.float32)  # Use normalized coordinates [0, 1]
+    x = torch.linspace(0, size-1, size, dtype=torch.float32)  # Use pixel coordinates [0, size-1]
 
-    # Calculate cycles based on normalized coordinates [0,1]
-    # Since x is normalized, cycles should be half of size/wavelength
-    cycles = (size / wavelength) / 2  # Number of cycles we want
+    # Calculate cycles based on pixel coordinates
+    cycles = freq  # Number of cycles per pixel
     
     # Create pattern with specified wavelength
     for i in range(size):

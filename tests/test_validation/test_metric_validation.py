@@ -78,6 +78,7 @@ class TestMetricValidation:
         base_metric = torch.eye(dim).unsqueeze(0).repeat(batch_size, 1, 1)
         compatible_metric = base_metric + 0.1 * torch.randn(batch_size, dim, dim)
         compatible_metric = (compatible_metric + compatible_metric.transpose(-1, -2)) / 2
+        compatible_metric = compatible_metric + torch.eye(dim).unsqueeze(0) * validator.eigenvalue_threshold
 
         # Test compatibility validation
         result = validator.validate_metric(compatible_metric)
@@ -86,10 +87,18 @@ class TestMetricValidation:
 
         # Test connection compatibility
         connection = validator.get_test_connection()
-        assert validator.validate_connection_compatibility(connection)
+        assert connection.shape == (1, dim, dim, dim), f"Connection shape {connection.shape} != expected (1, {dim}, {dim}, {dim})"
+        
+        # Ensure connection is numerically stable
+        assert torch.all(torch.isfinite(connection)), "Connection contains non-finite values"
+        assert torch.max(torch.abs(connection)) < 1.0, "Connection values too large"
+        
+        # Test compatibility
+        is_compatible = validator.validate_connection_compatibility(connection)
+        assert is_compatible, "Connection should be compatible with metric"
 
         # Test torsion
-        torsion = validator.compute_torsion(connection)
+        torsion = validator.compute_torsion(connection[0])  # Remove batch dim for torsion computation
         assert validator.validate_torsion_free(torsion)
 
     def test_fisher_rao_metric(self, validator: MetricValidator, batch_size: int, dim: int):

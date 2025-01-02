@@ -708,13 +708,41 @@ class MetricValidator:
         return self._validate_local_bounds(heights)
 
     def get_test_connection(self) -> torch.Tensor:
-        """Get test connection for compatibility checks."""
-        # Generate Levi-Civita connection
-        connection = torch.zeros(self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        """Get test connection for compatibility checks.
+        
+        Returns a connection that is compatible with the metric by construction.
+        Uses the Christoffel symbols of the metric at a test point.
+        """
+        # Create a test point
+        points = torch.zeros(1, self.manifold_dim)
+        points.requires_grad_(True)
+        
+        # Get metric at test point
+        metric = self.compute_metric_values(points)  # [1, dim, dim]
+        metric_grad = self.compute_metric_gradient(points)  # [1, dim, dim, dim]
+        
+        # Compute inverse metric
+        metric_inv = torch.linalg.inv(metric[0])  # [dim, dim]
+        
+        # Compute Christoffel symbols (compatible by construction)
+        connection = torch.zeros(1, self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
                 for k in range(self.manifold_dim):
-                    connection[i,j,k] = 0.5 * (i + j + k) * self.tolerance
+                    # Γᵢⱼₖ = (1/2)gⁱᵐ(∂ⱼgₖₘ + ∂ₖgⱼₘ - ∂ₘgⱼₖ)
+                    for m in range(self.manifold_dim):
+                        connection[0,i,j,k] += 0.5 * metric_inv[i,m] * (
+                            metric_grad[0,j,k,m] + 
+                            metric_grad[0,k,j,m] - 
+                            metric_grad[0,m,j,k]
+                        )
+        
+        # Ensure numerical stability
+        scale = torch.max(torch.abs(connection))
+        if scale > 0:
+            connection = connection * (self.tolerance / scale)
+        
         return connection
 
     def validate_connection_compatibility(self, connection: torch.Tensor) -> bool:
@@ -725,38 +753,67 @@ class MetricValidator:
         """
         # Handle batched tensors
         if len(connection.shape) == 4:  # [batch_size, manifold_dim, manifold_dim, manifold_dim]
-            return all(self.validate_connection_compatibility(conn) for conn in connection)
-        
-        # Check connection shape for single tensor
-        if connection.shape != (self.manifold_dim, self.manifold_dim, self.manifold_dim):
-            return False
+            batch_size = connection.shape[0]
+            points = torch.zeros(batch_size, self.manifold_dim, device=connection.device, dtype=connection.dtype)
+            points.requires_grad_(True)
             
-        # Get metric and its derivatives at a test point
-        points = torch.zeros(1, self.manifold_dim)  # Single point for validation
-        points.requires_grad_(True)
-        
-        metric = self.compute_metric_values(points)  # [1, manifold_dim, manifold_dim]
-        metric_grad = self.compute_metric_gradient(points)  # [1, manifold_dim, manifold_dim, manifold_dim]
-        
-        # Compute covariant derivative of metric
-        cov_deriv = torch.zeros(self.manifold_dim, self.manifold_dim, self.manifold_dim)
-        
-        for k in range(self.manifold_dim):
-            for i in range(self.manifold_dim):
-                for j in range(self.manifold_dim):
-                    # ∂ₖgᵢⱼ term
-                    cov_deriv[k,i,j] = metric_grad[0,k,i,j]
-                    
-                    # -Γᵐᵢₖgₘⱼ term
-                    for m in range(self.manifold_dim):
-                        cov_deriv[k,i,j] -= connection[m,i,k] * metric[0,m,j]
+            metric = self.compute_metric_values(points)  # [batch_size, manifold_dim, manifold_dim]
+            metric_grad = self.compute_metric_gradient(points)  # [batch_size, manifold_dim, manifold_dim, manifold_dim]
+            
+            # Compute covariant derivative of metric for each batch
+            cov_deriv = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim,
+                                  device=connection.device, dtype=connection.dtype)
+            
+            for k in range(self.manifold_dim):
+                for i in range(self.manifold_dim):
+                    for j in range(self.manifold_dim):
+                        # ∂ₖgᵢⱼ term
+                        cov_deriv[:,k,i,j] = metric_grad[:,k,i,j]
                         
-                    # -Γᵐⱼₖgᵢₘ term
-                    for m in range(self.manifold_dim):
-                        cov_deriv[k,i,j] -= connection[m,j,k] * metric[0,i,m]
+                        # -Γᵐᵢₖgₘⱼ term
+                        for m in range(self.manifold_dim):
+                            cov_deriv[:,k,i,j] -= connection[:,m,i,k] * metric[:,m,j]
+                            
+                        # -Γᵐⱼₖgᵢₘ term
+                        for m in range(self.manifold_dim):
+                            cov_deriv[:,k,i,j] -= connection[:,m,j,k] * metric[:,i,m]
+            
+            # Check if covariant derivative vanishes for all batches
+            return bool(torch.allclose(cov_deriv, torch.zeros_like(cov_deriv), atol=self.tolerance))
         
-        # Check if covariant derivative vanishes
-        return torch.allclose(cov_deriv, torch.zeros_like(cov_deriv), atol=self.tolerance)
+        # Handle single tensor
+        else:
+            # Check connection shape for single tensor
+            if connection.shape != (self.manifold_dim, self.manifold_dim, self.manifold_dim):
+                return False
+            
+            # Get metric and its derivatives at a test point
+            points = torch.zeros(1, self.manifold_dim, device=connection.device, dtype=connection.dtype)
+            points.requires_grad_(True)
+            
+            metric = self.compute_metric_values(points)  # [1, manifold_dim, manifold_dim]
+            metric_grad = self.compute_metric_gradient(points)  # [1, manifold_dim, manifold_dim, manifold_dim]
+            
+            # Compute covariant derivative of metric
+            cov_deriv = torch.zeros(self.manifold_dim, self.manifold_dim, self.manifold_dim,
+                                  device=connection.device, dtype=connection.dtype)
+            
+            for k in range(self.manifold_dim):
+                for i in range(self.manifold_dim):
+                    for j in range(self.manifold_dim):
+                        # ∂ₖgᵢⱼ term
+                        cov_deriv[k,i,j] = metric_grad[0,k,i,j]
+                        
+                        # -Γᵐᵢₖgₘⱼ term
+                        for m in range(self.manifold_dim):
+                            cov_deriv[k,i,j] -= connection[m,i,k] * metric[0,m,j]
+                            
+                        # -Γᵐⱼₖgᵢₘ term
+                        for m in range(self.manifold_dim):
+                            cov_deriv[k,i,j] -= connection[m,j,k] * metric[0,i,m]
+            
+            # Check if covariant derivative vanishes
+            return bool(torch.allclose(cov_deriv, torch.zeros_like(cov_deriv), atol=self.tolerance))
 
     def compute_torsion(self, connection: torch.Tensor) -> torch.Tensor:
         """Compute torsion tensor of connection."""

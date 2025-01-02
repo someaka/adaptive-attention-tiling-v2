@@ -1,73 +1,78 @@
-# Test configuration for debugging (absolute minimal settings)
-# Extends base.yaml with minimal values for debugging
+---
+# Debug test configuration extending base.yaml
+# This configuration is used for debugging and development
 
-# Hardware profile
-hardware_profile:
-  name: "debug"
-  description: "Extreme minimal configuration for debugging"
-  target_hardware:
-    ram_gb: 2
-  cpu: "minimal"
-  memory: "minimal"
+# Import base configuration
+defaults:
+  - base
 
-# Override base parameters with minimal values
+# Override parameters for debugging
 fiber_bundle:
-  base_dim: 2
-  fiber_dim: 2
-  batch_size: 2
-  dtype: "float32"
-  tolerance: 1e-2
+  batch_size: 16  # Smaller batch size for faster debugging
+  tolerance: 1.0e-4  # Looser tolerance for debugging
 
-# Fiber bundle test specific parameters
 fiber_bundle_tests:
-  structure_group_dim: 2
-  test_paths:
-    circular_points: 4
-    figure8_points: 8
-    max_angle: 2 * pi
-  test_vectors:
-    initial_norm: 1.0
-    perturbation_scale: 0.1
+  test_tolerances:
+    projection: 1.0e-4
+    trivialization: 1.0e-4
+    transition: 1.0e-4
+    connection: 1.0e-4
+    transport: 1.0e-3
+    metric: 1.0e-4
+    torsion_free: 1.0e-4
+    vertical_preservation: 1.0e-4
+    linearity: 1.0e-4
+    structure_group: 1.0e-4
+    skew_symmetry: 1.0e-4
+    lie_bracket: 1.0e-4
+    finite_diff: 1.0e-2
+    horizontal: 1.0e-3
+    path_independence: 1.0e-3
+    norm_preservation: 1.0e-3
+    loop_triviality: 1.0e-3
+    symmetry: 1.0e-4
+    metric_compatibility: 1.0e-4
 
 geometric_tests:
-  dimensions: 2
-  num_heads: 1
-  hidden_dim: 4
-  vector_scales: [0.01]
-  test_norms: [0.01]
+  dimensions: 2  # Smaller dimension for debugging
+  num_heads: 4  # Fewer heads for debugging
+  hidden_dim: 32  # Smaller hidden dimension
 
 parallel_transport:
-  methods: ["schild"]
-  test_cases: 1
-  section_batch_size: 1
-  path_points: 3
-  max_path_length: 1.0
+  test_cases: 5  # Fewer test cases
+  section_batch_size: 8
+  path_points: 50
 
 quantum_geometric:
-  fisher_rao_weight: 0.1
-  quantum_weight: 0.01
-  stress_energy_weight: 0.1
-  manifold_dim: 2
-  hidden_dim: 4
-  dt: 0.1
+  dt: 0.1  # Larger timestep for debugging
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
+  quantum_weight: 0.1  # Weight for quantum effects
+  stress_energy_weight: 0.5  # Weight for stress-energy tensor
 
 memory_management:
-  max_cached_tensors: 10
-  defrag_threshold: 0.5
-  gc_frequency: 10
-  tensor_lifecycle: "short"
+  max_cached_tensors: 100  # Smaller cache for debugging
+  defrag_threshold: 0.9
+  gc_frequency: 100
 
-# Quantum arithmetic parameters
 quantum_arithmetic:
-  dtype: "complex64"
+  dtype: float32  # Fixed data type for quantum operations
+  manifold_dim: 3  # Manifold dimension for quantum operations
+  hidden_dim: 32  # Hidden dimension for quantum operations
+  motive_rank: 2  # Rank of the motive
+  num_primes: 4  # Number of primes for arithmetic operations
+  batch_size: 16  # Batch size for quantum operations
+  min_scale: 1.0e-6  # Minimum scale for height computations
+  max_scale: 5.0  # Maximum scale for height computations
+  max_norm: 10.0  # Maximum norm for curvature bounds
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
   tolerances:
-    state_norm: 1e-2
-    phase_comparison: 1e-2
-    geometric_phase: 1e-2
-    quantum_metric: 1e-2
-    berry_connection: 1e-2
+    state_norm: 1.0e-5
+    phase_comparison: 1.0e-4
+    geometric_phase: 1.0e-3
+    quantum_metric: 1.0e-4
+    berry_connection: 1.0e-4
   validation:
-    max_iterations: 3
-    convergence_threshold: 1e-2
-    stability_threshold: 1e-2
-    entanglement_threshold: 0.5
+    max_iterations: 50
+    convergence_threshold: 1.0e-5
+    stability_threshold: 1.0e-4
+    entanglement_threshold: 0.8
