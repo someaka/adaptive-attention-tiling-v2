@@ -25,32 +25,23 @@ from src.validation.geometric.metric import (
     CurvatureBounds,
     MetricProperties
 )
-from tests.utils.config_loader import load_test_config
 
 class TestMetricValidation:
     """Test metric validation functionality."""
 
-    @pytest.fixture(scope="class")
-    def test_config(self):
-        """Load test configuration."""
-        return load_test_config()
+    @pytest.fixture
+    def batch_size(self) -> int:
+        return 16
 
     @pytest.fixture
-    def batch_size(self, test_config) -> int:
-        """Get batch size from config."""
-        return test_config["performance"]["batch_sizes"]["geometric"]
+    def dim(self) -> int:
+        return 8
 
     @pytest.fixture
-    def dim(self, test_config) -> int:
-        """Get manifold dimension from config."""
-        return test_config["geometric"]["manifold_dim"]
-
-    @pytest.fixture
-    def validator(self, test_config, dim: int) -> MetricValidator:
-        """Create metric validator with config settings."""
+    def validator(self, dim: int) -> MetricValidator:
         return MetricValidator(
             manifold_dim=dim,
-            tolerance=test_config["validation"]["tolerances"]["base"]
+            tolerance=1e-6
         )
 
     def test_positive_definite(

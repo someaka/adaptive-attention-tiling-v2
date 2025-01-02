@@ -1,8 +1,5 @@
-# Standard test configuration extending base.yaml
-# This configuration is for workstations with decent resources
-
-defaults:
-  - base
+# Test configuration for standard hardware (workstations with decent resources)
+# Contains only performance-related settings that override base.yaml
 
 # Hardware profile
 hardware_profile:
@@ -13,87 +10,34 @@ hardware_profile:
     cpu: "standard"
     memory: "standard"
 
-# Fiber bundle parameters
+# Performance-related parameters
 fiber_bundle:
-  batch_size: 128
-  tolerance: 1.0e-5
-  dimensions:
-    manifold: 3
-    fiber: 3
-    hidden: 64
-  parameters:
-    fisher_rao_weight: 0.5
-    quantum_weight: 0.1
-    stress_energy_weight: 0.5
-  validation:
-    max_iterations: 100
-    parallel_transport_methods: ["schild", "exponential"]
-    stability_threshold: 1.0e-5
+  batch_size: 32  # Reduced to prevent dimension overflow
 
-# Quantum geometric parameters
-quantum_geometric:
-  manifold_dim: 3
-  fiber_dim: 3
-  dt: 0.01
-  num_steps: 100
-  batch_size: 64
-  tolerance: 1.0e-5
-  stability_threshold: 1.0e-5
-  max_iterations: 100
-  learning_rate: 0.001
-  momentum: 0.9
-  weight_decay: 0.0001
-
-# Geometric test parameters
 geometric_tests:
-  dimensions: 3
-  hidden_dim: 64
-  batch_size: 64
-  num_samples: 1000
-  num_iterations: 100
-  learning_rate: 0.001
-  momentum: 0.9
-  weight_decay: 0.0001
-  tolerance: 1.0e-5
-  stability_threshold: 1.0e-5
+  batch_size: 32
+  max_samples: 1000
+  max_iterations: 100
 
-# Performance settings
-performance:
-  batch_sizes:
-    default: 128
-    geometric: 64
-    quantum: 64
-    section: 32
-  dimensions:
-    hidden: 64
-    heads: 8
-  test_cases:
-    parallel_transport: 10
-    path_points: 100
-  cache:
-    max_tensors: 1000
-    gc_frequency: 1000
+pattern_tests:
+  batch_size: 32
+  max_patterns: 128
+  pattern_size: 32  # Reduced to prevent dimension overflow
+  num_iterations: 200
 
-# Test paths
-test_paths:
-  circular_points: 100
-  figure8_points: 200
-  max_angle: 6.283185307179586  # 2 * pi
+parallel_transport:
+  batch_size: 16
+  path_points: 50  # Reduced to prevent dimension overflow
+  test_cases: 10
 
-# Test vectors
-test_vectors:
-  initial_norm: 1.0
-  perturbation_scale: 0.1
+memory_management:
+  max_cached_tensors: 5000
+  gc_frequency: 500
 
-# Numerical constants
-numerical_constants:
-  epsilons:
-    finite_diff: 1e-6
-    small_angle: 1e-4
-    tensor_compare: 1e-8
-  test_values:
-    small_loop_scale: 0.1
-    arc_angle: 0.7853981633974483  # pi/4
-    max_skew_error: 5e-5
-    max_torsion_error: 5e-5
-    max_group_error: 5e-5
+quantum_geometric:
+  dt: 0.005
+  batch_size: 32
+
+quantum_arithmetic:
+  batch_size: 32
+  max_iterations: 100

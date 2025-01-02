@@ -1,72 +1,78 @@
 ---
 # Debug test configuration extending base.yaml
-# This configuration is used for debugging and development with relaxed tolerances
+# This configuration is used for debugging and development
 
+# Import base configuration
 defaults:
   - base
 
-# Hardware profile
-hardware_profile:
-  name: "debug"
-  description: "Configuration for debugging and development"
-  target_hardware:
-    ram_gb: 8
-    cpu: "minimal"
-    memory: "minimal"
+# Override parameters for debugging
+fiber_bundle:
+  batch_size: 16  # Smaller batch size for faster debugging
+  tolerance: 1.0e-4  # Looser tolerance for debugging
 
-# Performance settings
-performance:
-  batch_sizes:
-    default: 16
-    geometric: 8
-    quantum: 8
-    section: 8
-  dimensions:
-    hidden: 32
-    heads: 4
-  test_cases:
-    parallel_transport: 5
-    path_points: 50
-  cache:
-    max_tensors: 100
-    gc_frequency: 100
+fiber_bundle_tests:
+  test_tolerances:
+    projection: 1.0e-4
+    trivialization: 1.0e-4
+    transition: 1.0e-4
+    connection: 1.0e-4
+    transport: 1.0e-3
+    metric: 1.0e-4
+    torsion_free: 1.0e-4
+    vertical_preservation: 1.0e-4
+    linearity: 1.0e-4
+    structure_group: 1.0e-4
+    skew_symmetry: 1.0e-4
+    lie_bracket: 1.0e-4
+    finite_diff: 1.0e-2
+    horizontal: 1.0e-3
+    path_independence: 1.0e-3
+    norm_preservation: 1.0e-3
+    loop_triviality: 1.0e-3
+    symmetry: 1.0e-4
+    metric_compatibility: 1.0e-4
 
-# Override validation tolerances for debugging
-validation:
+geometric_tests:
+  dimensions: 2  # Smaller dimension for debugging
+  num_heads: 4  # Fewer heads for debugging
+  hidden_dim: 32  # Smaller hidden dimension
+
+parallel_transport:
+  test_cases: 5  # Fewer test cases
+  section_batch_size: 8
+  path_points: 50
+
+quantum_geometric:
+  dt: 0.1  # Larger timestep for debugging
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
+  quantum_weight: 0.1  # Weight for quantum effects
+  stress_energy_weight: 0.5  # Weight for stress-energy tensor
+
+memory_management:
+  max_cached_tensors: 100  # Smaller cache for debugging
+  defrag_threshold: 0.9
+  gc_frequency: 100
+
+quantum_arithmetic:
+  dtype: float32  # Fixed data type for quantum operations
+  manifold_dim: 3  # Manifold dimension for quantum operations
+  hidden_dim: 32  # Hidden dimension for quantum operations
+  motive_rank: 2  # Rank of the motive
+  num_primes: 4  # Number of primes for arithmetic operations
+  batch_size: 16  # Batch size for quantum operations
+  min_scale: 1.0e-6  # Minimum scale for height computations
+  max_scale: 5.0  # Maximum scale for height computations
+  max_norm: 10.0  # Maximum norm for curvature bounds
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
   tolerances:
-    base: 1e-4
-    finite_diff: 1e-2
-    tensor_compare: 1e-6
-    small_angle: 1e-3
-    
-    # Fiber bundle tolerances
-    projection: 1e-4
-    trivialization: 1e-4
-    transition: 1e-4
-    connection: 1e-4
-    transport: 1e-3
-    metric: 1e-4
-    torsion_free: 1e-4
-    vertical_preservation: 1e-4
-    linearity: 1e-4
-    structure_group: 1e-4
-    skew_symmetry: 1e-4
-    lie_bracket: 1e-4
-    horizontal: 1e-3
-    path_independence: 1e-3
-    norm_preservation: 1e-3
-    loop_triviality: 1e-3
-    symmetry: 1e-4
-    metric_compatibility: 1e-4
-    
-    # Quantum tolerances
-    state_norm: 1e-5
-    phase_comparison: 1e-4
-    geometric_phase: 1e-3
-    quantum_metric: 1e-4
-    berry_connection: 1e-4
-    
-  thresholds:
-    convergence: 1e-5
-    stability: 1e-4
-    entanglement: 0.8
+    state_norm: 1.0e-5
+    phase_comparison: 1.0e-4
+    geometric_phase: 1.0e-3
+    quantum_metric: 1.0e-4
+    berry_connection: 1.0e-4
+  validation:
+    max_iterations: 50
+    convergence_threshold: 1.0e-5
+    stability_threshold: 1.0e-4
+    entanglement_threshold: 0.8

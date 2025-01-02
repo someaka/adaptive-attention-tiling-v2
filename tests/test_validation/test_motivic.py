@@ -4,6 +4,8 @@ import pytest
 import torch
 from torch import Tensor, nn
 from typing import Tuple, Callable, Optional
+import os
+import yaml
 
 from src.core.patterns.motivic_riemannian import (
     MotivicRiemannianStructure,
@@ -29,88 +31,17 @@ from src.validation.geometric.model import ModelGeometricValidator
 from src.validation.quantum.state import QuantumStateValidator
 from src.validation.patterns.stability import PatternValidator as StabilityValidator
 from src.core.models.base import ModelGeometry
-from tests.utils.config_loader import load_test_config
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def test_config():
-    """Load test configuration."""
-    return load_test_config()
-
-
-@pytest.fixture
-def motivic_structure(test_config):
-    """Create a motivic Riemannian structure for testing."""
-    return MockMotivicRiemannianStructure(
-        manifold_dim=test_config["geometric"]["manifold_dim"],
-        hidden_dim=test_config["performance"]["dimensions"]["hidden"],
-        motive_rank=test_config["geometric"]["motive_rank"],
-        num_primes=test_config["geometric"]["num_primes"]
-    )
-
-
-@pytest.fixture
-def points(test_config):
-    """Create test points."""
-    manifold_dim = test_config["geometric"]["manifold_dim"]
-    batch_size = test_config["performance"]["batch_sizes"]["geometric"]
-    points = torch.randn(batch_size, manifold_dim)
-    points.requires_grad_(True)  # Enable gradients
-    return points
-
-
-@pytest.fixture
-def validator(motivic_structure, test_config):
-    """Create a motivic Riemannian validator."""
-    return MotivicRiemannianValidator(
-        motivic_structure,
-        tolerance=test_config["validation"]["tolerances"]["base"]
-    )
-
-
-@pytest.fixture
-def mock_model_geometry(test_config):
-    """Create mock model geometry for testing."""
-    manifold_dim = test_config["geometric"]["manifold_dim"]
-    return MockModelGeometry(manifold_dim=manifold_dim)
-
-
-@pytest.fixture
-def geometric_validator(mock_model_geometry, test_config):
-    """Create geometric validator."""
-    return ModelGeometricValidator(
-        model_geometry=mock_model_geometry,
-        tolerance=test_config["validation"]["tolerances"]["base"],
-        curvature_bounds=(-1.0, 1.0)
-    )
-
-
-@pytest.fixture
-def quantum_validator(test_config):
-    """Create quantum validator."""
-    return QuantumStateValidator()
-
-
-@pytest.fixture
-def pattern_validator(test_config):
-    """Create pattern validator."""
-    tolerance = test_config["validation"]["tolerances"]["base"]
-    return StabilityValidator(
-        linear_validator=None,  # Mock implementation doesn't need these
-        nonlinear_validator=None,
-        lyapunov_threshold=tolerance,
-        perturbation_threshold=tolerance
-    )
-
-
-@pytest.fixture
-def validation_framework(geometric_validator, quantum_validator, pattern_validator):
-    """Create validation framework."""
-    return ValidationFramework(
-        geometric_validator=geometric_validator,
-        quantum_validator=quantum_validator,
-        pattern_validator=pattern_validator
-    )
+    """Load test configuration based on environment."""
+    config_name = os.environ.get("TEST_REGIME", "debug")
+    config_path = f"configs/test_regimens/{config_name}.yaml"
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return config
 
 
 class MockModelGeometry(ModelGeometry):
@@ -445,6 +376,77 @@ class MockMotivicRiemannianStructure(MotivicRiemannianStructure):
         return curvature
 
 
+@pytest.fixture
+def motivic_structure(test_config):
+    """Create a motivic Riemannian structure for testing."""
+    return MockMotivicRiemannianStructure(
+        manifold_dim=test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3,
+        hidden_dim=test_config["quantum_arithmetic"]["hidden_dim"] if "quantum_arithmetic" in test_config else 4,
+        motive_rank=test_config["quantum_arithmetic"]["motive_rank"] if "quantum_arithmetic" in test_config else 2,
+        num_primes=test_config["quantum_arithmetic"]["num_primes"] if "quantum_arithmetic" in test_config else 4
+    )
+
+
+@pytest.fixture
+def points(test_config):
+    """Create test points."""
+    manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
+    batch_size = test_config["quantum_arithmetic"]["batch_size"] if "quantum_arithmetic" in test_config else 10
+    points = torch.randn(batch_size, manifold_dim)
+    points.requires_grad_(True)  # Enable gradients
+    return points
+
+
+@pytest.fixture
+def validator(motivic_structure, test_config):
+    """Create a motivic Riemannian validator."""
+    return MotivicRiemannianValidator(
+        motivic_structure,
+        tolerance=test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
+    )
+
+
+@pytest.fixture
+def mock_model_geometry(test_config):
+    """Create mock model geometry for testing."""
+    manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
+    return MockModelGeometry(manifold_dim=manifold_dim)
+
+@pytest.fixture
+def geometric_validator(mock_model_geometry, test_config):
+    """Create geometric validator."""
+    return ModelGeometricValidator(
+        model_geometry=mock_model_geometry,
+        tolerance=test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6,
+        curvature_bounds=(-1.0, 1.0)
+    )
+
+@pytest.fixture
+def quantum_validator(test_config):
+    """Create quantum validator."""
+    return QuantumStateValidator()
+
+@pytest.fixture
+def pattern_validator(test_config):
+    """Create pattern validator."""
+    tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
+    return StabilityValidator(
+        linear_validator=None,  # Mock implementation doesn't need these
+        nonlinear_validator=None,
+        lyapunov_threshold=tolerance,
+        perturbation_threshold=tolerance
+    )
+
+@pytest.fixture
+def validation_framework(geometric_validator, quantum_validator, pattern_validator):
+    """Create validation framework."""
+    return ValidationFramework(
+        geometric_validator=geometric_validator,
+        quantum_validator=quantum_validator,
+        pattern_validator=pattern_validator
+    )
+
+
 class TestHeightValidation:
     """Test suite specifically for height validation."""
     
@@ -480,11 +482,11 @@ class TestHeightValidation:
     def test_strictly_increasing_heights(self, motivic_structure, test_config):
         """Test that heights are strictly increasing."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
-        manifold_dim = test_config["geometric"]["manifold_dim"]
-        batch_size = test_config["performance"]["batch_sizes"]["geometric"]
-        min_scale = test_config["geometric"]["min_scale"]
-        max_scale = test_config["geometric"]["max_scale"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
+        manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
+        batch_size = test_config["quantum_arithmetic"]["batch_size"] if "quantum_arithmetic" in test_config else 5
+        min_scale = test_config["quantum_arithmetic"]["min_scale"] if "quantum_arithmetic" in test_config else 1.0
+        max_scale = test_config["quantum_arithmetic"]["max_scale"] if "quantum_arithmetic" in test_config else 5.0
         
         # Create sequence of points with increasing norms
         points = torch.randn(batch_size, manifold_dim)
@@ -512,8 +514,8 @@ class TestHeightValidation:
     def test_height_edge_cases(self, motivic_structure, test_config):
         """Test height validation with edge cases."""
         validator = MotivicValidator()
-        manifold_dim = test_config["geometric"]["manifold_dim"]
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         
         # Test single point
         single_point = torch.randn(1, manifold_dim)
@@ -572,8 +574,8 @@ class TestHeightValidation:
     def test_invalid_height_cases(self, test_config):
         """Test cases where height validation should fail."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
-        manifold_dim = test_config["geometric"]["manifold_dim"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
+        manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
         
         # Test negative height
         invalid_height = torch.tensor([-1.0, 0.0, 1.0])
@@ -622,7 +624,7 @@ class TestDynamicsValidation:
     def test_basic_dynamics_properties(self, motivic_structure, points, test_config):
         """Test basic arithmetic dynamics properties."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         connection = motivic_structure.compute_christoffel(points)
         
         result = validator.validate_dynamics(connection)
@@ -648,7 +650,7 @@ class TestDynamicsValidation:
     def test_dynamics_consistency(self, motivic_structure, points, test_config):
         """Test consistency of arithmetic dynamics."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         connection = motivic_structure.compute_christoffel(points)
         
         # Check that dynamics preserves structure
@@ -686,8 +688,8 @@ class TestDynamicsValidation:
     def test_dynamics_edge_cases(self, motivic_structure, test_config):
         """Test dynamics validation with edge cases."""
         validator = MotivicValidator()
-        manifold_dim = test_config["geometric"]["manifold_dim"]
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         
         # Test single point
         single_point = torch.randn(1, manifold_dim)
@@ -740,7 +742,7 @@ class TestDynamicsValidation:
     def test_invalid_dynamics_cases(self, motivic_structure, points, test_config):
         """Test cases where dynamics validation should fail."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         connection = motivic_structure.compute_christoffel(points)
         
         # Test with no dynamics state
@@ -783,7 +785,7 @@ class TestCohomologyValidation:
     def test_basic_cohomology_properties(self, motivic_structure, points, test_config):
         """Test basic cohomology properties."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         metric = motivic_structure.compute_metric(points)
         connection = motivic_structure.compute_christoffel(points)
         curvature = motivic_structure.compute_curvature(points, connection)
@@ -844,7 +846,7 @@ class TestCohomologyValidation:
     def test_curvature_bounds(self, motivic_structure, points, test_config):
         """Test that curvature satisfies required bounds."""
         validator = MotivicValidator()
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         metric = motivic_structure.compute_metric(points)
         connection = motivic_structure.compute_christoffel(points)
         curvature = motivic_structure.compute_curvature(points, connection)
@@ -865,7 +867,7 @@ class TestCohomologyValidation:
         ricci_norm = torch.norm(curvature.ricci.reshape(points.size(0), -1), dim=1)
         scalar_norm = torch.abs(curvature.scalar_curvatures)
         
-        max_norm = test_config["geometric"]["max_norm"]
+        max_norm = test_config["quantum_arithmetic"]["max_norm"] if "quantum_arithmetic" in test_config else 10.0
         assert torch.all(riemann_norm < max_norm), f"Riemann tensor norm too large: {riemann_norm.max().item()}"
         assert torch.all(ricci_norm < max_norm), f"Ricci tensor norm too large: {ricci_norm.max().item()}"
         assert torch.all(scalar_norm < max_norm), f"Scalar curvature too large: {scalar_norm.max().item()}"
@@ -873,8 +875,8 @@ class TestCohomologyValidation:
     def test_cohomology_edge_cases(self, motivic_structure, test_config):
         """Test cohomology validation with edge cases."""
         validator = MotivicValidator()
-        manifold_dim = test_config["geometric"]["manifold_dim"]
-        tolerance = test_config["validation"]["tolerances"]["state_norm"]
+        manifold_dim = test_config["quantum_arithmetic"]["manifold_dim"] if "quantum_arithmetic" in test_config else 3
+        tolerance = test_config["quantum_arithmetic"]["tolerances"]["state_norm"] if "quantum_arithmetic" in test_config else 1e-6
         
         # Test single point
         single_point = torch.randn(1, manifold_dim)
