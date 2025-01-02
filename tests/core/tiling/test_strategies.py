@@ -45,10 +45,7 @@ def attention_tile(device: str) -> AttentionTileFixture:
     """Create an attention tile fixture."""
     return AttentionTileFixture(input_dim=128, hidden_dim=128, device=device)
 
-@pytest.mark.dependency(name="test_tile_dimensions")
-@pytest.mark.order(1)
-@pytest.mark.tiling
-@pytest.mark.level0
+
 def test_tile_dimensions(attention_tile):
     """Test tile dimension properties. Level 0: Only depends on basic attribute access."""
     # Test input and hidden dimensions
@@ -57,10 +54,7 @@ def test_tile_dimensions(attention_tile):
     assert attention_tile.input_dim > 0
     assert attention_tile.hidden_dim > 0
 
-@pytest.mark.dependency(depends=["test_tile_dimensions"])
-@pytest.mark.order(2)
-@pytest.mark.tiling
-@pytest.mark.level1
+
 def test_tile_output_shape(attention_tile):
     """Test tile output shapes. Level 1: Depends on tile dimensions."""
     # Test with different batch sizes
@@ -75,19 +69,13 @@ def test_tile_output_shape(attention_tile):
         assert output.shape == (batch_size, seq_len, attention_tile.hidden_dim)
         assert output.device.type == attention_tile.device
 
-@pytest.mark.dependency(depends=["test_tile_dimensions", "test_tile_output_shape"])
-@pytest.mark.order(3)
-@pytest.mark.tiling
-@pytest.mark.level2
+
 def test_attention_tile_cpu(attention_tile, test_inputs):
     """Test attention tile on CPU. Level 2: Depends on tile dimensions and shape validation."""
     output = attention_tile.process(test_inputs)
     assert output.shape == test_inputs.shape
 
-@pytest.mark.dependency(depends=["test_tile_dimensions", "test_tile_output_shape"])
-@pytest.mark.order(4)
-@pytest.mark.tiling
-@pytest.mark.level2
+
 def test_state_management(attention_tile, test_inputs):
     """Test state management. Level 2: Depends on tile dimensions and shape validation."""
     state = torch.randn(1, 128, 128)
