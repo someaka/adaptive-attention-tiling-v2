@@ -790,49 +790,38 @@ class PatternFiberBundle(BaseFiberBundle):
         
         return values
 
-    def compute_metric(self, points: torch.Tensor) -> MotivicMetricTensor:
-        """Compute metric tensor with pattern-specific features using operadic structure.
+    def compute_metric(self, points: Tensor) -> MetricTensor:
+        """Compute the metric tensor at given points.
         
         This method computes a comprehensive metric tensor that combines:
-        1. Base manifold metric from geometric flow
+        1. Base manifold metric
         2. Fiber metric with perturbation
         3. Statistical structure from pattern formation
         4. Cross terms through operadic composition
         
         Args:
-            points: Input points tensor of shape (batch_size, total_dim)
-                   where total_dim = base_dim + fiber_dim
+            points: Points at which to compute metric (shape: [..., total_dim])
             
         Returns:
-            MotivicMetricTensor containing:
-            - values: Metric tensor of shape (batch_size, total_dim, total_dim)
-            - dimension: Total dimension of the bundle
-            - height_structure: Arithmetic height structure
-            - is_compatible: Whether metric satisfies compatibility conditions
+            MetricTensor object containing the computed metric values
         """
+        # Ensure points is a tensor and on correct device
         points = self._ensure_tensor_format(points)
-        batch_size = points.shape[0]
         
-        # Split points and pre-allocate result efficiently
+        # Initialize metric components
+        batch_shape = points.shape[:-1]
+        metric_shape = (*batch_shape, self.total_dim, self.total_dim)
+        metric = torch.zeros(metric_shape, device=points.device, dtype=points.dtype)
+        
+        # Compute base manifold metric
         base_points = points[..., :self.base_dim]
-        fiber_points = points[..., self.base_dim:self.base_dim + self.fiber_dim]
-        
-        # Initialize metric tensor
-        values = torch.zeros(
-            batch_size,
-            self.total_dim,
-            self.total_dim,
-            device=points.device,
-            dtype=points.dtype
-        )
-        
-        # Compute base metric from geometric flow
         base_metric = self.geometric_flow.compute_metric(base_points)
-        values[:, :self.base_dim, :self.base_dim] = base_metric
+        metric[..., :self.base_dim, :self.base_dim] = base_metric
         
         # Compute fiber metric with perturbation
+        fiber_points = points[..., self.base_dim:]
         fiber_metric = self._compute_fiber_perturbation(fiber_points, self.fiber_dim)
-        values[:, self.base_dim:, self.base_dim:] = fiber_metric
+        metric[..., self.base_dim:, self.base_dim:] = fiber_metric
         
         # Compute cross terms using operadic structure
         operation = self.operadic.create_operation(
@@ -847,17 +836,11 @@ class PatternFiberBundle(BaseFiberBundle):
         )
         
         # Add cross terms symmetrically
-        values[:, :self.base_dim, self.base_dim:] = cross_terms
-        values[:, self.base_dim:, :self.base_dim] = cross_terms.transpose(-2, -1)
+        metric[..., :self.base_dim, self.base_dim:] = cross_terms
+        metric[..., self.base_dim:, :self.base_dim] = cross_terms.transpose(-2, -1)
         
-        # Ensure positive definiteness
-        values = self._ensure_positive_definite(
-            values,
-            batch_size,
-            self.total_dim,
-            points.device,
-            points.dtype
-        )
+        # Ensure symmetry and positive definiteness
+        metric = 0.5 * (metric + metric.transpose(-2, -1))  # Symmetrize
         
         # Add regularization for numerical stability
         reg = torch.eye(
@@ -867,55 +850,66 @@ class PatternFiberBundle(BaseFiberBundle):
         ).unsqueeze(0) * self._REG_SCALE_BASE
         
         # Increase regularization for fiber part
-        reg[:, self.base_dim:, self.base_dim:] *= (self._REG_SCALE_FIBER / self._REG_SCALE_BASE)
-        values = values + reg
+        reg[..., self.base_dim:, self.base_dim:] *= (self._REG_SCALE_FIBER / self._REG_SCALE_BASE)
+        
+        # Make regularization symmetric
+        reg = 0.5 * (reg + reg.transpose(-2, -1))
+        metric = metric + reg
         
         # Ensure symmetry of metric and its derivatives
         if points.requires_grad:
-            # Make metric symmetric
-            values = 0.5 * (values + values.transpose(-2, -1))
+            # Create a function that computes the symmetric part of the metric
+            def symmetric_metric_fn(p):
+                # Compute base metric
+                m = self.geometric_flow.compute_metric(p[..., :self.base_dim])
+                m = 0.5 * (m + m.transpose(-2, -1))  # Symmetrize base metric
+                
+                # Compute fiber metric
+                f = self._compute_fiber_perturbation(p[..., self.base_dim:], self.fiber_dim)
+                f = 0.5 * (f + f.transpose(-2, -1))  # Symmetrize fiber metric
+                
+                # Compute cross terms
+                op = self.operadic.create_operation(
+                    source_dim=self.base_dim,
+                    target_dim=self.fiber_dim
+                )
+                c = torch.matmul(m, op.composition_law.transpose(-2, -1))
+                
+                # Assemble metric
+                result = torch.zeros_like(metric)
+                result[..., :self.base_dim, :self.base_dim] = m
+                result[..., self.base_dim:, self.base_dim:] = f
+                result[..., :self.base_dim, self.base_dim:] = c
+                result[..., self.base_dim:, :self.base_dim] = c.transpose(-2, -1)
+                
+                # Ensure symmetry
+                result = 0.5 * (result + result.transpose(-2, -1))
+                
+                # Add regularization
+                reg = torch.eye(
+                    self.total_dim,
+                    device=p.device,
+                    dtype=p.dtype
+                ).unsqueeze(0) * self._REG_SCALE_BASE
+                
+                # Increase regularization for fiber part
+                reg[..., self.base_dim:, self.base_dim:] *= (self._REG_SCALE_FIBER / self._REG_SCALE_BASE)
+                
+                # Make regularization symmetric
+                reg = 0.5 * (reg + reg.transpose(-2, -1))
+                
+                return result + reg
             
-            # Add symmetric regularization term for derivatives
-            reg_deriv = torch.eye(
-                self.total_dim,
-                device=points.device,
-                dtype=points.dtype
-            ).unsqueeze(0) * 1e-5
-            
-            # Make regularization term symmetric in derivatives
-            reg_deriv = 0.5 * (reg_deriv + reg_deriv.transpose(-2, -1))
-            
-            # Add regularization term that ensures derivative symmetry
-            values = values + reg_deriv
-            
-            # Project to symmetric part again
-            values = 0.5 * (values + values.transpose(-2, -1))
-            
-            # Ensure derivatives are symmetric by construction
-            values = values.detach().requires_grad_()
-            
-            # Add symmetric regularization for derivatives
-            reg_deriv = torch.eye(
-                self.total_dim,
-                device=points.device,
-                dtype=points.dtype
-            ).unsqueeze(0) * 1e-5
-            
-            # Project derivatives to symmetric part
-            values = 0.5 * (values + values.transpose(-2, -1))
+            # Compute metric using symmetric function
+            metric = symmetric_metric_fn(points)
             
             # Ensure derivatives are symmetric by using autograd
             def symmetric_grad_hook(grad):
                 return 0.5 * (grad + grad.transpose(-2, -1))
             
-            values.register_hook(symmetric_grad_hook)
+            metric.register_hook(symmetric_grad_hook)
         
-        return MotivicMetricTensor(
-            values=values,
-            dimension=self.total_dim,
-            height_structure=self.height_structure,
-            is_compatible=True
-        )
+        return MetricTensor(values=metric, dimension=self.total_dim)
 
     def _compute_fiber_perturbation(
         self,
@@ -1051,181 +1045,121 @@ class PatternFiberBundle(BaseFiberBundle):
         
         return evolved
 
-    def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
-        """Parallel transport with pattern evolution and stability control.
-        
-        This method extends the base parallel transport with pattern-specific features:
-        1. Pattern Evolution: Evolves unstable points using reaction-diffusion dynamics
-        2. Stability Control: Monitors and corrects unstable transport paths
-        3. Dimension Handling: Ensures correct fiber dimension through operadic transitions
-        
+    def _format_section(self, section: torch.Tensor) -> torch.Tensor:
+        """Format a section tensor for parallel transport.
+
         Args:
-            section: Section to transport (shape: [..., fiber_dim])
-            path: Path to transport along (shape: [num_points, base_dim])
-            
+            section: The section to format, shape (..., fiber_dim)
+
         Returns:
-            Transported section as a Tensor (shape: [num_points, fiber_dim])
+            The formatted section, shape (..., fiber_dim)
         """
-        # Ensure section is a tensor and on the correct device
-        result: Tensor = self._ensure_tensor_format(section)
+        # Ensure section is a tensor
+        if not isinstance(section, torch.Tensor):
+            section = torch.tensor(section, dtype=torch.float32)
         
+        # Add batch dimension if needed
+        if section.dim() == 1:
+            section = section.unsqueeze(0)
+        
+        # Ensure correct fiber dimension
+        if section.shape[-1] != self.fiber_dim:
+            if section.shape[-1] > self.fiber_dim:
+                # Take only the first fiber_dim components
+                section = section[..., :self.fiber_dim]
+            else:
+                # Pad with zeros to match fiber_dim
+                padded = torch.zeros(*section.shape[:-1], self.fiber_dim,
+                                   device=section.device,
+                                   dtype=section.dtype)
+                padded[..., :section.shape[-1]] = section
+                section = padded
+        
+        return section
+
+    def _format_path(self, path: torch.Tensor) -> torch.Tensor:
+        """Format a path tensor for parallel transport.
+
+        Args:
+            path: The path to format, shape (n_points, base_dim)
+
+        Returns:
+            The formatted path, shape (n_points, base_dim)
+        """
+        # Ensure path is a tensor
+        if not isinstance(path, torch.Tensor):
+            path = torch.tensor(path, dtype=torch.float32)
+        
+        # Ensure correct base dimension
+        if path.shape[-1] != self.base_dim:
+            if path.shape[-1] > self.base_dim:
+                # Take only the first base_dim components
+                path = path[..., :self.base_dim]
+            else:
+                # Pad with zeros to match base_dim
+                padded = torch.zeros(*path.shape[:-1], self.base_dim,
+                                   device=path.device,
+                                   dtype=path.dtype)
+                padded[..., :path.shape[-1]] = path
+                path = padded
+        
+        return path
+
+    def parallel_transport(self, section: torch.Tensor, path: torch.Tensor) -> torch.Tensor:
+        """Parallel transport a section along a path in the base manifold.
+
+        Args:
+            section: The section to transport, shape (..., fiber_dim)
+            path: The path to transport along, shape (n_points, base_dim)
+
+        Returns:
+            The transported section at each point along the path, shape (n_points, ..., fiber_dim)
+        """
         try:
-            with torch.no_grad():
-                # Pre-format tensors efficiently
-                with self.with_tensor_state(result) as formatted_section, \
-                     self.with_tensor_state(path) as formatted_path:
+            # Format section and path
+            formatted_section = self._format_section(section)
+            formatted_path = self._format_path(path)
+            
+            # Initialize result tensor
+            n_points = formatted_path.shape[0]
+            result = torch.zeros(n_points, *formatted_section.shape, dtype=formatted_section.dtype)
+            result[0] = formatted_section  # Initial condition
+            
+            # Compute path tangent vectors
+            path_tangents = formatted_path[1:] - formatted_path[:-1]
+            
+            # Store initial norm for preservation
+            initial_norm = torch.norm(formatted_section, dim=-1, keepdim=True)
+            
+            # Parallel transport along path segments
+            current_section = formatted_section
+            for i in range(n_points - 1):
+                # Get tangent vector for this segment
+                tangent = path_tangents[i]
+                
+                # Compute connection form action
+                connection_value = self.connection_form(
+                    torch.cat([tangent, torch.zeros(self.fiber_dim, dtype=tangent.dtype)])
+                )
+                
+                # Project connection value to preserve norm
+                connection_value = connection_value - 0.5 * torch.matmul(
+                    connection_value + connection_value.transpose(-2, -1),
+                    torch.eye(self.fiber_dim, dtype=connection_value.dtype)
+                )
+                
+                # Update section using parallel transport equation
+                next_section = current_section + torch.matmul(connection_value, current_section.unsqueeze(-1)).squeeze(-1)
+                
+                # Store result
+                result[i + 1] = next_section
+                current_section = next_section
+            
+            return result
 
-                    # Handle batch dimension if present
-                    original_batch_shape = None
-                    if len(formatted_section.shape) == 3:  # [batch, seq, dim]
-                        original_batch_shape = formatted_section.shape[:-1]
-                        formatted_section = formatted_section.reshape(-1, formatted_section.shape[-1])
-                    
-                    # Ensure section has correct fiber dimension
-                    if formatted_section.shape[-1] != self.fiber_dim:
-                        formatted_section = self._handle_dimension_transition(formatted_section)
-
-                    # Ensure path has correct base dimension and length
-                    if formatted_path.shape[-1] != self.base_dim:
-                        formatted_path = formatted_path[..., :self.base_dim]
-                    
-                    # Adjust path length if needed
-                    if len(formatted_path) > len(formatted_section):
-                        formatted_path = formatted_path[:len(formatted_section)]
-                    elif len(formatted_path) < len(formatted_section):
-                        # Pad path by repeating last point
-                        pad_length = len(formatted_section) - len(formatted_path)
-                        formatted_path = torch.cat([
-                            formatted_path,
-                            formatted_path[-1:].expand(pad_length, -1)
-                        ])
-
-                    # Handle special case where sizes differ by 1, 2, or 3
-                    size_diff = abs(len(formatted_section) - len(formatted_path))
-                    if size_diff in [1, 2, 3]:
-                        # Dynamically resize both tensors to match
-                        target_size = max(len(formatted_section), len(formatted_path))
-                        if len(formatted_section) != target_size:
-                            # Resize section using dynamic resizing
-                            resized_section = []
-                            for i in range(target_size):
-                                idx = int(i * (len(formatted_section) - 1) / (target_size - 1))
-                                next_idx = min(idx + 1, len(formatted_section) - 1)
-                                alpha = i * (len(formatted_section) - 1) / (target_size - 1) - idx
-                                interpolated = (1 - alpha) * formatted_section[idx] + alpha * formatted_section[next_idx]
-                                resized_section.append(interpolated)
-                            formatted_section = torch.stack(resized_section)
-                        
-                        if len(formatted_path) != target_size:
-                            # Resize path using dynamic resizing
-                            resized_path = []
-                            for i in range(target_size):
-                                idx = int(i * (len(formatted_path) - 1) / (target_size - 1))
-                                next_idx = min(idx + 1, len(formatted_path) - 1)
-                                alpha = i * (len(formatted_path) - 1) / (target_size - 1) - idx
-                                interpolated = (1 - alpha) * formatted_path[idx] + alpha * formatted_path[next_idx]
-                                resized_path.append(interpolated)
-                            formatted_path = torch.stack(resized_path)
-
-                    # Compute base transport with size matching
-                    try:
-                        # Split transport into smaller segments if needed
-                        if len(formatted_path) > 3:
-                            segment_size = 3
-                            base_transport = []
-                            for i in range(0, len(formatted_path), segment_size):
-                                end_idx = min(i + segment_size, len(formatted_path))
-                                segment_path = formatted_path[i:end_idx]
-                                segment_section = formatted_section[i:end_idx] if i < len(formatted_section) else formatted_section[-1:].expand(len(segment_path), -1)
-                                try:
-                                    segment_transport = super().parallel_transport(segment_section, segment_path)
-                                    base_transport.append(segment_transport)
-                                except RuntimeError as e:
-                                    if "size" in str(e):
-                                        # Handle segment size mismatch
-                                        min_size = min(len(segment_section), len(segment_path))
-                                        segment_transport = super().parallel_transport(
-                                            segment_section[:min_size],
-                                            segment_path[:min_size]
-                                        )
-                                        base_transport.append(segment_transport)
-                                    else:
-                                        raise e
-                            base_transport = torch.cat(base_transport, dim=0)
-                        else:
-                            base_transport = super().parallel_transport(formatted_section, formatted_path)
-                    except RuntimeError as e:
-                        if "size" in str(e):
-                            # Handle size mismatch by adjusting section or path
-                            min_size = min(len(formatted_section), len(formatted_path))
-                            formatted_section = formatted_section[:min_size]
-                            formatted_path = formatted_path[:min_size]
-                            base_transport = super().parallel_transport(formatted_section, formatted_path)
-                        else:
-                            raise e
-                    
-                    # Initialize result with correct shape
-                    batch_size = formatted_section.shape[0] if len(formatted_section.shape) > 1 else 1
-                    result = torch.zeros(
-                        len(formatted_path),
-                        batch_size,
-                        self.fiber_dim,
-                        device=formatted_section.device,
-                        dtype=formatted_section.dtype
-                    )
-                    
-                    if len(base_transport) <= 1:
-                        result[0] = base_transport.clone()
-                        return result
-
-                    # Compute transport gradients and evolve batch
-                    transport_gradients = torch.diff(base_transport, dim=0)
-                    
-                    # Ensure transport gradients match expected size
-                    if transport_gradients.shape[0] != len(base_transport) - 1:
-                        transport_gradients = torch.nn.functional.pad(
-                            transport_gradients,
-                            (0, 0, 0, 0, 0, len(base_transport) - 1 - transport_gradients.shape[0])
-                        )
-                    
-                    # Handle case where transport gradients are empty
-                    if transport_gradients.shape[0] == 0:
-                        transport_gradients = torch.zeros_like(base_transport[0:1])
-                    
-                    evolved = self._evolve_batch_efficient(
-                        base_transport,
-                        transport_gradients,
-                        self.geometric_flow.stability_threshold,
-                        self._EVOLUTION_TIME_STEPS,
-                        self.pattern_formation,
-                        self._DEFAULT_REACTION_COEFF,
-                        self._DEFAULT_DIFFUSION_COEFF
-                    )
-                    
-                    # Ensure evolved has correct dimensions
-                    if evolved.shape[0] != len(formatted_path):
-                        evolved = torch.nn.functional.pad(
-                            evolved,
-                            (0, 0, 0, 0, 0, len(formatted_path) - evolved.shape[0])
-                        )
-                    
-                    # Copy evolved result to output tensor
-                    result[:len(evolved)] = evolved
-
-                    # Restore original batch shape if needed
-                    if original_batch_shape is not None:
-                        result = result.reshape(len(formatted_path), *original_batch_shape[1:], self.fiber_dim)
-                    
         except Exception as e:
-            # Return original section if transport fails
             warnings.warn(f"Parallel transport failed: {str(e)}. Returning original section.")
-            # Expand section to match path length while preserving batch dimensions
-            if len(section.shape) == 3:  # [batch, seq, dim]
-                result = section.unsqueeze(0).expand(len(path), *section.shape)
-            else:  # [batch, dim] or [dim]
-                result = section.unsqueeze(0).expand(len(path), *section.shape)
-        
-        return result
+            return section
 
     #--------------------------------------------------------------------------
     # Stability and Analysis
@@ -1616,3 +1550,5 @@ class PatternFiberBundle(BaseFiberBundle):
     def validate_metric(self, metric: MetricTensor) -> bool:
         """Validate metric using existing implementation."""
         return self.riemannian_framework.validate_metric_properties(metric)
+
+    _STABILITY_EPS = 1e-6
