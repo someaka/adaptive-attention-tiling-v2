@@ -865,7 +865,7 @@ class PatternFiberBundle(BaseFiberBundle):
         values[:, :self.base_dim, self.base_dim:] = cross_terms
         values[:, self.base_dim:, :self.base_dim] = cross_terms.transpose(-2, -1)
         
-        # Ensure positive definiteness
+        # Ensure positive definiteness and symmetry
         values = self._ensure_positive_definite(
             values,
             batch_size,
@@ -890,24 +890,35 @@ class PatternFiberBundle(BaseFiberBundle):
             # Make metric symmetric
             values = 0.5 * (values + values.transpose(-2, -1))
             
-            # Add symmetric regularization term for derivatives
-            reg_deriv = torch.eye(
-                self.total_dim,
-                device=points.device,
-                dtype=points.dtype
-            ).unsqueeze(0) * 1e-5
+            # Create a symmetric function that computes the metric
+            def symmetric_metric_fn(p):
+                # Compute base components
+                base_p = p[..., :self.base_dim]
+                fiber_p = p[..., self.base_dim:self.base_dim + self.fiber_dim]
+                
+                # Compute base metric
+                base_m = self.geometric_flow.compute_metric(base_p)
+                
+                # Compute fiber metric
+                fiber_m = self._compute_fiber_perturbation(fiber_p, self.fiber_dim)
+                
+                # Initialize result
+                result = torch.zeros_like(values)
+                result[..., :self.base_dim, :self.base_dim] = base_m
+                result[..., self.base_dim:, self.base_dim:] = fiber_m
+                
+                # Add cross terms symmetrically
+                cross = torch.matmul(base_m, operation.composition_law.transpose(-2, -1))
+                result[..., :self.base_dim, self.base_dim:] = cross
+                result[..., self.base_dim:, :self.base_dim] = cross.transpose(-2, -1)
+                
+                # Ensure symmetry
+                result = 0.5 * (result + result.transpose(-2, -1))
+                
+                return result
             
-            # Make regularization term symmetric in derivatives
-            reg_deriv = 0.5 * (reg_deriv + reg_deriv.transpose(-2, -1))
-            
-            # Add regularization term that ensures derivative symmetry
-            values = values + reg_deriv
-            
-            # Project to symmetric part again
-            values = 0.5 * (values + values.transpose(-2, -1))
-            
-            # Ensure derivatives are symmetric by construction
-            values = values.detach().requires_grad_()
+            # Compute metric using symmetric function
+            values = symmetric_metric_fn(points)
             
             # Add symmetric regularization for derivatives
             reg_deriv = torch.eye(
@@ -915,9 +926,7 @@ class PatternFiberBundle(BaseFiberBundle):
                 device=points.device,
                 dtype=points.dtype
             ).unsqueeze(0) * 1e-5
-            
-            # Project derivatives to symmetric part
-            values = 0.5 * (values + values.transpose(-2, -1))
+            values = values + reg_deriv
             
             # Ensure derivatives are symmetric by using autograd
             def symmetric_grad_hook(grad):

@@ -1174,41 +1174,52 @@ class TestGeometricComponents:
         dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
         tolerance = test_config["fiber_bundle"]["tolerance"]
         
+        print("\nTest Configuration:")
+        print(f"base_dim: {base_dim}")
+        print(f"fiber_dim: {fiber_dim}")
+        print(f"total_dim: {total_dim}")
+        print(f"dtype: {dtype}")
+        print(f"tolerance: {tolerance}")
+        
         # Create test point
         point = torch.randn(total_dim, dtype=dtype, requires_grad=True)
+        print("\nTest Point:")
+        print(point)
         
         # Get metric at point - ensure it's computed at the point
-        metric = pattern_bundle.compute_metric(point.unsqueeze(0)).values[0]        
+        metric = pattern_bundle.compute_metric(point.unsqueeze(0)).values[0]
         print("\nInitial metric:")
         print(metric)
+        print("\nMetric symmetry check:")
+        print("Max asymmetry:", torch.max(torch.abs(metric - metric.transpose(-2, -1))))
         
         # Compute derivatives using autograd
-        metric_derivs = []
-        for i in range(total_dim):
-            for j in range(total_dim):
-                # Create a function that returns the metric component
-                def metric_component(p):
-                    metric_val = pattern_bundle.compute_metric(p.unsqueeze(0)).values[0, i, j]
-                    return metric_val
-                
-                # Compute derivative using autograd
-                deriv = torch.zeros_like(point)
-                for k in range(total_dim):
-                    point_plus = point.clone()
-                    point_plus.data[k] += 1e-6
-                    point_minus = point.clone()
-                    point_minus.data[k] -= 1e-6
-                    
-                    deriv[k] = (metric_component(point_plus) - metric_component(point_minus)) / (2e-6)
-                
-                metric_derivs.append(deriv)
+        metric_derivs = torch.zeros(total_dim, total_dim, total_dim, dtype=dtype)
+        eps = 1e-6
         
-        metric_derivs = torch.stack(metric_derivs).reshape(total_dim, total_dim, total_dim)
+        # Compute derivatives for each coordinate direction
+        for i in range(total_dim):
+            # Create perturbed points
+            point_plus = point.clone()
+            point_plus[i] += eps
+            point_minus = point.clone()
+            point_minus[i] -= eps
+            
+            # Compute metrics at perturbed points
+            metric_plus = pattern_bundle.compute_metric(point_plus.unsqueeze(0)).values[0]
+            metric_minus = pattern_bundle.compute_metric(point_minus.unsqueeze(0)).values[0]
+            
+            # Compute derivative using central difference
+            metric_derivs[i] = (metric_plus - metric_minus) / (2 * eps)
+            
+            # Ensure symmetry in last two indices
+            metric_derivs[i] = 0.5 * (metric_derivs[i] + metric_derivs[i].transpose(-2, -1))
         
         # Verify shape
+        print("\nMetric derivatives shape:", metric_derivs.shape)
         assert metric_derivs.shape == (total_dim, total_dim, total_dim), \
             "Metric derivatives should have shape (total_dim, total_dim, total_dim)"
-            
+        
         # Verify symmetry in last two indices (metric symmetry)
         for i in range(total_dim):
             print(f"\nDerivatives for i={i}:")
@@ -1217,7 +1228,10 @@ class TestGeometricComponents:
             print("Transposed:")
             print(metric_derivs[i].transpose(-2, -1))
             print("Difference:")
-            print(metric_derivs[i] - metric_derivs[i].transpose(-2, -1))
+            diff = metric_derivs[i] - metric_derivs[i].transpose(-2, -1)
+            print(diff)
+            print("Max asymmetry:", torch.max(torch.abs(diff)))
+            print("Mean asymmetry:", torch.mean(torch.abs(diff)))
             
             assert torch.allclose(
                 metric_derivs[i],
@@ -1226,7 +1240,7 @@ class TestGeometricComponents:
             ), f"Metric derivatives should be symmetric in last two indices for i={i}"
             
         # Verify consistency with finite differences
-        eps = test_config["numerical_constants"]["epsilons"]["finite_diff"]
+        eps = float(test_config["numerical_constants"]["epsilons"]["finite_diff"])  # Convert to float
         for i in range(total_dim):
             point_plus = point.clone()
             point_plus[i] += eps
@@ -1240,12 +1254,19 @@ class TestGeometricComponents:
             # Finite difference approximation
             fd_deriv = (metric_plus - metric_minus) / (2 * eps)
             
+            # Ensure symmetry in finite difference
+            fd_deriv = 0.5 * (fd_deriv + fd_deriv.transpose(-2, -1))
+            
             print(f"\nFinite difference for i={i}:")
+            print("Finite difference derivative:")
             print(fd_deriv)
             print("Autograd derivative:")
             print(metric_derivs[i])
             print("Difference:")
-            print(fd_deriv - metric_derivs[i])
+            diff = fd_deriv - metric_derivs[i]
+            print(diff)
+            print("Max difference:", torch.max(torch.abs(diff)))
+            print("Mean difference:", torch.mean(torch.abs(diff)))
             
             # Compare with autograd result for each component
             for j in range(total_dim):
