@@ -1,5 +1,8 @@
-# Test configuration for standard hardware (workstations with decent resources)
-# Extends base.yaml with standard values
+# Standard test configuration extending base.yaml
+# This configuration is for workstations with decent resources
+
+defaults:
+  - base
 
 # Hardware profile
 hardware_profile:
@@ -7,47 +10,36 @@ hardware_profile:
   description: "Configuration for workstations with decent resources"
   target_hardware:
     ram_gb: 32
-  cpu: "standard"
-  memory: "standard"
+    cpu: "standard"
+    memory: "standard"
 
-# Override base parameters with standard values
-fiber_bundle:
-  base_dim: 3
-  fiber_dim: 3
-  batch_size: 128
-  dtype: "float32"
-  tolerance: 1e-5
+# Performance settings
+performance:
+  batch_sizes:
+    default: 128
+    geometric: 64
+    quantum: 64
+    section: 32
+  dimensions:
+    hidden: 64
+    heads: 8
+  test_cases:
+    parallel_transport: 10
+    path_points: 100
+  cache:
+    max_tensors: 1000
+    gc_frequency: 1000
 
-# Fiber bundle test specific parameters
-fiber_bundle_tests:
-  structure_group_dim: 4
-  test_tolerances:
-    projection: 1e-5
-    trivialization: 1e-5
-    transition: 1e-5
-    connection: 1e-5
-    transport: 1e-4
-    metric: 1e-5
-    torsion_free: 1e-5
-    vertical_preservation: 1e-5
-    linearity: 1e-5
-    structure_group: 1e-5
-    skew_symmetry: 1e-5
-    lie_bracket: 1e-5
-    finite_diff: 1e-3
-    horizontal: 1e-4
-    path_independence: 1e-4
-    norm_preservation: 1e-4
-    loop_triviality: 1e-4
-    symmetry: 1e-5
-    metric_compatibility: 1e-5
-  test_paths:
-    circular_points: 100
-    figure8_points: 200
-    max_angle: 2 * pi
-  test_vectors:
-    initial_norm: 1.0
-    perturbation_scale: 0.1
+# Test paths
+test_paths:
+  circular_points: 100
+  figure8_points: 200
+  max_angle: 6.283185307179586  # 2 * pi
+
+# Test vectors
+test_vectors:
+  initial_norm: 1.0
+  perturbation_scale: 0.1
 
 # Numerical constants
 numerical_constants:
@@ -61,30 +53,3 @@ numerical_constants:
     max_skew_error: 5e-5
     max_torsion_error: 5e-5
     max_group_error: 5e-5
-
-geometric_tests:
-  dimensions: 3
-  num_heads: 8
-  hidden_dim: 64
-  vector_scales: [0.1, 1.0, 10.0]
-  test_norms: [0.1, 1.0, 10.0]
-
-parallel_transport:
-  methods: ["schild", "exponential"]
-  test_cases: 10
-  section_batch_size: 16
-  path_points: 100
-  max_path_length: 10.0
-
-quantum_geometric:
-  fisher_rao_weight: 0.5
-  quantum_weight: 0.1
-  stress_energy_weight: 0.5
-  manifold_dim: 3
-  dt: 0.01
-
-memory_management:
-  max_cached_tensors: 1000
-  defrag_threshold: 0.8
-  gc_frequency: 1000
-  tensor_lifecycle: "normal"

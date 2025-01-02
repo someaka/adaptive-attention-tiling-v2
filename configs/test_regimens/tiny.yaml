@@ -1,4 +1,10 @@
-# Test configuration for small hardware (laptops with limited resources)
+# Tiny test configuration extending base.yaml
+# This configuration is for laptops with limited resources
+
+defaults:
+  - base
+
+# Hardware profile
 hardware_profile:
   name: "tiny"
   description: "Configuration for laptops with limited resources"
@@ -7,16 +13,41 @@ hardware_profile:
     cpu: "minimal"
     memory: "minimal"
 
-geometric_tests:
-  batch_size: 32
-  max_dim: 64
-  num_samples: 500
+# Performance settings
+performance:
+  batch_sizes:
+    default: 32
+    geometric: 16
+    quantum: 16
+    section: 8
+  dimensions:
+    hidden: 32
+    heads: 4
+  test_cases:
+    parallel_transport: 5
+    path_points: 50
+  cache:
+    max_tensors: 100
+    gc_frequency: 100
 
+# Test paths
+test_paths:
+  circular_points: 50
+  figure8_points: 100
+  max_angle: 6.283185307179586  # 2 * pi
+
+# Test vectors
+test_vectors:
+  initial_norm: 1.0
+  perturbation_scale: 0.1
+
+# Pattern tests
 pattern_tests:
   max_patterns: 64
   pattern_size: 64
   num_iterations: 100
 
+# Performance tests
 performance_tests:
   warmup_iters: 3
   test_iters: 10

@@ -1,79 +1,98 @@
 # Base configuration schema for all test regimens
 # All test configs should extend this base config
 
-# Required parameters for fiber bundle tests
-fiber_bundle:
-  base_dim: 3
+# Core validation parameters
+validation:
+  tolerances:
+    # General tolerances
+    base: 1.0e-5
+    finite_diff: 1.0e-3
+    tensor_compare: 1.0e-8
+    small_angle: 1.0e-4
+    
+    # Fiber bundle tolerances
+    projection: 1.0e-5
+    trivialization: 1.0e-5
+    transition: 1.0e-5
+    connection: 1.0e-5
+    transport: 1.0e-4
+    metric: 1.0e-5
+    torsion_free: 1.0e-5
+    vertical_preservation: 1.0e-5
+    linearity: 1.0e-5
+    structure_group: 1.0e-5
+    skew_symmetry: 1.0e-5
+    lie_bracket: 1.0e-5
+    horizontal: 1.0e-4
+    path_independence: 1.0e-4
+    norm_preservation: 1.0e-4
+    loop_triviality: 1.0e-4
+    symmetry: 1.0e-5
+    metric_compatibility: 1.0e-5
+    
+    # Quantum tolerances
+    state_norm: 1.0e-6
+    phase_comparison: 1.0e-5
+    geometric_phase: 1.0e-4
+    quantum_metric: 1.0e-5
+    berry_connection: 1.0e-5
+    
+  thresholds:
+    convergence: 1.0e-6
+    stability: 1.0e-5
+    entanglement: 0.9
+    defrag: 0.8
+    min_scale: 1.0e-6
+    max_scale: 5.0
+    max_norm: 10.0
+
+# Core geometric parameters
+geometric:
+  manifold_dim: 3
   fiber_dim: 3
-  batch_size: 32
-  dtype: "float32"
-  tolerance: 1e-5
-
-# Fiber bundle test specific parameters
-fiber_bundle_tests:
-  test_tolerances:
-    projection: 1e-5
-    trivialization: 1e-5
-    transition: 1e-5
-    connection: 1e-5
-    transport: 1e-4
-    metric: 1e-5
-    torsion_free: 1e-5
-    vertical_preservation: 1e-5
-    linearity: 1e-5
-    structure_group: 1e-5
-    skew_symmetry: 1e-5
-    lie_bracket: 1e-5
-    finite_diff: 1e-3
-    horizontal: 1e-4
-    path_independence: 1e-4
-    norm_preservation: 1e-4
-    loop_triviality: 1e-4
-    symmetry: 1e-5
-    metric_compatibility: 1e-5
-
-# Geometric test parameters
-geometric_tests:
-  dimensions: 3
-  num_heads: 8
-  hidden_dim: 64
-  vector_scales: [0.1, 1.0, 10.0]
-  test_norms: [0.1, 1.0, 10.0]
-
-# Parallel transport parameters
-parallel_transport:
-  methods: ["schild", "exponential"]
-  test_cases: 10
-  section_batch_size: 16
-  path_points: 100
-  max_path_length: 10.0
-
-# Quantum geometric parameters
-quantum_geometric:
+  motive_rank: 2
+  num_primes: 4
   fisher_rao_weight: 0.5
   quantum_weight: 0.1
   stress_energy_weight: 0.5
-  manifold_dim: 3
   dt: 0.01
+  min_scale: 1.0e-6
+  max_scale: 5.0
+  max_norm: 10.0
+  curvature_bounds: [-1.0, 1.0]
 
-# Memory management parameters
-memory_management:
-  max_cached_tensors: 1000
-  defrag_threshold: 0.8
-  gc_frequency: 1000
-  tensor_lifecycle: "normal"
+# Data types
+dtypes:
+  default: "float32"
+  quantum: "complex64"
 
-# Quantum arithmetic parameters
-quantum_arithmetic:
-  dtype: "complex64"  # Fixed complex number type for quantum operations
-  tolerances:
-    state_norm: 1e-6
-    phase_comparison: 1e-5
-    geometric_phase: 1e-4
-    quantum_metric: 1e-5
-    berry_connection: 1e-5
-  validation:
-    max_iterations: 100
-    convergence_threshold: 1e-6
-    stability_threshold: 1e-5
-    entanglement_threshold: 0.9
+# Test constants
+test_constants:
+  vector_scales: [0.1, 1.0, 10.0]
+  test_norms: [0.1, 1.0, 10.0]
+  max_path_length: 10.0
+  arc_angle: 0.7853981633974483  # pi/4
+  max_skew_error: 5.0e-5
+  max_torsion_error: 5.0e-5
+  max_group_error: 5.0e-5
+
+# Validation methods
+validation_methods:
+  parallel_transport: ["schild", "exponential"]
+  max_iterations: 100
+
+# Performance parameters
+performance:
+  dimensions:
+    hidden: 64
+    latent: 32
+    embedding: 128
+  batch_sizes:
+    geometric: 32
+    quantum: 16
+    pattern: 64
+    flow: 32
+  test_cases:
+    num_samples: 1000
+    warmup_iters: 10
+    test_iters: 100
