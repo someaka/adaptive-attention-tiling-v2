@@ -26,7 +26,21 @@ def arithmetic_dynamics():
         motive_rank=4,
         num_primes=8,
         height_dim=4,
-        quantum_weight=0.1
+        quantum_weight=0.1,
+        dtype=torch.float32
+    )
+
+@pytest.fixture
+def quantum_dynamics():
+    """Create an ArithmeticDynamics instance for quantum operations."""
+    return ArithmeticDynamics(
+        hidden_dim=64,
+        motive_rank=4,
+        num_primes=8,
+        height_dim=64,
+        manifold_dim=64,
+        quantum_weight=0.1,
+        dtype=torch.complex64
     )
 
 @pytest.fixture
@@ -153,18 +167,23 @@ def test_quantum_correction(arithmetic_dynamics):
     assert not torch.isnan(correction).any()
     assert not torch.isinf(correction).any()
 
-def test_quantum_metric(arithmetic_dynamics):
+def test_quantum_metric(quantum_dynamics):
     """Test quantum metric computation."""
     batch_size = 2
-    x = torch.randn(batch_size, arithmetic_dynamics.hidden_dim)
+    x = torch.randn(batch_size, quantum_dynamics.hidden_dim, dtype=torch.complex64)
     
     # Compute quantum metric directly
-    metric = arithmetic_dynamics.compute_quantum_metric(x)
+    metric = quantum_dynamics.compute_quantum_metric(x)
     
     # Check shape and properties
-    assert metric.shape == (batch_size, arithmetic_dynamics.hidden_dim, arithmetic_dynamics.hidden_dim)
-    assert not torch.isnan(metric).any()
-    assert not torch.isinf(metric).any()
+    assert metric.shape == (batch_size, quantum_dynamics.hidden_dim, quantum_dynamics.hidden_dim)
+    assert not torch.isnan(metric.real).any()
+    assert not torch.isnan(metric.imag).any()
+    assert not torch.isinf(metric.real).any()
+    assert not torch.isinf(metric.imag).any()
+    
+    # Check Hermitian property
+    assert torch.allclose(metric, metric.transpose(-2, -1).conj(), atol=1e-5)
 
 def test_modular_form_q_expansion(modular_form_computer):
     """Test q-expansion computation."""
