@@ -256,13 +256,39 @@ class SymplecticStructure:
             raise ValueError(f"Input tensor dimension {tensor.size(-1)} exceeds maximum allowed dimension {self.max_dim}")
             
         current_dim = tensor.shape[-1]
-        if current_dim == self.dim:
+        if current_dim == self.target_dim:  # Use target_dim instead of dim
             return tensor
             
         if current_dim < 1:
             raise ValueError(f"Last dimension must be at least 1, got {current_dim}")
             
-        # Process in chunks to save memory
+        # Handle wave packets specially
+        if self.wave_enabled and tensor.is_complex():
+            # Extract position and momentum
+            pos = self.enriched.get_position(tensor)
+            mom = self.enriched.get_momentum(tensor)
+            
+            # Pad or truncate position and momentum
+            if current_dim < self.target_dim:
+                # Pad with zeros
+                padding_size = self.target_dim - current_dim
+                padding = torch.zeros(*tensor.shape[:-1], padding_size, device=tensor.device, dtype=tensor.dtype)
+                pos = torch.cat([pos, padding], dim=-1)
+                mom = torch.cat([mom, padding], dim=-1)
+            else:
+                # Truncate
+                pos = pos[..., :self.target_dim]
+                mom = mom[..., :self.target_dim]
+            
+            # Scale to preserve expectation values
+            scale = torch.sqrt(torch.tensor(self.target_dim / current_dim, device=tensor.device))
+            pos = pos * scale
+            mom = mom * scale
+            
+            # Create new wave packet
+            return self.enriched.create_wave_packet(pos, mom)
+            
+        # For non-wave tensors, process in chunks
         chunk_size = min(128, tensor.shape[0] if len(tensor.shape) > 1 else 1)
         output_chunks = []
         
@@ -274,22 +300,30 @@ class SymplecticStructure:
             original_shape = chunk.shape[:-1]
             
             # Simple dimension adjustment
-            if current_dim < self.dim:
-                # Pad with zeros
-                padding_size = self.dim - current_dim
+            if current_dim < self.target_dim:
+                # Pad with zeros to target_dim
+                padding_size = self.target_dim - current_dim
                 padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
+                if tensor.is_complex():
+                    padding = torch.complex(padding, torch.zeros_like(padding))
                 adjusted = torch.cat([chunk, padding], dim=-1)
             else:
-                # Truncate
-                adjusted = chunk[..., :self.dim]
-                
+                # Truncate to target_dim
+                adjusted = chunk[..., :self.target_dim]
+            
             output_chunks.append(adjusted)
             
             # Free memory
             del chunk, adjusted
             
         # Concatenate all chunks
-        return torch.cat(output_chunks, dim=0)
+        result = torch.cat(output_chunks, dim=0)
+        
+        # Ensure result has target dimension
+        if result.shape[-1] != self.target_dim:
+            raise RuntimeError(f"Failed to achieve target dimension {self.target_dim}, got {result.shape[-1]}")
+            
+        return result
 
     def compute_metric(self, fiber_coords: Tensor) -> Tensor:
         """Compute Riemannian metric tensor at given fiber coordinates.
@@ -374,14 +408,13 @@ class SymplecticStructure:
             # Handle dimension transition if needed
             fiber_coords = self._handle_dimension(fiber_coords)
             
-            # Get original dimension before padding
-            original_dim = min(self.dim, fiber_coords.shape[-1])
-            n = original_dim // 2  # Use original dimension for form size
+            # Use target dimension (always even) for form size
+            n = self.target_dim // 2
             
             # Create standard form matrix
             omega = torch.zeros(
-                original_dim,
-                original_dim,
+                self.target_dim,
+                self.target_dim,
                 device=fiber_coords.device,
                 dtype=fiber_coords.dtype
             )
@@ -399,11 +432,11 @@ class SymplecticStructure:
             
             # Add enriched structure data
             enrichment = {
-                'dimension': original_dim,
+                'dimension': self.target_dim,
                 'structure_type': 'standard_symplectic',
                 'preserve_symplectic': self.preserve_structure,
                 'wave_enabled': self.wave_enabled,
-                'fiber_coords': fiber_coords[..., :original_dim]
+                'fiber_coords': fiber_coords[..., :self.target_dim]
             }
             
             return SymplecticForm(omega, enrichment=enrichment)

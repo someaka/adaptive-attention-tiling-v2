@@ -5,7 +5,7 @@
 - [x] tests/metrics/test_metrics_integration.py
 
 
-- [ ] tests/test_memory/test_memory_management.py
+- [x] tests/test_memory/test_memory_management.py
 
 
 - [x] tests/test_utils/test_hardware/test_hardware_utils.py
@@ -45,10 +45,10 @@
 - [x] tests/test_core/test_patterns/test_fiber_types.py
 - [x] tests/test_core/test_patterns/test_motivic_integration.py
 - [x] tests/test_core/test_patterns/test_operadic_structure.py
-- [ ] tests/test_core/test_patterns/test_pattern_fiber_bundle_operadic.py
+- [x] tests/test_core/test_patterns/test_pattern_fiber_bundle_operadic.py
 - [ ] tests/test_core/test_patterns/test_pattern_processor.py
 - [ ] tests/test_core/test_patterns/test_riemannian.py
-- [ ] tests/test_core/test_patterns/test_symplectic.py
+- [x] tests/test_core/test_patterns/test_symplectic.py
 - [ ] tests/test_core/test_quantum_state.py
 - [ ] tests/test_core/test_quantum/test_neural_quantum_bridge.py
 - [ ] tests/test_core/test_quantum/test_path_integral.py

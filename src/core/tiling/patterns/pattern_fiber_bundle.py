@@ -323,7 +323,7 @@ class PatternFiberBundle(BaseFiberBundle):
         
         # Initialize symplectic structure
         self.symplectic = SymplecticStructure(
-            dim=self.total_dim,
+            dim=self.fiber_dim,
             preserve_structure=True,
             wave_enabled=True
         )
