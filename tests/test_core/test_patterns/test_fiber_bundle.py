@@ -31,49 +31,45 @@ from src.core.tiling.patterns.pattern_fiber_bundle import (
 )
 from src.utils.test_helpers import assert_manifold_properties
 from src.validation.geometric.metric import ConnectionValidator, ConnectionValidation
+from tests.utils.config_loader import load_test_config
 
 
 @pytest.fixture
 def test_config() -> dict[str, Any]:
     """Load test configuration based on environment."""
-    config_name = os.environ.get("TEST_REGIME", "debug")
-    config_path = f"configs/test_regimens/{config_name}.yaml"
-    
-    with open(config_path) as f:
-        config: dict = yaml.safe_load(f)
-    return config
+    return load_test_config()
 
 
 @pytest.fixture
 def base_manifold(test_config):
     """Create a test base manifold."""
-    base_dim = test_config["base_dim"]
-    batch_size = test_config["batch_size"]
-    dtype = getattr(torch, test_config["dtype"])
+    base_dim = test_config["fiber_bundle"]["base_dim"]
+    batch_size = test_config["fiber_bundle"]["batch_size"]
+    dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
     return torch.randn(batch_size, base_dim, dtype=dtype)
 
 
 @pytest.fixture
 def fiber_dim(test_config):
     """Dimension of the fiber."""
-    return test_config["fiber_dim"]
+    return test_config["fiber_bundle"]["fiber_dim"]
 
 
 @pytest.fixture
 def base_bundle(test_config):
     """Create base implementation instance."""
-    base_dim = test_config["base_dim"]
-    fiber_dim = test_config["fiber_dim"]
-    dtype = getattr(torch, test_config["dtype"])
+    base_dim = test_config["fiber_bundle"]["base_dim"]
+    fiber_dim = test_config["fiber_bundle"]["fiber_dim"]
+    dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
     return BaseFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim, dtype=dtype)
 
 
 @pytest.fixture
 def pattern_bundle(test_config):
     """Create pattern implementation instance."""
-    base_dim = test_config["base_dim"]
-    fiber_dim = test_config["fiber_dim"]
-    dtype = getattr(torch, test_config["dtype"])
+    base_dim = test_config["fiber_bundle"]["base_dim"]
+    fiber_dim = test_config["fiber_bundle"]["fiber_dim"]
+    dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
     return PatternFiberBundle(base_dim=base_dim, fiber_dim=fiber_dim, dtype=dtype)
 
 
@@ -141,8 +137,8 @@ class TestFiberBundleProtocol:
     def test_local_trivialization(self, bundle, request, base_manifold, fiber_dim, test_config):
         """Test that local trivialization satisfies protocol requirements."""
         bundle = request.getfixturevalue(bundle)
-        batch_size = test_config["batch_size"]
-        dtype = getattr(torch, test_config["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
         
         # Create test points with correct total dimension
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
@@ -175,8 +171,8 @@ class TestFiberBundleProtocol:
     def test_connection_form(self, bundle, request, test_config):
         """Test that connection form satisfies protocol requirements and theoretical principles."""
         bundle = request.getfixturevalue(bundle)
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test points and vectors with correct total dimension
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
@@ -253,9 +249,9 @@ class TestFiberBundleProtocol:
         ), "Connection should preserve vertical vectors exactly"
         
         # 5. Linearity property
-        scalars = torch.randn(batch_size, 1, dtype=dtype)
-        scaled_connection = bundle.connection_form(scalars * tangent_vectors)
-        linear_connection = scalars * bundle.connection_form(tangent_vectors)
+        scalars = torch.randn(batch_size, dtype=dtype)
+        scaled_connection = bundle.connection_form(scalars.unsqueeze(-1) * tangent_vectors)
+        linear_connection = scalars.unsqueeze(-1).unsqueeze(-1) * bundle.connection_form(tangent_vectors)
         
         assert torch.allclose(
             scaled_connection,
@@ -291,8 +287,8 @@ class TestFiberBundleProtocol:
         5. Compatibility with structure group
         """
         bundle = request.getfixturevalue(bundle)
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test section and path
         section = torch.randn(bundle.fiber_dim, dtype=dtype)
@@ -405,8 +401,8 @@ class TestFiberBundleProtocol:
     def test_vertical_horizontal_separation(self, bundle, request, test_config):
         """Test that the connection form properly separates vertical and horizontal components."""
         bundle = request.getfixturevalue(bundle)
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test vectors
         total_vectors = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
@@ -449,8 +445,8 @@ class TestFiberBundleProtocol:
     def test_structure_group_respect(self, bundle, request, test_config):
         """Test that the connection form respects the structure group action."""
         bundle = request.getfixturevalue(bundle)
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test points and vectors
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
@@ -502,8 +498,8 @@ class TestFiberBundleProtocol:
     def test_fiber_metric_preservation(self, bundle, request, test_config):
         """Test that the connection form preserves the fiber metric."""
         bundle = request.getfixturevalue(bundle)
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test points and vectors
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
@@ -555,7 +551,7 @@ class TestBaseFiberBundle:
         assert torch.allclose(
             algebra + algebra.transpose(-1, -2),
             torch.zeros_like(algebra),
-            rtol=test_config["tolerance"]
+            rtol=test_config["fiber_bundle"]["tolerance"]
         ), "Algebra should be anti-symmetric"
 
 
@@ -578,7 +574,7 @@ class TestPatternFiberBundle:
 
     def test_batch_operations(self, pattern_bundle, test_config):
         """Test batch operation handling specific to pattern implementation."""
-        batch_size = test_config["batch_size"]
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         total_space = torch.randn(batch_size, pattern_bundle.total_dim)
         
         # Test batch projection
@@ -591,8 +587,8 @@ class TestPatternFiberBundle:
 
     def test_connection_form_components(self, pattern_bundle, test_config):
         """Test individual components of the connection form separately."""
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
 
         # Test 1: Pure vertical vectors
         vertical_vector = torch.zeros(batch_size, pattern_bundle.total_dim, dtype=dtype)
@@ -606,7 +602,7 @@ class TestPatternFiberBundle:
         assert torch.allclose(
             vertical_components,
             vertical_vector[..., pattern_bundle.base_dim:],
-            rtol=test_config["tolerance"]
+            rtol=test_config["fiber_bundle"]["tolerance"]
         ), "Connection should preserve pure vertical vectors"
 
         # Test 2: Pure horizontal vectors
@@ -621,7 +617,7 @@ class TestPatternFiberBundle:
         assert torch.allclose(
             skew_check,
             torch.zeros_like(skew_check),
-            rtol=test_config["tolerance"]
+            rtol=test_config["fiber_bundle"]["tolerance"]
         ), "Connection should be skew-symmetric for horizontal vectors"
 
         # Test 3: Individual Christoffel symbols
@@ -631,12 +627,12 @@ class TestPatternFiberBundle:
             assert torch.allclose(
                 matrix + matrix.transpose(-2, -1),
                 torch.zeros_like(matrix),
-                rtol=test_config["tolerance"]
+                rtol=test_config["fiber_bundle"]["tolerance"]
             ), f"Connection component {i} should be skew-symmetric"
 
     def test_parallel_transport_components(self, pattern_bundle, test_config):
         """Test individual components of parallel transport separately."""
-        dtype = getattr(torch, test_config["dtype"])
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
         
         # Test 1: Short straight line transport
         section = torch.randn(pattern_bundle.fiber_dim, dtype=dtype)
@@ -686,7 +682,7 @@ class TestPatternFiberBundle:
 
     def test_holonomy_properties(self, pattern_bundle, test_config):
         """Test specific properties of the holonomy group."""
-        dtype = getattr(torch, test_config["dtype"])
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
         
         # Test 1: Small contractible loop
         section = torch.randn(pattern_bundle.fiber_dim, dtype=dtype)
@@ -817,8 +813,8 @@ class TestPatternFiberBundle:
 
     def test_connection_vertical_preservation(self, pattern_bundle, test_config):
         """Test that connection form preserves vertical vectors exactly."""
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create purely vertical vectors
         total_points = torch.randn(batch_size, pattern_bundle.total_dim, dtype=dtype)
@@ -845,8 +841,8 @@ class TestPatternFiberBundle:
 
     def test_connection_horizontal_projection(self, pattern_bundle, test_config):
         """Test that connection form correctly projects horizontal vectors."""
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create purely horizontal vectors
         total_points = torch.randn(batch_size, pattern_bundle.total_dim, dtype=dtype)
@@ -874,8 +870,8 @@ class TestPatternFiberBundle:
 
     def test_connection_levi_civita_compatibility(self, pattern_bundle, test_config):
         """Test that connection form satisfies Levi-Civita compatibility conditions."""
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test vectors
         total_points = torch.randn(batch_size, pattern_bundle.total_dim, dtype=dtype)
@@ -1071,6 +1067,10 @@ class TestConnectionFormValidation:
             metric = bundle.metric[bundle.base_dim:, bundle.base_dim:]
             metric_error = self._validate_metric_compatibility(connection, metric)
             self.logger.debug(f"Metric compatibility error: {metric_error:.6f}")
+            
+            # Structure group compatibility
+            group_error = self._validate_structure_group(bundle, connection)
+            self.logger.debug(f"Structure group error: {group_error:.6f}")
 
     def _validate_metric_compatibility(self, connection: torch.Tensor, metric: torch.Tensor) -> torch.Tensor:
         """Check metric compatibility condition.
@@ -1158,8 +1158,8 @@ class TestConnectionFormValidation:
     def test_connection_form_validation(self, bundle, request, test_config):
         """Comprehensive validation test for connection form properties."""
         bundle = request.getfixturevalue(bundle)
-        dtype = getattr(torch, test_config["dtype"])
-        batch_size = test_config["batch_size"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        batch_size = test_config["fiber_bundle"]["batch_size"]
         
         # Create test vectors
         total_points = torch.randn(batch_size, bundle.total_dim, dtype=dtype)
@@ -1200,11 +1200,11 @@ class TestGeometricComponents:
         3. Consistency with finite differences
         """
         # Get test dimensions
-        base_dim = test_config["base_dim"]
-        fiber_dim = test_config["fiber_dim"]
+        base_dim = test_config["fiber_bundle"]["base_dim"]
+        fiber_dim = test_config["fiber_bundle"]["fiber_dim"]
         total_dim = base_dim + fiber_dim
-        dtype = getattr(torch, test_config["dtype"])
-        tolerance = test_config["tolerance"]
+        dtype = getattr(torch, test_config["fiber_bundle"]["dtype"])
+        tolerance = test_config["fiber_bundle"]["tolerance"]
         
         # Create test point
         point = torch.randn(total_dim, dtype=dtype, requires_grad=True)
