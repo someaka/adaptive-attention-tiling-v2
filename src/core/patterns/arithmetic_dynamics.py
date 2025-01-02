@@ -233,11 +233,11 @@ class ArithmeticDynamics(nn.Module):
             ).squeeze(1)  # Remove channel dimension
             
             # Convert to complex if needed
-            if self.dtype.is_complex:
+            if self.dtype.is_complex and not x_proj.is_complex():
                 x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
         else:
             x_proj = x
-            if self.dtype.is_complex:
+            if self.dtype.is_complex and not x_proj.is_complex():
                 x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
 
         # Apply height map

@@ -477,7 +477,8 @@ class NeuralGeometricFlow(PatternFormationFlow):
         self,
         metric: Union[torch.Tensor, MetricTensor],
         ricci: Optional[Union[torch.Tensor, MetricTensor]] = None,
-        timestep: float = 0.1
+        timestep: float = 0.1,
+        attention_pattern: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, QuantumFlowMetrics]:
         """Perform neural network-aware flow step with quantum integration."""
         # Convert input tensors to appropriate types
@@ -577,9 +578,10 @@ class NeuralGeometricFlow(PatternFormationFlow):
                 )
                 
                 if not isinstance(initial_state, tuple):
-                    # Evolve quantum state
-                    evolved_state = self.quantum_bridge.evolve_quantum_state(
+                    # Evolve quantum state with attention pattern
+                    evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(
                         initial_state,
+                        attention_pattern=attention_pattern,
                         time=timestep
                     )
                     

@@ -37,3 +37,27 @@ quantum:
   dt: 0.01
   batch_size: 16
   max_iterations: 50
+
+performance_tests:
+  batch_size: 16
+  pattern_size: 16
+  num_iterations: 50
+  warmup_iterations: 5
+  test_iters: 10
+  max_time: 1.0
+  min_time: 0.0001
+  tolerance: 1e-6
+  memory_limit_mb: 1024
+  profile_memory: true
+  profile_time: true
+
+geometric_tests:
+  dimensions: 4
+  num_heads: 8
+  hidden_dim: 64
+  batch_size: 16
+  max_iterations: 50
+  tolerance: 1e-6
+  manifold_dim: 3
+  num_samples: 100
+  max_dim: 8
