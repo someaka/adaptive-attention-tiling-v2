@@ -39,12 +39,8 @@ logger = logging.getLogger(__name__)
 @pytest.fixture
 def test_config():
     """Load test configuration based on environment."""
-    config_name = os.environ.get("TEST_REGIME", "debug")
-    config_path = f"configs/test_regimens/{config_name}.yaml"
-    
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    return config
+    from tests.utils.config_loader import load_test_config
+    return load_test_config()
 
 @pytest.fixture
 def setup_test_parameters(test_config):
@@ -106,8 +102,8 @@ def flow_validator(setup_test_parameters, test_config):
     return FlowValidator(
         flow=flow,
         stability_threshold=setup_test_parameters['stability_threshold'],
-        curvature_bounds=(-test_config['quantum_geometric']['fisher_rao_weight'], 
-                         test_config['quantum_geometric']['fisher_rao_weight']),
+        curvature_bounds=(-test_config['geometric']['fisher_rao_weight'],
+                         test_config['geometric']['fisher_rao_weight']),
         max_energy=1.0/test_config['quantum_geometric']['dt']  # Use inverse dt as energy bound
     )
 

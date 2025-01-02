@@ -13,6 +13,50 @@ hardware_profile:
     cpu: "standard"
     memory: "standard"
 
+# Fiber bundle parameters
+fiber_bundle:
+  batch_size: 128
+  tolerance: 1.0e-5
+  dimensions:
+    manifold: 3
+    fiber: 3
+    hidden: 64
+  parameters:
+    fisher_rao_weight: 0.5
+    quantum_weight: 0.1
+    stress_energy_weight: 0.5
+  validation:
+    max_iterations: 100
+    parallel_transport_methods: ["schild", "exponential"]
+    stability_threshold: 1.0e-5
+
+# Quantum geometric parameters
+quantum_geometric:
+  manifold_dim: 3
+  fiber_dim: 3
+  dt: 0.01
+  num_steps: 100
+  batch_size: 64
+  tolerance: 1.0e-5
+  stability_threshold: 1.0e-5
+  max_iterations: 100
+  learning_rate: 0.001
+  momentum: 0.9
+  weight_decay: 0.0001
+
+# Geometric test parameters
+geometric_tests:
+  dimensions: 3
+  hidden_dim: 64
+  batch_size: 64
+  num_samples: 1000
+  num_iterations: 100
+  learning_rate: 0.001
+  momentum: 0.9
+  weight_decay: 0.0001
+  tolerance: 1.0e-5
+  stability_threshold: 1.0e-5
+
 # Performance settings
 performance:
   batch_sizes:
