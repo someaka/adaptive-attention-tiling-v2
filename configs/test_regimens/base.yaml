@@ -39,13 +39,17 @@ fiber_bundle_tests:
     initial_norm: 1.0
     perturbation_scale: 0.1
 
-# Geometric test parameters
-geometric_tests:
+# Geometric parameters
+geometric:
   vector_scales: [0.1, 1.0, 10.0]  # Standard vector scales for tests
   test_norms: [0.1, 1.0, 10.0]  # Standard test norms
   dimensions: 4  # Base dimension for geometric tests
   num_heads: 8  # Default number of attention heads
   hidden_dim: 64  # Base hidden dimension
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
+  quantum_weight: 0.1  # Weight for quantum contribution
+  stress_energy_weight: 0.5  # Weight for stress-energy contribution
+  manifold_dim: 3  # Base manifold dimension
 
 # Pattern test parameters
 pattern_tests:
@@ -82,15 +86,8 @@ numerical_constants:
     max_torsion_error: 5e-5
     max_group_error: 5e-5
 
-# Quantum geometric parameters
-quantum_geometric:
-  fisher_rao_weight: 0.5
-  quantum_weight: 0.1
-  stress_energy_weight: 0.5
-  manifold_dim: 3
-
-# Quantum arithmetic parameters
-quantum_arithmetic:
+# Quantum parameters
+quantum:
   dtype: "complex64"  # Fixed complex number type for quantum operations
   manifold_dim: 3  # Manifold dimension for quantum operations
   motive_rank: 2  # Rank of the motive
@@ -99,6 +96,7 @@ quantum_arithmetic:
   max_scale: 5.0  # Maximum scale for height computations
   max_norm: 10.0  # Maximum norm for curvature bounds
   fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
+  dt: 0.01  # Default timestep
   tolerances:
     state_norm: 1e-6
     phase_comparison: 1e-5

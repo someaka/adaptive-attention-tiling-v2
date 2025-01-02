@@ -11,32 +11,29 @@ hardware_profile:
 
 # Performance-related parameters
 fiber_bundle:
-  batch_size: 32
+  batch_size: 16
 
-geometric_tests:
-  batch_size: 32
-  max_samples: 500
+geometric:
+  batch_size: 16
+  max_samples: 200
   max_iterations: 50
 
 pattern_tests:
-  batch_size: 32
-  max_patterns: 64
-  pattern_size: 64
-  num_iterations: 100
+  batch_size: 16
+  max_patterns: 32
+  pattern_size: 16
+  num_iterations: 50
 
 parallel_transport:
-  batch_size: 16
-  path_points: 100
-  test_cases: 10
+  batch_size: 8
+  path_points: 25
+  test_cases: 5
 
 memory_management:
   max_cached_tensors: 1000
   gc_frequency: 100
 
-quantum_geometric:
+quantum:
   dt: 0.01
-  batch_size: 32
-
-quantum_arithmetic:
-  batch_size: 32
+  batch_size: 16
   max_iterations: 50
