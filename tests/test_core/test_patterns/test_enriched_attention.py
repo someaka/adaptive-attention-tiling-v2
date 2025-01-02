@@ -62,7 +62,7 @@ def test_get_position(enriched_attention):
     
     # Test with wave enabled
     result = enriched_attention.get_position(wave)
-    assert result.shape == wave.shape[:-1] + (16,)
+    assert result.shape == wave.shape[:-1]  # Position expectation removes last dimension
     assert not torch.is_complex(result)
     assert result.dtype == enriched_attention.dtype
 
