@@ -181,13 +181,17 @@ class MotivicIntegrator(nn.Module):
         """Perform Monte Carlo integration over the given measure and domain.
         
         Args:
-            measure: Measure tensor of shape [batch_size, dim]
+            measure: Measure tensor of shape [batch_size, dim] or [1, batch_size, dim]
             lower: Lower bounds tensor of shape [batch_size, dim]
             upper: Upper bounds tensor of shape [batch_size, dim]
             
         Returns:
             Integral values tensor of shape [batch_size]
         """
+        # Squeeze extra dimension if present
+        if measure.dim() == 3:
+            measure = measure.squeeze(0)
+            
         batch_size = measure.shape[0]
         dim = measure.shape[1]  # Use actual dimension from input
         device = measure.device
@@ -351,7 +355,7 @@ class MotivicIntegrationSystem(nn.Module):
             
         Returns:
             Tuple of:
-            - Measure tensor
+            - Measure tensor of shape [batch_size, manifold_dim]
             - Dictionary of metrics
         """
         # Compute geometric measure
@@ -366,6 +370,10 @@ class MotivicIntegrationSystem(nn.Module):
         
         # Compute measure
         measure = self.integrator.compute_measure(pattern)
+        
+        # Squeeze extra dimension if present
+        if measure.dim() == 3:
+            measure = measure.squeeze(0)
         
         # Apply quantum corrections if needed
         if with_quantum:

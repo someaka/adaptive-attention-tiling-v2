@@ -17,13 +17,13 @@
 - [x] tests/test_core/test_patterns/test_enriched_attention.py
 - [x] tests/test_core/test_patterns/test_fiber_bundle.py
 - [x] tests/test_core/test_patterns/test_fiber_types.py
-- [ ] tests/test_core/test_patterns/test_motivic_integration.py
+- [x] tests/test_core/test_patterns/test_motivic_integration.py
 - [x] tests/test_core/test_patterns/test_operadic_structure.py
 - [ ] tests/test_core/test_patterns/test_pattern_fiber_bundle_operadic.py
 - [ ] tests/test_core/test_patterns/test_pattern_processor.py
-- [x] tests/test_core/test_patterns/test_riemannian.py
+- [ ] tests/test_core/test_patterns/test_riemannian.py
 - [ ] tests/test_core/test_patterns/test_symplectic.py
-- [x] tests/test_core/test_quantum_state.py
+- [ ] tests/test_core/test_quantum_state.py
 - [ ] tests/test_core/test_quantum/test_neural_quantum_bridge.py
 - [ ] tests/test_core/test_quantum/test_path_integral.py
 - [ ] tests/test_core/test_quantum/test_state_space.py
