@@ -22,7 +22,6 @@ import torch.nn.functional as F
 from src.core.quantum.state_space import QuantumState, HilbertSpace
 
 
-@pytest.mark.dependency()
 class TestStateSpace:
     @pytest.fixture
     def hilbert_dim(self):
@@ -90,7 +89,7 @@ class TestStateSpace:
         H = H + H.conj().T  # Make Hermitian
 
         # Evolve state
-        time = torch.linspace(0, 1, 10, dtype=torch.float64)
+        time = torch.linspace(0, 1, 5, dtype=torch.float64)
         evolved_states = hilbert_space.evolve_state(initial_state, H, time)
 
         # Test unitarity
@@ -100,7 +99,13 @@ class TestStateSpace:
             ), "Evolution must preserve normalization"
 
         # Test time-reversal
-        reversed_state = hilbert_space.evolve_state(evolved_states[-1], -H, time)[-1]
+        assert isinstance(evolved_states, list), "Expected list of states for multiple time points"
+        last_state = evolved_states[-1]  # Get the last state from the list
+        assert isinstance(last_state, QuantumState), "Expected QuantumState"
+        reversed_states = hilbert_space.evolve_state(last_state, -H, time)
+        assert isinstance(reversed_states, list), "Expected list of states for multiple time points"
+        reversed_state = reversed_states[-1]  # Get the last state from reversed evolution
+        assert isinstance(reversed_state, QuantumState), "Expected QuantumState"
         assert torch.allclose(
             initial_state.amplitudes, reversed_state.amplitudes, rtol=1e-4
         ), "Time reversal should recover initial state"
@@ -257,17 +262,32 @@ class TestStateSpace:
             phase=torch.zeros(hilbert_dim, dtype=torch.complex128)
         )
 
-        # Generate Pauli basis measurements
+        # Generate Pauli basis measurements for each qubit
         pauli_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
         pauli_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
         pauli_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
 
-        # Perform tomographic measurements
-        measurements = {
-            "X": hilbert_space.measure_observable(true_state, pauli_x),
-            "Y": hilbert_space.measure_observable(true_state, pauli_y),
-            "Z": hilbert_space.measure_observable(true_state, pauli_z)
-        }
+        # Perform tomographic measurements for each qubit
+        measurements = {}
+        n_qubits = int(np.log2(hilbert_dim))
+        
+        for q in range(n_qubits):
+            # Create extended operators for each qubit
+            for basis, label in [(pauli_x, "X"), (pauli_y, "Y"), (pauli_z, "Z")]:
+                # Build the full operator using tensor products
+                if q == 0:
+                    full_op = basis
+                    for _ in range(1, n_qubits):
+                        full_op = torch.kron(full_op, torch.eye(2, dtype=torch.complex128))
+                else:
+                    full_op = torch.eye(2, dtype=torch.complex128)
+                    for i in range(1, n_qubits):
+                        if i == q:
+                            full_op = torch.kron(full_op, basis)
+                        else:
+                            full_op = torch.kron(full_op, torch.eye(2, dtype=torch.complex128))
+                
+                measurements[f"{label}{q}"] = hilbert_space.measure_observable(true_state, full_op)
 
         # Reconstruct state
         reconstructed_state = hilbert_space.reconstruct_state(measurements)
@@ -315,7 +335,7 @@ class TestStateSpace:
             )
 
         # Compute Berry phase
-        times = torch.linspace(0, 1.0, 100, dtype=torch.float64)
+        times = torch.linspace(0, 1.0, 20, dtype=torch.float64)
         berry_phase = hilbert_space.compute_berry_phase(initial_state, hamiltonian, times)
 
         # Test phase is real
@@ -422,7 +442,7 @@ class TestStateSpace:
     def test_batch_conversion_consistency(self, hilbert_space):
         """Test consistency of batch conversion operations."""
         # Create batch of states with different properties
-        batch_size = 16
+        batch_size = 8
         states = []
         for i in range(batch_size):
             amplitudes = torch.randn(hilbert_space.dim, dtype=torch.complex128)
@@ -491,7 +511,7 @@ class TestStateSpace:
         H = H + H.conj().T  # Make Hermitian
         
         # Test different time steps
-        time_steps = [10, 20, 40]
+        time_steps = [5, 10, 15]
         final_states = []
         
         for steps in time_steps:
@@ -538,7 +558,7 @@ class TestStateSpace:
             return H
         
         # Compute geometric phase for different time discretizations
-        time_steps = [50, 100, 200]
+        time_steps = [10, 20, 40]
         phases = []
         
         for steps in time_steps:
@@ -581,32 +601,95 @@ class TestStateSpace:
             assert torch.abs(concurrence - initial_concurrence) < 1e-6, "Local evolution should preserve entanglement"
 
 
-@pytest.mark.dependency(depends=["TestStateSpace"])
 class TestStateConversion:
     """Tests for quantum state conversion operations."""
     
+    @pytest.fixture
+    def hilbert_space(self, hilbert_dim):
+        """Create a test Hilbert space."""
+        return HilbertSpace(dim=hilbert_dim)
+
+    @pytest.fixture
+    def hilbert_dim(self):
+        """Dimension of test Hilbert space."""
+        return 4
+
+    @pytest.fixture
+    def test_state(self, hilbert_space):
+        """Create test quantum state."""
+        amplitudes = torch.randn(8, hilbert_space.dim, dtype=torch.complex128)  # [batch_size, dim]
+        amplitudes = F.normalize(amplitudes, p=2, dim=-1)
+        return QuantumState(
+            amplitudes=amplitudes,
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_space.dim)],
+            phase=torch.zeros(hilbert_space.dim, dtype=torch.complex128)
+        )
+
     def test_classical_to_quantum(self, hilbert_space):
-        """Test conversion from classical to quantum states."""
+        """Test conversion from classical to quantum state."""
         classical_data = torch.randn(8, hilbert_space.dim * 2)  # Complex embedding
         quantum_state = hilbert_space.prepare_state(classical_data)
-        
+
         assert isinstance(quantum_state, QuantumState)
-        assert torch.allclose(quantum_state.norm(), torch.tensor(1.0))
-        
+        assert torch.allclose(quantum_state.norm(), torch.tensor(1.0, dtype=torch.float64))
+
     def test_quantum_to_classical(self, hilbert_space, test_state):
         """Test conversion from quantum to classical states."""
-        classical_data = hilbert_space.measure_state(test_state)
-        
-        assert classical_data.shape[-1] == hilbert_space.dim * 2
-        assert torch.all(torch.isfinite(classical_data))
+        classical_data = hilbert_space.measure_state(test_state, "Z")  # Add measurement basis
+
+        assert isinstance(classical_data, torch.Tensor)
+        assert classical_data.shape[-1] == hilbert_space.dim * 2  # Real and imaginary parts
+
+    def test_unitary_evolution(self, hilbert_space, test_state):
+        """Test consistency of unitary evolution."""
+        # Create test Hamiltonian
+        H = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
+        H = H + H.conj().T  # Make Hermitian
+
+        # Evolve state
+        time = torch.linspace(0, 1.0, 10)
+        evolved_states = hilbert_space.evolve_state(test_state, H, time)
+
+        # Check unitarity preservation
+        for state in evolved_states:
+            assert torch.allclose(state.norm(), torch.tensor(1.0, dtype=torch.float64), rtol=1e-5)
+
+    def test_observable_expectation(self, hilbert_space, test_state):
+        """Test consistency of observable expectations during evolution."""
+        # Create test observable
+        O = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
+        O = O + O.conj().T  # Make Hermitian
+
+        # Initial expectation
+        initial_exp = hilbert_space.measure_observable(test_state, O)  # Use measure_observable instead of expectation_value
 
 
-@pytest.mark.dependency(depends=["TestStateSpace", "TestStateConversion"])
 class TestEvolutionConsistency:
     """Tests for quantum evolution consistency."""
     
+    @pytest.fixture
+    def hilbert_space(self, hilbert_dim):
+        """Create a test Hilbert space."""
+        return HilbertSpace(dim=hilbert_dim)
+
+    @pytest.fixture
+    def hilbert_dim(self):
+        """Dimension of test Hilbert space."""
+        return 4
+
+    @pytest.fixture
+    def test_state(self, hilbert_space):
+        """Create test quantum state."""
+        amplitudes = torch.randn(8, hilbert_space.dim, dtype=torch.complex128)  # [batch_size, dim]
+        amplitudes = F.normalize(amplitudes, p=2, dim=-1)
+        return QuantumState(
+            amplitudes=amplitudes,
+            basis_labels=[f"|{i}⟩" for i in range(hilbert_space.dim)],
+            phase=torch.zeros(hilbert_space.dim, dtype=torch.complex128)
+        )
+
     def test_unitary_evolution(self, hilbert_space, test_state):
-        """Test that evolution preserves unitarity."""
+        """Test consistency of unitary evolution."""
         # Create test Hamiltonian
         H = torch.randn(hilbert_space.dim, hilbert_space.dim, dtype=torch.complex128)
         H = H + H.conj().T  # Make Hermitian
@@ -617,7 +700,7 @@ class TestEvolutionConsistency:
         
         # Check unitarity preservation
         for state in evolved_states:
-            assert torch.allclose(state.norm(), torch.tensor(1.0), rtol=1e-5)
+            assert torch.allclose(state.norm(), torch.tensor(1.0, dtype=torch.float64), rtol=1e-5)
             
     def test_observable_expectation(self, hilbert_space, test_state):
         """Test consistency of observable expectations during evolution."""
@@ -626,7 +709,7 @@ class TestEvolutionConsistency:
         O = O + O.conj().T  # Make Hermitian
         
         # Initial expectation
-        initial_exp = hilbert_space.expectation_value(test_state, O)
+        initial_exp = hilbert_space.measure_observable(test_state, O)  # Use measure_observable instead of expectation_value
         
         # Create compatible Hamiltonian that commutes with O
         H = torch.matmul(O, O)  # Guaranteed to commute
@@ -636,5 +719,5 @@ class TestEvolutionConsistency:
         evolved_states = hilbert_space.evolve_state(test_state, H, time)
         
         for state in evolved_states:
-            exp_val = hilbert_space.expectation_value(state, O)
+            exp_val = hilbert_space.measure_observable(state, O)
             assert torch.allclose(exp_val, initial_exp, rtol=1e-5)

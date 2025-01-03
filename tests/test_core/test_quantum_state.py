@@ -15,16 +15,16 @@ def test_single_qubit_state_preparation():
     # Test |0⟩ state
     zero_state = hilbert_space.prepare_state(torch.tensor([1.0, 0.0]))
     assert isinstance(zero_state, QuantumState)
-    assert torch.allclose(zero_state.amplitudes, torch.tensor([1.0, 0.0], dtype=torch.complex64))
+    assert torch.allclose(zero_state.amplitudes, torch.tensor([1.0, 0.0], dtype=torch.complex128))
     assert zero_state.basis_labels == ["|0⟩", "|1⟩"]
     
     # Test |1⟩ state
     one_state = hilbert_space.prepare_state(torch.tensor([0.0, 1.0]))
-    assert torch.allclose(one_state.amplitudes, torch.tensor([0.0, 1.0], dtype=torch.complex64))
+    assert torch.allclose(one_state.amplitudes, torch.tensor([0.0, 1.0], dtype=torch.complex128))
     
     # Test superposition state (|0⟩ + |1⟩)/√2
     superposition = hilbert_space.prepare_state(torch.tensor([1.0, 1.0]))
-    expected = torch.tensor([1.0, 1.0], dtype=torch.complex64) / np.sqrt(2)
+    expected = torch.tensor([1.0, 1.0], dtype=torch.complex128) / np.sqrt(2)
     assert torch.allclose(superposition.amplitudes, expected)
 
 
@@ -37,12 +37,12 @@ def test_multi_qubit_state_preparation():
     zero_zero = hilbert_space.prepare_state(torch.tensor([1.0, 0.0, 0.0, 0.0]))
     assert torch.allclose(
         zero_zero.amplitudes,
-        torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.complex64)
+        torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.complex128)
     )
     
     # Test Bell state (|00⟩ + |11⟩)/√2
     bell_state = hilbert_space.prepare_state(torch.tensor([1.0, 0.0, 0.0, 1.0]))
-    expected = torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex64) / np.sqrt(2)
+    expected = torch.tensor([1.0, 0.0, 0.0, 1.0], dtype=torch.complex128) / np.sqrt(2)
     assert torch.allclose(bell_state.amplitudes, expected)
 
 
@@ -67,9 +67,9 @@ def test_state_normalization():
 def test_quantum_state_properties():
     """Test quantum state properties and methods."""
     # Create a quantum state
-    amplitudes = torch.tensor([1.0, 0.0], dtype=torch.complex64)
+    amplitudes = torch.tensor([1.0, 0.0], dtype=torch.complex128)
     basis_labels = ["|0⟩", "|1⟩"]
-    phase = torch.zeros(1, dtype=torch.complex64)
+    phase = torch.zeros(1, dtype=torch.complex128)
     
     state = QuantumState(amplitudes=amplitudes, basis_labels=basis_labels, phase=phase)
     
@@ -80,7 +80,10 @@ def test_quantum_state_properties():
     assert torch.allclose(state.data, amplitudes)
     
     # Test normalization
-    assert torch.isclose(torch.sum(torch.abs(state.amplitudes) ** 2), torch.tensor(1.0)) 
+    assert torch.isclose(
+        torch.sum(torch.abs(state.amplitudes) ** 2),
+        torch.tensor(1.0, dtype=torch.float64)
+    )
 
 
 def test_time_evolution():
@@ -91,19 +94,29 @@ def test_time_evolution():
     initial_state = hilbert_space.prepare_state(torch.tensor([1.0, 0.0]))
     
     # Define Hamiltonian (Pauli-X matrix)
-    hamiltonian = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.complex64)
+    hamiltonian = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.complex128)
     
     # Evolve state for time t=π/4 (quarter rotation)
     t = np.pi / 4
+    # For single time point
     evolved_state = hilbert_space.evolve_state(initial_state, hamiltonian, t)
+    assert isinstance(evolved_state, QuantumState), "Expected single QuantumState for single time point"
     
     # Expected state after evolution: cos(t)|0⟩ - i*sin(t)|1⟩
     expected = torch.tensor([
         np.cos(t),
         -1j * np.sin(t)
-    ], dtype=torch.complex64)
+    ], dtype=torch.complex128)
     
     assert torch.allclose(evolved_state.amplitudes, expected, atol=1e-6)
+    
+    # Test evolution with multiple time points
+    times = torch.linspace(0, t, 5, dtype=torch.float64)
+    evolved_states = hilbert_space.evolve_state(initial_state, hamiltonian, times)
+    assert isinstance(evolved_states, list), "Expected list of states for multiple time points"
+    final_state = evolved_states[-1]
+    assert isinstance(final_state, QuantumState), "Expected QuantumState"
+    assert torch.allclose(final_state.amplitudes, expected, atol=1e-6)
 
 
 def test_unitary_operations():
@@ -117,13 +130,13 @@ def test_unitary_operations():
     hadamard = torch.tensor([
         [1.0, 1.0],
         [1.0, -1.0]
-    ], dtype=torch.complex64) / np.sqrt(2)
+    ], dtype=torch.complex128) / np.sqrt(2)
     
     # Apply Hadamard gate
     hadamard_state = hilbert_space.apply_unitary(initial_state, hadamard)
     
     # Expected state: (|0⟩ + |1⟩)/√2
-    expected = torch.tensor([1.0, 1.0], dtype=torch.complex64) / np.sqrt(2)
+    expected = torch.tensor([1.0, 1.0], dtype=torch.complex128) / np.sqrt(2)
     
     assert torch.allclose(hadamard_state.amplitudes, expected, atol=1e-6)
     
@@ -140,25 +153,29 @@ def test_measurement_operations():
     initial_state = hilbert_space.prepare_state(torch.tensor([1.0, 1.0]))
     
     # Define measurement in computational basis
-    measurement = torch.eye(2, dtype=torch.complex64)
+    measurement = torch.eye(2, dtype=torch.complex128)
     
     # Perform measurement
-    result, post_state = hilbert_space.measure_state(initial_state, measurement)
+    result = hilbert_space.measure_state(initial_state, measurement)
+    assert isinstance(result, torch.Tensor), "Expected tensor result from measurement"
+    assert result.shape == (4,), "Expected result shape (4,) for real and imaginary parts"
     
-    # Check measurement result is valid (0 or 1)
-    assert result in [0, 1]
+    # Convert result back to complex form and normalize
+    measured_state = torch.complex(result[:2], result[2:])
+    norm = torch.sqrt(torch.sum(torch.abs(measured_state) ** 2))
+    measured_state = measured_state / norm
     
-    # Check post-measurement state is normalized
-    norm = torch.sum(torch.abs(post_state.amplitudes) ** 2)
-    assert torch.isclose(norm.to(torch.float32), torch.tensor(1.0, dtype=torch.float32))
+    # Check normalization
+    norm = torch.sqrt(torch.sum(torch.abs(measured_state) ** 2))
+    assert torch.isclose(norm, torch.tensor(1.0, dtype=torch.float64)), "Measured state should be normalized"
     
-    # Check post-measurement state is an eigenstate
-    if result == 0:
-        expected = torch.tensor([1.0, 0.0], dtype=torch.complex64)
-    else:
-        expected = torch.tensor([0.0, 1.0], dtype=torch.complex64)
+    # Check measured state is either |0⟩ or |1⟩
+    zero_state = torch.tensor([1.0, 0.0], dtype=torch.complex128)
+    one_state = torch.tensor([0.0, 1.0], dtype=torch.complex128)
     
-    assert torch.allclose(post_state.amplitudes, expected, atol=1e-6)
+    is_zero = torch.allclose(measured_state, zero_state, atol=1e-6)
+    is_one = torch.allclose(measured_state, one_state, atol=1e-6)
+    assert is_zero or is_one, "Measured state should collapse to |0⟩ or |1⟩"
 
 
 def test_measurement_statistics():
@@ -172,8 +189,16 @@ def test_measurement_statistics():
     # Perform multiple measurements
     results = []
     for _ in range(n_samples):
-        result, _ = hilbert_space.measure_state(plus_state, torch.eye(2, dtype=torch.complex64))
-        results.append(result)
+        result = hilbert_space.measure_state(plus_state, torch.eye(2, dtype=torch.complex128))
+        # Convert result to state vector and normalize
+        measured_state = torch.complex(result[:2], result[2:])
+        norm = torch.sqrt(torch.sum(torch.abs(measured_state) ** 2))
+        measured_state = measured_state / norm
+        
+        # If closer to |0⟩, count as 0, otherwise count as 1
+        zero_state = torch.tensor([1.0, 0.0], dtype=torch.complex128)
+        fidelity = torch.abs(torch.sum(measured_state.conj() * zero_state)) ** 2
+        results.append(0 if fidelity > 0.5 else 1)
     
     # Check measurement statistics (should be roughly 50-50)
     counts = torch.bincount(torch.tensor(results))
@@ -244,11 +269,11 @@ def test_density_matrix_properties():
     pure_state = hilbert_space.prepare_state(torch.tensor([1.0, 0.0]))
     
     # Create mixed state (|0⟩⟨0| + |1⟩⟨1|)/2
-    mixed_amplitudes = torch.tensor([1.0, 0.0], dtype=torch.complex64)  # Start with |0⟩
+    mixed_amplitudes = torch.tensor([1.0, 0.0], dtype=torch.complex128)  # Start with |0⟩
     mixed_state = QuantumState(
         amplitudes=mixed_amplitudes,
         basis_labels=["|0⟩", "|1⟩"],
-        phase=torch.zeros(1, dtype=torch.complex64)
+        phase=torch.zeros(1, dtype=torch.complex128)
     )
     
     # Test purity through state fidelity
@@ -282,3 +307,45 @@ def test_quantum_geometric_properties():
     observable = torch.tensor([[1.0, 0.0], [0.0, -1.0]], dtype=torch.complex128)  # Pauli-Z
     variance = hilbert_space.measure_variance(state1, observable)
     assert torch.isclose(variance.to(torch.float32), torch.tensor(0.0, dtype=torch.float32), atol=1e-6)  # |0⟩ is eigenstate of Z
+
+
+def test_time_reversal():
+    """Test time reversal of quantum states."""
+    hilbert_space = HilbertSpace(dim=2)
+    
+    # Prepare initial state |0⟩
+    initial_state = hilbert_space.prepare_state(torch.tensor([1.0, 0.0]))
+    
+    # Define Hamiltonian (Pauli-X matrix)
+    hamiltonian = torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.complex128)
+    
+    # Test time reversal with multiple time points
+    t = np.pi / 4
+    times = torch.linspace(0, t, 5, dtype=torch.float64)
+    evolved_states = hilbert_space.evolve_state(initial_state, hamiltonian, times)
+    assert isinstance(evolved_states, list), "Expected list of states for multiple time points"
+    last_state = evolved_states[-1]
+    assert isinstance(last_state, QuantumState), "Expected QuantumState"
+    
+    # Reverse evolution with multiple time points
+    reversed_states = hilbert_space.evolve_state(last_state, -hamiltonian, times)
+    assert isinstance(reversed_states, list), "Expected list of states for multiple time points"
+    reversed_state = reversed_states[-1]
+    assert isinstance(reversed_state, QuantumState), "Expected QuantumState"
+    
+    # Check if we recover the initial state
+    assert torch.allclose(
+        initial_state.amplitudes, reversed_state.amplitudes, rtol=1e-4
+    ), "Time reversal should recover initial state"
+    
+    # Test time reversal with single time point
+    evolved_state = hilbert_space.evolve_state(initial_state, hamiltonian, t)
+    assert isinstance(evolved_state, QuantumState), "Expected single QuantumState for single time point"
+    
+    reversed_single = hilbert_space.evolve_state(evolved_state, -hamiltonian, t)
+    assert isinstance(reversed_single, QuantumState), "Expected single QuantumState for single time point"
+    
+    # Check if we recover the initial state
+    assert torch.allclose(
+        initial_state.amplitudes, reversed_single.amplitudes, rtol=1e-4
+    ), "Time reversal should recover initial state (single time point)"
