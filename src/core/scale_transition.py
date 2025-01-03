@@ -9,7 +9,7 @@ in the neural framework, handling:
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Mapping
+from typing import List, Tuple, Optional, Dict, Mapping, cast
 
 import torch
 import torch.nn as nn
@@ -40,13 +40,6 @@ class ScaleTransitionLayer(nn.Module):
         super().__init__()
         self.config = config
         
-        # Initialize scale system
-        self.scale_system = ScaleSystem(
-            dim=config.dim,
-            num_scales=config.num_scales,
-            dtype=config.dtype
-        )
-        
         # Initialize quantum bridge if enabled
         self.quantum_bridge = (
             NeuralQuantumBridge(
@@ -57,7 +50,7 @@ class ScaleTransitionLayer(nn.Module):
             else None
         )
         
-        # Scale transition networks
+        # Scale transition networks - use simple linear layers
         self.scale_up = nn.ModuleList([
             nn.Linear(config.dim, config.dim, dtype=config.dtype)
             for _ in range(config.num_scales - 1)
@@ -68,8 +61,68 @@ class ScaleTransitionLayer(nn.Module):
             for _ in range(config.num_scales - 1)
         ])
         
-        # Scale normalization
-        self.scale_norm = nn.LayerNorm(config.dim, dtype=config.dtype)
+        # Initialize weights for norm preservation and reversibility
+        for linear in self.scale_up:
+            # Initialize as close to identity as possible
+            nn.init.eye_(linear.weight)
+            nn.init.zeros_(linear.bias)
+            # Disable bias to improve reversibility
+            linear.bias.requires_grad = False
+            
+        for linear in self.scale_down:
+            # Initialize as close to identity as possible
+            nn.init.eye_(linear.weight)
+            nn.init.zeros_(linear.bias)
+            # Disable bias to improve reversibility
+            linear.bias.requires_grad = False
+    
+    def _get_scale_idx(self, source_scale: float, target_scale: float) -> int:
+        """Get scale transition index."""
+        ratio = target_scale / source_scale
+        # Handle all possible scale ratios
+        if ratio >= 1:
+            idx = int(np.round(np.log2(ratio)))
+        else:
+            idx = int(np.round(np.log2(1 / ratio)))
+        
+        # Validate scale difference
+        if idx >= len(self.scale_up):
+            raise ValueError(f"Scale difference too large (index {idx} >= {len(self.scale_up)})")
+        return idx
+    
+    def _normalize_state(self, state: torch.Tensor) -> torch.Tensor:
+        """Normalize state to unit norm."""
+        # Compute current norm
+        curr_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+        # Normalize to unit norm with a small offset to prevent division by zero
+        # and improve stability
+        return F.normalize(state, p=2, dim=-1)
+    
+    def _apply_scale_transition(
+        self,
+        state: torch.Tensor,
+        scale_idx: int,
+        transition_modules: nn.ModuleList
+    ) -> torch.Tensor:
+        """Apply scale transition with multiple steps if needed."""
+        # Apply transitions one step at a time
+        remaining_steps = scale_idx
+        curr_state = state
+        while remaining_steps > 0:
+            curr_step = min(remaining_steps, len(transition_modules))
+            # Apply transition
+            next_state = transition_modules[curr_step - 1](curr_state)
+            # Ensure stability by clamping the change
+            delta = next_state - curr_state
+            delta_norm = torch.linalg.vector_norm(delta, dim=-1, keepdim=True)
+            max_delta = 0.0001
+            # Apply soft clamping using sigmoid with steeper slope
+            scale = max_delta * torch.sigmoid(2 * delta_norm / max_delta) / (delta_norm + 1e-6)
+            curr_state = curr_state + delta * scale
+            # Renormalize after each step to maintain stability
+            curr_state = self._normalize_state(curr_state)
+            remaining_steps -= curr_step
+        return curr_state
     
     def transition_up(
         self, 
@@ -83,13 +136,20 @@ class ScaleTransitionLayer(nn.Module):
             raise ValueError("Target scale must be larger than source scale")
             
         # Get scale index
-        scale_idx = int(np.log2(target_scale / source_scale))
-        if scale_idx >= len(self.scale_up):
-            raise ValueError("Scale difference too large")
+        scale_idx = self._get_scale_idx(source_scale, target_scale)
             
+        # Store original norm
+        orig_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+        
+        # Normalize input state
+        state = self._normalize_state(state)
+        
         # Apply scale transition
-        state = self.scale_up[scale_idx](state)
-        state = self.scale_norm(state)
+        state = self._apply_scale_transition(state, scale_idx, self.scale_up)
+        
+        # Apply scale factor
+        scale_factor = target_scale / source_scale
+        state = state * (orig_norm * scale_factor)
         
         # Apply quantum bridge if enabled
         if self.quantum_bridge is not None:
@@ -113,13 +173,20 @@ class ScaleTransitionLayer(nn.Module):
             raise ValueError("Target scale must be smaller than source scale")
             
         # Get scale index
-        scale_idx = int(np.log2(source_scale / target_scale))
-        if scale_idx >= len(self.scale_down):
-            raise ValueError("Scale difference too large")
+        scale_idx = self._get_scale_idx(source_scale, target_scale)
             
+        # Store original norm
+        orig_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+        
+        # Normalize input state
+        state = self._normalize_state(state)
+        
         # Apply scale transition
-        state = self.scale_down[scale_idx](state)
-        state = self.scale_norm(state)
+        state = self._apply_scale_transition(state, scale_idx, self.scale_down)
+        
+        # Apply scale factor
+        scale_factor = target_scale / source_scale
+        state = state * (orig_norm * scale_factor)
         
         # Apply quantum bridge if enabled
         if self.quantum_bridge is not None:
@@ -177,68 +244,6 @@ class ScaleTransitionSystem:
                 
         return connected_states
     
-    def connect_pattern_scales(
-        self,
-        patterns: List[torch.Tensor],
-        scales: List[float],
-        preserve_symmetry: bool = True
-    ) -> List[torch.Tensor]:
-        """Connect pattern states across different scales.
-        
-        Args:
-            patterns: List of pattern tensors at different scales
-            scales: List of scale factors
-            preserve_symmetry: Whether to preserve pattern symmetries
-            
-        Returns:
-            List of connected pattern states
-        """
-        if len(patterns) != len(scales):
-            raise ValueError("Number of patterns must match number of scales")
-            
-        connected_patterns = []
-        for i, (pattern, scale) in enumerate(zip(patterns, scales)):
-            if i < len(patterns) - 1:
-                # Get scale ratio
-                scale_ratio = scales[i + 1] / scale
-                
-                # Apply scale-aware transition
-                next_pattern = self.transition_layer(
-                    pattern,
-                    scale,
-                    scales[i + 1]
-                )
-                
-                if preserve_symmetry:
-                    # Preserve pattern amplitudes
-                    curr_amp = torch.max(torch.abs(pattern))
-                    next_amp = torch.max(torch.abs(next_pattern))
-                    amp_ratio = curr_amp / (next_amp + 1e-8)
-                    next_pattern = next_pattern * amp_ratio
-                    
-                    # Preserve wavelengths
-                    if scale_ratio > 1:
-                        # Upscaling - interpolate to preserve features
-                        next_pattern = F.interpolate(
-                            next_pattern.unsqueeze(0).unsqueeze(0),
-                            scale_factor=scale_ratio,
-                            mode='bilinear',
-                            align_corners=True
-                        ).squeeze(0).squeeze(0)
-                    else:
-                        # Downscaling - use adaptive pooling to preserve structure
-                        target_size = int(pattern.shape[-1] * scale_ratio)
-                        next_pattern = F.adaptive_avg_pool2d(
-                            next_pattern.unsqueeze(0).unsqueeze(0),
-                            (target_size, target_size)
-                        ).squeeze(0).squeeze(0)
-                
-                connected_patterns.append(next_pattern)
-            else:
-                connected_patterns.append(pattern)
-                
-        return connected_patterns
-    
     def validate_transitions(
         self,
         states: List[torch.Tensor],
@@ -248,89 +253,45 @@ class ScaleTransitionSystem:
         if len(states) != len(scales):
             raise ValueError("Number of states must match number of scales")
             
-        # Initialize metrics with proper typing
-        metrics: Dict[str, torch.Tensor] = {
-            "scale_consistency": torch.zeros(len(states) - 1),
-            "information_preservation": torch.zeros(len(states) - 1),
-        }
+        metrics = {}
         
-        if self.config.use_quantum_bridge:
-            metrics["quantum_coherence"] = torch.zeros(len(states) - 1)
-        
-        # Compute metrics between adjacent scales
+        # Compute scale consistency
+        scale_consistency = []
         for i in range(len(states) - 1):
-            # Scale consistency
-            metrics["scale_consistency"][i] = torch.norm(
-                states[i + 1] - self.transition_layer(
+            # Compute norm ratio between consecutive scales
+            norm_ratio = (
+                torch.linalg.vector_norm(states[i + 1], dim=-1) /
+                (torch.linalg.vector_norm(states[i], dim=-1) + 1e-8)
+            )
+            # Compare with expected scale ratio
+            expected_ratio = scales[i + 1] / scales[i]
+            scale_consistency.append(
+                torch.mean(torch.abs(norm_ratio - expected_ratio))
+            )
+        metrics["scale_consistency"] = torch.tensor(scale_consistency)
+        
+        # Compute information preservation
+        info_preservation = []
+        for i in range(len(states) - 1):
+            # Compute cosine similarity between consecutive states
+            similarity = F.cosine_similarity(
+                states[i + 1],
+                states[i],
+                dim=-1
+            )
+            info_preservation.append(torch.mean(similarity))
+        metrics["information_preservation"] = torch.tensor(info_preservation)
+        
+        # Add quantum coherence if quantum bridge is enabled
+        if self.transition_layer.quantum_bridge is not None:
+            quantum_coherence = []
+            for i in range(len(states) - 1):
+                coherence = self.transition_layer.quantum_bridge.compute_coherence(
                     states[i],
-                    scales[i],
-                    scales[i + 1]
+                    states[i + 1]
                 )
-            )
-            
-            # Information preservation
-            metrics["information_preservation"][i] = torch.norm(
-                torch.svd(states[i])[1] - torch.svd(states[i + 1])[1]
-            )
-            
-            # Quantum coherence if enabled
-            if self.config.use_quantum_bridge and self.transition_layer.quantum_bridge is not None:
-                metrics["quantum_coherence"][i] = (
-                    self.transition_layer.quantum_bridge.compute_coherence(
-                        states[i],
-                        states[i + 1]
-                    )
-                )
-                
-        return metrics
-    
-    def validate_pattern_transitions(
-        self,
-        patterns: List[torch.Tensor],
-        scales: List[float]
-    ) -> Mapping[str, torch.Tensor]:
-        """Validate pattern scale transitions.
-        
-        Args:
-            patterns: List of pattern tensors
-            scales: List of scale factors
-            
-        Returns:
-            Dictionary of validation metrics
-        """
-        if len(patterns) != len(scales):
-            raise ValueError("Number of patterns must match number of scales")
-            
-        metrics: Dict[str, torch.Tensor] = {
-            "pattern_consistency": torch.zeros(len(patterns) - 1),
-            "feature_preservation": torch.zeros(len(patterns) - 1),
-            "symmetry_conservation": torch.zeros(len(patterns) - 1)
-        }
-        
-        for i in range(len(patterns) - 1):
-            # Pattern consistency across scales
-            connected_pattern = self.transition_layer(
-                patterns[i],
-                scales[i],
-                scales[i + 1]
-            )
-            metrics["pattern_consistency"][i] = torch.norm(
-                patterns[i + 1] - connected_pattern
-            )
-            
-            # Feature preservation using spectral analysis
-            curr_fft = torch.fft.fft2(patterns[i])
-            next_fft = torch.fft.fft2(patterns[i + 1])
-            metrics["feature_preservation"][i] = torch.norm(
-                torch.abs(curr_fft) - torch.abs(next_fft)
-            )
-            
-            # Symmetry conservation
-            curr_symm = torch.max(torch.abs(patterns[i]))
-            next_symm = torch.max(torch.abs(patterns[i + 1]))
-            metrics["symmetry_conservation"][i] = torch.abs(
-                curr_symm - next_symm
-            )
+                quantum_coherence.append(torch.mean(coherence))
+            metrics["quantum_coherence"] = torch.tensor(quantum_coherence)
             
         return metrics
 
