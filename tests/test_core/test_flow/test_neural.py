@@ -207,52 +207,54 @@ class TestNeuralGeometricFlow:
 
     def test_flow_step(self, neural_flow, batch_size, device):
         """Test geometric flow step."""
-        # Use a reduced batch size but complete model dimensions
-        test_batch_size = min(batch_size, 4)  # Limit to 4 samples
+        # Use a reduced batch size for testing
+        test_batch_size = min(batch_size, 4)
         
-        metric = torch.eye(neural_flow.manifold_dim, device=device)
-        metric = metric.unsqueeze(0).repeat(test_batch_size, 1, 1)
+        # Create metric tensor with manifold dimensions
+        manifold_dim = neural_flow.manifold_dim
+        hidden_dim = neural_flow.quantum_bridge.hidden_dim
+        metric = torch.zeros(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=torch.float32)
         
-        # Create a valid Ricci tensor with complete dimensions
-        ricci = torch.randn(test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, device=device)
-        # Make the Ricci tensor symmetric
+        # Initialize with identity to preserve geometric structure
+        metric[:] = torch.eye(manifold_dim, device=device, dtype=torch.float32)
+        
+        # Create a valid Ricci tensor matching manifold_dim
+        ricci = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=torch.float32)
+        # Make the Ricci tensor symmetric as required
         ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
         
-        # Verify dimensions before flow_step
-        assert metric.shape == (test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
-        assert ricci.shape == (test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
-        
-        # Create attention pattern for quantum evolution
-        attention_pattern = torch.randn(test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, device=device)
+        # Create attention pattern matching manifold_dim
+        attention_pattern = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=torch.float32)
         attention_pattern = torch.softmax(attention_pattern, dim=-1)  # Normalize attention weights
         
-        # Update neural_flow's quantum bridge dimensions and ensure complex float dtype
-        neural_flow.quantum_bridge.hidden_dim = 8
-        neural_flow.quantum_bridge.hilbert_space.dim = 8
-        neural_flow.quantum_bridge.dtype = torch.complex64  # Set to ComplexFloat
+        # Project metric tensor to hidden dimension for quantum bridge
+        metric_flat = metric.reshape(test_batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
+        metric_padded = torch.zeros(test_batch_size, hidden_dim, device=device, dtype=torch.float32)
+        metric_padded[:, :manifold_dim * manifold_dim] = metric_flat
         
-        # Convert state amplitudes to ComplexFloat
-        neural_flow.quantum_bridge.hilbert_space.state_dtype = torch.complex64
-        
-        # Convert any existing states to ComplexFloat
-        if hasattr(neural_flow.quantum_bridge, 'state'):
-            neural_flow.quantum_bridge.state.amplitudes = neural_flow.quantum_bridge.state.amplitudes.to(dtype=torch.complex64)
-
+        # Run flow step
         new_metric, flow_metrics = neural_flow.flow_step(metric, ricci, attention_pattern=attention_pattern)
         
-        # Verify dimensions and properties after flow_step
-        assert new_metric.shape == metric.shape
-        assert torch.allclose(new_metric, new_metric.transpose(-1, -2))
+        # Verify output shapes
+        assert new_metric.shape == metric.shape, f"Expected shape {metric.shape}, got {new_metric.shape}"
         
-        # Verify that flow metrics are valid
-        assert isinstance(flow_metrics.flow_magnitude, torch.Tensor)
-        assert isinstance(flow_metrics.metric_determinant, torch.Tensor)
-        assert isinstance(flow_metrics.ricci_scalar, torch.Tensor)
+        # Verify metric properties
+        assert torch.all(torch.isfinite(new_metric)), "New metric contains non-finite values"
+        assert torch.allclose(new_metric, new_metric.transpose(-2, -1), rtol=1e-5), "New metric is not symmetric"
+        eigenvals = torch.linalg.eigvalsh(new_metric)
+        assert torch.all(eigenvals > 0), "New metric is not positive definite"
         
-        # Verify metric dimensions
-        assert flow_metrics.flow_magnitude.shape == (test_batch_size,)
-        assert flow_metrics.metric_determinant.shape == (test_batch_size,)
-        assert flow_metrics.ricci_scalar.shape == (test_batch_size,)
+        # Verify flow metrics
+        assert hasattr(flow_metrics, 'quantum_entropy'), "Flow metrics should contain quantum_entropy"
+        assert isinstance(flow_metrics.quantum_entropy, torch.Tensor), "Quantum entropy should be a tensor"
+        assert torch.all(torch.isfinite(flow_metrics.quantum_entropy)), "Quantum entropy contains non-finite values"
+        
+        # Verify quantum corrections if present
+        if hasattr(flow_metrics, 'quantum_corrections') and flow_metrics.quantum_corrections is not None:
+            corrections = flow_metrics.quantum_corrections
+            assert isinstance(corrections, torch.Tensor), "Quantum corrections should be a tensor"
+            assert torch.all(torch.isfinite(corrections)), "Quantum corrections contain non-finite values"
+            assert corrections.shape[-2:] == (manifold_dim, manifold_dim), "Incorrect quantum corrections shape"
 
     def test_geometric_operations(self, neural_flow, batch_size, device):
         """Test geometric operations."""

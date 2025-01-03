@@ -287,6 +287,9 @@ class NeuralQuantumBridge(nn.Module):
             dtype=attention_pattern.dtype
         ).unsqueeze(0) * 1e-6
         
+        # Convert to complex64 for matrix operations
+        attention_regularized = attention_regularized.to(torch.complex64)
+        
         # Compute matrix logarithm
         try:
             hamiltonian = -1j * torch.matrix_exp(attention_regularized)
@@ -295,14 +298,20 @@ class NeuralQuantumBridge(nn.Module):
             hamiltonian = -1j * (attention_regularized - torch.eye(
                 state_dim,
                 device=attention_pattern.device,
-                dtype=attention_pattern.dtype
+                dtype=torch.complex64
             ).unsqueeze(0))
         
         # Compute evolution operator U = exp(-iHt)
         U = torch.matrix_exp(-time * hamiltonian)
         
+        # Convert state amplitudes to complex64 for evolution
+        amplitudes_float = state.amplitudes.to(torch.complex64)
+        
         # Evolve state
-        evolved_amplitudes = torch.matmul(U, state.amplitudes.unsqueeze(-1)).squeeze(-1)
+        evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
+        
+        # Convert back to complex128 for consistency
+        evolved_amplitudes = evolved_amplitudes.to(torch.complex128)
         
         # Create new quantum state
         evolved_state = QuantumState(

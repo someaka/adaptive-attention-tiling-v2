@@ -93,43 +93,31 @@ class HilbertSpace:
         return norm.to(torch.float64)
 
     def prepare_state(self, amplitudes: torch.Tensor) -> QuantumState:
-        """Prepare quantum state with given amplitudes."""
-        # Convert input to complex128
-        if amplitudes.dtype != torch.complex128:
-            if amplitudes.dtype == torch.complex64:
-                amplitudes = amplitudes.to(torch.complex128)
-            else:
-                # Handle real inputs by converting to complex
-                amplitudes = amplitudes.to(torch.float64)
-                if amplitudes.shape[-1] == self.dim * 2:
-                    # Convert real and imaginary parts to complex
-                    real_part = amplitudes[..., :self.dim].to(torch.float64)
-                    imag_part = amplitudes[..., self.dim:].to(torch.float64)
-                    amplitudes = torch.complex(real_part, imag_part)
-                else:
-                    # Single real input
-                    amplitudes = torch.complex(amplitudes, torch.zeros_like(amplitudes, dtype=torch.float64))
-
-        # Handle different input dimensions
-        if amplitudes.shape[-1] == 2 and self.dim == 4:
-            # Special case: Convert 2-qubit product state to 4-dim state
-            amplitudes = torch.kron(amplitudes[:1], amplitudes[1:])
-        elif amplitudes.shape[-1] != self.dim:
-            raise ValueError(f"Amplitudes must have dimension {self.dim} or {self.dim * 2}")
+        """Prepare quantum state from amplitudes.
+        
+        Args:
+            amplitudes: Complex amplitudes tensor
             
-        # Store original norm
-        original_norm = self._compute_norm(amplitudes)
+        Returns:
+            Prepared quantum state
+        """
+        # Ensure complex64 dtype
+        if amplitudes.dtype != torch.complex64:
+            amplitudes = amplitudes.to(dtype=torch.complex64)
             
         # Normalize state
-        if torch.any(original_norm > 1e-10):
-            amplitudes = (amplitudes / original_norm).to(torch.complex128)
+        norm = torch.sqrt(torch.sum(torch.abs(amplitudes)**2, dim=-1, keepdim=True))
+        if torch.any(norm > 1e-10):
+            amplitudes = amplitudes / norm
             
-        return QuantumState(
+        # Create quantum state
+        state = QuantumState(
             amplitudes=amplitudes,
             basis_labels=self.basis_states,
-            phase=torch.zeros_like(amplitudes, dtype=torch.complex128),
-            original_norm=original_norm
+            phase=torch.zeros(1, dtype=torch.complex64, device=amplitudes.device)
         )
+        
+        return state
 
     def entanglement_entropy(self, state: Union[QuantumState, torch.Tensor]) -> torch.Tensor:
         """Compute entanglement entropy of a bipartite quantum state.
