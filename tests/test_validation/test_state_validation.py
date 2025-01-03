@@ -49,7 +49,7 @@ class TestStateValidation:
         """Test state preparation validation."""
         # Generate test state
         dim = 2**num_qubits
-        amplitudes = torch.randn(dim, dtype=torch.complex64)
+        amplitudes = torch.randn(dim, dtype=torch.complex128)
         amplitudes = amplitudes / torch.norm(amplitudes)
         phase = torch.exp(1j * torch.rand(1))
         target = QuantumState(amplitudes=amplitudes, basis_labels=basis_labels, phase=phase)
@@ -70,7 +70,7 @@ class TestStateValidation:
         """Test density matrix validation."""
         # Generate single pure state
         dim = 2**num_qubits
-        amplitudes = torch.randn(dim, dtype=torch.complex64)
+        amplitudes = torch.randn(dim, dtype=torch.complex128)
         amplitudes = amplitudes / torch.norm(amplitudes)
         phase = torch.exp(1j * torch.rand(1))
         state = QuantumState(amplitudes=amplitudes, basis_labels=basis_labels, phase=phase)
@@ -89,9 +89,9 @@ class TestStateValidation:
         # Test mixed state
         def generate_mixed_state() -> torch.Tensor:
             # Create a mixed state by mixing two pure states
-            state1 = torch.randn(dim, dtype=torch.complex64)
+            state1 = torch.randn(dim, dtype=torch.complex128)
             state1 = state1 / torch.norm(state1)
-            state2 = torch.randn(dim, dtype=torch.complex64)
+            state2 = torch.randn(dim, dtype=torch.complex128)
             state2 = state2 / torch.norm(state2)
             
             # Mix states with probabilities p and (1-p)
@@ -114,7 +114,7 @@ class TestStateValidation:
         """Test state tomography validation."""
         # Generate test state
         dim = 2**num_qubits
-        amplitudes = torch.randn(dim, dtype=torch.complex64)
+        amplitudes = torch.randn(dim, dtype=torch.complex128)
         amplitudes = amplitudes / torch.norm(amplitudes)
         phase = torch.exp(1j * torch.rand(1))
         state = QuantumState(amplitudes=amplitudes, basis_labels=basis_labels, phase=phase)
@@ -122,7 +122,7 @@ class TestStateValidation:
         # Generate measurement operators
         def generate_projector(basis_state: int) -> torch.Tensor:
             """Generate projection operator."""
-            proj = torch.zeros(dim, dim, dtype=torch.complex64)
+            proj = torch.zeros(dim, dim, dtype=torch.complex128)
             proj[basis_state, basis_state] = 1
             return proj
 
@@ -141,7 +141,7 @@ class TestStateValidation:
         """Test integrated state validation."""
         # Generate test state
         dim = 2**num_qubits
-        amplitudes = torch.randn(dim, dtype=torch.complex64)
+        amplitudes = torch.randn(dim, dtype=torch.complex128)
         amplitudes = amplitudes / torch.norm(amplitudes)
         phase = torch.exp(1j * torch.rand(1))
         target = QuantumState(amplitudes=amplitudes, basis_labels=basis_labels, phase=phase)
@@ -162,7 +162,7 @@ class TestStateValidation:
         # Test tomography
         def generate_projector(basis_state: int) -> torch.Tensor:
             """Generate projection operator."""
-            proj = torch.zeros(dim, dim, dtype=torch.complex64)
+            proj = torch.zeros(dim, dim, dtype=torch.complex128)
             proj[basis_state, basis_state] = 1
             return proj
 

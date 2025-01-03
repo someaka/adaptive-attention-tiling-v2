@@ -389,7 +389,7 @@ class StatePreparationValidator:
         trace = torch.trace(density)
         trace_one = torch.allclose(
             trace,
-            torch.tensor(1.0, dtype=torch.complex64),
+            torch.tensor(1.0, dtype=torch.complex128),
             atol=self.tolerance,
         )
 
@@ -463,7 +463,7 @@ class StatePreparationValidator:
         num_measurements = measurements.shape[1]
         dim = bases[0].shape[0]
         device = measurements.device
-        dtype = torch.complex64
+        dtype = torch.complex128
         
         # Initialize with maximally mixed state
         rho = torch.eye(dim, dtype=dtype, device=device).unsqueeze(0).expand(batch_size, -1, -1) / dim
@@ -577,14 +577,14 @@ class DensityMatrixValidator:
             trace = torch.diagonal(rho, dim1=-2, dim2=-1).sum(-1)  # Sum diagonals for each batch
             trace_one = torch.allclose(
                 trace,
-                torch.ones_like(trace, dtype=torch.complex64),
+                torch.ones_like(trace, dtype=torch.complex128),
                 atol=self.tolerance,
             )
         else:  # Single state case
             trace = torch.trace(rho)
             trace_one = torch.allclose(
                 trace,
-                torch.tensor(1.0, dtype=torch.complex64),
+                torch.tensor(1.0, dtype=torch.complex128),
                 atol=self.tolerance,
             )
 
@@ -708,7 +708,7 @@ class TomographyValidator:
         num_measurements = measurements.shape[1]
         dim = bases[0].shape[0]
         device = measurements.device
-        dtype = torch.complex64
+        dtype = torch.complex128
         
         # Initialize with maximally mixed state
         rho = torch.eye(dim, dtype=dtype, device=device).unsqueeze(0).expand(batch_size, -1, -1) / dim

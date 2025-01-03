@@ -69,9 +69,9 @@ class WavePacketValidator:
                 pos_valid = True
                 mom_valid = True
                 if position is not None:
-                    pos_valid = bool(torch.allclose(computed_position, position, rtol=self.tolerance))
+                    pos_valid = bool(torch.allclose(computed_position, position, atol=self.tolerance))
                 if momentum is not None:
-                    mom_valid = bool(torch.allclose(computed_momentum, momentum, rtol=self.tolerance))
+                    mom_valid = bool(torch.allclose(computed_momentum, momentum, atol=self.tolerance))
             else:
                 computed_position = None
                 computed_momentum = None

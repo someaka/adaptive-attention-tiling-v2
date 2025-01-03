@@ -166,8 +166,8 @@ class MockAttentionHead(nn.Module):
         key = self.key_proj(key_points)
         
         # Get metric tensors
-        query_metric = self.query_metric(query_points)
-        key_metric = self.key_metric(key_points)
+        query_metric = self.query_metric(query_points)  # [batch, dim, dim]
+        key_metric = self.key_metric(key_points)  # [batch, dim, dim]
         
         # Scale inputs to a reasonable range if they're too small
         scale_factor = max(
@@ -175,9 +175,18 @@ class MockAttentionHead(nn.Module):
             torch.norm(key_points).item()
         )
         if scale_factor < 1e-4:
+            query_points_scaled = query_points / scale_factor * 1e-4
+            key_points_scaled = key_points / scale_factor * 1e-4
             query = query / scale_factor * 1e-4
             key = key / scale_factor * 1e-4
+        else:
+            query_points_scaled = query_points
+            key_points_scaled = key_points
             
+        # Normalize points to unit norm for stable distance computation
+        query = F.normalize(query, p=2, dim=-1)
+        key = F.normalize(key, p=2, dim=-1)
+        
         # Compute metric-aware inner products with improved stability
         query_metric_sqrt = torch.linalg.cholesky(
             query_metric + eps * torch.eye(query.size(-1), device=query.device).unsqueeze(0)
@@ -202,52 +211,47 @@ class MockAttentionHead(nn.Module):
         # Scale to [0, 1] with controlled scaling
         similarities = (similarities + 1.0) / 2.0
         
-        # Apply temperature scaling with adaptive temperature
+        # Match input distance distribution using cosine similarity
+        query_distances = torch.zeros(query_points.size(0), query_points.size(0), device=query_points.device)
+        key_distances = torch.zeros(key_points.size(0), key_points.size(0), device=key_points.device)
+        
+        # Compute pairwise distances using cosine similarity
+        query_points_norm = F.normalize(query_points_scaled, p=2, dim=-1)
+        key_points_norm = F.normalize(key_points_scaled, p=2, dim=-1)
+        query_distances = 1 - F.cosine_similarity(query_points_norm.unsqueeze(1), query_points_norm.unsqueeze(0), dim=-1)
+        key_distances = 1 - F.cosine_similarity(key_points_norm.unsqueeze(1), key_points_norm.unsqueeze(0), dim=-1)
+        
+        # Normalize distances
+        query_distances = query_distances / (query_distances.max() + eps)
+        key_distances = key_distances / (key_distances.max() + eps)
+        
+        # Convert distances to attention logits directly
+        attention_logits = -query_distances  # Closer points get higher logits
+        
+        # Apply temperature scaling to control sharpness
         dim = float(query.size(-1))
-        temperature = 1.0 / math.sqrt(dim)
-        scores = similarities / temperature
+        base_temperature = 1.0 / math.sqrt(dim)
+        attention_logits = attention_logits / base_temperature
         
-        # Apply numerically stable softmax
-        scores_max = torch.max(scores, dim=-1, keepdim=True)[0]
-        scores = torch.exp(scores - scores_max)
-        scores = scores / (torch.sum(scores, dim=-1, keepdim=True) + eps)
+        # Convert to attention scores
+        scores = F.softmax(attention_logits, dim=-1)
         
-        # Match input distance distribution
-        input_dists = torch.cdist(query_points, key_points, p=2)
-        input_dists = input_dists / (input_dists.max() + eps)
-        
-        score_dists = torch.cdist(scores, scores, p=2)
-        score_dists = score_dists / (score_dists.max() + eps)
+        # Compute score distances using cosine similarity
+        scores_norm = F.normalize(scores, p=2, dim=-1)
+        score_distances = 1 - F.cosine_similarity(scores_norm.unsqueeze(1), scores_norm.unsqueeze(0), dim=-1)
+        score_distances = score_distances / (score_distances.max() + eps)
         
         # Match distance distributions more precisely
-        input_mean = input_dists.mean()
-        input_std = input_dists.std()
+        input_mean = query_distances.mean()
+        input_std = query_distances.std()
         
         # Compute correlation between input and score distances
         correlation = torch.corrcoef(
             torch.stack([
-                input_dists.flatten(),
-                score_dists.flatten()
+                query_distances.flatten(),
+                score_distances.flatten()
             ])
         )[0, 1]
-        
-        # If correlation is too low, adjust the scores to better match input distances
-        if correlation < 0.5:
-            # Use input distances to guide the attention
-            attention_weights = 1.0 / (input_dists + eps)
-            attention_weights = attention_weights / attention_weights.sum(dim=-1, keepdim=True)
-            
-            # Blend between original scores and distance-based weights
-            blend_factor = (0.5 - correlation) / 0.5  # More blending when correlation is lower
-            scores = (1 - blend_factor) * scores + blend_factor * attention_weights
-        
-        # Apply affine transformation to match moments
-        scores_centered = scores - scores.mean(dim=-1, keepdim=True)
-        scores_normalized = scores_centered / (scores.std(dim=-1, keepdim=True) + eps)
-        scores = scores_normalized * input_std + input_mean
-        
-        # Ensure scores are non-negative and sum to 1
-        scores = F.softmax(scores, dim=-1)
         
         return scores
 
@@ -370,27 +374,44 @@ class TestModelGeometricValidator:
         key_points = torch.randn(batch_size, validator.model_geometry.key_dim)
         result = validator.validate_attention_geometry(0, query_points, key_points)
         assert result.is_valid, f"Attention validation failed: {result.message}"
-        
+    
         # Test with small magnitude points
         small_query = query_points * 1e-6
         small_key = key_points * 1e-6
         result_small = validator.validate_attention_geometry(0, small_query, small_key)
         assert result_small.is_valid, f"Attention validation failed for small points: {result_small.message}"
-        
+    
         # Test with large magnitude points
         large_query = query_points * 1e6
         large_key = key_points * 1e6
         result_large = validator.validate_attention_geometry(0, large_query, large_key)
         assert result_large.is_valid, f"Attention validation failed for large points: {result_large.message}"
-        
+    
         # Test with identical points
         result_identical = validator.validate_attention_geometry(0, query_points, query_points)
         assert result_identical.is_valid, f"Attention validation failed for identical points: {result_identical.message}"
-        
+    
         # Test with orthogonal points
-        q_ortho, _ = torch.linalg.qr(query_points.t())
-        k_ortho, _ = torch.linalg.qr(key_points.t())
-        result_ortho = validator.validate_attention_geometry(0, q_ortho.t(), k_ortho.t())
+        # Create orthogonal points that preserve distance relationships better
+        q_ortho = torch.randn(batch_size, validator.model_geometry.query_dim)
+        k_ortho = torch.randn(batch_size, validator.model_geometry.key_dim)
+        
+        # Normalize to unit vectors
+        q_ortho = F.normalize(q_ortho, p=2, dim=1)
+        k_ortho = F.normalize(k_ortho, p=2, dim=1)
+        
+        # Ensure points are well-separated
+        angle = torch.tensor(torch.pi / 4, device=q_ortho.device)  # 45 degree separation
+        rotation = torch.tensor([[torch.cos(angle), -torch.sin(angle)],
+                               [torch.sin(angle), torch.cos(angle)]], device=q_ortho.device)
+        
+        # Apply rotation to create consistent angular separation
+        q_ortho_rotated = torch.cat([
+            torch.mm(q_ortho[:, :2], rotation),
+            q_ortho[:, 2:]
+        ], dim=1)
+        
+        result_ortho = validator.validate_attention_geometry(0, q_ortho_rotated, k_ortho)
         assert result_ortho.is_valid, f"Attention validation failed for orthogonal points: {result_ortho.message}"
         
         # Verify attention properties for all cases

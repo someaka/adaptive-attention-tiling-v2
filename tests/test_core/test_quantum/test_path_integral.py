@@ -76,13 +76,16 @@ def test_propagator():
     )
     
     # Final points
-    final_points = torch.tensor([[0.0, 1.0], [1.0, 1.0]])
+    final_points = torch.tensor([[0.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
     
     # Propagate
     final_state = propagator.propagate(initial_state, final_points)
     assert isinstance(final_state, QuantumState)
     assert final_state.amplitudes.shape == initial_state.amplitudes.shape
-    assert torch.allclose(torch.sum(torch.abs(final_state.amplitudes)**2), torch.tensor(1.0), atol=1e-6)
+    
+    # Convert sum to float32 before comparison
+    total_prob = torch.sum(torch.abs(final_state.amplitudes)**2).to(torch.float32)
+    assert torch.allclose(total_prob, torch.tensor(1.0, dtype=torch.float32), atol=1e-6)
 
 
 def test_stationary_phase():

@@ -662,37 +662,38 @@ class ModelGeometricValidator:
         # Normalize points to unit norm for stable distance computation
         points = F.normalize(points, p=2, dim=-1)
         
-        # Compute pairwise distances in base metric space
+        # Compute pairwise distances using the same metric tensor for both spaces
         self.query_distances = self._compute_pairwise_distances(points, base_metric, normalize=False)
-        self.key_distances = self._compute_pairwise_distances(points, base_metric, normalize=False)
         
-        # Compute score distances (using cosine similarity for stability)
-        self.score_distances = 1 - F.cosine_similarity(scores.unsqueeze(1), scores.unsqueeze(0), dim=-1)
+        # For score distances, use a metric that preserves probability structure
+        score_metric = torch.eye(scores.size(-1), device=scores.device)
+        self.score_distances = self._compute_pairwise_distances(scores, score_metric, normalize=False)
         
-        # Normalize distances to [0,1] range for comparison
-        self.query_distances = (self.query_distances - self.query_distances.min()) / (self.query_distances.max() - self.query_distances.min() + 1e-8)
-        self.key_distances = (self.key_distances - self.key_distances.min()) / (self.key_distances.max() - self.key_distances.min() + 1e-8)
-        self.score_distances = (self.score_distances - self.score_distances.min()) / (self.score_distances.max() - self.score_distances.min() + 1e-8)
+        # Normalize distances consistently
+        eps = 1e-8
+        self.query_distances = self.query_distances / (self.query_distances.max() + eps)
+        self.score_distances = self.score_distances / (self.score_distances.max() + eps)
         
         # Check if distance distributions are similar
-        # 1. Compare means
+        # 1. Compare means with relative tolerance
         mean_tolerance = 0.3  # Allow 30% difference in means
-        mean_diff = abs(self.score_distances.mean() - self.query_distances.mean()) / (self.query_distances.mean() + 1e-8)
+        mean_diff = abs(self.score_distances.mean() - self.query_distances.mean()) / (self.query_distances.mean() + eps)
         mean_preserved = bool(mean_diff.item() < mean_tolerance)
         
-        # 2. Compare standard deviations
+        # 2. Compare standard deviations with relative tolerance
         std_tolerance = 0.3  # Allow 30% difference in standard deviations
-        std_diff = abs(self.score_distances.std() - self.query_distances.std()) / (self.query_distances.std() + 1e-8)
+        std_diff = abs(self.score_distances.std() - self.query_distances.std()) / (self.query_distances.std() + eps)
         std_preserved = bool(std_diff.item() < std_tolerance)
         
-        # 3. Check correlation between distance matrices
-        correlation = torch.corrcoef(
-            torch.stack([
-                self.query_distances.flatten(),
-                self.score_distances.flatten()
-            ])
-        )[0, 1]
-        correlation_threshold = 0.5  # Require at least 0.5 correlation
+        # 3. Check correlation using rank correlation for robustness
+        query_ranks = torch.argsort(torch.argsort(self.query_distances.flatten())).float()
+        score_ranks = torch.argsort(torch.argsort(self.score_distances.flatten())).float()
+        
+        # Compute Spearman correlation
+        n = query_ranks.size(0)
+        rank_diff = query_ranks - score_ranks
+        correlation = 1.0 - (6.0 * (rank_diff * rank_diff).sum()) / (n * (n * n - 1.0))
+        correlation_threshold = 0.5
         correlation_preserved = bool(correlation.item() > correlation_threshold)
         
         # Combined preservation check
@@ -705,18 +706,14 @@ class ModelGeometricValidator:
             print(f"  Range: [{self.query_distances.min():.6f}, {self.query_distances.max():.6f}]")
             print(f"  Mean: {self.query_distances.mean():.6f}")
             print(f"  Std: {self.query_distances.std():.6f}\n")
-            print("Key distances:")
-            print(f"  Range: [{self.key_distances.min():.6f}, {self.key_distances.max():.6f}]")
-            print(f"  Mean: {self.key_distances.mean():.6f}")
-            print(f"  Std: {self.key_distances.std():.6f}\n")
             print("Score distances:")
             print(f"  Range: [{self.score_distances.min():.6f}, {self.score_distances.max():.6f}]")
             print(f"  Mean: {self.score_distances.mean():.6f}")
             print(f"  Std: {self.score_distances.std():.6f}\n")
             print("Preservation metrics:")
-            print(f"  Mean difference: {abs(self.score_distances.mean() - self.query_distances.mean()):.6f}")
-            print(f"  Std difference: {abs(self.score_distances.std() - self.query_distances.std()):.6f}")
-            print(f"  Correlation: {correlation:.6f}")
+            print(f"  Mean difference: {mean_diff.item():.6f}")
+            print(f"  Std difference: {std_diff.item():.6f}")
+            print(f"  Rank correlation: {correlation.item():.6f}")
             
         return distance_preserved
 

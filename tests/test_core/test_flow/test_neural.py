@@ -226,6 +226,18 @@ class TestNeuralGeometricFlow:
         attention_pattern = torch.randn(test_batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, device=device)
         attention_pattern = torch.softmax(attention_pattern, dim=-1)  # Normalize attention weights
         
+        # Update neural_flow's quantum bridge dimensions and ensure complex float dtype
+        neural_flow.quantum_bridge.hidden_dim = 8
+        neural_flow.quantum_bridge.hilbert_space.dim = 8
+        neural_flow.quantum_bridge.dtype = torch.complex64  # Set to ComplexFloat
+        
+        # Convert state amplitudes to ComplexFloat
+        neural_flow.quantum_bridge.hilbert_space.state_dtype = torch.complex64
+        
+        # Convert any existing states to ComplexFloat
+        if hasattr(neural_flow.quantum_bridge, 'state'):
+            neural_flow.quantum_bridge.state.amplitudes = neural_flow.quantum_bridge.state.amplitudes.to(dtype=torch.complex64)
+
         new_metric, flow_metrics = neural_flow.flow_step(metric, ricci, attention_pattern=attention_pattern)
         
         # Verify dimensions and properties after flow_step

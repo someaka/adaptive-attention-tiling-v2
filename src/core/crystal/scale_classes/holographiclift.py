@@ -385,37 +385,59 @@ class HolographicLifter(nn.Module):
 
                     # Handle both 1D and 2D input tensors
                     if op1.dim() == 1:
-                        # For 1D tensors, create 2D composition laws
-                        op1_2d = torch.zeros((self.dim, self.dim), dtype=self.dtype)
-                        op2_2d = torch.zeros((self.dim, self.dim), dtype=self.dtype)
-                        # Set magnitudes only, handle phases separately
-                        op1_2d[0] = torch.abs(op1) / norm1
-                        op2_2d[0] = torch.abs(op2) / norm2
+                        # For 1D tensors, create 2D composition laws for real and imaginary parts
+                        op1_2d_real = torch.zeros((self.dim, self.dim), dtype=torch.float32)
+                        op1_2d_imag = torch.zeros((self.dim, self.dim), dtype=torch.float32)
+                        op2_2d_real = torch.zeros((self.dim, self.dim), dtype=torch.float32)
+                        op2_2d_imag = torch.zeros((self.dim, self.dim), dtype=torch.float32)
+                        
+                        # Set real and imaginary parts
+                        op1_2d_real[0] = op1.real
+                        op1_2d_imag[0] = op1.imag
+                        op2_2d_real[0] = op2.real
+                        op2_2d_imag[0] = op2.imag
                     else:
-                        # For 2D tensors, use their magnitudes directly
-                        op1_2d = torch.abs(op1) / norm1
-                        op2_2d = torch.abs(op2) / norm2
+                        # For 2D tensors, use real and imaginary parts directly
+                        op1_2d_real = op1.real
+                        op1_2d_imag = op1.imag
+                        op2_2d_real = op2.real
+                        op2_2d_imag = op2.imag
 
-                    # Set composition laws
-                    op1_operation.composition_law = op1_2d
-                    op2_operation.composition_law = op2_2d
+                    # Set composition laws for real and imaginary parts
+                    op1_operation.composition_law = op1_2d_real / norm1
+                    op2_operation.composition_law = op2_2d_real / norm1
 
-                    # Let the operadic structure handle magnitude composition
-                    composed_op, metrics = self.operad_handler.compose_operations(
+                    # Let the operadic structure handle real part composition
+                    composed_op_real, metrics_real = self.operad_handler.compose_operations(
+                        operations=[op1_operation, op2_operation],
+                        with_motivic=True
+                    )
+
+                    # Set composition laws for imaginary parts
+                    op1_operation.composition_law = op1_2d_imag / norm2
+                    op2_operation.composition_law = op2_2d_imag / norm2
+
+                    # Let the operadic structure handle imaginary part composition
+                    composed_op_imag, metrics_imag = self.operad_handler.compose_operations(
                         operations=[op1_operation, op2_operation],
                         with_motivic=True
                     )
 
                     # Extract result based on input dimensionality
                     if op1.dim() == 1:
-                        result = composed_op.composition_law[0]
+                        result_real = composed_op_real.composition_law[0]
+                        result_imag = composed_op_imag.composition_law[0]
                     else:
-                        result = composed_op.composition_law
+                        result_real = composed_op_real.composition_law
+                        result_imag = composed_op_imag.composition_law
+
+                    # Combine real and imaginary parts
+                    result = torch.complex(result_real, result_imag)
 
                     # Estimate distance between operators using their overlap
                     overlap = torch.abs(torch.sum(torch.conj(op1) * op2) / (norm1 * norm2))
                     distance = torch.sqrt(2.0 * (1.0 - overlap))  # Geodesic distance on unit sphere
-                         
+
                     # Scale amplitude with distance using both classical and quantum terms
                     if distance > self.EPSILON:
                         # Use log(1+d) for associativity
@@ -429,10 +451,10 @@ class HolographicLifter(nn.Module):
 
                         # Weight quantum corrections using UV/IR ratio with reduced strength
                         correction_weight = 0.01 / (1 + self.Z_RATIO**2)
-                         
+
                         # Combine classical and quantum scaling with reduced quantum contribution
                         scale_factor = classical_scale * (1 + correction_weight * quantum_scale)
-                        
+
                         # Scale the result
                         result = result * scale_factor
 
