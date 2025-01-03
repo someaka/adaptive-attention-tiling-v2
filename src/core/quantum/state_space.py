@@ -539,107 +539,152 @@ class HilbertSpace:
                 torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)  # Z
             ]
             
-        # Convert measurements to list format
-        meas_list = []
-        basis_list = []
-        for basis_name, meas_val in measurements.items():
-            meas_list.append(meas_val.to(torch.complex128))
-            if basis_name == "X":
-                basis_list.append(bases[0])
-            elif basis_name == "Y":
-                basis_list.append(bases[1])
-            elif basis_name == "Z":
-                basis_list.append(bases[2])
+        # Initialize state vector using all measurements
+        n_qubits = int(np.log2(self.dim))
+        
+        # Create a complete set of measurement operators
+        measurement_ops = []
+        measurement_vals = []
+        
+        # Single-qubit measurements
+        for q in range(n_qubits):
+            for basis_name in ["X", "Y", "Z"]:
+                meas_val = measurements[f"{basis_name}{q}"]
+                measurement_vals.append(meas_val)
                 
-        # Initialize state vector based on Z measurement
-        z_meas = measurements["Z"].real
-        x_meas = measurements["X"].real
-        y_meas = measurements["Y"].real
-        
-        # Construct Bloch vector for first qubit
-        bloch_vector = torch.tensor([x_meas, y_meas, z_meas], dtype=torch.float64)
-        bloch_norm = torch.norm(bloch_vector)
-        if bloch_norm > 1:
-            bloch_vector = bloch_vector / bloch_norm
-            
-        # Convert Bloch vector to state vector for first qubit
-        theta = torch.arccos(bloch_vector[2])
-        phi = torch.atan2(bloch_vector[1], bloch_vector[0])
-        state = torch.zeros(self.dim, dtype=torch.complex128)
-        state[0] = torch.cos(theta/2)
-        state[1] = torch.sin(theta/2) * torch.exp(1j * phi)
-        
-        # Set remaining amplitudes to small random values
-        if self.dim > 2:
-            state[2:] = torch.randn(self.dim - 2, dtype=torch.complex128) * 0.01
-        state = state / torch.sqrt(torch.sum(torch.abs(state) ** 2))
-        
-        # Iterative optimization with density matrix projection
-        n_iterations = 2000
-        learning_rate = 0.01
-        best_state = state.clone()
-        best_error = float('inf')
-        
-        for iter_idx in range(n_iterations):
-            # Convert state to density matrix
-            rho = torch.outer(state, state.conj())
-            
-            # Compute error and gradient for each measurement
-            total_error = 0.0
-            grad = torch.zeros_like(state)
-            
-            for basis, target_meas in zip(basis_list, meas_list):
-                # Expand basis operator if needed
-                if basis.shape[0] < self.dim:
-                    expanded = torch.eye(self.dim, dtype=torch.complex128)
-                    expanded[:2, :2] = basis
-                    basis = expanded
+                # Build the full operator
+                if basis_name == "X":
+                    basis = bases[0]
+                elif basis_name == "Y":
+                    basis = bases[1]
+                else:  # Z
+                    basis = bases[2]
                     
-                # Compute expectation value using density matrix
-                expect = torch.trace(torch.matmul(basis, rho)).real
-                
-                # Compute error
-                error = (target_meas - expect).real
-                total_error += error ** 2
-                
-                # Gradient for state vector
-                grad_expect = 2 * (torch.matmul(basis, state))
-                grad = grad - error * grad_expect
-                
-            # Update state vector
-            state = state - learning_rate * grad
+                # Extend to full space
+                if q == 0:
+                    full_op = basis
+                    for _ in range(1, n_qubits):
+                        full_op = torch.kron(full_op, torch.eye(2, dtype=torch.complex128))
+                else:
+                    full_op = torch.eye(2, dtype=torch.complex128)
+                    for i in range(1, n_qubits):
+                        if i == q:
+                            full_op = torch.kron(full_op, basis)
+                        else:
+                            full_op = torch.kron(full_op, torch.eye(2, dtype=torch.complex128))
+                            
+                measurement_ops.append(full_op)
+        
+        # Initialize with a better guess using the first qubit's measurements
+        z0 = measurements["Z0"].real
+        x0 = measurements["X0"].real
+        y0 = measurements["Y0"].real
+        bloch_vec = torch.tensor([x0, y0, z0], dtype=torch.float64)
+        bloch_norm = torch.norm(bloch_vec)
+        if bloch_norm > 1:
+            bloch_vec = bloch_vec / bloch_norm
             
-            # Project onto unit sphere
-            state = state / torch.sqrt(torch.sum(torch.abs(state) ** 2))
+        # Convert Bloch vector to density matrix for first qubit
+        rho_0 = torch.eye(2, dtype=torch.complex128) / 2 + (
+            bloch_vec[0] * bases[0] +
+            bloch_vec[1] * bases[1] +
+            bloch_vec[2] * bases[2]
+        ) / 2
+        
+        # Initialize with tensor product of first qubit state and identity
+        rho = rho_0
+        for _ in range(1, n_qubits):
+            rho = torch.kron(rho, torch.eye(2, dtype=torch.complex128) / 2)
+        
+        # Maximum likelihood estimation with multiple restarts
+        n_iterations = 10000
+        n_restarts = 5  # Number of random restarts
+        best_rho_global = None
+        best_error_global = float('inf')
+        
+        for restart in range(n_restarts):
+            if restart > 0:
+                # Random perturbation of initial state for restarts
+                random_state = torch.randn(self.dim, dtype=torch.complex128)
+                random_state = random_state / torch.sqrt(torch.sum(torch.abs(random_state) ** 2))
+                rho = 0.9 * rho + 0.1 * torch.outer(random_state, random_state.conj())
             
-            # Project density matrix onto positive semidefinite cone
-            rho = torch.outer(state, state.conj())
-            eigenvals, eigenvecs = torch.linalg.eigh(rho)
-            eigenvals = torch.clamp(eigenvals.real, min=0).to(torch.complex128)
-            eigenvals = eigenvals / torch.sum(eigenvals)
-            diag_eigenvals = torch.diag(eigenvals)
-            rho = torch.matmul(torch.matmul(eigenvecs, diag_eigenvals), eigenvecs.conj().T)
+            learning_rate = 0.01
+            best_rho = rho.clone()
+            best_error = float('inf')
+            patience = 100
+            no_improvement = 0
+            min_lr = 1e-6
+            momentum = torch.zeros_like(rho)
             
-            # Extract principal eigenvector
-            eigenvals, eigenvecs = torch.linalg.eigh(rho)
-            max_idx = torch.argmax(eigenvals.real)
-            state = eigenvecs[:, max_idx].to(torch.complex128)
-            
-            # Update best solution
-            if total_error < best_error:
-                best_error = total_error
-                best_state = state.clone()
+            for iter_idx in range(n_iterations):
+                # Compute error and gradient
+                total_error = 0.0
+                grad = torch.zeros_like(rho)
                 
-            # Adaptive learning rate
-            if iter_idx % 100 == 0:
-                learning_rate *= 0.95
+                for op, target_val in zip(measurement_ops, measurement_vals):
+                    # Compute expectation value
+                    expect = torch.trace(torch.matmul(op, rho)).real
+                    error = (target_val - expect).real
+                    total_error += error ** 2
+                    
+                    # Gradient for density matrix with regularization
+                    grad = grad - error * op
                 
-            # Early stopping
-            if total_error < 1e-10:
+                # Normalize gradient
+                grad_norm = torch.norm(grad)
+                if grad_norm > 0:
+                    grad = grad / grad_norm
+                
+                # Update with momentum and regularization
+                beta = 0.9
+                momentum = beta * momentum + (1 - beta) * grad
+                rho = rho - learning_rate * (momentum + momentum.conj().T) / 2
+                
+                # Project onto positive semidefinite cone and normalize
+                eigenvals, eigenvecs = torch.linalg.eigh(rho)
+                eigenvals = torch.clamp(eigenvals.real, min=0).to(torch.complex128)
+                eigenvals = eigenvals / torch.sum(eigenvals)
+                rho = torch.matmul(torch.matmul(eigenvecs, torch.diag(eigenvals)), eigenvecs.conj().T)
+                
+                # Update best solution
+                if total_error < best_error:
+                    best_error = total_error
+                    best_rho = rho.clone()
+                    no_improvement = 0
+                else:
+                    no_improvement += 1
+                
+                # Adaptive learning rate
+                if no_improvement >= patience:
+                    learning_rate *= 0.5
+                    no_improvement = 0
+                    if learning_rate < min_lr:
+                        break
+                
+                # Early stopping
+                if total_error < 1e-10:
+                    break
+            
+            # Update global best
+            if best_error < best_error_global:
+                best_error_global = best_error
+                best_rho_global = best_rho.clone()
+        
+        # Use the best state found across all restarts
+        best_rho = best_rho_global
+        
+        # Extract pure state from density matrix
+        eigenvals, eigenvecs = torch.linalg.eigh(best_rho)
+        max_idx = torch.argmax(eigenvals.real)
+        state = eigenvecs[:, max_idx].to(torch.complex128)
+        
+        # Ensure global phase matches the measurements
+        for op, target_val in zip(measurement_ops[:3], measurement_vals[:3]):  # Use first three measurements
+            expect = torch.trace(torch.matmul(op, torch.outer(state, state.conj()))).real
+            if torch.sgn(expect).real != torch.sgn(target_val.real).real:
+                state = -state
                 break
-                
-        # Use best solution found
-        state = best_state
         
         # Ensure proper normalization
         norm = torch.sqrt(torch.sum(torch.abs(state) ** 2))
