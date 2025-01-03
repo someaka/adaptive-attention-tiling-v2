@@ -135,20 +135,16 @@ class NeuralQuantumBridge(nn.Module):
             If return_validation is True, returns (quantum_state, validation_result)
             Otherwise, returns just quantum_state
         """
+        # Validate input dimensions
+        if x.shape[-1] != self.hidden_dim:
+            raise ValueError(f"Input tensor must have hidden dimension {self.hidden_dim}, got {x.shape[-1]}")
+
         # Ensure state manager is on correct device
         if self.state_manager.device != x.device:
             self.state_manager.device = x.device
 
         # Store original norm
         original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
-
-        # Reshape input if needed
-        if x.shape[-1] != self.hidden_dim:
-            # Pad or project to hidden_dim
-            batch_size = x.shape[0]
-            x_padded = torch.zeros(batch_size, self.hidden_dim, device=x.device)
-            x_padded[..., :x.shape[-1]] = x.view(batch_size, -1)
-            x = x_padded
 
         # Project to manifold dimension
         x_manifold = x[..., :self.manifold_dim]
@@ -198,18 +194,14 @@ class NeuralQuantumBridge(nn.Module):
         
         # Project back to hidden dimension
         batch_size = classical_flat.shape[0]
-        seq_len = classical_flat.shape[1] if len(classical_flat.shape) > 2 else 1
         
-        # Reshape classical to (batch_size * seq_len, manifold_dim)
-        classical_flat = classical_flat.reshape(-1, self.manifold_dim)
+        # Reshape classical to (batch_size, manifold_dim)
+        classical_flat = classical_flat.reshape(batch_size, -1)
         
         # Project from manifold_dim back to hidden_dim using the inverse projection
         if not hasattr(self, 'inverse_projection'):
             self.inverse_projection = nn.Linear(self.manifold_dim, self.hidden_dim, device=classical_flat.device)
-        output_flat = self.inverse_projection(classical_flat)
-        
-        # Reshape back to (batch_size, seq_len, hidden_dim)
-        output = output_flat.reshape(batch_size, seq_len, self.hidden_dim)
+        output = self.inverse_projection(classical_flat)
         
         # Restore original norm
         if hasattr(state, 'original_norm') and state.original_norm is not None:
@@ -774,17 +766,17 @@ class NeuralQuantumBridge(nn.Module):
         target_scale: float
     ) -> torch.Tensor:
         """Bridge between different scales using quantum operations.
-        
+
         Args:
             state: Input state tensor
             source_scale: Source scale factor
             target_scale: Target scale factor
-            
+
         Returns:
             Transformed state tensor
-            
+
         Raises:
-            ValueError: If input parameters are invalid
+            ValueError: If input parameters are invalid or state dimensions are incorrect
             RuntimeError: If scale bridging fails
         """
         # Validate inputs
@@ -794,29 +786,26 @@ class NeuralQuantumBridge(nn.Module):
             raise ValueError("Scale factors must be positive")
         if not torch.isfinite(state).all():
             raise ValueError("State tensor contains non-finite values")
-            
+
         try:
             # Convert to quantum state with validation
-            try:
-                quantum_result = self.neural_to_quantum(state, return_validation=True)
-                if isinstance(quantum_result, tuple):
-                    quantum_state, validation = quantum_result
-                    
-                    if not validation.is_valid and validation.error_type is not None:
-                        # Apply correction if state preparation failed
-                        quantum_state = self.state_preparation.correct_state(
-                            quantum_state,
-                            validation.error_type
-                        )
-                else:
-                    quantum_state = quantum_result
-                    
-                # Validate quantum state
-                if not isinstance(quantum_state, QuantumState):
-                    raise ValueError("Failed to create valid quantum state")
-            except Exception as e:
-                raise RuntimeError(f"Quantum state preparation failed: {str(e)}")
-            
+            quantum_result = self.neural_to_quantum(state, return_validation=True)
+            if isinstance(quantum_result, tuple):
+                quantum_state, validation = quantum_result
+
+                if not validation.is_valid and validation.error_type is not None:
+                    # Apply correction if state preparation failed
+                    quantum_state = self.state_preparation.correct_state(
+                        quantum_state,
+                        validation.error_type
+                    )
+            else:
+                quantum_state = quantum_result
+
+            # Validate quantum state
+            if not isinstance(quantum_state, QuantumState):
+                raise ValueError("Failed to create valid quantum state")
+
             # Get scale ratio for time evolution with validation
             try:
                 scale_ratio = np.log2(target_scale / source_scale)
@@ -825,7 +814,7 @@ class NeuralQuantumBridge(nn.Module):
                 time = torch.sigmoid(torch.tensor(scale_ratio)).item() * 0.5
             except Exception as e:
                 raise RuntimeError(f"Scale ratio computation failed: {str(e)}")
-            
+
             # Evolve state using quantum geometric attention
             try:
                 evolved_state = self.evolve_quantum_state_with_attention(
@@ -834,31 +823,31 @@ class NeuralQuantumBridge(nn.Module):
                 )
             except Exception as e:
                 raise RuntimeError(f"Quantum evolution failed: {str(e)}")
-            
+
             # Convert back to neural representation
             try:
                 neural_state = self.quantum_to_neural(evolved_state, state.shape)
-                
+
                 # Validate output state
                 if not torch.isfinite(neural_state).all():
                     raise ValueError("Neural state contains non-finite values")
             except Exception as e:
                 raise RuntimeError(f"Neural state conversion failed: {str(e)}")
-            
+
             # Interpolate between initial and evolved states
             try:
                 alpha = 0.7  # Bias towards initial state to preserve structure
                 neural_state = alpha * state + (1 - alpha) * neural_state
-                
+
                 # Normalize the output state
                 neural_state = torch.nn.functional.normalize(neural_state, p=2, dim=-1)
-                
+
                 # Validate final state
                 if not torch.isfinite(neural_state).all():
                     raise ValueError("Final state contains non-finite values")
             except Exception as e:
                 raise RuntimeError(f"State interpolation failed: {str(e)}")
-            
+
             # Track cross-scale entanglement
             try:
                 self._update_entanglement_tracking(
@@ -869,9 +858,12 @@ class NeuralQuantumBridge(nn.Module):
             except Exception as e:
                 # Don't fail the whole operation if entanglement tracking fails
                 print(f"Warning: Entanglement tracking failed: {str(e)}")
-            
+
             return neural_state
-            
+
+        except ValueError as ve:
+            # Re-raise ValueError directly
+            raise ve
         except Exception as e:
             raise RuntimeError(f"Scale bridging failed: {str(e)}")
         
@@ -904,49 +896,43 @@ class NeuralQuantumBridge(nn.Module):
         state2: torch.Tensor
     ) -> torch.Tensor:
         """Compute quantum coherence between two states.
-        
-        This method measures the quantum coherence by:
-        1. Converting states to quantum representation
-        2. Computing density matrices
-        3. Calculating coherence metrics
-        
+
         Args:
-            state1: First neural state tensor
-            state2: Second neural state tensor
-            
+            state1: First state tensor of shape (batch_size, hidden_dim)
+            state2: Second state tensor of shape (batch_size, hidden_dim)
+
         Returns:
-            Coherence metric tensor
+            Coherence values of shape (batch_size,)
         """
         # Convert to quantum states
-        quantum_state1 = self.neural_to_quantum(state1, return_validation=False)
-        quantum_state2 = self.neural_to_quantum(state2, return_validation=False)
-        
-        if not isinstance(quantum_state1, QuantumState) or not isinstance(quantum_state2, QuantumState):
-            raise ValueError("Failed to convert to quantum states")
-            
+        quantum_result1 = self.neural_to_quantum(state1, return_validation=True)
+        quantum_result2 = self.neural_to_quantum(state2, return_validation=True)
+
+        # Extract quantum states
+        quantum_state1 = quantum_result1[0] if isinstance(quantum_result1, tuple) else quantum_result1
+        quantum_state2 = quantum_result2[0] if isinstance(quantum_result2, tuple) else quantum_result2
+
         # Get density matrices
         rho1 = quantum_state1.density_matrix()
         rho2 = quantum_state2.density_matrix()
+
+        # Compute fidelity for each batch element
+        batch_size = rho1.shape[0]
+        fidelity = torch.zeros(batch_size, device=rho1.device)
         
-        # Compute quantum fidelity
-        fidelity = torch.sqrt(torch.matmul(
-            torch.matmul(torch.sqrt(rho1), rho2),
-            torch.sqrt(rho1)
-        ).diagonal(dim1=-2, dim2=-1).sum(-1))
+        for i in range(batch_size):
+            # Compute sqrt(rho1) * rho2 * sqrt(rho1)
+            sqrt_rho1 = torch.matrix_power(rho1[i], 1)  # Use integer power
+            product = torch.matmul(sqrt_rho1, torch.matmul(rho2[i], sqrt_rho1))
+            
+            # Compute trace of the square root
+            eigenvalues = torch.linalg.eigvals(product)
+            fidelity[i] = torch.sqrt(torch.abs(eigenvalues.sum()))
+
+        # Normalize to [0, 1] range
+        fidelity = torch.clamp(fidelity, 0.0, 1.0)
         
-        # Compute von Neumann entropy
-        entropy1 = -torch.trace(torch.matmul(rho1, torch.log(rho1 + 1e-8)))
-        entropy2 = -torch.trace(torch.matmul(rho2, torch.log(rho2 + 1e-8)))
-        
-        # Compute relative entropy
-        relative_entropy = torch.trace(
-            torch.matmul(rho1, torch.log(rho1 + 1e-8) - torch.log(rho2 + 1e-8))
-        )
-        
-        # Combine metrics into coherence measure
-        coherence = fidelity * torch.exp(-(entropy1 + entropy2) / 2) * torch.exp(-relative_entropy)
-        
-        return coherence
+        return fidelity
 
     def evolve_quantum_state(self, state: QuantumState, time: float = 1.0) -> QuantumState:
         """Evolve quantum state using Hamiltonian evolution."""

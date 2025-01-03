@@ -46,11 +46,11 @@
 - [x] tests/test_core/test_patterns/test_motivic_integration.py
 - [x] tests/test_core/test_patterns/test_operadic_structure.py
 - [x] tests/test_core/test_patterns/test_pattern_fiber_bundle_operadic.py
-- [ ] tests/test_core/test_patterns/test_pattern_processor.py
-- [ ] tests/test_core/test_patterns/test_riemannian.py
+- [x] tests/test_core/test_patterns/test_pattern_processor.py
+- [x] tests/test_core/test_patterns/test_riemannian.py
 - [x] tests/test_core/test_patterns/test_symplectic.py
-- [ ] tests/test_core/test_quantum_state.py
-- [ ] tests/test_core/test_quantum/test_neural_quantum_bridge.py
+- [x] tests/test_core/test_quantum_state.py
+- [x] tests/test_core/test_quantum/test_neural_quantum_bridge.py
 - [ ] tests/test_core/test_quantum/test_path_integral.py
 - [ ] tests/test_core/test_quantum/test_state_space.py
 - [ ] tests/test_core/test_scale_transition.py

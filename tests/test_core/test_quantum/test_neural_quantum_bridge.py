@@ -21,7 +21,7 @@ def bridge():
 @pytest.fixture
 def test_state():
     """Create test neural state."""
-    return torch.randn(8, 64)  # [batch_size, dim]
+    return torch.randn(8, 64)  # [batch_size, hidden_dim]
 
 
 class TestNeuralQuantumBridge:
@@ -71,8 +71,8 @@ class TestNeuralQuantumBridge:
     def test_compute_coherence(self, bridge):
         """Test quantum coherence computation."""
         # Create test states
-        state1 = torch.randn(8, 64)
-        state2 = torch.randn(8, 64)
+        state1 = torch.randn(8, 64)  # [batch_size, hidden_dim]
+        state2 = torch.randn(8, 64)  # [batch_size, hidden_dim]
         
         # Compute coherence
         coherence = bridge.compute_coherence(state1, state2)
@@ -95,7 +95,7 @@ class TestNeuralQuantumBridge:
     def test_invalid_inputs(self, bridge):
         """Test bridge behavior with invalid inputs."""
         # Test invalid scale values
-        state = torch.randn(8, 64)
+        state = torch.randn(8, 64)  # [batch_size, hidden_dim]
         
         with pytest.raises(ValueError):
             bridge.bridge_scales(
@@ -112,16 +112,16 @@ class TestNeuralQuantumBridge:
             )
             
         # Test invalid state shapes
-        invalid_state = torch.randn(8, 32)  # Wrong dimension
+        invalid_state = torch.randn(8, 16)  # Wrong dimension - should be hidden_dim (64)
         
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Input tensor must have hidden dimension"):
             bridge.bridge_scales(
                 invalid_state,
                 source_scale=1.0,
                 target_scale=2.0
             )
             
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Input tensor must have hidden dimension"):
             bridge.compute_coherence(
                 state,
                 invalid_state  # Mismatched dimensions
