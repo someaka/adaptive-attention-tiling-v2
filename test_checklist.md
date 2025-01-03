@@ -51,7 +51,7 @@
 - [x] tests/test_core/test_patterns/test_symplectic.py
 - [x] tests/test_core/test_quantum_state.py
 - [x] tests/test_core/test_quantum/test_neural_quantum_bridge.py
-- [ ] tests/test_core/test_quantum/test_path_integral.py
+- [x] tests/test_core/test_quantum/test_path_integral.py
 - [ ] tests/test_core/test_quantum/test_state_space.py
 - [ ] tests/test_core/test_scale_transition.py
 
