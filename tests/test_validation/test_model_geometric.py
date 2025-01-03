@@ -413,7 +413,7 @@ class TestModelGeometricValidator:
         
         result_ortho = validator.validate_attention_geometry(0, q_ortho_rotated, k_ortho)
         assert result_ortho.is_valid, f"Attention validation failed for orthogonal points: {result_ortho.message}"
-        
+    
         # Verify attention properties for all cases
         for name, result in [
             ("regular", result),
