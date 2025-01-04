@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Callable
 import yaml
 import numpy as np
+import math
 
 import pytest
 import torch
@@ -114,6 +115,7 @@ class TestAnomalyPolynomial:
 
     def test_cocycle_condition(self, scale_system: ScaleCohomology, dtype: torch.dtype):
         """Test cocycle condition with memory efficiency."""
+        # Create test symmetry actions with smaller dimension
         g1 = self._create_u1_action(1.0, dtype)
         g2 = self._create_u1_action(2.0, dtype)
 

@@ -306,51 +306,54 @@ class AttentionOperad(OperadicComposition):
         Returns:
             The composed morphism tensor with preserved structure
         """
-        # Extract phases and magnitudes
-        phases = [torch.angle(m) for m in morphisms]
-        magnitudes = [torch.abs(m) for m in morphisms]
+        # Extract norms and complex phases
+        norms = [torch.abs(m) for m in morphisms]
+        phases = [m / (n + 1e-8) for m, n in zip(morphisms, norms)]  # Unit complex numbers
         
-        # Compose magnitudes first
-        result = magnitudes[0]
-        for magnitude, enrichment in zip(magnitudes[1:], enrichments):
-            if enrichment.get('preserve_symplectic'):
-                # Compose while preserving symplectic structure
-                result = self._symplectic_compose(result, magnitude)
-                
-                # Ensure result has correct shape after composition
-                source_dim = morphisms[0].shape[1]  # First morphism's input dimension
-                target_dim = morphisms[-1].shape[0]  # Last morphism's output dimension
-                
-                # Reshape result to match required dimensions
-                if result.shape != (target_dim, source_dim):
-                    new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
-                    min_rows = min(result.shape[0], target_dim)
-                    min_cols = min(result.shape[1], source_dim)
-                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
-                    result = new_result
-            else:
-                # Standard composition
-                result = torch.matmul(magnitude, result)
-                
-                # Ensure result has correct shape
-                source_dim = morphisms[0].shape[1]
-                target_dim = morphisms[-1].shape[0]
-                if result.shape != (target_dim, source_dim):
-                    new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
-                    min_rows = min(result.shape[0], target_dim)
-                    min_cols = min(result.shape[1], source_dim)
-                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
-                    result = new_result
+        # Compose norms using geometric mean
+        result_norm = norms[0]
+        for norm in norms[1:]:
+            result_norm = torch.sqrt(result_norm * norm)
         
-        # Compose phases by adding them
-        composed_phase = torch.zeros_like(result)
-        for phase in phases:
-            composed_phase = composed_phase + phase
+        # Compose phases multiplicatively
+        result_phase = phases[0]
+        for phase in phases[1:]:
+            result_phase = result_phase * phase
+            
+        # Combine norm and phase
+        result = result_norm * result_phase
         
-        # Combine magnitude and phase
-        result = result * torch.exp(1j * composed_phase)
+        # Apply quantum corrections with proper scaling
+        if enrichments and enrichments[0].get('preserve_symplectic'):
+            # Get dimensions for scaling
+            source_dim = morphisms[0].shape[1]  # First morphism's input dimension
+            target_dim = morphisms[-1].shape[0]  # Last morphism's output dimension
+            
+            # Compute quantum correction scale using float32 for arange
+            k = 0.001  # Small coupling constant
+            correction = k * torch.exp(-torch.arange(min(source_dim, target_dim), dtype=torch.float32, device=result.device))
+            correction = correction.to(dtype=result.dtype)  # Convert to complex if needed
+            
+            # Apply correction with proper broadcasting
+            if len(result.shape) == 2:
+                correction = correction.unsqueeze(1)  # Add dimension for broadcasting
+            result = result * (1 + correction.unsqueeze(-1))  # Add dimension for broadcasting
         
-        return result
+        # Ensure result has correct shape (target_dim, source_dim)
+        if len(result.shape) > 2:
+            # Take diagonal elements if result is higher dimensional
+            result = torch.diagonal(result, dim1=0, dim2=1)
+            result = result.transpose(0, 1)  # Transpose to get (target_dim, source_dim)
+        elif len(result.shape) == 1:
+            # Expand to 2D if result is 1D
+            result = result.unsqueeze(1)
+
+        # Normalize the final result
+        norm = torch.norm(result)
+        if norm > 1e-6:
+            result = result / norm
+
+        return result.contiguous()
     
     def _symplectic_compose(self, a1: torch.Tensor, a2: torch.Tensor) -> torch.Tensor:
         """Compose two anomaly polynomials using symplectic structure."""

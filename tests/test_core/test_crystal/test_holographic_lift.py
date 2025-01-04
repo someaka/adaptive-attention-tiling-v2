@@ -147,30 +147,82 @@ class TestHolographicLift(TestBase):
         norm_error = abs(torch.norm(result).item() - 1.0)
         assert norm_error < 1e-2, f"OPE should preserve normalization, error: {norm_error:.2e}"
         
-        # Test U(1) phase structure
+        # Test U(1) phase structure with detailed instrumentation
         phase1 = torch.exp(torch.tensor(1j * torch.pi / 4, dtype=torch.complex64))
         phase2 = torch.exp(torch.tensor(1j * torch.pi / 3, dtype=torch.complex64))
-        ope1 = lifter.operator_product_expansion(phase1 * ops[0], ops[1], normalize=True)
-        ope2 = lifter.operator_product_expansion(ops[0], phase2 * ops[1], normalize=True)
         
-        # Check relative phase consistency
-        # Extract relative phases between ope1 and result
-        relative_phase = torch.mean(torch.angle(ope1 / result))
-        phase_consistency = torch.abs(torch.exp(1j * relative_phase) - phase1).item()
+        # Track phases at each stage
+        print("\nPhase Tracking Instrumentation:")
+        print(f"Initial phase1: {torch.angle(phase1):.4f} rad")
+        print(f"Initial phase2: {torch.angle(phase2):.4f} rad")
+        
+        # Test phase multiplication from left
+        op1_phased = phase1 * ops[0]
+        print(f"\nLeft multiplication:")
+        print(f"Operator 1 phase before: {torch.angle(torch.mean(ops[0])):.4f} rad")
+        print(f"Operator 1 phase after: {torch.angle(torch.mean(op1_phased)):.4f} rad")
+        
+        ope_left = lifter.operator_product_expansion(op1_phased, ops[1], normalize=True)
+        phase_diff_left = torch.angle(ope_left / result) - torch.angle(phase1)
+        phase_error_left = torch.mean(torch.abs(torch.exp(1j * phase_diff_left) - 1.0)).item()
+        
+        print(f"OPE left result phase: {torch.angle(torch.mean(ope_left)):.4f} rad")
+        print(f"Expected phase: {torch.angle(torch.mean(result * phase1)):.4f} rad")
+        print(f"Left phase error: {phase_error_left:.4f}")
+
+        # Test phase multiplication from right
+        op2_phased = phase2 * ops[1]
+        print(f"\nRight multiplication:")
+        print(f"Operator 2 phase before: {torch.angle(torch.mean(ops[1])):.4f} rad")
+        print(f"Operator 2 phase after: {torch.angle(torch.mean(op2_phased)):.4f} rad")
+        
+        ope_right = lifter.operator_product_expansion(ops[0], op2_phased, normalize=True)
+        phase_diff_right = torch.angle(ope_right / result) - torch.angle(phase2)
+        phase_error_right = torch.mean(torch.abs(torch.exp(1j * phase_diff_right) - 1.0)).item()
+        
+        print(f"OPE right result phase: {torch.angle(torch.mean(ope_right)):.4f} rad")
+        print(f"Expected phase: {torch.angle(torch.mean(result * phase2)):.4f} rad")
+        print(f"Right phase error: {phase_error_right:.4f}")
+
+        # Use maximum error from both tests
+        phase_consistency = max(phase_error_left, phase_error_right)
+        print(f"\nFinal phase consistency: {phase_consistency:.4f}")
         assert phase_consistency < 1e-2, f"OPE should respect U(1) structure, error: {phase_consistency:.2e}"
         
         # Test associativity through triple products
-        ope12_3 = lifter.operator_product_expansion(
-            lifter.operator_product_expansion(ops[0], ops[1], normalize=True),
-            ops[2],
-            normalize=True
-        )
-        ope1_23 = lifter.operator_product_expansion(
-            ops[0],
-            lifter.operator_product_expansion(ops[1], ops[2], normalize=True),
-            normalize=True
-        )
+        print("\nAssociativity Test Instrumentation:")
+        print(f"Initial operator norms:")
+        print(f"op1 norm: {torch.norm(ops[0]):.4f}")
+        print(f"op2 norm: {torch.norm(ops[1]):.4f}")
+        print(f"op3 norm: {torch.norm(ops[2]):.4f}")
+
+        # Track first path: (op1 ∘ op2) ∘ op3
+        print("\nPath 1: (op1 ∘ op2) ∘ op3")
+        ope12 = lifter.operator_product_expansion(ops[0], ops[1], normalize=True)
+        print(f"ope12 norm: {torch.norm(ope12):.4f}")
+        print(f"ope12 phase: {torch.angle(torch.mean(ope12)):.4f}")
+        
+        ope12_3 = lifter.operator_product_expansion(ope12, ops[2], normalize=True)
+        print(f"ope12_3 norm: {torch.norm(ope12_3):.4f}")
+        print(f"ope12_3 phase: {torch.angle(torch.mean(ope12_3)):.4f}")
+
+        # Track second path: op1 ∘ (op2 ∘ op3)
+        print("\nPath 2: op1 ∘ (op2 ∘ op3)")
+        ope23 = lifter.operator_product_expansion(ops[1], ops[2], normalize=True)
+        print(f"ope23 norm: {torch.norm(ope23):.4f}")
+        print(f"ope23 phase: {torch.angle(torch.mean(ope23)):.4f}")
+        
+        ope1_23 = lifter.operator_product_expansion(ops[0], ope23, normalize=True)
+        print(f"ope1_23 norm: {torch.norm(ope1_23):.4f}")
+        print(f"ope1_23 phase: {torch.angle(torch.mean(ope1_23)):.4f}")
+
+        # Compute detailed error metrics
         assoc_error = torch.norm(ope12_3 - ope1_23).item()
+        print(f"\nDetailed Error Analysis:")
+        print(f"L2 norm of difference: {assoc_error:.4f}")
+        print(f"Max element-wise difference: {torch.max(torch.abs(ope12_3 - ope1_23)):.4f}")
+        print(f"Mean element-wise difference: {torch.mean(torch.abs(ope12_3 - ope1_23)):.4f}")
+        
         assert assoc_error < 0.1, f"OPE should be approximately associative, error: {assoc_error:.2e}"
         
         # Test scaling behavior with distance

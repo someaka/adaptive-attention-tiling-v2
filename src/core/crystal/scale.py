@@ -68,7 +68,7 @@ from torch import nn, Tensor
 
 # Import memory optimization utilities
 from src.core.performance.cpu.memory_management import MemoryManager, MemoryMetrics
-from src.utils.memory_management import optimize_memory, register_tensor
+from utils.memory_management_util import optimize_memory, register_tensor
 from src.core.crystal.scale_classes.rgflow import RGFlow
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.scaleinvariance import ScaleInvariance
@@ -214,7 +214,9 @@ class ScaleCohomology:
         # Initialize lattice and Hilbert space for quantum analysis
         from src.core.quantum.crystal import BravaisLattice, HilbertSpace
         self.lattice = BravaisLattice(dim)
-        self.hilbert_space = HilbertSpace(2**dim)  # 2 states per dimension
+        # Use log2 of dimension to keep Hilbert space manageable
+        hilbert_dim = max(2, int(math.log2(dim + 1)))  # At least 2-dimensional
+        self.hilbert_space = HilbertSpace(hilbert_dim)  # Use log-scaled dimension
 
         # Use ComplexTanh for all networks if dtype is complex
         activation = ComplexTanh() if dtype == torch.complex64 else nn.Tanh()

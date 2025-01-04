@@ -23,7 +23,7 @@ warnings.filterwarnings(
     category=FutureWarning
 )
 
-from src.utils.memory_management import (
+from utils.memory_management_util import (
     tensor_manager,
     memory_optimizer,
     register_tensor,

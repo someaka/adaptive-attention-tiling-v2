@@ -307,6 +307,13 @@ class MotivicCohomology:
         if combined.dim() == 1:
             combined = combined.unsqueeze(0)
 
+        # Project input scale to match combined size if needed
+        if input_scale.shape[-1] != combined.shape[-1]:
+            input_scale = torch.nn.functional.adaptive_avg_pool1d(
+                input_scale.unsqueeze(1),  # Add channel dimension
+                combined.shape[-1]
+            ).squeeze(1)  # Remove channel dimension
+
         # Normalize while preserving input scale
         combined_norm = torch.norm(combined, dim=-1, keepdim=True)
         # Only normalize if norm is non-zero, and scale by input magnitude
@@ -448,6 +455,25 @@ class MotivicCohomology:
             flow_metrics.unsqueeze(1) if flow_metrics.dim() == 2 else flow_metrics,
             self.motive_rank
         ).squeeze(1)
+        
+        # Ensure all projections have the same size
+        if height_proj.shape[-1] != self.motive_rank:
+            height_proj = torch.nn.functional.adaptive_avg_pool1d(
+                height_proj.unsqueeze(1),
+                self.motive_rank
+            ).squeeze(1)
+        
+        if dynamics_proj.shape[-1] != self.motive_rank:
+            dynamics_proj = torch.nn.functional.adaptive_avg_pool1d(
+                dynamics_proj.unsqueeze(1),
+                self.motive_rank
+            ).squeeze(1)
+        
+        if flow_proj.shape[-1] != self.motive_rank:
+            flow_proj = torch.nn.functional.adaptive_avg_pool1d(
+                flow_proj.unsqueeze(1),
+                self.motive_rank
+            ).squeeze(1)
         
         # Combine projections
         combined = height_proj + dynamics_proj + flow_proj

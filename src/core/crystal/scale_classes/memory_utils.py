@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from src.core.performance.cpu.memory_management import MemoryManager
-from src.utils.memory_management import optimize_memory
+from utils.memory_management_util import optimize_memory
 
 # Global memory manager instance
 memory_manager = MemoryManager()

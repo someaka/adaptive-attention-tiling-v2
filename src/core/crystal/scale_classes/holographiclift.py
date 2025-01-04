@@ -15,7 +15,7 @@ from torch import nn, Tensor
 
 # Import memory optimization utilities
 from src.core.performance.cpu.memory_management import MemoryManager, MemoryMetrics
-from src.utils.memory_management import optimize_memory, register_tensor
+from utils.memory_management_util import optimize_memory, register_tensor
 from src.core.crystal.scale_classes.rgflow import RGFlow
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.scaleinvariance import ScaleInvariance
@@ -361,147 +361,52 @@ class HolographicLifter(nn.Module):
                 validation = self._validate_tensor(op, name)
                 if not validation.is_valid:
                     raise ValidationError(f"Invalid {name}: {validation.message}")
-
+    
             # Track input operators
             with self._track_tensor(op1, "op1"), self._track_tensor(op2, "op2"):
-                # Get norms and phases for scaling
+                # Get norms for scaling
                 norm1 = torch.norm(op1)
                 norm2 = torch.norm(op2)
-                
-                # Extract global phases more carefully
-                global_phase1 = torch.mean(torch.angle(op1))
-                global_phase2 = torch.mean(torch.angle(op2))
-                
-                # Remove global phases for composition
-                op1_normalized = op1 * torch.exp(-1j * global_phase1)
-                op2_normalized = op2 * torch.exp(-1j * global_phase2)
 
                 if norm1 > self.EPSILON and norm2 > self.EPSILON:
-                    # Create operadic operations with quantum structure preservation
-                    op1_operation = self.operad_handler.create_operation(
-                        source_dim=self.dim,
-                        target_dim=self.dim,
-                        preserve_structure='quantum'
-                    )
-                    op2_operation = self.operad_handler.create_operation(
-                        source_dim=self.dim,
-                        target_dim=self.dim,
-                        preserve_structure='quantum'
-                    )
-
-                    # Handle both 1D and 2D input tensors
-                    if op1.dim() == 1:
-                        # For 1D tensors, create 2D composition laws for real and imaginary parts
-                        op1_2d_real = torch.zeros((self.dim, self.dim), dtype=torch.float32)
-                        op1_2d_imag = torch.zeros((self.dim, self.dim), dtype=torch.float32)
-                        op2_2d_real = torch.zeros((self.dim, self.dim), dtype=torch.float32)
-                        op2_2d_imag = torch.zeros((self.dim, self.dim), dtype=torch.float32)
-
-                        # Set real and imaginary parts
-                        op1_2d_real[0] = op1_normalized.real
-                        op1_2d_imag[0] = op1_normalized.imag
-                        op2_2d_real[0] = op2_normalized.real
-                        op2_2d_imag[0] = op2_normalized.imag
-                    else:
-                        # For 2D tensors, use real and imaginary parts directly
-                        op1_2d_real = op1_normalized.real
-                        op1_2d_imag = op1_normalized.imag
-                        op2_2d_real = op2_normalized.real
-                        op2_2d_imag = op2_normalized.imag
-
-                    # Set composition laws for real and imaginary parts
-                    op1_operation.composition_law = torch.complex(op1_2d_real.float(), op1_2d_imag.float()) / norm1
-                    op2_operation.composition_law = torch.complex(op2_2d_real.float(), op2_2d_imag.float()) / norm2
-
-                    # Let the operadic structure handle complex composition
-                    composed_op, metrics = self.operad_handler.compose_operations(
-                        operations=[op1_operation, op2_operation],
-                        with_motivic=True
-                    )
-
-                    # Extract result based on input dimensionality
-                    if op1.dim() == 1:
-                        result = composed_op.composition_law[0]
-                    else:
-                        result = composed_op.composition_law
-
-                    # Estimate distance between operators using their overlap
-                    overlap = torch.abs(torch.sum(torch.conj(op1_normalized) * op2_normalized) / (norm1 * norm2))
-                    distance = torch.sqrt(2.0 * (1.0 - overlap))  # Geodesic distance on unit sphere
-
-                    # Scale amplitude with distance using both classical and quantum terms
-                    if distance > self.EPSILON:
-                        # Use log(1+d) for associativity
-                        log_distance = torch.log1p(distance)
-
-                        # Classical scaling term (matches UV/IR classical scaling)
-                        classical_scale = torch.exp(-log_distance * self.dim)
-
-                        # Quantum correction term (matches UV/IR quantum corrections)
-                        quantum_scale = torch.exp(log_distance * (2 - self.dim))
-
-                        # Weight quantum corrections using UV/IR ratio with reduced strength
-                        # Adjust correction weight to improve associativity
-                        correction_weight = 0.005 / (1 + self.Z_RATIO**2)  # Reduced from 0.01 to 0.005
-
-                        # Combine classical and quantum scaling with reduced quantum contribution
-                        scale_factor = classical_scale * (1 + correction_weight * quantum_scale)
-
-                        # Scale the result
-                        result = result * scale_factor
-
-                    # Scale by geometric mean of input norms
-                    result = result * torch.sqrt(norm1 * norm2)
-
-                    # Extract global phases from input operators
-                    phase1 = torch.exp(1j * global_phase1)
-                    phase2 = torch.exp(1j * global_phase2)
+                    # Allocate normalized tensors through memory manager
+                    op1_norm = self._allocate_tensor(op1.shape, self.dtype, "op1_norm")
+                    op2_norm = self._allocate_tensor(op2.shape, self.dtype, "op2_norm")
                     
-                    # Use geometric quantization for phase composition
-                    # Map U(1) phases to prequantum line bundle
-                    
-                    # Convert phases to prequantum states
-                    # Use Kähler polarization for U(1)
-                    # The prequantum Hilbert space is L²(U(1))
-                    theta1 = global_phase1
-                    theta2 = global_phase2
-                    
-                    # Create prequantum wavefunctions
-                    # ψ(θ) = exp(inθ) for n ∈ Z
-                    # Use n=1 for fundamental representation
-                    psi1 = torch.exp(1j * theta1)
-                    psi2 = torch.exp(1j * theta2)
-                    
-                    # Compute geometric parallel transport
-                    # Use connection 1-form A = -i dθ
-                    # Parallel transport preserves U(1) structure
-                    transport = torch.exp(-1j * (theta1 + theta2) / 2)
-                    
-                    # Apply quantum reduction
-                    # Project to physical Hilbert space
-                    # Use Guillemin-Sternberg isomorphism
-                    reduced_state = psi1 * psi2 * transport
-                    
-                    # Extract composed phase from reduced state
-                    # Use quantum reduction map
-                    composed_phase = reduced_state / torch.abs(reduced_state)
-                    
-                    # Apply composed phase
-                    result = result * composed_phase
-                    
-                    # Ensure result is complex
-                    if not result.is_complex():
-                        result = torch.complex(result, torch.zeros_like(result))
+                    # Track normalized tensors
+                    with self._track_tensor(op1_norm, "op1_norm"), self._track_tensor(op2_norm, "op2_norm"):
+                        # Normalize inputs for composition
+                        op1_norm.copy_(op1 / norm1)
+                        op2_norm.copy_(op2 / norm2)
 
-                    # Normalize if requested
-                    if normalize:
-                        result = result / torch.norm(result)
+                        # Compute geometric mean of norms
+                        norm_scale = torch.sqrt(norm1 * norm2)
 
-                    return result.contiguous()
+                        # Allocate result tensor
+                        result = self._allocate_tensor(op1.shape, self.dtype, "result")
+                        
+                        # Track result tensor
+                        with self._track_tensor(result, "result"):
+                            # Use composition law directly with proper broadcasting
+                            result.copy_(torch.einsum('...i,...j,ij->...i', op1_norm, op2_norm, self.operad_handler.composition_law))
+
+                            # Scale by geometric mean of norms
+                            result.mul_(norm_scale)
+
+                            # Normalize if requested
+                            if normalize:
+                                result_norm = torch.norm(result)
+                                if result_norm > self.EPSILON:
+                                    result.div_(result_norm)
+
+                            # Track phase for quantum coherence
+                            self._track_phase(result)
+
+                            return result.contiguous()
                 else:
                     # Return zero tensor with proper shape and dtype
                     return self._allocate_tensor(op1.shape, self.dtype, "zero_result")
-    
+
         except ValidationError:
             raise
         except Exception as e:

@@ -61,54 +61,75 @@ class ArithmeticDynamics(nn.Module):
             torch.randn(num_primes, self.height_dim, dtype=self.dtype) / np.sqrt(num_primes * self.height_dim)
         )
 
-        # Initialize networks
+        # Initialize networks with the correct dtype
+        def init_linear(in_features: int, out_features: int) -> nn.Linear:
+            if self.dtype.is_complex:
+                # For complex dtypes, initialize with real and imaginary parts
+                real_weight = torch.randn(out_features, in_features) / np.sqrt(in_features)
+                imag_weight = torch.randn(out_features, in_features) / np.sqrt(in_features)
+                weight = torch.complex(real_weight, imag_weight)
+                
+                real_bias = torch.randn(out_features) / np.sqrt(out_features)
+                imag_bias = torch.randn(out_features) / np.sqrt(out_features)
+                bias = torch.complex(real_bias, imag_bias)
+                
+                linear = nn.Linear(in_features, out_features, bias=True)
+                with torch.no_grad():
+                    linear.weight.data = weight.to(self.dtype)
+                    linear.bias.data = bias.to(self.dtype)
+            else:
+                # For real dtypes, use standard initialization
+                linear = nn.Linear(in_features, out_features, dtype=self.dtype)
+            return linear
+
+        # Initialize height map
         self.height_map = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, self.height_dim, dtype=self.dtype)
+            init_linear(hidden_dim // 2, self.height_dim)
         )
         
         # Flow network should match height_dim
-        self.flow = nn.Linear(self.height_dim, self.height_dim, dtype=self.dtype)
+        self.flow = init_linear(self.height_dim, self.height_dim)
         
         # Initialize L-function network to output motive_rank dimensions
         self.l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
+            init_linear(hidden_dim // 2, motive_rank)
         )
 
         # Adelic projection
         self.adelic_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, num_primes * motive_rank, dtype=self.dtype)
+            init_linear(hidden_dim // 2, num_primes * motive_rank)
         )
 
         # Output projection layers
         self.min_dim = hidden_dim  # Use hidden_dim as min_dim
         self.measure_proj = nn.Sequential(
-            nn.Linear(self.height_dim, hidden_dim // 2, dtype=self.dtype),  # Input is height_dim
+            init_linear(self.height_dim, hidden_dim // 2),  # Input is height_dim
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, hidden_dim, dtype=self.dtype)  # Output is hidden_dim
+            init_linear(hidden_dim // 2, hidden_dim)  # Output is hidden_dim
         )
-        self.output_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
+        self.output_proj = init_linear(hidden_dim, hidden_dim)  # Keep same dimension
 
         # Quantum correction networks - ensure same output size as height_map
         self.quantum_height = nn.Sequential(
-            nn.Linear(self.manifold_dim, self.manifold_dim // 2, dtype=self.dtype),  # Use manifold_dim/2 as intermediate
+            init_linear(self.manifold_dim, self.manifold_dim // 2),  # Use manifold_dim/2 as intermediate
             nn.Tanh(),
-            nn.Linear(self.manifold_dim // 2, self.height_dim, dtype=self.dtype)  # Output height_dim
+            init_linear(self.manifold_dim // 2, self.height_dim)  # Output height_dim
         )
         
         self.quantum_l_function = nn.Sequential(
-            nn.Linear(self.manifold_dim, self.manifold_dim // 2, dtype=self.dtype),  # Use manifold_dim/2 as intermediate
+            init_linear(self.manifold_dim, self.manifold_dim // 2),  # Use manifold_dim/2 as intermediate
             nn.Tanh(),
-            nn.Linear(self.manifold_dim // 2, motive_rank, dtype=self.dtype)  # Output motive_rank
+            init_linear(self.manifold_dim // 2, motive_rank)  # Output motive_rank
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)  # Project to manifold_dim instead of height_dim
+        self.quantum_proj = init_linear(self.hidden_dim, self.manifold_dim)  # Project to manifold_dim instead of height_dim
 
     @staticmethod
     def _get_first_n_primes(n: int) -> List[int]:
@@ -139,17 +160,17 @@ class ArithmeticDynamics(nn.Module):
         """
         # Save original shape for later reshaping
         original_shape = x.shape
+        original_dtype = x.dtype
         
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
             # Flatten all but last dimension
             flat_shape = (-1, x.shape[-1])
             x = x.reshape(flat_shape)
-            # Project to hidden_dim using adaptive pooling
-            x = torch.nn.functional.adaptive_avg_pool1d(
-                x.unsqueeze(1),  # Add channel dimension
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
+            # Project to hidden_dim
+            x = self._project_to_hidden_dim(x)
+            # Ensure dtype is preserved
+            x = x.to(original_dtype)
         
         # Classical height
         classical_height = self.height_map(x)
@@ -178,17 +199,17 @@ class ArithmeticDynamics(nn.Module):
         """
         # Save original shape for later reshaping
         original_shape = x.shape
+        original_dtype = x.dtype
         
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
             # Flatten all but last dimension
             flat_shape = (-1, x.shape[-1])
             x = x.reshape(flat_shape)
-            # Project to hidden_dim using adaptive pooling
-            x = torch.nn.functional.adaptive_avg_pool1d(
-                x.unsqueeze(1),  # Add channel dimension
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
+            # Project to hidden_dim
+            x = self._project_to_hidden_dim(x)
+            # Ensure dtype is preserved
+            x = x.to(original_dtype)
         
         # Classical L-function
         classical_l = self.l_function(x)
@@ -218,83 +239,50 @@ class ArithmeticDynamics(nn.Module):
         # Save original shape and size for later reshaping
         original_shape = x.shape
         original_size = x.shape[-1]
+        original_dtype = x.dtype
+
+        # Preserve batch dimension if present
+        batch_size = x.shape[0] if x.dim() > 1 else 1
+        
+        # Flatten all dimensions except batch and last
+        if x.dim() > 2:
+            x = x.reshape(batch_size, -1, original_size)
+        # Add batch dimension if input is 1D
+        elif x.dim() == 1:
+            x = x.unsqueeze(0)
 
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
-            # Flatten all but last dimension
-            flat_shape = (-1, x.shape[-1])
-            x_flat = x.reshape(flat_shape)
-            
-            # Handle complex tensors by separating real and imaginary parts
-            if x_flat.is_complex():
-                # Split into real and imaginary parts
-                x_real = x_flat.real
-                x_imag = x_flat.imag
-                
-                # Project each part separately
-                x_real_proj = torch.nn.functional.adaptive_avg_pool1d(
-                    x_real.unsqueeze(1),  # Add channel dimension
-                    output_size=self.hidden_dim
-                ).squeeze(1)  # Remove channel dimension
-                
-                x_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
-                    x_imag.unsqueeze(1),  # Add channel dimension
-                    output_size=self.hidden_dim
-                ).squeeze(1)  # Remove channel dimension
-                
-                # Combine back into complex tensor
-                x_proj = torch.complex(x_real_proj, x_imag_proj)
-            else:
-                # For real tensors, proceed as before
-                x_proj = torch.nn.functional.adaptive_avg_pool1d(
-                    x_flat.unsqueeze(1),  # Add channel dimension
-                    output_size=self.hidden_dim
-                ).squeeze(1)  # Remove channel dimension
-        else:
-            x_proj = x
-            if self.dtype.is_complex and not x_proj.is_complex():
-                x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
+            # Project to hidden_dim
+            x = self._project_to_hidden_dim(x)
+            # Ensure dtype is preserved
+            x = x.to(original_dtype)
 
-        # Apply height map
-        height = self.height_map(x_proj)
+        # Compute height and L-function
+        height = self.compute_height(x)
+        l_values = self.compute_l_function(x)
 
-        # Apply quantum flow
-        flow = self.flow(height)
+        # Compute adelic projection
+        adelic = self.adelic_proj(x)
+        adelic = adelic.reshape(-1, self.num_primes, self.motive_rank)
 
-        # Project back to original size if needed
-        if original_size != self.hidden_dim:
-            # Handle complex tensors by splitting real and imaginary parts
-            if flow.is_complex():
-                # Split into real and imaginary parts
-                flow_real = flow.real
-                flow_imag = flow.imag
-                
-                # Project each part separately
-                flow_real_proj = torch.nn.functional.adaptive_avg_pool1d(
-                    flow_real.unsqueeze(1),  # Add channel dimension
-                    output_size=original_size
-                ).squeeze(1)  # Remove channel dimension
-                
-                flow_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
-                    flow_imag.unsqueeze(1),  # Add channel dimension
-                    output_size=original_size
-                ).squeeze(1)  # Remove channel dimension
-                
-                # Combine back into complex tensor
-                flow = torch.complex(flow_real_proj, flow_imag_proj)
-            else:
-                # For real tensors, proceed as before
-                flow = torch.nn.functional.adaptive_avg_pool1d(
-                    flow.unsqueeze(1),  # Add channel dimension
-                    output_size=original_size
-                ).squeeze(1)  # Remove channel dimension
-            
-            # Reshape back to original shape
-            flow = flow.reshape(original_shape)
-        else:
-            flow = flow.reshape(original_shape)
+        # Apply flow
+        flow_output = self.flow(height)
 
-        return flow
+        # Compute measure projection
+        measure = self.measure_proj(flow_output)
+
+        # Final output projection
+        output = self.output_proj(measure)
+
+        # Reshape output to match input shape except for last dimension
+        if len(original_shape) > 2:
+            new_shape = original_shape[:-1] + (self.hidden_dim,)
+            output = output.reshape(new_shape)
+        elif len(original_shape) == 1:
+            output = output.squeeze(0)
+
+        return output
 
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
@@ -499,6 +487,40 @@ class ArithmeticDynamics(nn.Module):
         quantum_state = quantum_state / torch.norm(quantum_state, dim=1, keepdim=True)
         
         return quantum_state
+
+    def _project_to_hidden_dim(self, x: torch.Tensor) -> torch.Tensor:
+        """Project input tensor to hidden_dim while preserving complex structure.
+        
+        Args:
+            x: Input tensor of any shape with last dimension != hidden_dim
+            
+        Returns:
+            Tensor with last dimension = hidden_dim, preserving complex structure
+        """
+        if x.is_complex():
+            # Handle complex tensors by separating real and imaginary parts
+            x_real = x.real
+            x_imag = x.imag
+            
+            # Project each part separately
+            x_real_proj = torch.nn.functional.adaptive_avg_pool1d(
+                x_real.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+            
+            x_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
+                x_imag.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Recombine into complex tensor
+            return torch.complex(x_real_proj, x_imag_proj)
+        else:
+            # For real tensors, just project directly
+            return torch.nn.functional.adaptive_avg_pool1d(
+                x.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
 
 
 class ArithmeticPattern(nn.Module):
