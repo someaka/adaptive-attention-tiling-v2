@@ -378,14 +378,50 @@ class MotivicIntegrationSystem(nn.Module):
         # Apply quantum corrections if needed
         if with_quantum:
             quantum_factor = self.dynamics.compute_quantum_correction(pattern)
+            # Project quantum factor to match measure size if needed
+            if quantum_factor.shape[-1] != measure.shape[-1]:
+                # Flatten all dimensions except the last
+                orig_shape = quantum_factor.shape
+                flat_shape = (-1, orig_shape[-1])
+                quantum_factor_flat = quantum_factor.reshape(flat_shape)
+                
+                # Handle complex tensors by separating real and imaginary parts
+                if quantum_factor_flat.is_complex():
+                    # Split into real and imaginary parts
+                    quantum_factor_real = quantum_factor_flat.real
+                    quantum_factor_imag = quantum_factor_flat.imag
+                    
+                    # Project each part separately
+                    quantum_factor_real_proj = torch.nn.functional.adaptive_avg_pool1d(
+                        quantum_factor_real.unsqueeze(1),  # Add channel dimension
+                        output_size=measure.shape[-1]
+                    ).squeeze(1)  # Remove channel dimension
+                    
+                    quantum_factor_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
+                        quantum_factor_imag.unsqueeze(1),  # Add channel dimension
+                        output_size=measure.shape[-1]
+                    ).squeeze(1)  # Remove channel dimension
+                    
+                    # Combine back into complex tensor
+                    quantum_factor_proj = torch.complex(quantum_factor_real_proj, quantum_factor_imag_proj)
+                else:
+                    # For real tensors, proceed as before
+                    quantum_factor_proj = torch.nn.functional.adaptive_avg_pool1d(
+                        quantum_factor_flat.unsqueeze(1),  # Add channel dimension
+                        output_size=measure.shape[-1]
+                    ).squeeze(1)  # Remove channel dimension
+                
+                # Reshape back to original dimensions but with new size in last dim
+                new_shape = orig_shape[:-1] + (measure.shape[-1],)
+                quantum_factor = quantum_factor_proj.reshape(new_shape)
+            
             measure = measure * quantum_factor
         
         # Compute metrics
         metrics = {
-            'measure_norm': torch.norm(measure, dim=-1).mean().item(),
-            'cohomology_degree': form.degree,  # Use form's degree instead of cohomology
-            'metric_determinant': torch.det(metric.values).mean().item(),
-            'quantum_correction': quantum_factor.mean().item() if with_quantum else 1.0
+            'metric_tensor': metric,
+            'cohomology': cohomology,
+            'measure': measure
         }
         
         return measure, metrics

@@ -225,16 +225,31 @@ class ArithmeticDynamics(nn.Module):
             flat_shape = (-1, x.shape[-1])
             x_flat = x.reshape(flat_shape)
             
-            # Project to hidden_dim using nearest neighbor interpolation
-            x_proj = torch.nn.functional.interpolate(
-                x_flat.unsqueeze(1),  # Add channel dimension
-                size=self.hidden_dim,
-                mode='nearest'  # Use nearest neighbor which works with complex numbers
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Convert to complex if needed
-            if self.dtype.is_complex and not x_proj.is_complex():
-                x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
+            # Handle complex tensors by separating real and imaginary parts
+            if x_flat.is_complex():
+                # Split into real and imaginary parts
+                x_real = x_flat.real
+                x_imag = x_flat.imag
+                
+                # Project each part separately
+                x_real_proj = torch.nn.functional.adaptive_avg_pool1d(
+                    x_real.unsqueeze(1),  # Add channel dimension
+                    output_size=self.hidden_dim
+                ).squeeze(1)  # Remove channel dimension
+                
+                x_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
+                    x_imag.unsqueeze(1),  # Add channel dimension
+                    output_size=self.hidden_dim
+                ).squeeze(1)  # Remove channel dimension
+                
+                # Combine back into complex tensor
+                x_proj = torch.complex(x_real_proj, x_imag_proj)
+            else:
+                # For real tensors, proceed as before
+                x_proj = torch.nn.functional.adaptive_avg_pool1d(
+                    x_flat.unsqueeze(1),  # Add channel dimension
+                    output_size=self.hidden_dim
+                ).squeeze(1)  # Remove channel dimension
         else:
             x_proj = x
             if self.dtype.is_complex and not x_proj.is_complex():
@@ -251,34 +266,31 @@ class ArithmeticDynamics(nn.Module):
             # Handle complex tensors by splitting real and imaginary parts
             if flow.is_complex():
                 # Split into real and imaginary parts
-                flow_real = flow.real.unsqueeze(1)  # Add channel dimension
-                flow_imag = flow.imag.unsqueeze(1)  # Add channel dimension
+                flow_real = flow.real
+                flow_imag = flow.imag
                 
-                # Interpolate real and imaginary parts separately
-                flow_real_proj = torch.nn.functional.interpolate(
-                    flow_real,
-                    size=original_size,
-                    mode='nearest'
+                # Project each part separately
+                flow_real_proj = torch.nn.functional.adaptive_avg_pool1d(
+                    flow_real.unsqueeze(1),  # Add channel dimension
+                    output_size=original_size
                 ).squeeze(1)  # Remove channel dimension
                 
-                flow_imag_proj = torch.nn.functional.interpolate(
-                    flow_imag,
-                    size=original_size,
-                    mode='nearest'
+                flow_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
+                    flow_imag.unsqueeze(1),  # Add channel dimension
+                    output_size=original_size
                 ).squeeze(1)  # Remove channel dimension
                 
                 # Combine back into complex tensor
-                flow_proj = torch.complex(flow_real_proj, flow_imag_proj)
+                flow = torch.complex(flow_real_proj, flow_imag_proj)
             else:
                 # For real tensors, proceed as before
-                flow_proj = torch.nn.functional.interpolate(
+                flow = torch.nn.functional.adaptive_avg_pool1d(
                     flow.unsqueeze(1),  # Add channel dimension
-                    size=original_size,
-                    mode='nearest'
+                    output_size=original_size
                 ).squeeze(1)  # Remove channel dimension
             
             # Reshape back to original shape
-            flow = flow_proj.reshape(original_shape)
+            flow = flow.reshape(original_shape)
         else:
             flow = flow.reshape(original_shape)
 

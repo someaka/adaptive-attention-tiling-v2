@@ -575,8 +575,11 @@ class QuantumMotivicCohomology:
         Returns:
             Quantum motive tensor of shape [batch_size x motive_rank]
         """
+        # Ensure quantum structure has same dtype as input
+        quantum_structure = self.quantum_structure.to(dtype=classical.dtype)
+        
         # Transpose the multiplication to handle batched inputs
-        return torch.matmul(classical, self.quantum_structure.T)
+        return torch.matmul(classical, quantum_structure.T)
 
 
 class AdvancedMetricsAnalyzer:
