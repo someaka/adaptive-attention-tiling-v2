@@ -289,35 +289,48 @@ class SymplecticStructure:
             return self.enriched.create_wave_packet(pos, mom)
             
         # For non-wave tensors, process in chunks
-        chunk_size = min(128, tensor.shape[0] if len(tensor.shape) > 1 else 1)
-        output_chunks = []
-        
-        for start_idx in range(0, tensor.shape[0], chunk_size):
-            end_idx = min(start_idx + chunk_size, tensor.shape[0])
-            chunk = tensor[start_idx:end_idx]
+        if len(tensor.shape) > 1:
+            chunk_size = min(128, tensor.shape[0])
+            output_chunks = []
             
-            # Save original shape for proper reshaping
-            original_shape = chunk.shape[:-1]
-            
-            # Simple dimension adjustment
+            for start_idx in range(0, tensor.shape[0], chunk_size):
+                end_idx = min(start_idx + chunk_size, tensor.shape[0])
+                chunk = tensor[start_idx:end_idx]
+                
+                # Save original shape for proper reshaping
+                original_shape = chunk.shape[:-1]
+                
+                # Simple dimension adjustment
+                if current_dim < self.target_dim:
+                    # Pad with zeros to target_dim
+                    padding_size = self.target_dim - current_dim
+                    padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
+                    if tensor.is_complex():
+                        padding = torch.complex(padding, torch.zeros_like(padding))
+                    adjusted = torch.cat([chunk, padding], dim=-1)
+                else:
+                    # Truncate to target_dim
+                    adjusted = chunk[..., :self.target_dim]
+                
+                output_chunks.append(adjusted)
+                
+                # Free memory
+                del chunk, adjusted
+                
+            # Concatenate all chunks
+            result = torch.cat(output_chunks, dim=0)
+        else:
+            # Handle single vector case
             if current_dim < self.target_dim:
                 # Pad with zeros to target_dim
                 padding_size = self.target_dim - current_dim
-                padding = torch.zeros(*original_shape, padding_size, device=tensor.device, dtype=tensor.dtype)
+                padding = torch.zeros(padding_size, device=tensor.device, dtype=tensor.dtype)
                 if tensor.is_complex():
                     padding = torch.complex(padding, torch.zeros_like(padding))
-                adjusted = torch.cat([chunk, padding], dim=-1)
+                result = torch.cat([tensor, padding], dim=-1)
             else:
                 # Truncate to target_dim
-                adjusted = chunk[..., :self.target_dim]
-            
-            output_chunks.append(adjusted)
-            
-            # Free memory
-            del chunk, adjusted
-            
-        # Concatenate all chunks
-        result = torch.cat(output_chunks, dim=0)
+                result = tensor[..., :self.target_dim]
         
         # Ensure result has target dimension
         if result.shape[-1] != self.target_dim:

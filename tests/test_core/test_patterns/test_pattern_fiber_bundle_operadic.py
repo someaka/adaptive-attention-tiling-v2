@@ -13,7 +13,7 @@ from src.core.patterns.riemannian import PatternRiemannianStructure
 from src.core.patterns.riemannian_flow import RiemannianFlow
 
 @pytest.fixture(scope="class")
-def bundle(self):
+def bundle():
     """Create test fiber bundle."""
     base_dim = 2
     fiber_dim = 3
@@ -25,8 +25,6 @@ def bundle(self):
         structure_group="SO3"
     )
     
-    # Set target dimension to match fiber dimension
-    bundle.symplectic.target_dim = fiber_dim
     return bundle
 
 @pytest.fixture
