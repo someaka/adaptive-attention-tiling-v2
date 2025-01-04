@@ -455,7 +455,8 @@ class MotivicIntegrationSystem(nn.Module):
         integral_metrics = {
             'domain_volume': torch.prod(upper - lower, dim=-1).mean().item(),
             'integral_mean': integral.mean().item(),
-            'integral_std': integral.std().item()
+            'integral_std': integral.std().item(),
+            'measure_norm': torch.norm(measure, dim=-1).mean().item()
         }
         
         # Combine metrics
