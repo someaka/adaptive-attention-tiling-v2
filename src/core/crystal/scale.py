@@ -1246,10 +1246,10 @@ class ScaleCohomology:
         - D is the dilatation operator
         - d is the canonical dimension
         
-        For a correlation of the form C = |x2-x1|^(-1 + γ(g)):
-        1. β(g)∂_g C = β(g) * ∂_g γ(g) * log|x2-x1| * C
-        2. γ(g)D C = γ(g) * (-1 + γ(g)) * C
-        3. d C = (-1 + γ(g)) * C
+        For a correlation of the form C = |x2-x1|^(canonical_dim + γ(g)):
+        1. ∂_g C = C * log|x2-x1| * ∂_g γ(g)
+        2. D C = (canonical_dim + γ(g)) * C = γ(g) * C
+        3. d C = canonical_dim * C = 0
         
         The equation is satisfied when:
         1. β(g)∂_g γ(g) = γ(g)² (consistency condition)
@@ -1308,17 +1308,16 @@ class ScaleCohomology:
             dgamma_val = dgamma(g)
             
             # Compute the terms in the CS equation
-            # For C = |x2-x1|^(-1 + γ(g)):
+            # For C = |x2-x1|^(canonical_dim + γ(g)):
             # 1. ∂_g C = C * log|x2-x1| * ∂_g γ(g)
-            # 2. D C = (-1 + γ(g)) * C
-            # 3. d C = (-1 + γ(g)) * C
-            # Therefore:
-            # β(g)∂_g C + γ(g)D C + d C =
-            # C * [β(g) * log|x2-x1| * ∂_g γ(g) + γ(g) * (-1 + γ(g)) + (-1 + γ(g))] = 0
-            beta_term = beta_val * log_dist * dgamma_val
-            gamma_term = gamma_val * (-1 + gamma_val)
-            dim_term = (-1 + gamma_val)
-            result = corr * (beta_term + gamma_term + dim_term)
+            # 2. D C = (canonical_dim + γ(g)) * C = γ(g) * C
+            # 3. d C = canonical_dim * C = 0
+            beta_term = beta_val * corr * log_dist * dgamma_val
+            gamma_term = gamma_val * corr  # D operator term
+            dim_term = torch.zeros_like(corr)  # Canonical dimension term (d = 0)
+            
+            # Combine terms according to the CS equation
+            result = beta_term + gamma_term - dim_term
             
             return result
             

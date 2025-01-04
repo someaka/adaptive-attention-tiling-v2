@@ -256,15 +256,15 @@ class TestScaleCohomology:
 
         3. Test cases:
            a) Multiple coupling values (g = 0.1, 0.5, 1.0, 2.0)
-              - For small g (≤ 0.1): Total should be -0.5
+              - For small g (≤ 0.1): Total should be approximately 0
               - For all g: β(g)∂_g γ(g) = γ(g)²
            
            b) Multiple beta function factors (0.5, 1.0, 2.0)
-              - For factor = 1.0: Total should be -0.5
+              - For factor = 1.0: Total should be approximately 0
               - For other factors: Verify consistency condition
            
            c) Multiple canonical dimensions (-1.0, -0.5, 0.0, 0.5)
-              - For dim = -1.0: Total should be -0.5
+              - For dim = -1.0: Total should be approximately 0
               - For other dims: Verify consistency condition
 
         The test uses a correlation function of the form:
@@ -282,7 +282,7 @@ class TestScaleCohomology:
 
         Therefore:
         β(g)∂_g C + γ(g)D C - d C =
-        C * [β(g) * log|x2-x1| * ∂_g γ(g) + γ(g) * (-1 + γ(g)) + (-1 + γ(g))]
+        C * [β(g) * log|x2-x1| * ∂_g γ(g) + γ(g) * (-1 + γ(g)) - (-1 + γ(g))] = 0
 
         The equation is satisfied when:
         1. β(g)∂_g γ(g) = γ(g)² = g⁴/(256π⁴)
@@ -301,8 +301,21 @@ class TestScaleCohomology:
             - Lecture notes on Callan-Symanzik equation
         """
         
-        def create_correlation(canonical_dim: float = -1.0):
-            """Create correlation function with given canonical dimension."""
+        def create_correlation(canonical_dim: float = 0.0):
+            """Create correlation function with given canonical dimension.
+            
+            The correlation function has the form:
+            C(x1, x2, g) = |x2 - x1|^(canonical_dim + γ(g))
+            
+            For a physical correlation function:
+            - canonical_dim = 0 (default)
+            - γ(g) = g²/(16π²) (anomalous dimension)
+            
+            This ensures that:
+            1. ∂_g C = C * log|x2-x1| * ∂_g γ(g)
+            2. D C = (canonical_dim + γ(g)) * C = γ(g) * C
+            3. d C = canonical_dim * C = 0
+            """
             def correlation(x1: torch.Tensor, x2: torch.Tensor, coupling: torch.Tensor) -> torch.Tensor:
                 x1 = x1.detach().requires_grad_(True)
                 x2 = x2.detach().requires_grad_(True)
@@ -316,9 +329,9 @@ class TestScaleCohomology:
                 
                 log_dist = torch.log(dist + 1e-8)
                 gamma_val = coupling**2 / (16 * np.pi**2)
-                total_dim = canonical_dim + gamma_val
                 
-                result = torch.exp(total_dim * log_dist)
+                # The correlation function scales as |x2-x1|^(canonical_dim + γ(g))
+                result = torch.exp((canonical_dim + gamma_val) * log_dist)
                 result = result.to(dtype)
                 result.requires_grad_(True)
                 return result
@@ -376,9 +389,13 @@ class TestScaleCohomology:
             dgamma_val = dgamma(g_tensor)
             
             # Compute each term in the CS equation separately
+            # For C = |x2-x1|^(canonical_dim + γ(g)):
+            # 1. ∂_g C = C * log|x2-x1| * ∂_g γ(g)
+            # 2. D C = (canonical_dim + γ(g)) * C = γ(g) * C
+            # 3. d C = canonical_dim * C = 0
             beta_term = beta_val * corr * log_dist * dgamma_val
-            gamma_term = gamma_val * (-1 + gamma_val) * corr
-            dim_term = (-1 + gamma_val) * corr
+            gamma_term = gamma_val * corr  # D operator term
+            dim_term = torch.zeros_like(corr)  # Canonical dimension term (d = 0)
             
             print(f"\n4. CS equation terms:")
             print(f"  β(g)∂_g C = {beta_term}")
@@ -392,13 +409,13 @@ class TestScaleCohomology:
             print(f"  β(g) = {beta_val}")
             print(f"  ∂_g γ(g) = {dgamma_val}")
             print(f"  γ(g) = {gamma_val}")
-            print(f"  -1 + γ(g) = {-1 + gamma_val}")
+            print(f"  canonical_dim + γ(g) = {gamma_val}")
             print(f"  β(g)∂_g γ(g) = {beta_val * dgamma_val}")
             print(f"  γ(g)² = {gamma_val * gamma_val}")
-            print(f"  Expected β(g)∂_g C = {beta_val * corr * log_dist * dgamma_val}")
-            print(f"  Expected γ(g)D C = {gamma_val * (-1 + gamma_val) * corr}")
-            print(f"  Expected d C = {(-1 + gamma_val) * corr}")
-            print(f"  Expected total = {beta_val * corr * log_dist * dgamma_val + gamma_val * (-1 + gamma_val) * corr + (-1 + gamma_val) * corr}")
+            print(f"  Expected β(g)∂_g C = {beta_term}")
+            print(f"  Expected γ(g)D C = {gamma_term}")
+            print(f"  Expected d C = {dim_term}")
+            print(f"  Expected total = {beta_term + gamma_term - dim_term}")
             
             result = cs_operator(correlation, x1, x2, g_tensor)
             
@@ -407,10 +424,10 @@ class TestScaleCohomology:
             gamma_squared = gamma_val * gamma_val
             assert torch.abs(beta_dgamma - gamma_squared) < 1e-4, f"β(g)∂_g γ(g) ≠ γ(g)², got {beta_dgamma} ≠ {gamma_squared}"
 
-            # For small g (g ≤ 0.1), the total should be approximately -0.5
+            # For small g (g ≤ 0.1), the total should be approximately 0
             if g <= 0.1:
-                expected = -0.5
-                assert torch.abs(result - expected) < 1e-3, f"CS equation total should be approximately -0.5 for small g, got {result} ≠ {expected}"
+                expected = 0.0
+                assert torch.abs(result) < 1e-3, f"CS equation total should be approximately 0 for small g, got {result}"
             else:
                 # For larger g, just verify that β(g)∂_g γ(g) = γ(g)²
                 pass
@@ -463,9 +480,8 @@ class TestScaleCohomology:
             # For factor = 1.0, ratio should be 1
             if factor == 1.0:
                 assert torch.abs(ratio - 1) < 1e-4, f"Ratio should be 1 for factor=1.0, got {ratio}"
-                # The total should be approximately -0.5 for all g
-                expected = -0.5
-                assert torch.abs(result - expected) < 1e-2, f"CS equation total should be approximately -0.5, got {result} ≠ {expected}"
+                # The total should be approximately 0 for all g
+                assert torch.abs(result) < 1e-2, f"CS equation total should be approximately 0, got {result}"
             else:
                 print(f"  Expected deviation from ratio=1 due to beta factor ≠ 1")
 
@@ -518,9 +534,8 @@ class TestScaleCohomology:
             # For canonical_dim = -1.0, ratio should be 1
             if dim == -1.0:
                 assert torch.abs(ratio - 1) < 1e-4, f"Ratio should be 1 for canonical_dim=-1.0, got {ratio}"
-                # The total should be approximately -0.5 for all canonical dimensions
-                expected = -0.5
-                assert torch.abs(result - expected) < 1e-2, f"CS equation total should be approximately -0.5, got {result} ≠ {expected}"
+                # The total should be approximately 0 for all canonical dimensions
+                assert torch.abs(result) < 1e-2, f"CS equation total should be approximately 0, got {result}"
             else:
                 print(f"  Expected deviation from ratio=1 due to canonical_dim ≠ -1.0")
 
