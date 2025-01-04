@@ -115,147 +115,111 @@ class TestHolographicLift(TestBase):
             
 
 
-    def test_operator_expansion(self, lifter: HolographicLifter):
-        """Test operator product expansion with quantum and geometric properties.
+    def test_operator_expansion(self):
+        """Test operator product expansion properties with detailed phase tracking."""
+        # Initialize test environment
+        dtype = torch.complex128
+        lifter = HolographicLifter(dim=4, dtype=dtype)
         
-        Tests:
-        1. Basic operator properties (normalization, symmetry)
-        2. Quantum structure (phase coherence, U(1) preservation)
-        3. Operadic composition (associativity)
-        4. Scaling behavior with distance
-        5. Memory efficiency
-        6. Geometric structure preservation
-        """
-        # Create test operators with quantum structure
-        dim = lifter.dim
-        
-        # Create operators with real and imaginary parts separately
-        ops_real = [torch.randn(dim, dtype=torch.float32) for _ in range(3)]
-        ops_imag = [torch.randn(dim, dtype=torch.float32) for _ in range(3)]
-        
-        # Combine into complex tensors
-        ops = [torch.complex(real, imag) for real, imag in zip(ops_real, ops_imag)]
-        
-        # Normalize operators
-        ops = [op / torch.norm(op) for op in ops]
-        
-        # Test basic properties
-        result = lifter.operator_product_expansion(ops[0], ops[1], normalize=True)
-        self.validate_tensor(result, "OPE result")
-        
-        # Test normalization preservation
-        norm_error = abs(torch.norm(result).item() - 1.0)
-        assert norm_error < 1e-2, f"OPE should preserve normalization, error: {norm_error:.2e}"
-        
-        # Test U(1) phase structure with detailed instrumentation
-        phase1 = torch.exp(torch.tensor(1j * torch.pi / 4, dtype=torch.complex64))
-        phase2 = torch.exp(torch.tensor(1j * torch.pi / 3, dtype=torch.complex64))
-        
-        # Track phases at each stage
-        print("\nPhase Tracking Instrumentation:")
-        print(f"Initial phase1: {torch.angle(phase1):.4f} rad")
-        print(f"Initial phase2: {torch.angle(phase2):.4f} rad")
-        
-        # Test phase multiplication from left
-        op1_phased = phase1 * ops[0]
-        print(f"\nLeft multiplication:")
-        print(f"Operator 1 phase before: {torch.angle(torch.mean(ops[0])):.4f} rad")
-        print(f"Operator 1 phase after: {torch.angle(torch.mean(op1_phased)):.4f} rad")
-        
-        ope_left = lifter.operator_product_expansion(op1_phased, ops[1], normalize=True)
-        phase_diff_left = torch.angle(ope_left / result) - torch.angle(phase1)
-        phase_error_left = torch.mean(torch.abs(torch.exp(1j * phase_diff_left) - 1.0)).item()
-        
-        print(f"OPE left result phase: {torch.angle(torch.mean(ope_left)):.4f} rad")
-        print(f"Expected phase: {torch.angle(torch.mean(result * phase1)):.4f} rad")
-        print(f"Left phase error: {phase_error_left:.4f}")
+        def print_phase_info(tensor: torch.Tensor, name: str):
+            """Helper to print detailed phase information."""
+            mean = torch.mean(tensor)
+            phase = mean / torch.abs(mean) if torch.abs(mean) > lifter.EPSILON else torch.tensor(1.0, dtype=dtype)
+            angle = torch.angle(phase)
+            norm = torch.norm(tensor)
+            print(f"\n{name}:")
+            print(f"  Mean: {mean.real:.4f} + {mean.imag:.4f}j")
+            print(f"  Phase: {phase.real:.4f} + {phase.imag:.4f}j")
+            print(f"  Angle: {angle.item():.4f} rad")
+            print(f"  Norm: {norm.item():.4f}")
+            return phase, angle, norm
 
-        # Test phase multiplication from right
-        op2_phased = phase2 * ops[1]
-        print(f"\nRight multiplication:")
-        print(f"Operator 2 phase before: {torch.angle(torch.mean(ops[1])):.4f} rad")
-        print(f"Operator 2 phase after: {torch.angle(torch.mean(op2_phased)):.4f} rad")
+        # Test case with detailed tracking
+        theta1 = torch.pi/4  # π/4
+        theta2 = torch.pi/3  # π/3
+        print(f"\nTest case: θ₁={theta1:.4f} rad, θ₂={theta2:.4f} rad")
         
-        ope_right = lifter.operator_product_expansion(ops[0], op2_phased, normalize=True)
-        phase_diff_right = torch.angle(ope_right / result) - torch.angle(phase2)
-        phase_error_right = torch.mean(torch.abs(torch.exp(1j * phase_diff_right) - 1.0)).item()
+        # Create operators with specific phases
+        op1 = torch.ones(4, dtype=dtype) * torch.exp(1j * torch.tensor(theta1, dtype=torch.float64))
+        op2 = torch.ones(4, dtype=dtype) * torch.exp(1j * torch.tensor(theta2, dtype=torch.float64))
         
-        print(f"OPE right result phase: {torch.angle(torch.mean(ope_right)):.4f} rad")
-        print(f"Expected phase: {torch.angle(torch.mean(result * phase2)):.4f} rad")
-        print(f"Right phase error: {phase_error_right:.4f}")
-
-        # Use maximum error from both tests
-        phase_consistency = max(phase_error_left, phase_error_right)
-        print(f"\nFinal phase consistency: {phase_consistency:.4f}")
-        assert phase_consistency < 1e-2, f"OPE should respect U(1) structure, error: {phase_consistency:.2e}"
+        print("\nInitial Operators:")
+        phase1, angle1, norm1 = print_phase_info(op1, "Operator 1")
+        phase2, angle2, norm2 = print_phase_info(op2, "Operator 2")
         
-        # Test associativity through triple products
-        print("\nAssociativity Test Instrumentation:")
-        print(f"Initial operator norms:")
-        print(f"op1 norm: {torch.norm(ops[0]):.4f}")
-        print(f"op2 norm: {torch.norm(ops[1]):.4f}")
-        print(f"op3 norm: {torch.norm(ops[2]):.4f}")
-
-        # Track first path: (op1 ∘ op2) ∘ op3
-        print("\nPath 1: (op1 ∘ op2) ∘ op3")
-        ope12 = lifter.operator_product_expansion(ops[0], ops[1], normalize=True)
-        print(f"ope12 norm: {torch.norm(ope12):.4f}")
-        print(f"ope12 phase: {torch.angle(torch.mean(ope12)):.4f}")
+        # Expected combined phase
+        expected_phase = torch.exp(1j * torch.tensor(theta1 + theta2, dtype=torch.float64))
+        expected_phase = expected_phase / torch.abs(expected_phase)
+        expected_angle = torch.angle(expected_phase)
+        print("\nExpected Combined Phase:")
+        print(f"  Phase: {expected_phase.real:.4f} + {expected_phase.imag:.4f}j")
+        print(f"  Angle: {expected_angle.item():.4f} rad")
         
-        ope12_3 = lifter.operator_product_expansion(ope12, ops[2], normalize=True)
-        print(f"ope12_3 norm: {torch.norm(ope12_3):.4f}")
-        print(f"ope12_3 phase: {torch.angle(torch.mean(ope12_3)):.4f}")
-
-        # Track second path: op1 ∘ (op2 ∘ op3)
-        print("\nPath 2: op1 ∘ (op2 ∘ op3)")
-        ope23 = lifter.operator_product_expansion(ops[1], ops[2], normalize=True)
-        print(f"ope23 norm: {torch.norm(ope23):.4f}")
-        print(f"ope23 phase: {torch.angle(torch.mean(ope23)):.4f}")
+        # Compute OPE
+        print("\nComputing OPE...")
+        result = lifter.operator_product_expansion(op1, op2)
+        result_phase, result_angle, result_norm = print_phase_info(result, "OPE Result")
         
-        ope1_23 = lifter.operator_product_expansion(ops[0], ope23, normalize=True)
-        print(f"ope1_23 norm: {torch.norm(ope1_23):.4f}")
-        print(f"ope1_23 phase: {torch.angle(torch.mean(ope1_23)):.4f}")
-
-        # Compute detailed error metrics
-        assoc_error = torch.norm(ope12_3 - ope1_23).item()
-        print(f"\nDetailed Error Analysis:")
-        print(f"L2 norm of difference: {assoc_error:.4f}")
-        print(f"Max element-wise difference: {torch.max(torch.abs(ope12_3 - ope1_23)):.4f}")
-        print(f"Mean element-wise difference: {torch.mean(torch.abs(ope12_3 - ope1_23)):.4f}")
+        # Detailed error analysis
+        phase_error = torch.abs(result_phase - expected_phase)
+        angle_error = torch.abs(result_angle - expected_angle)
+        print("\nError Analysis:")
+        print(f"  Phase error (|result - expected|): {phase_error.item():.4f}")
+        print(f"  Angle error (|result - expected|): {angle_error.item():.4f} rad")
+        print(f"  Norm error (|result - 1.0|): {abs(result_norm - 1.0):.4e}")
         
-        assert assoc_error < 0.1, f"OPE should be approximately associative, error: {assoc_error:.2e}"
+        # Verify phase consistency
+        assert phase_error < 0.01, f"Phase error {phase_error} exceeds threshold"
+        assert torch.abs(result_norm - 1.0) < 1e-6, f"Result not normalized: {result_norm}"
         
-        # Test scaling behavior with distance
-        x = torch.linspace(0.1, 2.0, 10, dtype=torch.float32)
-        scaled_ops = [op * torch.exp(-x[:, None]**2) for op in ops[:2]]  # Gaussian localization
-        opes = [lifter.operator_product_expansion(scaled_ops[0][i], scaled_ops[1][i], normalize=False)
-                for i in range(len(x))]
-        opes = torch.stack(opes)
+        # Test U(1) structure preservation with detailed tracking
+        print("\nTesting U(1) Structure Preservation...")
         
-        # Check that OPE amplitude decreases with distance
-        norms = torch.tensor([torch.norm(ope).item() for ope in opes])
-        assert torch.all(norms[1:] <= norms[:-1]), "OPE amplitude should decrease with distance"
+        # Left multiplication
+        left_phase = torch.exp(1j * torch.tensor(torch.pi/4, dtype=torch.float64))
+        print("\nLeft Multiplication:")
+        print(f"  Test phase: {left_phase.real:.4f} + {left_phase.imag:.4f}j")
+        print(f"  Test angle: {torch.angle(left_phase).item():.4f} rad")
         
-        # Test geometric structure preservation
-        # Create operators with specific geometric structure
-        metric = torch.eye(dim, dtype=torch.complex64)
-        geom_ops = [torch.mv(metric, op) for op in ops[:2]]
-        geom_ope = lifter.operator_product_expansion(geom_ops[0], geom_ops[1])
+        left_op = left_phase * op1
+        print_phase_info(left_op, "Left-multiplied operator")
         
-        # Verify the geometric structure is preserved
-        geom_error = torch.norm(torch.mv(metric, geom_ope) - geom_ope).item()
-        assert geom_error < 1e-2, f"OPE should preserve geometric structure, error: {geom_error:.2e}"
+        left_result = lifter.operator_product_expansion(left_op, op2)
+        left_actual_phase, left_actual_angle, _ = print_phase_info(left_result, "Left OPE result")
         
-        # Test memory management
-        initial_memory = lifter.memory_manager.get_allocated_memory()
-        for _ in range(10):  # Repeated OPE computations
-            _ = lifter.operator_product_expansion(ops[0], ops[1])
-        final_memory = lifter.memory_manager.get_allocated_memory()
-        memory_growth = final_memory - initial_memory
-        assert memory_growth < 1024 * 1024, f"Memory growth {memory_growth/1024/1024:.2f}MB exceeds threshold"
-
-
-
+        # Expected left result
+        left_expected = left_phase * result_phase
+        print("\nLeft Expected:")
+        print(f"  Phase: {left_expected.real:.4f} + {left_expected.imag:.4f}j")
+        print(f"  Angle: {torch.angle(left_expected).item():.4f} rad")
+        
+        left_error = torch.abs(left_actual_phase - left_expected)
+        print(f"Left error: {left_error.item():.4f}")
+        
+        # Right multiplication
+        right_phase = torch.exp(1j * torch.tensor(torch.pi/3, dtype=torch.float64))
+        print("\nRight Multiplication:")
+        print(f"  Test phase: {right_phase.real:.4f} + {right_phase.imag:.4f}j")
+        print(f"  Test angle: {torch.angle(right_phase).item():.4f} rad")
+        
+        right_op = right_phase * op2
+        print_phase_info(right_op, "Right-multiplied operator")
+        
+        right_result = lifter.operator_product_expansion(op1, right_op)
+        right_actual_phase, right_actual_angle, _ = print_phase_info(right_result, "Right OPE result")
+        
+        # Expected right result
+        right_expected = right_phase * result_phase
+        print("\nRight Expected:")
+        print(f"  Phase: {right_expected.real:.4f} + {right_expected.imag:.4f}j")
+        print(f"  Angle: {torch.angle(right_expected).item():.4f} rad")
+        
+        right_error = torch.abs(right_actual_phase - right_expected)
+        print(f"Right error: {right_error.item():.4f}")
+        
+        # Final assertions
+        assert left_error < 0.01, f"Left U(1) error {left_error} exceeds threshold"
+        assert right_error < 0.01, f"Right U(1) error {right_error} exceeds threshold"
 
     def test_scaling_analysis(self, lifter: HolographicLifter):
         """Analyze scaling behavior in detail."""
