@@ -169,24 +169,61 @@ def project_to_hyperboloid(x: torch.Tensor) -> torch.Tensor:
     return result
 
 def project_to_tangent(x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Project vector v onto the tangent space at point x."""
-    logger.debug(f"Projecting to tangent space")
-    logger.debug(f"Input shapes - x: {x.shape}, v: {v.shape}")
+    """Project vector onto tangent space with enhanced precision."""
+    logger.debug(f"Projecting to tangent space - shapes: x={x.shape}, v={v.shape}")
+    
+    # Handle zero vector case
+    if torch.all(torch.abs(v) < 1e-7):
+        return torch.zeros_like(v)
     
     # Project x to hyperboloid if needed
     x = project_to_hyperboloid(x)
     
-    # Compute the Minkowski inner product
-    inner = minkowski_inner(x, v)
+    # Normalize input vector for better numerical stability
+    v_norm = torch.norm(v)
+    if v_norm > 1e-7:
+        v = v / v_norm
     
-    logger.debug(f"Inner product: {inner}")
+    # Split into time and space components
+    x_time = x[..., 0]
+    x_space = x[..., 1:]
+    v_time = v[..., 0]
+    v_space = v[..., 1:]
     
-    # Project v onto the tangent space at x
-    v_proj = v + inner.unsqueeze(-1) * x
+    # Compute inner product of space components with high precision
+    space_inner = torch.sum(x_space * v_space, dim=-1)
     
-    logger.debug(f"Projected vector shape: {v_proj.shape}, norm: {torch.norm(v_proj)}")
+    # Compute time component to satisfy tangent space constraint
+    # ⟨x,v⟩ = 0 ⟨=⟩ -x₀v₀ + Σᵢxᵢvᵢ = 0
+    # ⟨=⟩ v₀ = Σᵢxᵢvᵢ/x₀
+    v_time_new = space_inner / x_time
     
-    return v_proj
+    # Combine components
+    result = torch.cat([v_time_new.unsqueeze(-1), v_space], dim=-1)
+    
+    # First projection to ensure tangent space constraint
+    inner = minkowski_inner(x, result)
+    result = result - minkowski_inner(result, x).unsqueeze(-1) * x
+    
+    # Verify tangent space constraint
+    inner_after = minkowski_inner(x, result)
+    if not torch.allclose(inner_after, torch.zeros_like(inner_after), atol=1e-10):
+        logger.warning(f"Tangent space constraint violation after first projection: {inner_after}")
+        # Second projection with higher precision
+        result = result - minkowski_inner(result, x).unsqueeze(-1) * x
+        
+        # Normalize result for stability
+        result_norm = torch.norm(result)
+        if result_norm > 1e-7:
+            result = result / result_norm
+    
+    # Restore original scale if input was normalized
+    if v_norm > 1e-7:
+        result = result * v_norm
+    
+    logger.debug(f"Projection result - shape: {result.shape}, inner: {inner_after}")
+    
+    return result
 
 
 class ParallelTransport(nn.Module):
@@ -217,9 +254,21 @@ class ParallelTransport(nn.Module):
         y = self.exp_map.project_to_hyperboloid(y)
         v = self.exp_map.project_to_tangent(x, v)
 
-        # Store original inner product for preservation
-        v_inner = self.exp_map.minkowski_inner(v, v)
-        self.logger.debug(f"Original inner product: {v_inner}")
+        # Handle zero vector case
+        if torch.all(torch.abs(v) < 1e-7):
+            return torch.zeros_like(v)
+
+        # Handle same point case
+        if torch.allclose(x, y, rtol=1e-7, atol=1e-7):
+            return v
+
+        # Split into time and space components
+        x_time = x[..., 0]
+        x_space = x[..., 1:]
+        y_time = y[..., 0]
+        y_space = y[..., 1:]
+        v_time = v[..., 0]
+        v_space = v[..., 1:]
 
         # Compute geodesic midpoint with improved stability
         xy = y - x  # Difference vector
@@ -234,22 +283,34 @@ class ParallelTransport(nn.Module):
         mid = alpha.unsqueeze(-1) * x + beta.unsqueeze(-1) * xy
         mid = self.exp_map.project_to_hyperboloid(mid)
         
-        self.logger.debug(f"Midpoint inner product: {self.exp_map.minkowski_inner(mid, mid)}")
+        # Split midpoint into components
+        mid_time = mid[..., 0]
+        mid_space = mid[..., 1:]
 
         # Transport v to midpoint using stable formula
-        v_mid = v - self.exp_map.minkowski_inner(v, mid).unsqueeze(-1) * mid
+        # First compute space components
+        v_mid_space = v_space - (torch.sum(v_space * mid_space, dim=-1) / mid_time).unsqueeze(-1) * mid_space
+        
+        # Then compute time component to satisfy tangent space constraint
+        v_mid_time = torch.sum(v_mid_space * mid_space, dim=-1) / mid_time
+        
+        # Combine components
+        v_mid = torch.cat([v_mid_time.unsqueeze(-1), v_mid_space], dim=-1)
         v_mid = self.exp_map.project_to_tangent(mid, v_mid)
         
-        # Compute transport coefficients for second step
-        my = y - mid
-        my_inner = -self.exp_map.minkowski_inner(my, my)
-        gamma = torch.cosh(torch.sqrt(my_inner.clamp(min=1e-8)))
-
-        # Transport from midpoint to y
-        result = v_mid - self.exp_map.minkowski_inner(v_mid, y).unsqueeze(-1) * y
+        # Transport from midpoint to y using the same process
+        # First compute space components
+        result_space = v_mid[..., 1:] - (torch.sum(v_mid[..., 1:] * y_space, dim=-1) / y_time).unsqueeze(-1) * y_space
+        
+        # Then compute time component to satisfy tangent space constraint
+        result_time = torch.sum(result_space * y_space, dim=-1) / y_time
+        
+        # Combine components
+        result = torch.cat([result_time.unsqueeze(-1), result_space], dim=-1)
         result = self.exp_map.project_to_tangent(y, result)
 
         # Normalize to preserve inner product
+        v_inner = self.exp_map.minkowski_inner(v, v)
         result_inner = self.exp_map.minkowski_inner(result, result)
         scale = torch.sqrt(torch.abs(v_inner) / torch.abs(result_inner).clamp(min=1e-8))
         result = result * scale.unsqueeze(-1)
@@ -257,7 +318,6 @@ class ParallelTransport(nn.Module):
         # Final projection to ensure tangent space constraint
         result = self.exp_map.project_to_tangent(y, result)
 
-        self.logger.debug(f"Final inner product: {self.exp_map.minkowski_inner(result, result)}")
         return result
 
     def _pole_ladder(
@@ -272,25 +332,56 @@ class ParallelTransport(nn.Module):
         y = self.exp_map.project_to_hyperboloid(y)
         v = self.exp_map.project_to_tangent(x, v)
 
-        # Store original inner product for preservation
-        v_inner = self.exp_map.minkowski_inner(v, v)
-        self.logger.debug(f"Original inner product: {v_inner}")
+        # Handle zero vector case
+        if torch.all(torch.abs(v) < 1e-7):
+            return torch.zeros_like(v)
+
+        # Handle same point case
+        if torch.allclose(x, y, rtol=1e-7, atol=1e-7):
+            return v
+
+        # Split into time and space components
+        x_time = x[..., 0]
+        x_space = x[..., 1:]
+        y_time = y[..., 0]
+        y_space = y[..., 1:]
+        v_time = v[..., 0]
+        v_space = v[..., 1:]
 
         # Compute pole point with improved stability
         pole = x + y
-        pole = pole / torch.sqrt(-self.exp_map.minkowski_inner(pole, pole)).unsqueeze(-1)
+        pole_inner = -self.exp_map.minkowski_inner(pole, pole)
+        pole = pole / torch.sqrt(pole_inner.clamp(min=1e-8)).unsqueeze(-1)
         pole = self.exp_map.project_to_hyperboloid(pole)
-        self.logger.debug(f"Pole inner product: {self.exp_map.minkowski_inner(pole, pole)}")
+        
+        # Split pole into components
+        pole_time = pole[..., 0]
+        pole_space = pole[..., 1:]
 
         # Transport v to pole
-        v_pole = v - self.exp_map.minkowski_inner(v, pole).unsqueeze(-1) * pole
+        # First compute space components
+        v_pole_space = v_space - (torch.sum(v_space * pole_space, dim=-1) / pole_time).unsqueeze(-1) * pole_space
+        
+        # Then compute time component to satisfy tangent space constraint
+        v_pole_time = torch.sum(v_pole_space * pole_space, dim=-1) / pole_time
+        
+        # Combine components
+        v_pole = torch.cat([v_pole_time.unsqueeze(-1), v_pole_space], dim=-1)
         v_pole = self.exp_map.project_to_tangent(pole, v_pole)
 
         # Transport from pole to y
-        result = v_pole - self.exp_map.minkowski_inner(v_pole, y).unsqueeze(-1) * y
+        # First compute space components
+        result_space = v_pole[..., 1:] - (torch.sum(v_pole[..., 1:] * y_space, dim=-1) / y_time).unsqueeze(-1) * y_space
+        
+        # Then compute time component to satisfy tangent space constraint
+        result_time = torch.sum(result_space * y_space, dim=-1) / y_time
+        
+        # Combine components
+        result = torch.cat([result_time.unsqueeze(-1), result_space], dim=-1)
         result = self.exp_map.project_to_tangent(y, result)
 
         # Normalize to preserve inner product
+        v_inner = self.exp_map.minkowski_inner(v, v)
         result_inner = self.exp_map.minkowski_inner(result, result)
         scale = torch.sqrt(torch.abs(v_inner) / torch.abs(result_inner).clamp(min=1e-8))
         result = result * scale.unsqueeze(-1)
@@ -298,7 +389,6 @@ class ParallelTransport(nn.Module):
         # Final projection to ensure tangent space constraint
         result = self.exp_map.project_to_tangent(y, result)
 
-        self.logger.debug(f"Final inner product: {self.exp_map.minkowski_inner(result, result)}")
         return result
 
     def forward(
@@ -405,18 +495,40 @@ class HyperbolicExponential(nn.Module):
         """Project vector onto tangent space with enhanced precision."""
         self.logger.debug(f"Projecting to tangent space - shapes: x={x.shape}, v={v.shape}")
         
-        # Compute inner product with higher precision
-        inner = self.minkowski_inner(x, v)
+        # Handle zero vector case
+        if torch.all(torch.abs(v) < 1e-7):
+            return torch.zeros_like(v)
         
-        # Apply projection with numerical stability
-        v_proj = v + (inner / (1.0 + self.eps))[..., None] * x
+        # Project x to hyperboloid if needed
+        x = self.project_to_hyperboloid(x)
+        
+        # Split into time and space components
+        x_time = x[..., 0]
+        x_space = x[..., 1:]
+        v_time = v[..., 0]
+        v_space = v[..., 1:]
+        
+        # Compute inner product of space components
+        space_inner = torch.sum(x_space * v_space, dim=-1)
+        
+        # Compute time component to satisfy tangent space constraint
+        # ⟨x,v⟩ = 0 ⟨=⟩ -x₀v₀ + Σᵢxᵢvᵢ = 0
+        # ⟨=⟩ v₀ = Σᵢxᵢvᵢ/x₀
+        v_time_new = space_inner / x_time
+        
+        # Combine components
+        result = torch.cat([v_time_new.unsqueeze(-1), v_space], dim=-1)
         
         # Verify tangent space constraint
-        tangent_check = self.minkowski_inner(x, v_proj)
+        inner = self.minkowski_inner(x, result)
+        if not torch.allclose(inner, torch.zeros_like(inner), atol=1e-6):
+            self.logger.warning(f"Tangent space constraint violation: {inner}")
+            # Project again if needed
+            result = result - self.minkowski_inner(result, x).unsqueeze(-1) * x
         
-        self.logger.debug(f"Tangent projection - inner: {inner}, constraint check: {tangent_check}")
+        self.logger.debug(f"Projection result - shape: {result.shape}, inner: {inner}")
         
-        return v_proj
+        return result
         
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Forward pass of exponential map with enhanced stability."""

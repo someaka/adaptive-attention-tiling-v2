@@ -1,6 +1,6 @@
 import torch
 import pytest
-from src.core.attention.geometric import HyperbolicExponential
+from src.core.attention.geometric import HyperbolicExponential, GeometricStructures
 
 def print_test_case(name: str, **values):
     """Print test case information with enhanced numerical analysis."""
@@ -98,6 +98,7 @@ def test_exponential_map():
     """Test exponential map implementation."""
     # Initialize with double precision for better numerical stability
     exp_map = HyperbolicExponential(dim=2, dtype=torch.float64)
+    geom = GeometricStructures(dim=2, num_heads=1, manifold_type="hyperbolic", curvature=-1.0)
     
     # Create test points and vectors with correct dimensions
     x = torch.tensor([1.7321, 1.0, 1.0], dtype=torch.float64)  # Point on hyperboloid
@@ -185,8 +186,8 @@ def test_exponential_map():
     result_small = exp_map(x_small, v_small)
     print_test_case("Small Vector Result",
         result=result_small[0],  # Remove batch dim for printing
-        distance=exp_map.compute_distance(x_small, result_small),
-        vector_norm=exp_map.minkowski_norm(v_small)
+        distance=geom.compute_geodesic_distance(x_small, result_small),
+        vector_norm=torch.sqrt(torch.abs(exp_map.minkowski_inner(v_small, v_small)))
     )
     
     # Property 3: Testing vector scaling properties
@@ -219,8 +220,8 @@ def test_exponential_map():
     verify_hyperboloid_constraint(exp_map, result2, "result2")
     
     # Compute distances
-    dist1 = exp_map.compute_distance(x_scale, result1)
-    dist2 = exp_map.compute_distance(x_scale, result2)
+    dist1 = geom.compute_geodesic_distance(x_scale, result1)
+    dist2 = geom.compute_geodesic_distance(x_scale, result2)
     print_test_case("Distance Values",
         dist1=dist1,
         dist2=dist2,
@@ -235,8 +236,8 @@ def test_exponential_map():
         f"Distance scaling error: {torch.abs(dist2 - 2 * dist1)} > {scaling_tol}"
     
     # Additional property: Distance should equal vector norm
-    v1_norm = exp_map.minkowski_norm(v1)
-    v2_norm = exp_map.minkowski_norm(v2)
+    v1_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v1, v1)))
+    v2_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v2, v2)))
     print_test_case("Vector-Distance Comparison",
         v1_norm=v1_norm,
         dist1=dist1,
@@ -252,6 +253,7 @@ def test_exponential_map_properties():
     """Test mathematical properties of exponential map with enhanced precision checks."""
     dim = 3
     exp_map = HyperbolicExponential(dim)
+    geom = GeometricStructures(dim=dim, num_heads=1, manifold_type="hyperbolic", curvature=-1.0)
     
     # Property 1: exp_x(0) = x
     print_test_case("Zero Vector Test",
@@ -286,8 +288,8 @@ def test_exponential_map_properties():
     result_small = exp_map(x, v_small)
     print_test_case("Small Vector Result",
         result=result_small,
-        distance=exp_map.compute_distance(x, result_small),
-        vector_norm=exp_map.minkowski_norm(v_small)
+        distance=geom.compute_geodesic_distance(x.unsqueeze(0), result_small.unsqueeze(0)),
+        vector_norm=torch.sqrt(torch.abs(exp_map.minkowski_inner(v_small.unsqueeze(0), v_small.unsqueeze(0))))
     )
     
     # Property 3: Testing vector scaling properties
@@ -306,9 +308,10 @@ def test_exponential_map_properties():
     verify_tangent_space(exp_map, x, v2, "scaled vector")
     
     print_test_case("Vector Norms",
-        v1_norm=exp_map.minkowski_norm(v1),
-        v2_norm=exp_map.minkowski_norm(v2),
-        ratio=exp_map.minkowski_norm(v2) / exp_map.minkowski_norm(v1)
+        v1_norm=torch.sqrt(torch.abs(exp_map.minkowski_inner(v1.unsqueeze(0), v1.unsqueeze(0)))),
+        v2_norm=torch.sqrt(torch.abs(exp_map.minkowski_inner(v2.unsqueeze(0), v2.unsqueeze(0)))),
+        ratio=torch.sqrt(torch.abs(exp_map.minkowski_inner(v2.unsqueeze(0), v2.unsqueeze(0)))) / 
+              torch.sqrt(torch.abs(exp_map.minkowski_inner(v1.unsqueeze(0), v1.unsqueeze(0))))
     )
     
     # Compute exponential maps
@@ -323,9 +326,9 @@ def test_exponential_map_properties():
     verify_hyperboloid_constraint(exp_map, result1, "result1")
     verify_hyperboloid_constraint(exp_map, result2, "result2")
     
-    # Compute distances using the new method
-    dist1 = exp_map.compute_distance(x, result1)
-    dist2 = exp_map.compute_distance(x, result2)
+    # Compute distances using GeometricStructures
+    dist1 = geom.compute_geodesic_distance(x.unsqueeze(0), result1.unsqueeze(0))
+    dist2 = geom.compute_geodesic_distance(x.unsqueeze(0), result2.unsqueeze(0))
     print_test_case("Distance Values",
         dist1=dist1,
         dist2=dist2,
@@ -340,8 +343,8 @@ def test_exponential_map_properties():
         f"Distance scaling error: {torch.abs(dist2 - 2 * dist1)} > {scaling_tol}"
     
     # Additional property: Distance should equal vector norm
-    v1_norm = exp_map.minkowski_norm(v1)
-    v2_norm = exp_map.minkowski_norm(v2)
+    v1_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v1.unsqueeze(0), v1.unsqueeze(0))))
+    v2_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v2.unsqueeze(0), v2.unsqueeze(0))))
     print_test_case("Vector-Distance Comparison",
         v1_norm=v1_norm,
         dist1=dist1,
@@ -365,7 +368,7 @@ def test_exponential_map_properties():
     
     # Property 4: Testing transitivity of distances
     result_mid = exp_map.forward(x, 1.5 * v1)
-    dist_mid = exp_map.compute_distance(x, result_mid)
+    dist_mid = geom.compute_geodesic_distance(x.unsqueeze(0), result_mid.unsqueeze(0))
     print_test_case("Distance Transitivity",
         dist_mid=dist_mid,
         expected_mid=1.5*dist1,

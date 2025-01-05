@@ -4,6 +4,7 @@ __pycache__/
 *.so
 .Python
 .hypothesis
+logs/
 build/
 develop-eggs/
 dist/
