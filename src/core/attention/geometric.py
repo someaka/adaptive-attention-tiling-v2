@@ -241,260 +241,193 @@ class ParallelTransport(nn.Module):
         self.exp_map = exp_map
         self.logger = logging.getLogger(f"{__name__}.ParallelTransport")
         self.logger.info(f"Initialized ParallelTransport - dim: {dim}, method: {method}")
-
+        
+        # Numerical stability parameters
+        self.eps = 1e-8
+        self.max_norm = 5.0  # Reduced from 10.0 for better stability
+        self.min_norm = 1e-6
+        
+    def _stable_normalize(self, v: torch.Tensor) -> torch.Tensor:
+        """Normalize vector with enhanced numerical stability."""
+        assert self.exp_map is not None
+        norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
+        if norm < self.min_norm:
+            return torch.zeros_like(v)
+        return v / norm.clamp(min=self.min_norm)
+    
+    def _stable_project(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Project vector to tangent space with enhanced stability."""
+        assert self.exp_map is not None
+        
+        # Handle zero vector case
+        if torch.all(torch.abs(v) < self.min_norm):
+            return torch.zeros_like(v)
+        
+        # Ensure x is on hyperboloid
+        x = self.exp_map.project_to_hyperboloid(x)
+        
+        # Normalize input vector for better numerical stability
+        v_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
+        if v_norm > self.min_norm:
+            v = v / v_norm
+        
+        # Project to tangent space with double precision
+        inner = self.exp_map.minkowski_inner(x, v)
+        v_proj = v - inner * x
+        
+        # Second projection for enhanced stability
+        inner_new = self.exp_map.minkowski_inner(x, v_proj)
+        v_proj = v_proj - inner_new * x
+        
+        # Restore original norm
+        if v_norm > self.min_norm:
+            v_proj = v_proj * v_norm
+        
+        # Verify tangent space constraint
+        final_inner = self.exp_map.minkowski_inner(x, v_proj)
+        if torch.abs(final_inner) >= self.eps:
+            self.logger.warning(f"Tangent space constraint violation after projection: {final_inner}")
+        
+        return v_proj
+    
+    def _stable_midpoint(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Compute geodesic midpoint using exponential map."""
+        assert self.exp_map is not None
+        
+        # Project points to hyperboloid
+        x = self.exp_map.project_to_hyperboloid(x)
+        y = self.exp_map.project_to_hyperboloid(y)
+        
+        # Compute logarithm map to get tangent vector
+        xy = y - x  # Initial direction
+        xy = self._stable_project(x, xy)  # Project to tangent space
+        
+        # Scale vector if too large
+        xy_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(xy, xy)))
+        if xy_norm > self.max_norm:
+            xy = xy * (self.max_norm / xy_norm)
+        
+        # Use exponential map with t=0.5 for midpoint
+        t = 0.5
+        mid = self.exp_map(x, t * xy)
+        
+        return self.exp_map.project_to_hyperboloid(mid)
+    
+    def _stable_project_with_gram_schmidt(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Project vector v onto the tangent space at x using Gram-Schmidt orthogonalization.
+        
+        This method is more numerically stable than the standard projection formula.
+        """
+        assert self.exp_map is not None
+        
+        # Store original norm
+        original_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
+        if original_norm < self.min_norm:
+            return torch.zeros_like(v)
+            
+        # Ensure x is normalized
+        x_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(x, x)))
+        if x_norm > self.eps:
+            x = x / x_norm
+            
+        # Compute the projection using Gram-Schmidt
+        inner = self.exp_map.minkowski_inner(x, v)
+        result = v + x * inner
+        
+        # Restore original norm
+        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
+        if result_norm > self.eps:
+            result = result * (original_norm / result_norm)
+            
+        return result
+        
     def _schild_ladder(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Parallel transport using Schild's ladder method."""
-        assert self.exp_map is not None, "exp_map must be provided for parallel transport"
+        """Parallel transport using Schild's ladder method with enhanced stability."""
+        assert self.exp_map is not None
         self.logger.info("\n=== Starting Schild's Ladder Transport ===")
         
-        # Early returns for special cases with more lenient tolerance
+        # Handle special cases
+        if torch.all(torch.abs(v) < self.min_norm):
+            return torch.zeros_like(v)
         if torch.allclose(x, y, rtol=1e-4, atol=1e-4):
-            self.logger.info("Same point detected, returning original vector")
             return v.clone()
         
-        # Handle zero vector case
-        v_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
-        if v_norm < 1e-7:
-            self.logger.info("Zero vector detected, returning zeros")
-            return torch.zeros_like(v)
-
-        # Project points to hyperboloid
-        self.logger.info(f"Initial values - x: {x}, y: {y}, v: {v}")
-        self.logger.info(f"Initial norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {v_norm}")
-        
+        # Initial projection and normalization
         x = self.exp_map.project_to_hyperboloid(x)
         y = self.exp_map.project_to_hyperboloid(y)
         
-        # Project vector to tangent space and store original norm
-        v = self.exp_map.project_to_tangent(x, v)
+        # Store original norm
         original_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
-        
-        self.logger.info(f"After projection:")
-        self.logger.info(f"x: {x}, norm: {torch.norm(x)}")
-        self.logger.info(f"y: {y}, norm: {torch.norm(y)}")
-        self.logger.info(f"v: {v}, norm: {original_norm}")
-        self.logger.info(f"Hyperboloid constraints - x: {self.exp_map.minkowski_inner(x, x) + 1}, y: {self.exp_map.minkowski_inner(y, y) + 1}")
-        self.logger.info(f"Tangent constraint - <x,v>: {self.exp_map.minkowski_inner(x, v)}")
-        
-        # Handle special cases again after projection
-        if original_norm < 1e-7:
-            self.logger.info("Zero vector after projection, returning zeros")
+        if original_norm < self.min_norm:
             return torch.zeros_like(v)
             
-        # Normalize v for numerical stability using Minkowski norm
-        v = v / original_norm
-        self.logger.info(f"After normalization - v: {v}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))}")
-        self.logger.info(f"Tangent constraint after normalization - <x,v>: {self.exp_map.minkowski_inner(x, v)}")
+        # Project and normalize initial vector
+        v = self._stable_project_with_gram_schmidt(x, v)
+        v = v / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
         
-        # Compute midpoint between x and y using geodesic
-        t = 0.5
-        xy = y - x
-        xy_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(xy, xy)))
-        if xy_norm < 1e-7:
-            self.logger.info("Points too close, returning original vector")
-            return v * original_norm
-            
-        self.logger.info(f"Midpoint computation:")
-        self.logger.info(f"xy: {xy}, norm: {xy_norm}")
-        self.logger.info(f"Geodesic parameter t: {t}")
+        # Transport through midpoint with careful projections
+        mid = self._stable_midpoint(x, y)
+        v_mid = self._stable_project_with_gram_schmidt(mid, v)
+        v_mid = v_mid / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))
         
-        # Transport to midpoint using exponential map
-        mid = self.exp_map(x, t * xy)
-        self.logger.info(f"Before midpoint projection: {mid}, norm: {torch.norm(mid)}")
-        self.logger.info(f"Hyperboloid constraint before projection: {self.exp_map.minkowski_inner(mid, mid) + 1}")
-        
-        mid = self.exp_map.project_to_hyperboloid(mid)
-        
-        self.logger.info(f"Midpoint after projection:")
-        self.logger.info(f"mid: {mid}, norm: {torch.norm(mid)}")
-        self.logger.info(f"Hyperboloid constraint - mid: {self.exp_map.minkowski_inner(mid, mid) + 1}")
-        
-        # Transport v to midpoint with double projection
-        v_mid = v.clone()
-        self.logger.info(f"Before midpoint transport - v_mid: {v_mid}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))}")
-        
-        v_mid = self.exp_map.project_to_tangent(mid, v_mid)
-        # Double projection for numerical stability
-        v_mid = self.exp_map.project_to_tangent(mid, v_mid)
-        v_mid_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))
-        self.logger.info(f"After midpoint tangent projection - v_mid: {v_mid}, norm: {v_mid_norm}")
-        self.logger.info(f"Tangent constraint at mid - <mid,v_mid>: {self.exp_map.minkowski_inner(mid, v_mid)}")
-        
-        if v_mid_norm > 1e-7:
-            v_mid = v_mid / v_mid_norm
-            self.logger.info(f"After midpoint normalization - v_mid: {v_mid}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))}")
-        
-        self.logger.info(f"Vector at midpoint:")
-        self.logger.info(f"v_mid: {v_mid}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))}")
-        self.logger.info(f"Tangent constraint - <mid,v_mid>: {self.exp_map.minkowski_inner(mid, v_mid)}")
-        
-        # Transport from midpoint to y with double projection
-        result = v_mid.clone()
-        self.logger.info(f"Before final transport - result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
-        
-        result = self.exp_map.project_to_tangent(y, result)
-        # Double projection for numerical stability
-        result = self.exp_map.project_to_tangent(y, result)
-        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
-        self.logger.info(f"After final tangent projection - result: {result}, norm: {result_norm}")
-        self.logger.info(f"Tangent constraint before normalization - <y,result>: {self.exp_map.minkowski_inner(y, result)}")
-        
-        if result_norm > 1e-7:
-            result = result / result_norm
-            self.logger.info(f"After final normalization - result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
+        # Transport to final point
+        result = self._stable_project_with_gram_schmidt(y, v_mid)
         
         # Restore original norm
-        result = result * original_norm
-        self.logger.info(f"After restoring norm - result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
-        
-        # Final double projection to ensure tangent space constraint
-        result = self.exp_map.project_to_tangent(y, result)
-        result = self.exp_map.project_to_tangent(y, result)
-        
-        self.logger.info(f"Final result:")
-        self.logger.info(f"result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
-        self.logger.info(f"Original norm: {original_norm}")
-        self.logger.info(f"Final tangent constraint - <y,result>: {self.exp_map.minkowski_inner(y, result)}")
-        self.logger.info(f"Norm preservation - original: {original_norm}, final: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
+        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
+        if result_norm > self.eps:
+            result = result * (original_norm / result_norm)
         
         return result
-
+    
     def _pole_ladder(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Parallel transport using pole ladder method."""
-        assert self.exp_map is not None, "exp_map must be provided for parallel transport"
+        """Parallel transport using pole ladder method with enhanced stability."""
+        assert self.exp_map is not None
         self.logger.info("\n=== Starting Pole Ladder Transport ===")
         
-        # Early returns for special cases with more lenient tolerance
-        if torch.allclose(x, y, rtol=1e-4, atol=1e-4):
-            self.logger.info("Same point detected, returning original vector")
-            return v.clone()
-        
-        # Handle zero vector case
-        v_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
-        if v_norm < 1e-7:
-            self.logger.info("Zero vector detected, returning zeros")
+        # Handle special cases
+        if torch.all(torch.abs(v) < self.min_norm):
             return torch.zeros_like(v)
-
-        # Project points to hyperboloid
-        self.logger.info(f"Initial values - x: {x}, y: {y}, v: {v}")
-        self.logger.info(f"Initial norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {v_norm}")
-        
+        if torch.allclose(x, y, rtol=1e-4, atol=1e-4):
+            return v.clone()
+            
+        # Initial projection and normalization
         x = self.exp_map.project_to_hyperboloid(x)
         y = self.exp_map.project_to_hyperboloid(y)
         
-        # Project vector to tangent space and store original norm
-        v = self.exp_map.project_to_tangent(x, v)
+        # Store original norm
         original_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
-        
-        self.logger.info(f"After projection:")
-        self.logger.info(f"x: {x}, norm: {torch.norm(x)}")
-        self.logger.info(f"y: {y}, norm: {torch.norm(y)}")
-        self.logger.info(f"v: {v}, norm: {original_norm}")
-        self.logger.info(f"Hyperboloid constraints - x: {self.exp_map.minkowski_inner(x, x) + 1}, y: {self.exp_map.minkowski_inner(y, y) + 1}")
-        self.logger.info(f"Tangent constraint - <x,v>: {self.exp_map.minkowski_inner(x, v)}")
-        
-        # Handle special cases again after projection
-        if original_norm < 1e-7:
-            self.logger.info("Zero vector after projection, returning zeros")
+        if original_norm < self.min_norm:
             return torch.zeros_like(v)
             
-        # Normalize v for numerical stability using Minkowski norm
-        v = v / original_norm
-        self.logger.info(f"After normalization - v: {v}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))}")
-        self.logger.info(f"Tangent constraint after normalization - <x,v>: {self.exp_map.minkowski_inner(x, v)}")
+        # Project and normalize initial vector
+        v = self._stable_project_with_gram_schmidt(x, v)
+        v = v / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
         
-        # Compute midpoint between x and y using geodesic
-        t = 0.5
-        xy = y - x
-        xy_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(xy, xy)))
-        if xy_norm < 1e-7:
-            self.logger.info("Points too close, returning original vector")
-            return v * original_norm
-            
-        self.logger.info(f"Midpoint computation:")
-        self.logger.info(f"xy: {xy}, norm: {xy_norm}")
-        self.logger.info(f"Geodesic parameter t: {t}")
+        # Compute midpoint and transport through it
+        mid = self._stable_midpoint(x, y)
+        v_mid = self._stable_project_with_gram_schmidt(mid, v)
+        v_mid = v_mid / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))
         
-        # Transport to midpoint using exponential map
-        mid = self.exp_map(x, t * xy)
-        self.logger.info(f"Before midpoint projection: {mid}, norm: {torch.norm(mid)}")
-        self.logger.info(f"Hyperboloid constraint before projection: {self.exp_map.minkowski_inner(mid, mid) + 1}")
-        
-        mid = self.exp_map.project_to_hyperboloid(mid)
-        
-        self.logger.info(f"Midpoint after projection:")
-        self.logger.info(f"mid: {mid}, norm: {torch.norm(mid)}")
-        self.logger.info(f"Hyperboloid constraint - mid: {self.exp_map.minkowski_inner(mid, mid) + 1}")
-        
-        # Compute pole point with double projection
-        pole = 2 * mid - x
-        self.logger.info(f"Before pole projection - pole: {pole}, norm: {torch.norm(pole)}")
-        pole = self.exp_map.project_to_hyperboloid(pole)
-        # Double projection for numerical stability
-        pole = self.exp_map.project_to_hyperboloid(pole)
-        self.logger.info(f"After pole projection - pole: {pole}, norm: {torch.norm(pole)}")
-        self.logger.info(f"Hyperboloid constraint - pole: {self.exp_map.minkowski_inner(pole, pole) + 1}")
-        
-        # Transport v to pole with double projection
-        v_pole = v.clone()
-        self.logger.info(f"Before pole transport - v_pole: {v_pole}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_pole, v_pole)))}")
-        
-        v_pole = self.exp_map.project_to_tangent(pole, v_pole)
-        # Double projection for numerical stability
-        v_pole = self.exp_map.project_to_tangent(pole, v_pole)
-        v_pole_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_pole, v_pole)))
-        self.logger.info(f"After pole tangent projection - v_pole: {v_pole}, norm: {v_pole_norm}")
-        self.logger.info(f"Tangent constraint at pole - <pole,v_pole>: {self.exp_map.minkowski_inner(pole, v_pole)}")
-        
-        if v_pole_norm > 1e-7:
-            v_pole = v_pole / v_pole_norm
-            self.logger.info(f"After pole normalization - v_pole: {v_pole}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_pole, v_pole)))}")
-        
-        self.logger.info(f"Vector at pole:")
-        self.logger.info(f"v_pole: {v_pole}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_pole, v_pole)))}")
-        self.logger.info(f"Tangent constraint - <pole,v_pole>: {self.exp_map.minkowski_inner(pole, v_pole)}")
-        
-        # Transport from pole to y with double projection
-        result = v_pole.clone()
-        self.logger.info(f"Before final transport - result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
-        
-        result = self.exp_map.project_to_tangent(y, result)
-        # Double projection for numerical stability
-        result = self.exp_map.project_to_tangent(y, result)
-        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
-        self.logger.info(f"After final tangent projection - result: {result}, norm: {result_norm}")
-        self.logger.info(f"Tangent constraint before normalization - <y,result>: {self.exp_map.minkowski_inner(y, result)}")
-        
-        if result_norm > 1e-7:
-            result = result / result_norm
-            self.logger.info(f"After final normalization - result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
+        # Transport to final point with double projection for stability
+        result = self._stable_project_with_gram_schmidt(y, v_mid)
+        result = self._stable_project_with_gram_schmidt(y, result)
         
         # Restore original norm
-        result = result * original_norm
-        self.logger.info(f"After restoring norm - result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
-        
-        # Final double projection to ensure tangent space constraint
-        result = self.exp_map.project_to_tangent(y, result)
-        result = self.exp_map.project_to_tangent(y, result)
-        
-        self.logger.info(f"Final result:")
-        self.logger.info(f"result: {result}, norm: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
-        self.logger.info(f"Original norm: {original_norm}")
-        self.logger.info(f"Final tangent constraint - <y,result>: {self.exp_map.minkowski_inner(y, result)}")
-        self.logger.info(f"Norm preservation - original: {original_norm}, final: {torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))}")
+        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
+        if result_norm > self.eps:
+            result = result * (original_norm / result_norm)
+            
+        # Final projection to ensure tangent space constraint
+        result = self._stable_project_with_gram_schmidt(y, result)
         
         return result
-
-    def forward(
-        self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
+    
+    def forward(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Forward pass for parallel transport."""
-        self.logger.debug(f"Forward pass - shapes: x={x.shape}, y={y.shape}, v={v.shape}")
-
         if self.method == "euclidean":
-            self.logger.debug("Using Euclidean transport (identity)")
             return v
-
+        
         if self.method == "schild":
             return self._schild_ladder(v, x, y)
         else:  # pole ladder

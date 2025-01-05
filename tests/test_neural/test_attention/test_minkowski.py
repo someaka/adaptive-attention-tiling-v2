@@ -226,14 +226,13 @@ def test_advanced_minkowski_properties():
     # Create a parallel transport object with exp_map
     transport = ParallelTransport(dim, exp_map=exp_map)
     
-    # Transport a vector between two points
+    # Transport v from x to y
     y = torch.tensor([1.2, 0.4, -0.3], dtype=torch.float64)
     y = exp_map.project_to_hyperboloid(y)
     v = torch.tensor([0.0, 0.1, 0.2], dtype=torch.float64)
     v = exp_map.project_to_tangent(x_norm, v)
     
-    # Transport v from x to y
-    v_transported = transport.forward(x_norm, y, v)
+    v_transported = transport.forward(v, x_norm, y)
     
     # Verify transported vector is in tangent space at y
     inner_transported = exp_map.minkowski_inner(y, v_transported)
