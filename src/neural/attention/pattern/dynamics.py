@@ -453,31 +453,17 @@ class PatternDynamics(nn.Module):
             
         # Compute reaction term
         with torch.no_grad():
-            try:
-                # Try calling with just state
-                reaction = reaction_term(state)
-            except TypeError:
-                # If that fails, check for param attribute
-                param = getattr(reaction_term, 'param', None)
-                if param is not None:
-                    # Create a partial function with the param
-                    from functools import partial
-                    wrapped_term = partial(reaction_term, param=param)
-                    reaction = wrapped_term(state)
-                else:
-                    raise ValueError("Reaction term must take either state or have param attribute")
-                    
+            reaction = reaction_term(state)
             reaction = torch.clamp(reaction, min=-10.0, max=10.0)
-        
-        # Add reaction to state
-        reacted = state + reaction
-        
-        # Ensure non-negative values (if applicable)
-        if torch.all(state >= 0):
-            reacted = torch.clamp(reacted, min=0.0)
             
+        # Apply reaction term with time step
+        if dt is None:
+            dt = self.dt
+            
+        next_state = state + dt * reaction
+        
         # Convert back to original dtype
-        return reacted.to(orig_dtype)
+        return next_state.to(orig_dtype)
         
     def evolve_spatiotemporal(
         self,
@@ -626,102 +612,134 @@ class PatternDynamics(nn.Module):
         
     def bifurcation_analysis(
         self,
-        pattern: torch.Tensor,
-        parameterized_reaction: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        initial_state: torch.Tensor,
         parameter_range: torch.Tensor,
-        max_iter: int = 100,
-        max_states: int = 1000,
+        reaction_term: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        max_iter: int = 50,
+        convergence_threshold: float = 1e-4,
+        stability_threshold: float = 0.1,
+        eps: float = 1e-6,
     ) -> BifurcationDiagram:
-        """Analyze bifurcations by varying parameter.
+        """Analyze bifurcations by varying parameters.
         
         Args:
-            pattern (torch.Tensor): Initial pattern state
-            parameterized_reaction (Callable): Reaction function with parameter
-            parameter_range (torch.Tensor): Range of parameter values to test
-            max_iter (int): Maximum iterations per parameter value
-            max_states (int): Maximum number of states to track
+            initial_state: Initial pattern state
+            parameter_range: Range of parameter values to analyze
+            reaction_term: Function that takes (state, param) and returns reaction term
+            max_iter: Maximum iterations per parameter value
+            convergence_threshold: Threshold for convergence
+            stability_threshold: Threshold for stability changes
+            eps: Finite difference epsilon
             
         Returns:
             BifurcationDiagram: Bifurcation analysis results
         """
+        # Initialize stability analyzer
+        stability = StabilityAnalyzer(self)
+        
+        # Initialize storage
         solution_states = []
         solution_params = []
         bifurcation_points = []
         
-        prev_state = None
-        prev_param = None
-        prev_eigenvals = None
+        # Initialize metrics
+        metrics = {
+            'iterations': [],
+            'final_deltas': [],
+            'eigenvalues': [],
+            'stability_values': [],
+            'state_changes': [],
+            'convergence_rates': []
+        }
         
-        # Track stability changes
-        stability_history = []
+        print(f"Starting bifurcation analysis:")
+        print(f"Parameter range: [{parameter_range[0]:.3f}, {parameter_range[-1]:.3f}]")
+        print(f"Number of points: {len(parameter_range)}")
+        print(f"Max iterations: {max_iter}")
+        
+        # Previous state and stability for tracking changes
+        prev_state = None
+        prev_eigenvals = None
         
         # Analyze each parameter value
         for param in parameter_range:
-            # Define reaction function for this parameter value
-            reaction = lambda x: parameterized_reaction(x, param)
+            # Set parameter value
+            self.parameter = param.item()
             
-            # Simulate dynamics with smaller time step near zero
-            state = pattern.clone()
+            # Initialize state
+            state = initial_state.clone()
+            
+            # Track convergence
             converged = False
-            dt = 0.1 if isinstance(param, float) else min(0.1, float(torch.abs(param).item()) + 0.01)  # Smaller dt near bifurcation
+            final_delta = float('inf')
             
-            for _ in range(max_iter):
-                next_state = self.reaction_diffusion(state, reaction, dt=dt)
+            # Evolve state
+            for i in range(max_iter):
+                # Step forward using the reaction term
+                new_state = self.step(state, reaction_term=lambda x: reaction_term(x, param))
                 
-                # Check convergence with relaxed threshold
-                delta = torch.abs(next_state - state).mean()
-                if delta < 1e-4:  # Relaxed convergence threshold
+                # Check convergence
+                delta = torch.norm(new_state - state).item()
+                if delta < convergence_threshold:
                     converged = True
+                    final_delta = delta
                     break
                     
-                state = next_state
+                state = new_state
             
-            # Only analyze converged states
-            if converged:
-                # Compute stability matrix and eigenvalues
-                stability_matrix = self.compute_stability_matrix(state, epsilon=1e-4)
-                eigenvals = torch.linalg.eigvals(stability_matrix)
+            # Store convergence metrics
+            metrics['iterations'].append(i + 1)
+            metrics['final_deltas'].append(final_delta)
+            
+            # Compute stability metrics
+            stability_info = stability.analyze_stability(state, eps * torch.randn_like(state))
+            eigenvals = stability_info.lyapunov_spectrum
+            stability_value = stability_info.linear_stability
+            
+            metrics['eigenvalues'].append(eigenvals)
+            metrics['stability_values'].append(stability_value)
+            
+            # Store solution
+            solution_states.append(state)
+            solution_params.append(param)
+            
+            # Check for bifurcation
+            if prev_state is not None and prev_eigenvals is not None:
+                # Check stability change
+                stability_change = (stability_value * prev_eigenvals[0].real < 0)
                 
-                # Store state
-                if len(solution_states) < max_states:
-                    solution_states.append(state)
-                    solution_params.append(param)
+                # Check state change
+                state_diff = torch.norm(state - prev_state)
+                state_change = state_diff > stability_threshold
                 
-                # Check for bifurcation using eigenvalue analysis
-                if prev_eigenvals is not None:
-                    # 1. Check for eigenvalue crossing zero (stability change)
-                    curr_stable = torch.all(eigenvals.real < 0)
-                    prev_stable = torch.all(prev_eigenvals.real < 0)
-                    stability_change = curr_stable != prev_stable
-                    
-                    # 2. Check for new complex eigenvalues (Hopf bifurcation)
-                    curr_complex = torch.any(torch.abs(eigenvals.imag) > 1e-4)
-                    prev_complex = torch.any(torch.abs(prev_eigenvals.imag) > 1e-4)
-                    hopf_change = curr_complex != prev_complex
-                    
-                    # 3. Check for state changes
-                    if prev_state is not None:
-                        state_diff = torch.max(torch.abs(state - prev_state))
-                        state_change = state_diff > 0.01  # More sensitive threshold
-                    else:
-                        state_change = False
-                    
-                    # 4. Check for eigenvalue magnitude changes
-                    eigenval_diff = torch.max(torch.abs(eigenvals - prev_eigenvals))
-                    eigenval_change = eigenval_diff > 0.01
-                    
-                    # Detect bifurcation if any criteria met
-                    if stability_change or hopf_change or state_change or eigenval_change:
-                        bifurcation_points.append(param)
+                metrics['state_changes'].append(state_diff.item())
                 
-                prev_state = state.clone()
-                prev_param = param
-                prev_eigenvals = eigenvals
+                # Detect bifurcation
+                if stability_change or state_change:
+                    bifurcation_points.append(param)
+                    print(f"Bifurcation detected at parameter = {param:.3f}")
+                    print(f"Stability change: {stability_change}")
+                    print(f"State change: {state_change}")
+                    print(f"State diff: {state_diff:.3e}")
+            
+            # Update previous values
+            prev_state = state
+            prev_eigenvals = eigenvals
+            
+            # Print progress
+            if (len(parameter_range) >= 10) and (len(solution_params) % (len(parameter_range) // 10) == 0):
+                print(f"Progress: {100 * len(solution_params) / len(parameter_range):.0f}%")
         
-        # Convert lists to tensors
-        solution_states = torch.stack(solution_states) if solution_states else torch.tensor([])
-        solution_params = torch.tensor(solution_params) if solution_params else torch.tensor([])
+        # Convert to tensors
+        solution_states = torch.stack(solution_states)
+        solution_params = torch.tensor(solution_params)
         bifurcation_points = torch.tensor(bifurcation_points) if bifurcation_points else torch.tensor([])
+        
+        # Print summary
+        print("\nAnalysis complete:")
+        print(f"Average iterations: {sum(metrics['iterations']) / len(metrics['iterations']):.1f}")
+        print(f"Final deltas: min={min(metrics['final_deltas']):.3e}, max={max(metrics['final_deltas']):.3e}")
+        print(f"Bifurcation points detected: {len(bifurcation_points)}")
         
         return BifurcationDiagram(
             solution_states=solution_states,
@@ -985,23 +1003,21 @@ class PatternDynamics(nn.Module):
         if len(state.shape) == 3:
             state = state.unsqueeze(0)  # Add batch dimension
             
-        # Apply reaction term
+        # Apply reaction term first
         if reaction_term is not None:
             reaction = reaction_term(state)
         else:
             reaction = self.reaction.reaction_term(state)
             
-        # Scale up reaction term for stronger dynamics
-        reaction = reaction * 200.0  # Increased scaling
-            
         # Apply diffusion with proper shape
-        diffused = self.diffusion.apply_diffusion(state, 0.5, dt)  # Increased diffusion coefficient
+        diffused = self.diffusion.apply_diffusion(state, 0.1, dt)  # Fixed diffusion coefficient
         
         # Combine reaction and diffusion with proper time step
         updated = state + dt * (reaction + diffused)
         
-        # Clamp with wider bounds
-        updated = torch.clamp(updated, min=-1000.0, max=1000.0)
+        # Normalize to prevent unbounded growth
+        norm = torch.norm(updated, dim=(-2, -1), keepdim=True)
+        updated = torch.where(norm > 1e-8, updated / (norm + 1e-8), updated)
         
         # Remove batch dimension if it was added
         if len(state.shape) == 4 and state.shape[0] == 1:
@@ -1322,3 +1338,33 @@ class PatternDynamics(nn.Module):
             vector=vector,
             connection=None  # Let the quantum flow compute the connection
         )
+
+    def evolve(
+        self,
+        state: torch.Tensor,
+        time: float
+    ) -> torch.Tensor:
+        """Evolve pattern state forward in time.
+        
+        Args:
+            state: Current state tensor
+            time: Evolution time
+            
+        Returns:
+            Evolved state
+        """
+        # Convert to float64 for numerical stability
+        state = state.to(torch.float64)
+        
+        # Apply diffusion with time step
+        diffused = self.apply_diffusion(state, diffusion_coefficient=0.1, dt=time)
+        
+        # Apply reaction with time step
+        reacted = self.apply_reaction(diffused, dt=time)
+        
+        # Ensure non-negative values and normalize
+        evolved = torch.clamp(reacted, min=0.0)
+        evolved = evolved / (evolved.norm(dim=-1, keepdim=True) + 1e-8)
+        
+        # Convert back to original dtype
+        return evolved.to(state.dtype)

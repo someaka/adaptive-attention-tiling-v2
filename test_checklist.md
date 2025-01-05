@@ -69,7 +69,7 @@
 - [x] tests/test_neural/test_attention/test_hyperboloid.py
 - [x] tests/test_neural/test_attention/test_logarithm.py
 - [x] tests/test_neural/test_attention/test_minkowski.py
-- [ ] tests/test_neural/test_attention/test_pattern_dynamics.py
+- [x] tests/test_neural/test_attention/test_pattern_dynamics.py
 - [ ] tests/test_neural/test_attention/test_quantum_geometric_attention.py
 
 

@@ -82,6 +82,7 @@ class QuantumGeometricAttention(nn.Module):
         motive_rank: int = 4,
         dtype: torch.dtype = torch.complex64,
         device: Optional[torch.device] = None,
+        is_causal: bool = False,
     ):
         """Initialize quantum geometric attention.
         
@@ -97,15 +98,27 @@ class QuantumGeometricAttention(nn.Module):
             motive_rank: Rank of motivic structure
             dtype: Data type
             device: Device to use
+            is_causal: Whether to use causal attention
         """
         super().__init__()
+
+        # Initialize dimensions and parameters
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.manifold_type = manifold_type
+        self.curvature = curvature
+        self.manifold_dim = manifold_dim if manifold_dim is not None else hidden_dim // 2
+        self.dtype = dtype
+        self.device = device or torch.device('cpu')
 
         # Initialize quantum attention tiles
         self.tiles = nn.ModuleList([
             QuantumMotivicTile(
                 size=tile_size,
-                hidden_dim=hidden_dim,
-                num_heads=1,  # Each tile handles one head
+                hidden_dim=self.head_dim,
+                num_heads=1,
                 dropout=dropout,
                 resolution=1.0,
                 cohomology_dim=manifold_dim or hidden_dim // 2,
@@ -119,17 +132,6 @@ class QuantumGeometricAttention(nn.Module):
         if not torch.is_complex(torch.empty(1, dtype=dtype)):
             raise ValueError("dtype must be complex (torch.complex64 or torch.complex128)")
             
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
-        self.scale = self.head_dim ** -0.5
-        
-        self.manifold_type = manifold_type
-        self.curvature = curvature
-        self.manifold_dim = manifold_dim if manifold_dim is not None else 4
-        self.dtype = dtype
-        self.device = device or torch.device('cpu')
-        
         # Initialize HilbertSpace for quantum computations
         self.hilbert_space = HilbertSpace(
             dim=self.manifold_dim,
@@ -175,52 +177,90 @@ class QuantumGeometricAttention(nn.Module):
         
         # Initialize projection layers with correct dimensions
         self.manifold_proj = nn.Linear(
-            self.head_dim,  # Input dimension is head_dim
+            self.head_dim,  # Input dimension is head_dim (hidden_dim // num_heads)
             self.manifold_dim,  # Output dimension is manifold_dim
-            dtype=self.dtype,
-            device=self.device
+            dtype=dtype,
+            device=device
         )
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.manifold_proj.weight.data = self.manifold_proj.weight.data.to(dtype)
+            if self.manifold_proj.bias is not None:
+                self.manifold_proj.bias.data = self.manifold_proj.bias.data.to(dtype)
         
         self.manifold_proj_inv = nn.Linear(
             self.manifold_dim,  # Input dimension is manifold_dim
             self.head_dim,  # Output dimension is head_dim
-            dtype=self.dtype,
-            device=self.device
+            dtype=dtype,
+            device=device
         )
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.manifold_proj_inv.weight.data = self.manifold_proj_inv.weight.data.to(dtype)
+            if self.manifold_proj_inv.bias is not None:
+                self.manifold_proj_inv.bias.data = self.manifold_proj_inv.bias.data.to(dtype)
         
         # Initialize pattern projection layers
         self.pattern_proj = nn.Linear(
             self.manifold_dim,
             self.head_dim,  # Changed to head_dim to match manifold_proj_inv output
-            dtype=self.dtype,
-            device=self.device
+            dtype=dtype,
+            device=device
         )
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.pattern_proj.weight.data = self.pattern_proj.weight.data.to(dtype)
+            if self.pattern_proj.bias is not None:
+                self.pattern_proj.bias.data = self.pattern_proj.bias.data.to(dtype)
         
         self.pattern_proj_inv = nn.Linear(
             self.head_dim,  # Changed to head_dim to match pattern_proj output
             self.manifold_dim,
-            dtype=self.dtype,
-            device=self.device
+            dtype=dtype,
+            device=device
         )
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.pattern_proj_inv.weight.data = self.pattern_proj_inv.weight.data.to(dtype)
+            if self.pattern_proj_inv.bias is not None:
+                self.pattern_proj_inv.bias.data = self.pattern_proj_inv.bias.data.to(dtype)
 
         # Initialize query, key, value transformations
-        self.query = nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
-        self.key = nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
-        self.value = nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
+        self.query = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
+        self.key = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
+        self.value = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.query.weight.data = self.query.weight.data.to(dtype)
+            if self.query.bias is not None:
+                self.query.bias.data = self.query.bias.data.to(dtype)
+            
+            self.key.weight.data = self.key.weight.data.to(dtype)
+            if self.key.bias is not None:
+                self.key.bias.data = self.key.bias.data.to(dtype)
+            
+            self.value.weight.data = self.value.weight.data.to(dtype)
+            if self.value.bias is not None:
+                self.value.bias.data = self.value.bias.data.to(dtype)
 
         # Initialize dropout
         self.dropout_layer = nn.Dropout(dropout)
 
         # Initialize attention layers
         self.attention_layers = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype, device=self.device)
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
             for _ in range(num_layers)
         ])
 
         # Initialize to_qkv and to_out projections
-        expanded_dim = self.num_heads * self.manifold_dim
-        self.to_qkv = nn.Linear(expanded_dim, 3 * expanded_dim, dtype=self.dtype, device=self.device)
-        self.to_out = nn.Linear(expanded_dim, hidden_dim, dtype=self.dtype, device=self.device)
+        expanded_dim = self.num_heads * hidden_dim
+        self.to_qkv = nn.Linear(hidden_dim, 3 * expanded_dim, dtype=dtype, device=device)
+        self.to_out = nn.Linear(expanded_dim, hidden_dim, dtype=dtype, device=device)
 
         # Initialize geometric flow with correct dimensions
         self.flow = GeometricFlow(
@@ -401,97 +441,59 @@ class QuantumGeometricAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
         return_metrics: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Apply quantum geometric attention."""
+        """Apply quantum geometric attention.
+        
+        Args:
+            x: Input tensor [batch_size, seq_len, hidden_dim]
+            mask: Optional attention mask [batch_size, seq_len]
+            return_metrics: Whether to return attention metrics
+            
+        Returns:
+            Output tensor [batch_size, seq_len, hidden_dim] and optional metrics
+        """
         batch_size, seq_len, _ = x.shape
         
-        # Ensure return_metrics is a boolean
-        return_metrics_bool = bool(return_metrics) if not isinstance(return_metrics, bool) else return_metrics
-        metrics = {} if return_metrics_bool else {}
+        # Project input to manifold space
+        x = x.to(torch.complex64)
+        x_proj = self.manifold_proj(x.view(-1, self.head_dim)).view(batch_size, seq_len, -1)
         
-        # Process through each attention layer
-        current = x
-        for i, attention_layer in enumerate(self.attention_layers):
-            # Project to Q, K, V in-place
-            qkv = self.to_qkv(current)  # [batch_size, seq_len, 3 * expanded_dim]
-            q, k, v = qkv.chunk(3, dim=-1)  # each is [batch_size, seq_len, expanded_dim]
+        # Split into heads
+        x_split = x_proj.view(batch_size, seq_len, self.num_heads, -1)
+        x_split = x_split.permute(0, 2, 1, 3)  # [batch_size, num_heads, seq_len, head_dim]
+        
+        # Process through attention layers
+        attention_output: List[torch.Tensor] = []
+        metrics_dict: Dict[str, Any] = {} if return_metrics else {}
+        
+        for i, layer in enumerate(self.attention_layers):
+            # Compute attention patterns
+            layer_output = layer(x_split, mask=mask, return_metrics=return_metrics)
             
-            # Reshape to separate heads: [batch_size, num_heads, seq_len, manifold_dim]
-            q = q.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
-            k = k.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
-            v = v.view(batch_size, seq_len, self.num_heads, self.manifold_dim).transpose(1, 2)
-            
-            # Process through quantum tiles
-            tile_outputs = []
-            tile_metrics = []
-            for h, tile in enumerate(self.tiles):
-                # Project to manifold dimension before applying flow
-                q_manifold = self.manifold_proj(q[:, h].reshape(-1, self.head_dim))
-                k_manifold = self.manifold_proj(k[:, h].reshape(-1, self.head_dim))
-                v_manifold = self.manifold_proj(v[:, h].reshape(-1, self.head_dim))
+            if return_metrics:
+                assert isinstance(layer_output, tuple)
+                output, layer_metrics = layer_output
+                metrics_dict[f'layer_{i}'] = layer_metrics
+            else:
+                assert isinstance(layer_output, torch.Tensor)  # Type assertion for mypy
+                output = layer_output
                 
-                # Prepare quantum state
-                q_state = self.prepare_quantum_state(q_manifold)
-                k_state = self.prepare_quantum_state(k_manifold)
-                v_state = self.prepare_quantum_state(v_manifold)
-                
-                # Process through tile
-                tile_output, tile_metric = tile(
-                    q_state.amplitudes,
-                    k_state.amplitudes,
-                    v_state.amplitudes,
-                    return_metrics=True
-                )
-                
-                # Convert back to classical representation
-                tile_output = self.quantum_to_classical(tile_output)
-                tile_outputs.append(tile_output)
-                tile_metrics.append(tile_metric)
+            assert isinstance(output, torch.Tensor)  # Type assertion for mypy
+            attention_output.append(output)
             
-            # Combine tile outputs
-            out = torch.stack(tile_outputs, dim=1)  # [batch_size, num_heads, seq_len, head_dim]
-            out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)  # [batch_size, seq_len, hidden_dim]
-            
-            # Update current
-            current = out
-            
-            if return_metrics_bool:
-                metrics[f'layer_{i}_output'] = {
-                    'norm': float(torch.linalg.vector_norm(out).item()),
-                    'mean': float(out.mean().item()),
-                    'std': float(out.std().item()),
-                    'tile_metrics': tile_metrics
-                }
+        # Combine attention outputs
+        combined = torch.stack(attention_output, dim=0)
+        assert isinstance(combined, torch.Tensor)  # Type assertion for mypy
+        combined = combined.mean(dim=0)
+        assert isinstance(combined, torch.Tensor)  # Type assertion for mypy
+        assert isinstance(combined, torch.Tensor)  # Type assertion for mypy
         
-        # Apply final projection
-        out = self.to_out(current)
+        # Project back to input space
+        output = self.output_proj(combined.view(batch_size, seq_len, -1))
         
-        if return_metrics_bool:
-            # Compute final quantum geometric metrics
-            final_metrics = compute_attention_metrics(
-                attention_patterns=out,
-                metric_context=MetricContext(
-                    timestamp=0.0,
-                    device=out.device,
-                    batch_size=batch_size,
-                    sequence_length=seq_len,
-                    hidden_dim=self.hidden_dim,
-                    resolution=1.0
-                )
-            )
+        if return_metrics:
+            return output, metrics_dict
             
-            metrics['final_output'] = {
-                'norm': float(torch.linalg.vector_norm(out).item()),
-                'mean': float(out.mean().item()),
-                'std': float(out.std().item()),
-                'quantum_geometric_metrics': {
-                    'entropy': float(final_metrics.entropy.mean().item()),
-                    'complexity': float(final_metrics.complexity.mean().item()),
-                    'stability': float(final_metrics.pattern_stability.mean().item()) if final_metrics.pattern_stability is not None else None
-                }
-            }
-            return out, metrics
-        
-        return out
+        return output
 
     def prepare_attention_state(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -502,21 +504,37 @@ class QuantumGeometricAttention(nn.Module):
         
         # Initialize quantum and geometric states with correct dimensions
         batch_size, seq_len, _ = x.shape
-        quantum_state = torch.zeros(
-            batch_size, self.num_heads, seq_len, self.head_dim,
+        
+        # Initialize quantum state with random values and normalize
+        quantum_state = torch.randn(
+            batch_size, self.num_heads, seq_len, self.manifold_dim,
             dtype=self.dtype, device=x.device
         )
+        # Normalize quantum state along the last dimension
+        quantum_state = quantum_state / quantum_state.norm(dim=-1, keepdim=True)
+        
+        # Initialize geometric state
         geometric_state = torch.zeros(
             batch_size, self.num_heads, seq_len, self.manifold_dim,
             dtype=self.dtype, device=x.device
         )
         
-        return AttentionState.initialize(
+        # Initialize AttentionState
+        state = AttentionState.initialize(
             hidden_dim=self.hidden_dim,
             num_heads=self.num_heads,
             device=x.device,
             dtype=self.dtype
         )
+        
+        # Store quantum state in state manager
+        state.state_manager.states["quantum"] = quantum_state
+        
+        # Initialize geometric components
+        state.geometric_state = geometric_state
+        state.manifold_state = geometric_state.clone()
+        
+        return state
 
     def _process_attention(self, x: torch.Tensor) -> torch.Tensor:
         """Process attention using tensor operations."""
@@ -558,35 +576,29 @@ class QuantumGeometricAttention(nn.Module):
         """Compute quantum features from input tensor.
         
         Args:
-            x: Input tensor of shape [batch_size, seq_len, manifold_dim]
+            x: Input tensor of shape [batch_size, hidden_dim] or [batch_size, seq_len, hidden_dim]
             
         Returns:
-            Quantum features of shape [batch_size, seq_len, manifold_dim]
+            Quantum features tensor
         """
-        # Project to manifold
+        # Reshape input to [batch_size * seq_len, head_dim] if needed
+        if x.dim() == 3:
+            batch_size, seq_len, hidden_dim = x.shape
+            x = x.reshape(-1, hidden_dim)
+        
+        # Split hidden_dim into num_heads x head_dim
+        if x.shape[-1] == self.hidden_dim:
+            x = x.view(-1, self.num_heads, self.head_dim)
+            x = x.reshape(-1, self.head_dim)
+        
+        # Project to manifold space
         x = self.manifold_proj(x)
         
-        # Compute query, key, value
-        q = self.query(x)
-        k = self.key(x)
-        v = self.value(x)
+        # Apply quantum attention through tiles
+        for tile in self.tiles:
+            x = tile(x)
         
-        # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        
-        # Apply softmax
-        attn = F.softmax(scores, dim=-1)
-        
-        # Apply dropout
-        attn = self.dropout_layer(attn)
-        
-        # Compute output
-        out = torch.matmul(attn, v)
-        
-        # Project back to manifold
-        out = self.manifold_proj_inv(out)
-        
-        return out
+        return x
 
     def compute_attention_patterns(
         self,
@@ -594,69 +606,67 @@ class QuantumGeometricAttention(nn.Module):
         key: torch.Tensor,
         value: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        return_metrics: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, AttentionMetrics]]:
-        """Compute attention patterns with optional metrics.
-        
+        return_metrics: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
+        """Compute attention patterns from query and key tensors.
+
         Args:
-            query: Query tensor of shape [batch_size, seq_len, hidden_dim]
-            key: Key tensor of shape [batch_size, seq_len, hidden_dim]
-            value: Optional value tensor of shape [batch_size, seq_len, hidden_dim]
-            mask: Optional attention mask of shape [batch_size, seq_len]
+            query: Query tensor [batch_size, num_heads, seq_len, head_dim]
+            key: Key tensor [batch_size, num_heads, seq_len, head_dim]
+            value: Optional value tensor [batch_size, num_heads, seq_len, head_dim]
+            mask: Optional attention mask
             return_metrics: Whether to return attention metrics
-            
+
         Returns:
-            Tuple containing:
-            - Attention patterns tensor of shape [batch_size, num_heads, seq_len, seq_len]
-            - Optional AttentionMetrics
+            Attention patterns and optional metrics
         """
-        batch_size, seq_len, _ = query.shape
-        
-        # Prepare attention state with proper dimensions
-        state = self.prepare_attention_state(query, mask)
-        
+        batch_size, num_heads, seq_len, head_dim = query.shape
+
         # Project to manifold space
-        q_manifold = self.manifold_proj(query.view(-1, self.head_dim))
-        q_manifold = q_manifold.view(batch_size, seq_len, self.num_heads, -1)
-        
-        k_manifold = self.manifold_proj(key.view(-1, self.head_dim))
-        k_manifold = k_manifold.view(batch_size, seq_len, self.num_heads, -1)
-        
-        # Compute attention scores with proper scaling
-        scores = torch.einsum('bhid,bhjd->bhij', q_manifold, k_manifold) * (self.scale)
-        
+        query = query.to(torch.complex64)
+        key = key.to(torch.complex64)
+
+        # Project query and key to manifold
+        query = self.manifold_proj(query.view(-1, head_dim)).view(batch_size, num_heads, seq_len, -1)
+        key = self.manifold_proj(key.view(-1, head_dim)).view(batch_size, num_heads, seq_len, -1)
+
+        # Compute attention scores
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
+
         # Apply mask if provided
         if mask is not None:
-            mask = mask.unsqueeze(1).unsqueeze(2)  # Add head and query dimensions
-            scores = scores.masked_fill(~mask, float('-inf'))
-        
-        # Compute attention patterns
-        attention_patterns = F.softmax(scores, dim=-1)
-        
-        if return_metrics:
-            # Create metric context
-            context = MetricContext(
-                timestamp=0.0,  # Current time not needed for attention
-                device=attention_patterns.device,
-                batch_size=batch_size,
-                sequence_length=seq_len,
-                hidden_dim=self.hidden_dim,
-                resolution=1.0  # Default resolution
-            )
-            
-            # Compute metrics using the attention patterns
-            metrics = compute_attention_metrics(attention_patterns, context)
-            return attention_patterns, metrics
-        
+            scores = scores.masked_fill(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+
+        # Convert complex scores to real for softmax
+        scores_real = scores.abs()
+        attention_weights = torch.softmax(scores_real, dim=-1)
+
+        # Compute output based on whether value is provided
         if value is not None:
-            attention_output = torch.einsum("bhij,bhjd->bhid", attention_patterns, self.manifold_proj(value.view(-1, self.head_dim)).view(batch_size, seq_len, self.num_heads, -1))
-            if return_metrics:
-                return attention_output, metrics
-            return attention_output
+            assert isinstance(value, torch.Tensor)  # Type assertion for mypy
+            processed_value = value.to(torch.complex64)
+            processed_value = self.manifold_proj(processed_value.view(-1, head_dim)).view(batch_size, num_heads, seq_len, -1)
             
+            # Convert processed_value to real for matmul with attention_weights
+            processed_value_real = torch.view_as_real(processed_value)  # [batch, heads, seq_len, head_dim, 2]
+            processed_value_real = processed_value_real.permute(0, 1, 2, 4, 3)  # [batch, heads, seq_len, 2, head_dim]
+            processed_value_real = processed_value_real.reshape(batch_size, num_heads, seq_len, -1)  # [batch, heads, seq_len, 2*head_dim]
+            attention_output = torch.matmul(attention_weights, processed_value_real)
+        else:
+            attention_output = attention_weights
+
+        # Return metrics if requested
         if return_metrics:
-            return attention_patterns, metrics
-        return attention_patterns
+            metrics = {
+                'attention_weights': attention_weights,
+                'attention_scores': scores,
+                'query_proj': query,
+                'key_proj': key,
+                'value_proj': processed_value if value is not None else None
+            }
+            return attention_output, metrics
+
+        return attention_output
 
     def integrate_heads(self, head_states: List[torch.Tensor]) -> torch.Tensor:
         """Integrate multiple attention heads into a single representation.
@@ -674,46 +684,7 @@ class QuantumGeometricAttention(nn.Module):
         integrated = self.to_out(stacked)
         return integrated
 
-    # def compute_entanglement_entropy(self, state: torch.Tensor, split_idx: int) -> torch.Tensor:
-    #     """Compute entanglement entropy across a bipartition.
-        
-    #     Args:
-    #         state: Quantum state tensor
-    #         split_idx: Index to split the state
-            
-    #     Returns:
-    #         Entanglement entropy
-    #     """
-    #     # Reshape state into matrix
-    #     state_matrix = state.view(-1, 2**split_idx, 2**(state.shape[-1] - split_idx))
-        
-    #     # Compute singular value decomposition
-    #     _, s, _ = torch.svd(state_matrix)
-        
-    #     # Compute entropy from singular values
-    #     s_sq = s ** 2
-    #     entropy = -torch.sum(s_sq * torch.log(s_sq + 1e-10))
-        
-    #     return entropy
 
-    # def compute_entropy(self, features: torch.Tensor) -> torch.Tensor:
-    #     """Compute entropy of attention features."""
-    #     probs = F.softmax(features, dim=-1)
-    #     log_probs = torch.log(probs + 1e-10)
-    #     entropy = -(probs * log_probs).sum(dim=-1)
-    #     return entropy
-
-    # def compute_complexity(self, features: torch.Tensor) -> torch.Tensor:
-    #     """Compute complexity of attention features."""
-    #     return torch.norm(features, p=2, dim=-1)
-
-    # def compute_stability(self, features: torch.Tensor) -> torch.Tensor:
-    #     """Compute stability of attention features."""
-    #     return torch.var(features, dim=-1)
-
-    # def compute_sparsity(self, features: torch.Tensor) -> torch.Tensor:
-    #     """Compute sparsity of attention features."""
-    #     return torch.count_nonzero(features, dim=-1).float() / features.shape[-1]
 
     def classical_to_quantum(self, x: torch.Tensor) -> QuantumState:
         """Convert classical input to quantum state.
@@ -1746,4 +1717,39 @@ class QuantumGeometricAttention(nn.Module):
         # 4. Applying quantum corrections through arithmetic structure
         
         return x_flowed
+    
+    def apply_mask(self, state: AttentionState, mask: torch.Tensor) -> AttentionState:
+        """Apply attention mask to state.
+        
+        Args:
+            state: Current attention state
+            mask: Boolean mask tensor [batch_size, seq_len]
+            
+        Returns:
+            Masked attention state
+        """
+        if mask is None:
+            return state
+            
+        # Get attention scores from state
+        attention_scores = state.attention_scores
+        if attention_scores is None:
+            # Initialize attention scores if they don't exist
+            batch_size = mask.size(0)
+            seq_len = mask.size(1)
+            attention_scores = torch.zeros(batch_size, self.num_heads, seq_len, seq_len,
+                                        device=mask.device, dtype=self.dtype)
+            state.attention_scores = attention_scores
+            
+        # Create mask for attention scores
+        # Expand mask to match attention scores shape [batch_size, num_heads, seq_len, seq_len]
+        expanded_mask = mask.unsqueeze(1).unsqueeze(2).expand(-1, self.num_heads, -1, mask.size(1))
+        
+        # Apply mask by setting masked positions to -inf
+        masked_scores = attention_scores.masked_fill(~expanded_mask, float('-inf'))
+        
+        # Update state with masked scores
+        state.attention_scores = masked_scores
+        
+        return state
     

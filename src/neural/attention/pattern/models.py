@@ -112,3 +112,4 @@ class BifurcationDiagram:
     solution_states: torch.Tensor  # States at each parameter value
     solution_params: torch.Tensor  # Parameter values where solutions were found
     bifurcation_points: torch.Tensor  # Parameter values where bifurcations occur
+    metrics: Optional[dict] = None  # Optional dictionary of analysis metrics

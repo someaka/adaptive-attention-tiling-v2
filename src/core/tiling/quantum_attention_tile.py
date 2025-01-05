@@ -35,21 +35,31 @@ class QuantumMotivicTile(nn.Module):
         self.size = size
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
+        self.head_dim = hidden_dim  # Each tile handles one head, so head_dim = hidden_dim
         self.dropout = dropout
         self.resolution = resolution
         self.dtype = dtype
         self.cohomology_dim = cohomology_dim
         self.motive_rank = motive_rank
 
-        # Add input projection layer
-        self.input_proj = nn.Linear(hidden_dim, hidden_dim)
+        # Initialize linear projections with correct dimensions
+        self.input_proj = nn.Linear(self.head_dim, self.head_dim, bias=True)
+        self.query = nn.Linear(self.head_dim, self.head_dim, bias=True)
+        self.key = nn.Linear(self.head_dim, self.head_dim, bias=True)
+        self.value = nn.Linear(self.head_dim, self.head_dim, bias=True)
 
-        # Initialize attention layers
-        self.query = nn.Linear(hidden_dim, hidden_dim)
-        self.key = nn.Linear(hidden_dim, hidden_dim)
-        self.value = nn.Linear(hidden_dim, hidden_dim)
+        # Initialize dropout layer
         self.dropout_layer = nn.Dropout(dropout)
+
+        # Convert weights to complex dtype
+        self.input_proj.weight.data = self.input_proj.weight.data.to(dtype=self.dtype)
+        self.input_proj.bias.data = self.input_proj.bias.data.to(dtype=self.dtype)
+        self.query.weight.data = self.query.weight.data.to(dtype=self.dtype)
+        self.query.bias.data = self.query.bias.data.to(dtype=self.dtype)
+        self.key.weight.data = self.key.weight.data.to(dtype=self.dtype)
+        self.key.bias.data = self.key.bias.data.to(dtype=self.dtype)
+        self.value.weight.data = self.value.weight.data.to(dtype=self.dtype)
+        self.value.bias.data = self.value.bias.data.to(dtype=self.dtype)
 
         # Initialize metrics dictionary
         self._metrics: MetricsDict = {}
@@ -57,12 +67,32 @@ class QuantumMotivicTile(nn.Module):
         self._neighbors: List['QuantumMotivicTile'] = []
 
         # Add cohomology projection
-        self.cohomology_proj = nn.Linear(hidden_dim, cohomology_dim)
-        self.cohomology_proj_inv = nn.Linear(cohomology_dim, hidden_dim)
+        self.cohomology_proj = nn.Linear(self.head_dim, cohomology_dim, dtype=dtype)
+        self.cohomology_proj_inv = nn.Linear(cohomology_dim, self.head_dim, dtype=dtype)
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.cohomology_proj.weight.data = self.cohomology_proj.weight.data.to(dtype)
+            if self.cohomology_proj.bias is not None:
+                self.cohomology_proj.bias.data = self.cohomology_proj.bias.data.to(dtype)
+                
+            self.cohomology_proj_inv.weight.data = self.cohomology_proj_inv.weight.data.to(dtype)
+            if self.cohomology_proj_inv.bias is not None:
+                self.cohomology_proj_inv.bias.data = self.cohomology_proj_inv.bias.data.to(dtype)
 
         # Add motive projection
-        self.motive_proj = nn.Linear(hidden_dim, motive_rank)
-        self.motive_proj_inv = nn.Linear(motive_rank, hidden_dim)
+        self.motive_proj = nn.Linear(self.head_dim, motive_rank, dtype=dtype)
+        self.motive_proj_inv = nn.Linear(motive_rank, self.head_dim, dtype=dtype)
+        
+        # Convert weights and bias to complex
+        with torch.no_grad():
+            self.motive_proj.weight.data = self.motive_proj.weight.data.to(dtype)
+            if self.motive_proj.bias is not None:
+                self.motive_proj.bias.data = self.motive_proj.bias.data.to(dtype)
+                
+            self.motive_proj_inv.weight.data = self.motive_proj_inv.weight.data.to(dtype)
+            if self.motive_proj_inv.bias is not None:
+                self.motive_proj_inv.bias.data = self.motive_proj_inv.bias.data.to(dtype)
 
         # Load balancing state
         self._load_factor = 1.0
@@ -254,39 +284,47 @@ class QuantumMotivicTile(nn.Module):
         # Extract coordinates from pattern if needed
         if isinstance(x, PatternSection):
             coords = x.coordinates
-            transition_maps = x.transition_maps.copy()
+            transition_maps = x.transition_maps
         else:
             coords = x
             transition_maps = {}
 
-        # Convert complex inputs to real by taking magnitude
-        if coords.is_complex():
-            coords = coords.abs()
-
-        # Ensure coords is float32/64 depending on self.dtype
+        # Ensure coords is complex64/128 depending on self.dtype
         coords = coords.to(dtype=self.dtype)
 
-        # Ensure input has correct shape [batch_size, seq_len, motive_rank]
+        # Ensure input has correct shape [batch_size, seq_len, hidden_dim]
         if coords.dim() == 2:
             coords = coords.unsqueeze(0)  # Add batch dimension
         elif coords.dim() == 1:
             coords = coords.unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
 
-        # Project input to hidden dimension
-        coords = self.input_proj(coords)  # [batch_size, seq_len, hidden_dim]
+        # Get dimensions
+        batch_size, seq_len, hidden_dim = coords.shape
 
-        # Project to query, key, value spaces
+        # Project input through linear layers
+        coords = self.input_proj(coords)  # [batch_size, seq_len, hidden_dim]
         q = self.query(coords)  # [batch_size, seq_len, hidden_dim]
         k = self.key(coords)    # [batch_size, seq_len, hidden_dim]
         v = self.value(coords)  # [batch_size, seq_len, hidden_dim]
 
+        # Reshape for multi-head attention
+        q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_heads, seq_len, head_dim]
+        k = k.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_heads, seq_len, head_dim]
+        v = v.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_heads, seq_len, head_dim]
+
         # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        attn = torch.softmax(scores, dim=-1)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [batch_size, num_heads, seq_len, seq_len]
+        
+        # Convert scores to real for softmax
+        scores_real = scores.abs()
+        attn = torch.softmax(scores_real, dim=-1)
         attn = self.dropout_layer(attn)
 
         # Apply attention
-        output = torch.matmul(attn, v)
+        output = torch.matmul(attn, v)  # [batch_size, num_heads, seq_len, head_dim]
+
+        # Reshape back to original dimensions
+        output = output.transpose(1, 2).reshape(batch_size, seq_len, hidden_dim)  # [batch_size, seq_len, hidden_dim]
 
         # Create new pattern section
         new_pattern = PatternSection(
