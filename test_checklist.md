@@ -1,5 +1,5 @@
 ## Core Attention & Tiling Tests
-- [x] tests/core/attention/test_geometric.py
+- [ ] tests/core/attention/test_geometric.py
 - [x] tests/core/tiling/test_strategies.py
 
 ## Metrics Tests
