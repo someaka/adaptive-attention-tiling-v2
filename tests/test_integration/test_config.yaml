@@ -4,11 +4,11 @@
 regimes:
   debug:
     # Minimal dimensions for debugging
-    hidden_dim: 8
+    hidden_dim: 16
     num_heads: 1
-    head_dim: 4
-    manifold_dim: 4
-    motive_rank: 1
+    head_dim: 8
+    manifold_dim: 16
+    motive_rank: 2
     batch_size: 1
     seq_len: 2
     num_layers: 1

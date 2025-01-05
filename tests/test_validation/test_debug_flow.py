@@ -9,7 +9,7 @@ This module contains focused unit tests to debug specific issues in:
 import pytest
 import torch
 from src.validation.base import ValidationResult
-from src.validation.flow.stability import (
+from src.validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     LinearStabilityValidation
@@ -64,11 +64,12 @@ class TestStabilityValidation:
         
         result = validator.validate_stability(dynamics, pattern)
         
-        assert isinstance(result, LinearStabilityValidation), "Should return LinearStabilityValidation"
-        assert result.eigenvalues.shape[0] == result.eigenvectors.shape[1], \
-            "Number of eigenvalues should match eigenvectors"
-        assert not torch.isnan(result.eigenvalues).any(), "Eigenvalues should not contain NaN"
-        assert not torch.isinf(result.eigenvalues).any(), "Eigenvalues should not contain Inf"
+        assert isinstance(result, ValidationResult), "Should return ValidationResult"
+        assert result.data is not None, "Should have data"
+        assert 'eigenvalues' in result.data, "Should have eigenvalues"
+        assert 'eigenvectors' in result.data, "Should have eigenvectors"
+        assert not torch.isnan(result.data['eigenvalues']).any(), "Eigenvalues should not contain NaN"
+        assert not torch.isinf(result.data['eigenvalues']).any(), "Eigenvalues should not contain Inf"
 
 class TestEnergyValidation:
     """Test suite for debugging energy conservation validation."""

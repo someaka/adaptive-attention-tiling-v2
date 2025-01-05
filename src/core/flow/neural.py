@@ -477,7 +477,8 @@ class NeuralGeometricFlow(PatternFormationFlow):
         self,
         metric: Union[torch.Tensor, MetricTensor],
         ricci: Optional[Union[torch.Tensor, MetricTensor]] = None,
-        timestep: float = 0.1
+        timestep: float = 0.1,
+        attention_pattern: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, QuantumFlowMetrics]:
         """Perform neural network-aware flow step with quantum integration."""
         # Convert input tensors to appropriate types
@@ -567,19 +568,21 @@ class NeuralGeometricFlow(PatternFormationFlow):
         if hasattr(self, 'quantum_bridge'):
             # Prepare initial state efficiently
             with torch.no_grad():
-                # Project metric to manifold dimension before preparing quantum state
-                metric_flat = new_metric.reshape(batch_size, -1)
-                metric_flat = metric_flat[:, :self.manifold_dim]  # Take only first manifold_dim components
+                # Project metric to hidden dimension before preparing quantum state
+                metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
+                metric_padded = torch.zeros(batch_size, self.quantum_bridge.hidden_dim, device=metric.device, dtype=metric.dtype)
+                metric_padded[:, :metric_flat.shape[1]] = metric_flat
                 
                 initial_state = self.prepare_quantum_state(
-                    metric_flat,
+                    metric_padded,
                     return_validation=False
                 )
                 
                 if not isinstance(initial_state, tuple):
-                    # Evolve quantum state
-                    evolved_state = self.quantum_bridge.evolve_quantum_state(
+                    # Evolve quantum state with attention pattern
+                    evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(
                         initial_state,
+                        attention_pattern=attention_pattern,
                         time=timestep
                     )
                     

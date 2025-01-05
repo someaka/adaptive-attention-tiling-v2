@@ -14,17 +14,22 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 
-from src.core.quantum.types import QuantumState
 from src.validation.quantum.state import (
     StateValidator,
     StatePreparationValidator,
     EntanglementMetrics
 )
 
+# Import the base QuantumState type
+from src.core.quantum.types import QuantumState
+
+# Re-export QuantumState for backward compatibility
+__all__ = ['QuantumState', 'HilbertSpace']
+
 class HilbertSpace:
     """Quantum Hilbert space implementation."""
     
-    def __init__(self, dim: int, dtype=torch.float32):
+    def __init__(self, dim: int, dtype=torch.float64):
         """Initialize Hilbert space.
         
         Args:
@@ -40,20 +45,8 @@ class HilbertSpace:
         self.observables = self._initialize_observables()
 
     def _get_complex_dtype(self) -> torch.dtype:
-        """Get corresponding complex dtype.
-        
-        This method ensures we have the appropriate complex dtype:
-        - float32 -> complex64
-        - float64 -> complex128
-        - complex64 -> complex64
-        - complex128 -> complex128
-        """
-        if self.dtype in [torch.float32, torch.complex64]:
-            return torch.complex64
-        elif self.dtype in [torch.float64, torch.complex128]:
-            return torch.complex128
-        else:
-            raise ValueError(f"Unsupported dtype: {self.dtype}. Must be one of: float32, float64, complex64, complex128")
+        """Get corresponding complex dtype."""
+        return torch.complex128  # Always use complex128 for quantum states
 
     def _initialize_basis(self) -> List[str]:
         """Initialize computational basis states.
@@ -85,44 +78,46 @@ class HilbertSpace:
         
         return observables
 
+    def _ensure_complex128(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Helper method to ensure tensor is complex128."""
+        if tensor.dtype != torch.complex128:
+            if tensor.dtype == torch.complex64:
+                return tensor.to(torch.complex128)
+            else:
+                return torch.complex(tensor.to(torch.float64), torch.zeros_like(tensor, dtype=torch.float64))
+        return tensor
+
+    def _compute_norm(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Helper method to compute norm consistently."""
+        norm = torch.sqrt(torch.sum(torch.abs(tensor)**2, dim=-1, keepdim=True))
+        return norm.to(torch.float64)
+
     def prepare_state(self, amplitudes: torch.Tensor) -> QuantumState:
-        """Prepare quantum state with given amplitudes.
+        """Prepare quantum state from amplitudes.
         
         Args:
-            amplitudes: Complex amplitudes in computational basis
+            amplitudes: Complex amplitudes tensor
             
         Returns:
             Prepared quantum state
         """
-        # Convert input to complex128
-        if amplitudes.dtype != torch.complex128:
-            if amplitudes.dtype == torch.complex64:
-                amplitudes = amplitudes.to(torch.complex128)
-            else:
-                amplitudes = torch.complex(amplitudes.to(torch.float64), torch.zeros_like(amplitudes, dtype=torch.float64))
-
-        # Handle different input dimensions
-        if amplitudes.shape[-1] == self.dim * 2:
-            # Convert real and imaginary parts to complex
-            real_part = amplitudes[..., :self.dim].to(torch.float64)
-            imag_part = amplitudes[..., self.dim:].to(torch.float64)
-            amplitudes = torch.complex(real_part, imag_part)
-        elif amplitudes.shape[-1] == 2 and self.dim == 4:
-            # Special case: Convert 2-qubit product state to 4-dim state
-            amplitudes = torch.kron(amplitudes[:1], amplitudes[1:])
-        elif amplitudes.shape[-1] != self.dim:
-            raise ValueError(f"Amplitudes must have dimension {self.dim} or {self.dim * 2}")
+        # Ensure complex64 dtype
+        if amplitudes.dtype != torch.complex64:
+            amplitudes = amplitudes.to(dtype=torch.complex64)
             
         # Normalize state
         norm = torch.sqrt(torch.sum(torch.abs(amplitudes)**2, dim=-1, keepdim=True))
         if torch.any(norm > 1e-10):
             amplitudes = amplitudes / norm
             
-        return QuantumState(
-            amplitudes=amplitudes.to(torch.complex128),
+        # Create quantum state
+        state = QuantumState(
+            amplitudes=amplitudes,
             basis_labels=self.basis_states,
-            phase=torch.zeros_like(amplitudes, dtype=torch.complex128)
+            phase=torch.zeros(1, dtype=torch.complex64, device=amplitudes.device)
         )
+        
+        return state
 
     def entanglement_entropy(self, state: Union[QuantumState, torch.Tensor]) -> torch.Tensor:
         """Compute entanglement entropy of a bipartite quantum state.
@@ -141,86 +136,116 @@ class HilbertSpace:
             rho = torch.matmul(state_vector.conj().transpose(-2,-1), state_vector)
         else:
             rho = state.to(torch.complex128)
-            
-        # Compute reduced density matrix by partial trace
-        n = int(torch.sqrt(torch.tensor(rho.shape[0])))  # Assuming 2-qubit system
-        rho_reshaped = rho.reshape(n, n, n, n)
-        rho_reduced = torch.einsum('ijik->jk', rho_reshaped)
         
-        # Compute von Neumann entropy
-        eigenvals = torch.linalg.eigvalsh(rho_reduced).to(torch.float64)
-        eigenvals = torch.clamp(eigenvals, min=1e-10)  # Remove small negative eigenvalues
-        eigenvals = eigenvals / torch.sum(eigenvals)  # Normalize eigenvalues
-        entropy = -torch.sum(eigenvals * torch.log(eigenvals))  # Using natural log
-        return entropy.to(torch.float64)
+        # For a lattice state, we'll use the first dimension as the subsystem
+        if len(rho.shape) == 2:
+            # Create density matrix from pure state if needed
+            if not torch.allclose(torch.matmul(rho.conj().transpose(-2,-1), rho), rho):
+                rho = torch.matmul(rho.conj().transpose(-2,-1), rho)
 
-    def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> QuantumState:
-        """Evolve quantum state under Hamiltonian.
-        
-        This method implements quantum time evolution using the Schrödinger equation:
-        |ψ(t)⟩ = exp(-iHt/ℏ)|ψ(0)⟩
-        
-        The evolution includes several key quantum mechanical aspects:
-        1. Unitary Evolution: The evolution operator U(t) = exp(-iHt) preserves the norm 
-           and quantum coherence of the state
-        2. Phase Correction: A geometric phase correction is applied to maintain pattern 
-           orientation in the quantum geometric framework
-        3. Complex Amplitudes: The evolution occurs in the complex Hilbert space using 
-           complex128 precision to ensure numerical stability
-        
-        The implementation uses matrix exponential for exact evolution, rather than 
-        perturbative methods, making it suitable for both short and long time scales.
-        
-        Args:
-            initial_state: Initial quantum state |ψ(0)⟩
-            hamiltonian: Hamiltonian operator H (must be Hermitian)
-            t: Evolution time (in natural units where ℏ = 1)
+            # Handle 2-qubit systems (4x4 density matrix) specially
+            if rho.shape == (4, 4):
+                # Reshape into 2x2x2x2 tensor for qubit subsystems
+                rho = rho.reshape(2, 2, 2, 2)
+                # Perform partial trace over second subsystem
+                reduced_rho = torch.einsum('ijik->jk', rho)
+            else:
+                # For larger systems, perform partial trace using matrix operations
+                # Calculate subsystem dimensions
+                dim1 = rho.shape[0]
+                dim2 = rho.shape[1]
+                
+                # Verify matrix is square
+                if dim1 != dim2:
+                    raise ValueError(f"Input matrix must be square, got {dim1}x{dim2}")
+                
+                # Calculate subsystem dimensions (try to find factors)
+                factors = []
+                for i in range(1, int(np.sqrt(dim1)) + 1):
+                    if dim1 % i == 0:
+                        factors.append((i, dim1 // i))
+                
+                if not factors:
+                    raise ValueError(f"Cannot factorize matrix dimension {dim1}")
+                
+                # Use largest possible subsystem dimensions
+                d1, d2 = factors[-1]
+                
+                # Reshape into [d1, d2, d1, d2] tensor
+                rho = rho.reshape(d1, d2, d1, d2)
+                # Perform partial trace over second subsystem
+                reduced_rho = torch.einsum('ijik->jk', rho)
             
-        Returns:
-            Evolved quantum state |ψ(t)⟩
+            # Compute eigenvalues
+            eigenvalues = torch.linalg.eigvalsh(reduced_rho)
             
-        Note:
-            The phase correction term exp(iφ) is computed from the overlap between the 
-            initial state and the first basis state of the evolution operator. This 
-            preserves the geometric structure of quantum patterns during evolution.
-        """
+            # Remove small negative eigenvalues (numerical artifacts)
+            eigenvalues = torch.where(eigenvalues > 1e-10, eigenvalues, torch.zeros_like(eigenvalues))
+            
+            # Normalize eigenvalues
+            eigenvalues = eigenvalues / torch.sum(eigenvalues)
+            
+            # Compute von Neumann entropy
+            entropy = -torch.sum(eigenvalues * torch.log(eigenvalues + 1e-10))
+            
+            return entropy
+        else:
+            raise ValueError("Input state must be 2-dimensional")
+
+    def evolve_state(self, initial_state: QuantumState, hamiltonian: torch.Tensor, t: Union[float, torch.Tensor]) -> Union[QuantumState, List[QuantumState]]:
+        """Evolve quantum state under Hamiltonian."""
         # Ensure complex types
-        hamiltonian = hamiltonian.to(torch.complex128)
-        state_vector = initial_state.amplitudes.to(torch.complex128)
+        hamiltonian = self._ensure_complex128(hamiltonian)
+        state_vector = self._ensure_complex128(initial_state.amplitudes)
         
         if len(state_vector.shape) == 1:
             state_vector = state_vector.unsqueeze(0)
             
-        # Single time evolution
-        evolution_operator = torch.matrix_exp(-1j * hamiltonian * t)
-        
-        # Add phase correction to preserve pattern orientation
-        first_row = evolution_operator[0] if len(evolution_operator.shape) == 2 else evolution_operator[0, 0]
-        
-        # Handle batch dimension properly
-        if len(state_vector.shape) > 2:
-            state_vector = state_vector.reshape(-1, state_vector.shape[-1])
-        
-        # Compute phase correction for each state in the batch
-        phase_corrections = []
-        for state in state_vector:
-            phase_correction = torch.exp(1j * torch.angle(torch.vdot(state, first_row)))
-            phase_corrections.append(phase_correction)
-        phase_correction = torch.stack(phase_corrections)
-        
-        # Apply evolution and phase correction
-        evolved_state = torch.matmul(state_vector, evolution_operator.transpose(-2, -1))
-        evolved_state = evolved_state * phase_correction.unsqueeze(-1)
-        
-        # Restore original shape if needed
-        if len(initial_state.amplitudes.shape) > 2:
-            evolved_state = evolved_state.view(initial_state.amplitudes.shape)
-        
-        return QuantumState(
-            amplitudes=evolved_state,
-            basis_labels=initial_state.basis_labels,
-            phase=initial_state.phase
-        )
+        # Handle single time point vs multiple time points
+        if isinstance(t, (float, int)):
+            t = torch.tensor([t], dtype=torch.float64)
+        else:
+            t = t.to(torch.float64)
+            
+        evolved_states = []
+        for time_point in t:
+            # Compute evolution operator for this time point
+            evolution_operator = torch.matrix_exp(-1j * hamiltonian * time_point)
+            evolution_operator = evolution_operator.to(torch.complex128)
+            
+            # Apply evolution operator
+            evolved = torch.matmul(state_vector, evolution_operator.transpose(-2, -1))
+            evolved = evolved.to(torch.complex128)
+            
+            # Add phase correction to preserve pattern orientation
+            first_row = evolution_operator[0]
+            phase_corrections = []
+            for state in evolved:
+                # Compute overlap with initial state for phase reference
+                overlap = torch.vdot(state_vector[0], state)
+                phase_correction = torch.exp(-1j * torch.angle(overlap))
+                phase_corrections.append(phase_correction)
+            phase_correction = torch.stack(phase_corrections).to(torch.complex128)
+            
+            # Apply phase correction
+            evolved = evolved * phase_correction.unsqueeze(-1)
+            
+            # Normalize state
+            norm = self._compute_norm(evolved)
+            evolved = (evolved / norm).to(torch.complex128)
+            
+            # Create quantum state for this time point
+            evolved_state = QuantumState(
+                amplitudes=evolved.squeeze(),
+                basis_labels=initial_state.basis_labels,
+                phase=initial_state.phase.to(torch.complex128)
+            )
+            evolved_states.append(evolved_state)
+            
+        # Return single state or list depending on input
+        if len(t) == 1:
+            return evolved_states[0]
+        return evolved_states
 
     def measure_observable(self, state: QuantumState, observable: torch.Tensor) -> torch.Tensor:
         """Measure quantum observable on state.
@@ -280,9 +305,11 @@ class HilbertSpace:
         # Remove small negative eigenvalues due to numerical errors
         eigenvals = torch.clamp(eigenvals, min=0)
         # Normalize eigenvalues
-        eigenvals = eigenvals / torch.sum(eigenvals)
+        eigenvals = eigenvals / (torch.sum(eigenvals) + 1e-10)
+        # Remove zero eigenvalues to avoid log(0)
+        eigenvals = eigenvals[eigenvals > 1e-10]
         # Compute entropy
-        entropy = -torch.sum(eigenvals * torch.log2(eigenvals + 1e-10))
+        entropy = -torch.sum(eigenvals * torch.log(eigenvals))
         return entropy.to(torch.float64)
 
     def compute_negativity(self, state: Union[QuantumState, torch.Tensor]) -> torch.Tensor:
@@ -346,38 +373,45 @@ class HilbertSpace:
         # Initialize phase accumulation
         phase = torch.tensor(0.0, dtype=torch.float64)
         
-        # Calculate time step
-        dt = times[1] - times[0]
-        
         # Initialize state vector with proper shape and type
         state_vector = initial_state.amplitudes.to(torch.complex128)
-        if len(state_vector.shape) == 0 or (len(state_vector.shape) == 1 and state_vector.shape[0] == 1):
-            state_vector = torch.zeros(self.dim, dtype=torch.complex128)
-            state_vector[0] = 1.0
+        if len(state_vector.shape) == 2:
+            state_vector = state_vector[0]  # Take first batch element
+            
+        # Get dimension of input Hamiltonian
+        H_test = hamiltonian_fn(0.0)
+        H_dim = H_test.shape[0]
+        
+        # If state dimension doesn't match Hamiltonian, truncate or pad state
+        if state_vector.shape[0] > H_dim:
+            state_vector = state_vector[:H_dim]
+        elif state_vector.shape[0] < H_dim:
+            padded = torch.zeros(H_dim, dtype=torch.complex128)
+            padded[:state_vector.shape[0]] = state_vector
+            state_vector = padded
             
         # Normalize initial state
-        state_vector = state_vector / torch.sqrt(torch.vdot(state_vector, state_vector))
+        norm = torch.sqrt(torch.sum(torch.abs(state_vector)**2))
+        state_vector = state_vector / norm
         
         # Store initial state for final overlap
         initial_vector = state_vector.clone()
         
-        # Use smaller time steps for better accuracy
-        fine_times = torch.linspace(times[0], times[-1], len(times) * 1000, dtype=torch.float64)
+        # Use adaptive time steps for better accuracy
+        n_steps = len(times) * 1000
+        fine_times = torch.linspace(times[0], times[-1], n_steps, dtype=torch.float64)
         dt_fine = fine_times[1] - fine_times[0]
         
         # Previous state for phase tracking
         prev_state = state_vector.clone()
         
-        for t in fine_times[:-1]:
+        # Initialize phase accumulation arrays
+        phase_factors = torch.zeros(n_steps - 1, dtype=torch.complex128)
+        
+        for i, t in enumerate(fine_times[:-1]):
             # Get Hamiltonian at current time
             H = hamiltonian_fn(t.item())
-            
-            # Pad Hamiltonian if needed
-            if H.shape[0] < self.dim:
-                H_padded = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
-                H_padded[:H.shape[0], :H.shape[1]] = H
-                H = H_padded
-            
+                
             # Ensure Hamiltonian is Hermitian
             H = (H + H.conj().T) / 2
             
@@ -402,12 +436,15 @@ class HilbertSpace:
             overlap = torch.vdot(prev_state, next_state)
             if torch.abs(overlap) > 1e-10:  # Avoid division by zero
                 phase_factor = overlap / torch.abs(overlap)
-                phase += torch.log(phase_factor).imag
+                phase_factors[i] = phase_factor
             
             # Update states
             prev_state = next_state.clone()
             state_vector = next_state
-        
+            
+        # Compute cumulative phase
+        phase = torch.sum(torch.log(phase_factors + 1e-10).imag)
+            
         # Compute final overlap with initial state for cyclic correction
         final_overlap = torch.vdot(initial_vector, state_vector)
         if torch.abs(final_overlap) > 1e-10:
@@ -420,104 +457,235 @@ class HilbertSpace:
         # Convert to complex tensor for output
         return torch.complex(phase, torch.zeros_like(phase))
 
-    def apply_quantum_channel(self, state: QuantumState, kraus_ops: List[torch.Tensor]) -> QuantumState:
-        """Apply quantum channel using Kraus operators."""
-        # Convert all operators to complex128
-        kraus_ops = [K.to(torch.complex128) for K in kraus_ops]
-        state_vector = state.amplitudes.to(torch.complex128)
-        
+    def apply_quantum_channel(self, state: QuantumState, kraus_operators: List[torch.Tensor]) -> QuantumState:
+        """Apply quantum channel to state using Kraus operators."""
+        # Convert state to complex128
+        state_vector = self._ensure_complex128(state.amplitudes)
         if len(state_vector.shape) == 1:
             state_vector = state_vector.unsqueeze(0)
             
-        # Apply channel
-        output_dm = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
-        for K in kraus_ops:
-            # Pad operator if needed
-            if K.shape[0] < self.dim:
-                K_padded = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
-                K_padded[:K.shape[0], :K.shape[1]] = K
-                K = K_padded
-                
-            evolved = torch.matmul(K, state_vector.T)
-            output_dm += torch.matmul(evolved, evolved.conj().T)
+        # Initialize density matrix
+        rho = torch.outer(state_vector.squeeze(), state_vector.squeeze().conj()).to(torch.complex128)
+        
+        # Apply each Kraus operator
+        output_dm = torch.zeros_like(rho, dtype=torch.complex128)
+        for kraus in kraus_operators:
+            kraus = self._ensure_complex128(kraus)
+            # Ensure proper dimensions
+            if kraus.shape[0] < self.dim:
+                padded = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
+                padded[:kraus.shape[0], :kraus.shape[1]] = kraus
+                kraus = padded
+            output_dm += torch.matmul(torch.matmul(kraus, rho), kraus.conj().T)
             
-        # Normalize
-        output_dm = output_dm / torch.trace(output_dm).real
-        
-        # Convert back to state vector (take first eigenvector)
+        # Ensure Hermiticity and positivity
+        output_dm = (output_dm + output_dm.conj().T) / 2
         eigenvals, eigenvecs = torch.linalg.eigh(output_dm)
-        max_idx = torch.argmax(eigenvals.real)
-        output_state = eigenvecs[:, max_idx]
+        eigenvals = torch.clamp(eigenvals.real, min=1e-15).to(torch.float64)  # Use small positive threshold
+        eigenvals = eigenvals / torch.sum(eigenvals)
         
-        # Ensure proper phase
-        phase = torch.angle(output_state[torch.argmax(torch.abs(output_state))])
-        output_state = output_state * torch.exp(-1j * phase)
+        # Reconstruct density matrix with positive eigenvalues
+        diag_eigenvals = torch.diag(eigenvals).to(torch.complex128)  # Convert eigenvalues to complex128
+        output_dm = torch.matmul(
+            torch.matmul(eigenvecs, diag_eigenvals),
+            eigenvecs.conj().T
+        )
+        
+        # Get pure state from density matrix
+        max_idx = torch.argmax(eigenvals)
+        output_state = eigenvecs[:, max_idx].to(torch.complex128)
+        
+        # Normalize
+        norm = self._compute_norm(output_state)
+        output_state = (output_state / norm).to(torch.complex128)
+        
+        # Store original norm
+        original_norm = norm.clone()
         
         return QuantumState(
             amplitudes=output_state,
             basis_labels=state.basis_labels,
-            phase=state.phase
+            phase=state.phase.to(torch.complex128),
+            original_norm=original_norm
         )
 
-    def reconstruct_state(self, measurements: Dict[str, torch.Tensor]) -> QuantumState:
-        """Reconstruct quantum state from tomographic measurements."""
-        # Initialize density matrix
-        rho = torch.zeros((self.dim, self.dim), dtype=torch.complex128)
+    def reconstruct_state(self, measurements: Dict[str, torch.Tensor], bases: Optional[List[torch.Tensor]] = None) -> QuantumState:
+        """Reconstruct quantum state from tomographic measurements using a hybrid approach.
         
-        # Add contribution from identity
-        rho += torch.eye(self.dim, dtype=torch.complex128) / self.dim
-        
-        # Define Pauli matrices
-        pauli_x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
-        pauli_y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
-        pauli_z = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
-        
-        # Process each qubit pair
+        Args:
+            measurements: Dictionary of measurement results for different bases
+            bases: Optional list of measurement bases (defaults to Pauli bases)
+            
+        Returns:
+            Reconstructed quantum state
+        """
+        # Default to Pauli bases if not provided
+        if bases is None:
+            bases = [
+                torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128),  # X
+                torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128),  # Y
+                torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)  # Z
+            ]
+            
+        # Initialize state vector using all measurements
         n_qubits = int(np.log2(self.dim))
-        for i in range(0, n_qubits, 2):
-            # Extract measurements for this qubit pair
-            x_val = measurements.get('X', torch.zeros(1, dtype=torch.complex128))[i//2]
-            y_val = measurements.get('Y', torch.zeros(1, dtype=torch.complex128))[i//2]
-            z_val = measurements.get('Z', torch.zeros(1, dtype=torch.complex128))[i//2]
-            
-            # Construct local density matrix
-            local_rho = torch.eye(4, dtype=torch.complex128) / 4
-            local_rho += torch.kron(pauli_x, torch.eye(2, dtype=torch.complex128)) * x_val / 2
-            local_rho += torch.kron(pauli_y, torch.eye(2, dtype=torch.complex128)) * y_val / 2
-            local_rho += torch.kron(pauli_z, torch.eye(2, dtype=torch.complex128)) * z_val / 2
-            
-            # Ensure Hermiticity
-            local_rho = (local_rho + local_rho.conj().T) / 2
-            
-            # Ensure positive semidefiniteness
-            eigenvals, eigenvecs = torch.linalg.eigh(local_rho)
-            eigenvals = torch.clamp(eigenvals, min=0).to(torch.complex128)
-            local_rho = torch.matmul(torch.matmul(eigenvecs, torch.diag(eigenvals)), eigenvecs.conj().T)
-            
-            # Normalize
-            local_rho = local_rho / torch.trace(local_rho)
-            
-            # Update global density matrix
-            if i == 0:
-                rho = local_rho
-            else:
-                rho = torch.kron(rho, local_rho)
         
-        # Extract state vector from density matrix
-        eigenvals, eigenvecs = torch.linalg.eigh(rho)
+        # Create a complete set of measurement operators
+        measurement_ops = []
+        measurement_vals = []
+        
+        # Single-qubit measurements
+        for q in range(n_qubits):
+            for basis_name in ["X", "Y", "Z"]:
+                meas_val = measurements[f"{basis_name}{q}"]
+                measurement_vals.append(meas_val)
+                
+                # Build the full operator
+                if basis_name == "X":
+                    basis = bases[0]
+                elif basis_name == "Y":
+                    basis = bases[1]
+                else:  # Z
+                    basis = bases[2]
+                    
+                # Extend to full space
+                if q == 0:
+                    full_op = basis
+                    for _ in range(1, n_qubits):
+                        full_op = torch.kron(full_op, torch.eye(2, dtype=torch.complex128))
+                else:
+                    full_op = torch.eye(2, dtype=torch.complex128)
+                    for i in range(1, n_qubits):
+                        if i == q:
+                            full_op = torch.kron(full_op, basis)
+                        else:
+                            full_op = torch.kron(full_op, torch.eye(2, dtype=torch.complex128))
+                            
+                measurement_ops.append(full_op)
+        
+        # Initialize with a better guess using the first qubit's measurements
+        z0 = measurements["Z0"].real
+        x0 = measurements["X0"].real
+        y0 = measurements["Y0"].real
+        bloch_vec = torch.tensor([x0, y0, z0], dtype=torch.float64)
+        bloch_norm = torch.norm(bloch_vec)
+        if bloch_norm > 1:
+            bloch_vec = bloch_vec / bloch_norm
+            
+        # Convert Bloch vector to density matrix for first qubit
+        rho_0 = torch.eye(2, dtype=torch.complex128) / 2 + (
+            bloch_vec[0] * bases[0] +
+            bloch_vec[1] * bases[1] +
+            bloch_vec[2] * bases[2]
+        ) / 2
+        
+        # Initialize with tensor product of first qubit state and identity
+        rho = rho_0
+        for _ in range(1, n_qubits):
+            rho = torch.kron(rho, torch.eye(2, dtype=torch.complex128) / 2)
+        
+        # Maximum likelihood estimation with multiple restarts
+        n_iterations = 10000
+        n_restarts = 5  # Number of random restarts
+        best_rho_global = None
+        best_error_global = float('inf')
+        
+        for restart in range(n_restarts):
+            if restart > 0:
+                # Random perturbation of initial state for restarts
+                random_state = torch.randn(self.dim, dtype=torch.complex128)
+                random_state = random_state / torch.sqrt(torch.sum(torch.abs(random_state) ** 2))
+                rho = 0.9 * rho + 0.1 * torch.outer(random_state, random_state.conj())
+            
+            learning_rate = 0.01
+            best_rho = rho.clone()
+            best_error = float('inf')
+            patience = 100
+            no_improvement = 0
+            min_lr = 1e-6
+            momentum = torch.zeros_like(rho)
+            
+            for iter_idx in range(n_iterations):
+                # Compute error and gradient
+                total_error = 0.0
+                grad = torch.zeros_like(rho)
+                
+                for op, target_val in zip(measurement_ops, measurement_vals):
+                    # Compute expectation value
+                    expect = torch.trace(torch.matmul(op, rho)).real
+                    error = (target_val - expect).real
+                    total_error += error ** 2
+                    
+                    # Gradient for density matrix with regularization
+                    grad = grad - error * op
+                
+                # Normalize gradient
+                grad_norm = torch.norm(grad)
+                if grad_norm > 0:
+                    grad = grad / grad_norm
+                
+                # Update with momentum and regularization
+                beta = 0.9
+                momentum = beta * momentum + (1 - beta) * grad
+                rho = rho - learning_rate * (momentum + momentum.conj().T) / 2
+                
+                # Project onto positive semidefinite cone and normalize
+                eigenvals, eigenvecs = torch.linalg.eigh(rho)
+                eigenvals = torch.clamp(eigenvals.real, min=0).to(torch.complex128)
+                eigenvals = eigenvals / torch.sum(eigenvals)
+                rho = torch.matmul(torch.matmul(eigenvecs, torch.diag(eigenvals)), eigenvecs.conj().T)
+                
+                # Update best solution
+                if total_error < best_error:
+                    best_error = total_error
+                    best_rho = rho.clone()
+                    no_improvement = 0
+                else:
+                    no_improvement += 1
+                
+                # Adaptive learning rate
+                if no_improvement >= patience:
+                    learning_rate *= 0.5
+                    no_improvement = 0
+                    if learning_rate < min_lr:
+                        break
+                
+                # Early stopping
+                if total_error < 1e-10:
+                    break
+            
+            # Update global best
+            if best_error < best_error_global:
+                best_error_global = best_error
+                best_rho_global = best_rho.clone()
+        
+        # Use the best state found across all restarts
+        best_rho = best_rho_global
+        
+        # Extract pure state from density matrix
+        eigenvals, eigenvecs = torch.linalg.eigh(best_rho)
         max_idx = torch.argmax(eigenvals.real)
-        state_vector = eigenvecs[:, max_idx]
+        state = eigenvecs[:, max_idx].to(torch.complex128)
         
-        # Normalize and align phase
-        state_vector = state_vector / torch.sqrt(torch.vdot(state_vector, state_vector))
-        max_amp_idx = torch.argmax(torch.abs(state_vector))
-        phase = torch.angle(state_vector[max_amp_idx])
-        state_vector = state_vector * torch.exp(-1j * phase)
+        # Ensure global phase matches the measurements
+        for op, target_val in zip(measurement_ops[:3], measurement_vals[:3]):  # Use first three measurements
+            expect = torch.trace(torch.matmul(op, torch.outer(state, state.conj()))).real
+            if torch.sgn(expect).real != torch.sgn(target_val.real).real:
+                state = -state
+                break
+        
+        # Ensure proper normalization
+        norm = torch.sqrt(torch.sum(torch.abs(state) ** 2))
+        state = (state / norm).to(torch.complex128)
+        
+        # Store original norm
+        original_norm = norm.clone()
         
         return QuantumState(
-            amplitudes=state_vector,
-            basis_labels=[f"|{i}⟩" for i in range(self.dim)],
-            phase=torch.zeros(self.dim, dtype=torch.complex128)
+            amplitudes=state,
+            basis_labels=self.basis_states,
+            phase=torch.zeros_like(state, dtype=torch.complex128),
+            original_norm=original_norm
         )
 
     def evolve_with_decoherence(self, state: QuantumState, T1: float, T2: float, times: torch.Tensor) -> List[QuantumState]:
@@ -573,17 +741,9 @@ class HilbertSpace:
         return states
 
     def state_fidelity(self, state1: QuantumState, state2: QuantumState) -> torch.Tensor:
-        """Compute fidelity between two quantum states.
-        
-        Args:
-            state1: First quantum state
-            state2: Second quantum state
-            
-        Returns:
-            Fidelity between states
-        """
-        v1 = state1.amplitudes
-        v2 = state2.amplitudes
+        """Compute fidelity between two quantum states."""
+        v1 = self._ensure_complex128(state1.amplitudes)
+        v2 = self._ensure_complex128(state2.amplitudes)
         
         if len(v1.shape) == 1:
             v1 = v1.unsqueeze(0)
@@ -591,7 +751,7 @@ class HilbertSpace:
             v2 = v2.unsqueeze(0)
             
         overlap = torch.abs(torch.matmul(v1.conj(), v2.T))**2
-        return overlap.squeeze().real
+        return overlap.squeeze().real.to(torch.float64)
 
     def measure_variance(self, state: QuantumState, observable: torch.Tensor) -> torch.Tensor:
         """Compute variance of an observable in a quantum state.
@@ -769,13 +929,36 @@ class HilbertSpace:
         Returns:
             Entanglement entropy tensor
         """
-        # Reshape amplitudes into bipartite system (2 x N/2)
-        shape = state.amplitudes.shape
-        mid_dim = shape[-1] // 2
-        amplitudes = state.amplitudes.view(2, mid_dim)
+        # Get state shape and ensure it's 2D
+        amplitudes = state.amplitudes
+        if len(amplitudes.shape) == 1:
+            amplitudes = amplitudes.unsqueeze(0)
+        
+        # Get dimensions
+        batch_size = amplitudes.shape[0]
+        total_dim = amplitudes.shape[-1]
+        
+        # Find the closest power of 2 that divides the total dimension
+        subsys_dim = 2
+        while subsys_dim * subsys_dim <= total_dim:
+            if total_dim % subsys_dim == 0:
+                break
+            subsys_dim *= 2
+        
+        if total_dim % subsys_dim != 0:
+            print(f"Warning: Cannot find exact bipartition for dimension {total_dim}, using approximate method")
+            # Use the largest possible subsystem dimension
+            subsys_dim = int(np.sqrt(total_dim))
+        
+        # Reshape amplitudes for bipartite split
+        try:
+            amplitudes = amplitudes.view(batch_size, subsys_dim, -1)
+        except RuntimeError as e:
+            print(f"Warning: Shape {amplitudes.shape} is invalid for input of size {total_dim}")
+            return torch.zeros(batch_size, device=amplitudes.device)
         
         # Compute reduced density matrix
-        rho = torch.einsum('ij,ik->jk', amplitudes, torch.conj(amplitudes))
+        rho = torch.einsum('bij,bik->bjk', amplitudes, torch.conj(amplitudes))
         
         # Compute eigenvalues
         eigenvalues = torch.linalg.eigvalsh(rho)
@@ -784,11 +967,12 @@ class HilbertSpace:
         eigenvalues = torch.clamp(eigenvalues, min=0.0)
         
         # Normalize eigenvalues
-        eigenvalues = eigenvalues / torch.sum(eigenvalues)
+        eigenvalues = eigenvalues / (torch.sum(eigenvalues, dim=-1, keepdim=True) + 1e-10)
         
         # Compute von Neumann entropy
         entropy = -torch.sum(
-            eigenvalues * torch.log2(eigenvalues + 1e-10)
+            eigenvalues * torch.log2(eigenvalues + 1e-10),
+            dim=-1
         )
         
         return entropy
@@ -829,44 +1013,235 @@ class HilbertSpace:
     def measure_state(
         self,
         state: QuantumState,
-        measurement: torch.Tensor
-    ) -> Tuple[int, QuantumState]:
+        measurement: Union[str, torch.Tensor]
+    ) -> torch.Tensor:
         """Perform projective measurement on quantum state.
-        
+
         Args:
             state: Quantum state to measure
-            measurement: Measurement operator (projector)
-            
+            measurement: Measurement basis name ("X", "Y", "Z") or operator
+
         Returns:
-            Tuple of (measurement result, post-measurement state)
+            Measurement result as a tensor with shape (2 * dim,) containing real and imaginary parts
         """
         # Ensure complex types
         state_vector = state.amplitudes.to(torch.complex128)
-        measurement = measurement.to(torch.complex128)
+        if len(state_vector.shape) == 1:
+            state_vector = state_vector.unsqueeze(0)
+        elif len(state_vector.shape) > 2:
+            # Take only the first state if we have multiple batches
+            state_vector = state_vector[0].unsqueeze(0)
         
-        # Compute measurement probabilities
+        # Convert string basis to operator
+        if isinstance(measurement, str):
+            if measurement == "X":
+                measurement = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
+            elif measurement == "Y":
+                measurement = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
+            elif measurement == "Z":
+                measurement = torch.tensor([[1, 0], [0, -1]], dtype=torch.complex128)
+            else:
+                raise ValueError(f"Unknown measurement basis {measurement}")
+            
+            # Expand to full dimension if needed
+            if measurement.shape[0] < self.dim:
+                expanded = torch.eye(self.dim, dtype=torch.complex128)
+                expanded[:2, :2] = measurement
+                measurement = expanded
+        else:
+            measurement = measurement.to(torch.complex128)
+        
+        # Project state onto measurement basis
+        eigenvals, eigenvecs = torch.linalg.eigh(measurement)
+        
+        # Get probabilities for each eigenstate
+        probs = torch.zeros(len(eigenvals), dtype=torch.float64)
+        for i in range(len(eigenvals)):
+            proj = torch.outer(eigenvecs[:, i], eigenvecs[:, i].conj())
+            overlap = torch.abs(torch.einsum('bi,ij,bj->b', state_vector.conj(), proj, state_vector))
+            probs[i] = overlap.mean().real  # Average over batch
+        
+        # Sample measurement result
+        result = torch.multinomial(probs, 1)[0]
+        
+        # Project state onto measurement result
+        proj = torch.outer(eigenvecs[:, result], eigenvecs[:, result].conj())
+        new_state = torch.matmul(proj, state_vector[0])  # Use first state in batch
+        
+        # Convert to real vector with real and imaginary parts
+        result_vector = torch.zeros(2 * self.dim, dtype=torch.float64)
+        result_vector[:self.dim] = new_state.real
+        result_vector[self.dim:] = new_state.imag
+        
+        return result_vector
+
+    def state_to_neural(self, state: QuantumState) -> torch.Tensor:
+        """Convert quantum state to neural network representation."""
+        # Check for zero state
+        if torch.all(torch.abs(state.amplitudes) < 1e-10):
+            raise ValueError("Cannot convert zero state to neural representation")
+            
+        # Get state vector
+        state_vector = state.amplitudes.to(torch.complex128)
         if len(state_vector.shape) == 1:
             state_vector = state_vector.unsqueeze(0)
             
-        probabilities = []
-        for i in range(measurement.shape[0]):
-            projector = measurement[i:i+1].T @ measurement[i:i+1].conj()
-            prob = torch.abs(
-                torch.einsum('bi,ij,bj->b', state_vector.conj(), projector, state_vector)
-            ).real
-            probabilities.append(prob)
+        # Convert to real representation
+        real_part = state_vector.real
+        imag_part = state_vector.imag
+        
+        # Include phase information
+        phase = state.phase.to(torch.complex128)
+        if len(phase.shape) == 1:
+            phase = phase.unsqueeze(0).expand(state_vector.shape[0], -1)
+        phase_real = phase.real
+        phase_imag = phase.imag
+        
+        # Concatenate all components
+        neural_repr = torch.cat([real_part, imag_part, phase_real, phase_imag], dim=-1)
+        
+        return neural_repr
+        
+    def neural_to_state(self, neural_repr: torch.Tensor) -> QuantumState:
+        """Convert neural network representation back to quantum state."""
+        # Split components
+        split_point = neural_repr.shape[-1] // 4
+        real_part = neural_repr[..., :split_point]
+        imag_part = neural_repr[..., split_point:2*split_point]
+        phase_real = neural_repr[..., 2*split_point:3*split_point]
+        phase_imag = neural_repr[..., 3*split_point:]
+        
+        # Combine into complex amplitudes
+        amplitudes = torch.complex(real_part, imag_part)
+        phase = torch.complex(phase_real, phase_imag)
+        
+        # Normalize
+        norm = torch.sqrt(torch.sum(torch.abs(amplitudes)**2, dim=-1, keepdim=True))
+        if torch.any(norm > 1e-10):
+            amplitudes = amplitudes / norm
             
-        probabilities = torch.cat(probabilities)
-        
-        # Sample measurement result
-        result = int(torch.multinomial(probabilities, 1).item())
-        
-        # Compute post-measurement state
-        post_state = measurement[result:result+1].T
-        post_state = post_state / torch.sqrt(probabilities[result])
-        
-        return result, QuantumState(
-            amplitudes=post_state.squeeze(),
-            basis_labels=state.basis_labels,
-            phase=state.phase
+        # Handle batch dimension
+        if len(amplitudes.shape) > 1:
+            amplitudes = amplitudes.squeeze(0)
+            phase = phase.squeeze(0)
+            
+        return QuantumState(
+            amplitudes=amplitudes,
+            basis_labels=self.basis_states,
+            phase=phase
         )
+
+    def compute_geometric_phase(self, state: QuantumState, path: torch.Tensor) -> torch.Tensor:
+        """Compute geometric phase along a closed path."""
+        # Ensure path is properly shaped and typed
+        path = path.to(torch.float64)
+        if len(path.shape) == 1:
+            path = path.unsqueeze(0)
+            
+        # Initialize phase accumulation
+        total_phase = torch.zeros(1, dtype=torch.float64)
+        current_state = state
+        
+        # Create time-dependent Hamiltonian
+        def get_hamiltonian(t: float) -> torch.Tensor:
+            # Create a time-dependent Hamiltonian based on the path parameter
+            H = self.hamiltonian.clone()  # Use the stored Hamiltonian as base
+            # Add time dependence through rotation
+            theta = 2 * np.pi * t
+            rotation = torch.tensor([
+                [np.cos(theta), np.sin(theta)],
+                [-np.sin(theta), np.cos(theta)]
+            ], dtype=torch.complex128)
+            if H.shape[0] > 2:
+                # Extend rotation to full Hilbert space dimension
+                full_rotation = torch.eye(H.shape[0], dtype=torch.complex128)
+                full_rotation[:2, :2] = rotation
+                rotation = full_rotation
+            return torch.matmul(rotation, H)
+        
+        # Compute phase for each segment with adaptive step size
+        for i in range(len(path) - 1):
+            # Get current and next points
+            current = path[i]
+            next_point = path[i + 1]
+            dt = next_point - current
+            
+            # Use smaller steps for better accuracy
+            n_substeps = 10
+            dt_sub = dt / n_substeps
+            
+            # Evolve through substeps
+            for j in range(n_substeps):
+                t = current + j * dt_sub
+                H = get_hamiltonian(t.item())
+                
+                # Evolve state for small time step
+                evolved = self.evolve_state(current_state, H, dt_sub)
+                # Handle both single state and list return types
+                evolved_state = evolved[0] if isinstance(evolved, list) else evolved
+                
+                # Compute phase difference using parallel transport
+                overlap = torch.vdot(current_state.amplitudes, evolved_state.amplitudes)
+                phase_diff = torch.angle(overlap)
+                
+                # Ensure phase difference is in [-π, π]
+                if phase_diff > np.pi:
+                    phase_diff -= 2 * np.pi
+                elif phase_diff < -np.pi:
+                    phase_diff += 2 * np.pi
+                    
+                # Accumulate phase
+                total_phase += phase_diff
+                
+                # Update state for next substep
+                current_state = evolved_state
+            
+        # Ensure final phase is gauge invariant
+        total_phase = torch.remainder(total_phase, 2 * np.pi)
+        if total_phase > np.pi:
+            total_phase -= 2 * np.pi
+            
+        return total_phase.real
+
+    def batch_convert_states(self, states: List[QuantumState]) -> torch.Tensor:
+        """Convert batch of states to tensor representation."""
+        # Convert states to tensors and stack
+        state_tensors = []
+        for state in states:
+            # Ensure complex128 dtype
+            amplitudes = state.amplitudes.to(torch.complex128)
+            phase = state.phase.to(torch.complex128)
+            
+            # Combine amplitude and phase
+            full_state = amplitudes * torch.exp(1j * torch.angle(phase))
+            state_tensors.append(full_state)
+            
+        # Stack states
+        batch_tensor = torch.stack(state_tensors)
+        
+        # Normalize batch
+        norms = torch.sqrt(torch.sum(torch.abs(batch_tensor)**2, dim=-1, keepdim=True)).to(torch.float64)
+        batch_tensor = batch_tensor / norms
+        
+        return batch_tensor
+
+    def geometric_phase_consistency(self, state: QuantumState, path: torch.Tensor) -> bool:
+        """Check geometric phase consistency along path."""
+        # Ensure path is properly shaped and typed
+        path = path.to(torch.float64)
+        if len(path.shape) == 1:
+            path = path.unsqueeze(0)
+            
+        # Compute forward phase
+        forward_phase = self.compute_geometric_phase(state, path)
+        
+        # Compute reverse phase
+        reverse_path = torch.flip(path, [0])
+        reverse_phase = self.compute_geometric_phase(state, reverse_path)
+        
+        # Check consistency (phases should sum to zero modulo 2π)
+        phase_sum = torch.remainder(forward_phase + reverse_phase, 2 * np.pi)
+        if phase_sum > np.pi:
+            phase_sum -= 2 * np.pi
+            
+        return bool(torch.abs(phase_sum) < 1e-4)

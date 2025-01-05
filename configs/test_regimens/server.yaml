@@ -1,4 +1,6 @@
 # Test configuration for server hardware (high-performance servers)
+# Contains only performance-related settings that override base.yaml
+
 hardware_profile:
   name: "server"
   description: "Configuration for high-performance servers"
@@ -7,17 +9,31 @@ hardware_profile:
     cpu: "high_end"
     memory: "high_end"
 
-geometric_tests:
-  batch_size: 512
-  max_dim: 1024
-  num_samples: 10000
+# Performance-related parameters
+fiber_bundle:
+  batch_size: 128
+
+geometric:
+  batch_size: 128
+  max_samples: 5000
+  max_iterations: 500
 
 pattern_tests:
-  max_patterns: 1024
-  pattern_size: 512
+  batch_size: 128
+  max_patterns: 512
+  pattern_size: 256
   num_iterations: 1000
 
-performance_tests:
-  warmup_iters: 10
-  test_iters: 100
-  max_batch_size: 1024
+parallel_transport:
+  batch_size: 64
+  path_points: 200
+  test_cases: 50
+
+memory_management:
+  max_cached_tensors: 100000
+  gc_frequency: 5000
+
+quantum:
+  dt: 0.001
+  batch_size: 128
+  max_iterations: 500

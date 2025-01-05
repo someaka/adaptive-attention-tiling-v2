@@ -175,11 +175,6 @@ class AttentionOperad(OperadicComposition):
             [op.composition_law for op in operations],
             enrichments
         )
-        
-        # Normalize the composed law to preserve significant terms
-        norm = torch.norm(composed_law)
-        if norm > 1e-6:
-            composed_law = composed_law / norm
             
         # Combine enrichment data
         combined_enrichment = self._combine_enrichments(enrichments)
@@ -194,6 +189,12 @@ class AttentionOperad(OperadicComposition):
                 if op.natural_transformation is not None
             ]
         }
+        
+        # Normalize the composed law to preserve significant terms
+        # but only after all compositions are done
+        norm = torch.norm(composed_law)
+        if norm > 1e-6:
+            composed_law = composed_law / norm
         
         return OperadicOperation(
             source_dim=source_dim,
@@ -305,38 +306,54 @@ class AttentionOperad(OperadicComposition):
         Returns:
             The composed morphism tensor with preserved structure
         """
-        result = morphisms[0]
-        for morphism, enrichment in zip(morphisms[1:], enrichments):
-            if enrichment.get('preserve_symplectic'):
-                # Compose while preserving symplectic structure
-                result = self._symplectic_compose(result, morphism)
-                
-                # Ensure result has correct shape after composition
-                source_dim = morphisms[0].shape[1]  # First morphism's input dimension
-                target_dim = morphisms[-1].shape[0]  # Last morphism's output dimension
-                
-                # Reshape result to match required dimensions
-                if result.shape != (target_dim, source_dim):
-                    new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
-                    min_rows = min(result.shape[0], target_dim)
-                    min_cols = min(result.shape[1], source_dim)
-                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
-                    result = new_result
-            else:
-                # Standard composition
-                result = torch.matmul(morphism, result)
-                
-                # Ensure result has correct shape
-                source_dim = morphisms[0].shape[1]
-                target_dim = morphisms[-1].shape[0]
-                if result.shape != (target_dim, source_dim):
-                    new_result = torch.zeros(target_dim, source_dim, device=result.device, dtype=result.dtype)
-                    min_rows = min(result.shape[0], target_dim)
-                    min_cols = min(result.shape[1], source_dim)
-                    new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
-                    result = new_result
+        # Extract norms and complex phases
+        norms = [torch.abs(m) for m in morphisms]
+        phases = [m / (n + 1e-8) for m, n in zip(morphisms, norms)]  # Unit complex numbers
         
-        return result
+        # Compose norms using geometric mean
+        result_norm = norms[0]
+        for norm in norms[1:]:
+            result_norm = torch.sqrt(result_norm * norm)
+        
+        # Compose phases multiplicatively
+        result_phase = phases[0]
+        for phase in phases[1:]:
+            result_phase = result_phase * phase
+            
+        # Combine norm and phase
+        result = result_norm * result_phase
+        
+        # Apply quantum corrections with proper scaling
+        if enrichments and enrichments[0].get('preserve_symplectic'):
+            # Get dimensions for scaling
+            source_dim = morphisms[0].shape[1]  # First morphism's input dimension
+            target_dim = morphisms[-1].shape[0]  # Last morphism's output dimension
+            
+            # Compute quantum correction scale using float32 for arange
+            k = 0.001  # Small coupling constant
+            correction = k * torch.exp(-torch.arange(min(source_dim, target_dim), dtype=torch.float32, device=result.device))
+            correction = correction.to(dtype=result.dtype)  # Convert to complex if needed
+            
+            # Apply correction with proper broadcasting
+            if len(result.shape) == 2:
+                correction = correction.unsqueeze(1)  # Add dimension for broadcasting
+            result = result * (1 + correction.unsqueeze(-1))  # Add dimension for broadcasting
+        
+        # Ensure result has correct shape (target_dim, source_dim)
+        if len(result.shape) > 2:
+            # Take diagonal elements if result is higher dimensional
+            result = torch.diagonal(result, dim1=0, dim2=1)
+            result = result.transpose(0, 1)  # Transpose to get (target_dim, source_dim)
+        elif len(result.shape) == 1:
+            # Expand to 2D if result is 1D
+            result = result.unsqueeze(1)
+
+        # Normalize the final result
+        norm = torch.norm(result)
+        if norm > 1e-6:
+            result = result / norm
+
+        return result.contiguous()
     
     def _symplectic_compose(self, a1: torch.Tensor, a2: torch.Tensor) -> torch.Tensor:
         """Compose two anomaly polynomials using symplectic structure."""
@@ -358,12 +375,6 @@ class AttentionOperad(OperadicComposition):
         if a2.dim() == 1:
             a2 = a2.unsqueeze(0)  # Shape becomes (1, N)
 
-        # Normalize inputs
-        if torch.norm(a1) > 0:
-            a1 = a1 / torch.norm(a1)
-        if torch.norm(a2) > 0:
-            a2 = a2 / torch.norm(a2)
-
         # Get target dimensions
         target_dim = a1.shape[0]
         source_dim = a2.shape[1] if a2.dim() > 1 else 1
@@ -377,6 +388,7 @@ class AttentionOperad(OperadicComposition):
             a1 = new_a1
 
         # Calculate the composition using matrix multiplication
+        # Preserve U(1) phase structure by not normalizing inputs
         result = torch.matmul(a1, a2)
 
         # Ensure result has correct shape (target_dim, source_dim)
@@ -386,10 +398,6 @@ class AttentionOperad(OperadicComposition):
             min_cols = min(result.shape[1], source_dim)
             new_result[:min_rows, :min_cols] = result[:min_rows, :min_cols]
             result = new_result
-
-        # Normalize the result
-        if torch.norm(result) > 0:
-            result = result / torch.norm(result)
 
         return result
     
@@ -453,63 +461,45 @@ class AttentionOperad(OperadicComposition):
         )
 
 class EnrichedAttention:
-    """Enriched attention structure with wave emergence support.
+    """Enriched attention structure with wave emergence.
     
-    This class implements both wave operator functionality and enriched
-    categorical structure for attention operations.
-    
-    Attributes:
-        base_category: Base category for enrichment
-        wave_enabled: Whether wave emergence is enabled
-        _k: Wave number parameter
-        _omega: Angular frequency parameter
-        dtype: Data type for tensors
+    This class implements enriched categorical structure with wave emergence
+    behavior for natural transitions between dimensions.
     """
+    
     def __init__(
         self,
         base_category: str = "SymplecticVect",
         wave_enabled: bool = True,
+        dtype: torch.dtype = torch.float32,
         _k: float = 2.0,
-        _omega: float = 1.0,
-        dtype: torch.dtype = torch.float32
+        _omega: float = 1.0
     ):
-        """Initialize enriched attention structure.
-        
-        Args:
-            base_category: Base category for enrichment
-            wave_enabled: Whether wave emergence is enabled
-            _k: Wave number parameter
-            _omega: Angular frequency parameter
-            dtype: Data type for tensors
-        """
+        """Initialize enriched attention structure."""
         self.base_category = base_category
         self.wave_enabled = wave_enabled
-        self._k = _k
-        self._omega = _omega
         self.dtype = dtype
-    
+        self._k = _k  # Wave number
+        self._omega = _omega  # Angular frequency
+        
     def wave_operator(self, tensor: Tensor) -> Tensor:
         """Apply wave operator to tensor.
-        
-        Implements wave operator: W_t = exp(-iHt) where H is the Hamiltonian
         
         Args:
             tensor: Input tensor
             
         Returns:
-            Tensor with wave operator applied
+            Complex tensor with wave structure
         """
         if not self.wave_enabled:
             return tensor
             
-        # Convert tensor to specified dtype
-        tensor = tensor.to(dtype=self.dtype)
-            
-        # Compute wave phase
-        phase = self._k * torch.sum(tensor * tensor, dim=-1, keepdim=True)
-        
-        # Apply wave operator
-        return tensor * torch.exp(-1j * self._omega * phase)
+        # Convert to complex with phase
+        phase = torch.sum(tensor * tensor, dim=-1, keepdim=True) * self._k
+        return torch.complex(
+            tensor,
+            tensor * torch.sin(phase)
+        )
         
     def create_wave_packet(self, position: Tensor, momentum: Tensor) -> Tensor:
         """Create wave packet from position and momentum.
@@ -524,16 +514,46 @@ class EnrichedAttention:
         if not self.wave_enabled:
             return position
             
-        # Convert tensors to specified dtype
-        position = position.to(dtype=self.dtype)
-        momentum = momentum.to(dtype=self.dtype)
+        # Handle complex inputs
+        if position.is_complex():
+            position = torch.abs(position)  # Use magnitude directly
+        else:
+            position = torch.abs(position.to(dtype=self.dtype))
             
+        if momentum.is_complex():
+            momentum = torch.angle(momentum) / self._k  # Extract phase
+        else:
+            momentum = momentum.to(dtype=self.dtype)
+        
+        # Ensure compatible shapes
+        if position.shape != momentum.shape:
+            # If momentum has extra dimensions, sum over them
+            if len(momentum.shape) > len(position.shape):
+                momentum = torch.mean(momentum, dim=tuple(range(len(momentum.shape)-1)))
+            # If position has extra dimensions, sum over them
+            elif len(position.shape) > len(momentum.shape):
+                position = torch.mean(position, dim=tuple(range(len(position.shape)-1)))
+        
         # Create Gaussian wave packet
         sigma = 1.0  # Width parameter
-        norm = torch.exp(-torch.sum(position * position, dim=-1) / (4 * sigma**2))
-        phase = torch.sum(momentum * position, dim=-1)
+        # Keep the last dimension by not summing over it
+        norm = torch.exp(-torch.sum(position * position, dim=-1, keepdim=True) / (4 * sigma**2))
+        phase = torch.sum(momentum * position, dim=-1, keepdim=True)
         
-        return norm * torch.exp(1j * phase)
+        # Create complex wave packet
+        real = norm * torch.cos(phase)
+        imag = norm * torch.sin(phase)
+        packet = torch.complex(real, imag)
+        
+        # Scale to preserve expectation values
+        packet = packet * torch.sqrt(position + 1e-7)  # Add epsilon for stability
+        packet = packet * torch.exp(1j * momentum)  # Add momentum phase
+        
+        # Normalize to preserve total probability
+        packet = packet / (torch.norm(packet) + 1e-7)
+        packet = packet * torch.sqrt(torch.mean(position))  # Scale by mean position
+        
+        return packet
         
     def get_position(self, wave: Tensor) -> Tensor:
         """Extract position from wave packet.
@@ -544,11 +564,15 @@ class EnrichedAttention:
         Returns:
             Position tensor
         """
-        if not self.wave_enabled or not torch.is_complex(wave):
-            return wave.real
+        if not self.wave_enabled or not wave.is_complex():
+            return wave
             
-        # Extract position as expectation value
-        return wave.real.to(dtype=self.dtype)
+        # Extract position as magnitude and normalize
+        pos = torch.abs(wave)
+        pos = pos / (torch.norm(pos) + 1e-7)  # Normalize
+        pos = pos * torch.mean(torch.abs(wave))  # Scale by mean magnitude
+        
+        return pos
         
     def get_momentum(self, wave: Tensor) -> Tensor:
         """Extract momentum from wave packet.
@@ -559,11 +583,15 @@ class EnrichedAttention:
         Returns:
             Momentum tensor
         """
-        if not self.wave_enabled or not torch.is_complex(wave):
-            return wave.imag
+        if not self.wave_enabled or not wave.is_complex():
+            return wave
             
-        # Extract momentum as expectation value
-        return (-self._k * wave.imag).to(dtype=self.dtype)
+        # Extract momentum from phase gradient and normalize
+        mom = torch.angle(wave + 1j) / self._k  # Add i to avoid zero angle
+        mom = mom / (torch.norm(mom) + 1e-7)  # Normalize
+        mom = mom * torch.mean(torch.abs(wave))  # Scale by mean magnitude
+        
+        return mom
         
     def create_morphism(
         self,
@@ -575,17 +603,17 @@ class EnrichedAttention:
         
         Args:
             pattern: Input pattern tensor
-            operation: Operadic operation to apply
+            operation: Operadic operation
             include_wave: Whether to include wave structure
             
         Returns:
-            Transformed tensor with enriched structure
+            Transformed pattern with preserved structure
         """
-        # Convert pattern to specified dtype
-        pattern = pattern.to(dtype=self.dtype)
+        # Apply operadic operation
+        result = torch.matmul(pattern, operation.composition_law.t())
         
-        # Apply wave operator if enabled
-        if include_wave and self.wave_enabled:
-            pattern = self.wave_operator(pattern)
+        # Add wave structure if enabled
+        if self.wave_enabled and include_wave:
+            result = self.wave_operator(result)
             
-        return pattern
+        return result

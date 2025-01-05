@@ -20,16 +20,16 @@ class QuantumState:
 
     def __post_init__(self):
         """Ensure state normalization and proper tensor types."""
-        # Convert to complex64 if not already
+        # Convert to complex128 if not already
         if not torch.is_complex(self.amplitudes):
-            self.amplitudes = self.amplitudes.to(torch.complex64)
-        elif self.amplitudes.dtype != torch.complex64:
-            self.amplitudes = self.amplitudes.to(torch.complex64)
+            self.amplitudes = self.amplitudes.to(torch.complex128)
+        elif self.amplitudes.dtype != torch.complex128:
+            self.amplitudes = self.amplitudes.to(torch.complex128)
             
         if not torch.is_complex(self.phase):
-            self.phase = self.phase.to(torch.complex64)
-        elif self.phase.dtype != torch.complex64:
-            self.phase = self.phase.to(torch.complex64)
+            self.phase = self.phase.to(torch.complex128)
+        elif self.phase.dtype != torch.complex128:
+            self.phase = self.phase.to(torch.complex128)
 
         # Normalize state vector
         if len(self.amplitudes.shape) == 1:
@@ -40,6 +40,12 @@ class QuantumState:
             # Batch of state vectors
             norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=1, keepdim=True))
             self.amplitudes = self.amplitudes / (norm + 1e-8)
+
+        # Store original norm if not provided
+        if self.original_norm is None:
+            self.original_norm = norm.to(torch.float64)
+        else:
+            self.original_norm = self.original_norm.to(torch.float64)
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -54,8 +60,8 @@ class QuantumState:
     def norm(self) -> torch.Tensor:
         """Compute the norm of the quantum state."""
         if len(self.amplitudes.shape) == 1:
-            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
-        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=1))
+            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2)).to(torch.float64)
+        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=1)).to(torch.float64)
 
     def density_matrix(self) -> torch.Tensor:
         """Compute the density matrix representation of the state."""
@@ -184,8 +190,13 @@ class QuantumState:
             bool: True if the state is pure, False otherwise
         """
         rho = self.density_matrix()
-        purity = torch.trace(torch.matmul(rho, rho)).real
-        return bool(abs(purity - 1.0) < tolerance)
+        if len(rho.shape) == 3:  # Batched case
+            # Compute purity for each state in batch
+            purity = torch.diagonal(torch.matmul(rho, rho), dim1=-2, dim2=-1).sum(-1).real
+            return bool(torch.all(torch.abs(purity - 1.0) < tolerance))
+        else:  # Single state case
+            purity = torch.trace(torch.matmul(rho, rho)).real
+            return bool(abs(purity - 1.0) < tolerance)
 
     def state_vector(self) -> torch.Tensor:
         """Get the state vector representation.

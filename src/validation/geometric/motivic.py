@@ -119,8 +119,35 @@ class MotivicValidator:
             
         # Check evolution properties
         try:
+            # Check for NaN or infinite values in connection
+            if not torch.all(torch.isfinite(connection.values)):
+                return ConnectionValidation(
+                    is_valid=False,
+                    message="Connection contains NaN or infinite values"
+                )
+            
+            # Check symmetry in lower indices
+            for i in range(connection.values.shape[0]):
+                for j in range(connection.values.shape[1]):
+                    if not torch.allclose(
+                        connection.values[i, j, :, :],
+                        connection.values[i, j, :, :].transpose(-2, -1),
+                        rtol=self.tolerance,
+                        atol=self.tolerance
+                    ):
+                        return ConnectionValidation(
+                            is_valid=False,
+                            message="Connection not symmetric in lower indices"
+                        )
+            
             # Use the pre-computed dynamics state
             evolution_valid = bool(torch.isfinite(connection.dynamics_state).all())
+            if not evolution_valid:
+                return ConnectionValidation(
+                    is_valid=False,
+                    message="Dynamics state contains NaN or infinite values"
+                )
+                
         except Exception as e:
             return ConnectionValidation(
                 is_valid=False,
@@ -146,6 +173,41 @@ class MotivicValidator:
         """
         # Check cohomology class exists
         if not hasattr(curvature, 'cohomology_class'):
+            return CurvatureValidation(
+                bounds_satisfied=False,
+                sectional=curvature.riemann,
+                scalar_curvatures=curvature.scalar_curvatures,
+                error_bounds=torch.full_like(curvature.scalar_curvatures, float('inf'))
+            )
+            
+        # Check for NaN or infinite values
+        if not torch.all(torch.isfinite(curvature.riemann)) or \
+           not torch.all(torch.isfinite(curvature.ricci)) or \
+           not torch.all(torch.isfinite(curvature.scalar_curvatures)):
+            return CurvatureValidation(
+                bounds_satisfied=False,
+                sectional=curvature.riemann,
+                scalar_curvatures=curvature.scalar_curvatures,
+                error_bounds=torch.full_like(curvature.scalar_curvatures, float('inf'))
+            )
+            
+        # Check Ricci tensor symmetry
+        for i in range(curvature.ricci.shape[0]):
+            if not torch.allclose(
+                curvature.ricci[i],
+                curvature.ricci[i].transpose(-2, -1),
+                rtol=self.tolerance,
+                atol=self.tolerance
+            ):
+                return CurvatureValidation(
+                    bounds_satisfied=False,
+                    sectional=curvature.riemann,
+                    scalar_curvatures=curvature.scalar_curvatures,
+                    error_bounds=torch.full_like(curvature.scalar_curvatures, float('inf'))
+                )
+                
+        # Check for negative scalar curvature
+        if torch.any(curvature.scalar_curvatures < -self.tolerance):
             return CurvatureValidation(
                 bounds_satisfied=False,
                 sectional=curvature.riemann,
@@ -218,12 +280,18 @@ class MotivicValidator:
             return False
             
         # Heights should be strictly positive with tolerance
-        if not bool(torch.all(height_data > -1e-6)):
+        if not bool(torch.all(height_data > self.tolerance)):
             return False
             
         # Heights should be finite
         if not bool(torch.isfinite(height_data).all()):
             return False
+            
+        # Check monotonicity
+        if height_data.numel() > 1:
+            diffs = height_data[1:] - height_data[:-1]
+            if torch.any(diffs <= -self.tolerance):
+                return False
             
         return True
 
@@ -238,15 +306,10 @@ class MotivicValidator:
             
         # Check growth conditions with tolerance
         if height_data.numel() > 1:
-            # Sort heights to check monotonicity
-            sorted_heights, _ = torch.sort(height_data)
-            
-            # Compute relative changes
-            changes = (sorted_heights[1:] - sorted_heights[:-1]) / (sorted_heights[:-1] + 1e-8)
-            
-            # Allow small negative changes (up to 5% relative change)
-            # This is more lenient to account for numerical instabilities
-            return bool(torch.all(changes > -0.05))
+            # Check if heights are monotonically increasing in sequence
+            diffs = height_data[1:] - height_data[:-1]
+            if torch.any(diffs <= -self.tolerance):
+                return False
             
         return True
 

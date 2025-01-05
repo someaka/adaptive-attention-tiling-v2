@@ -31,20 +31,24 @@ class ArithmeticDynamics(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
-        motive_rank: int,
+        height_dim: Optional[int] = None,
+        motive_rank: int = 4,
+        manifold_dim: Optional[int] = None,  # Add manifold_dim parameter
         num_primes: int = 8,  # Number of prime bases for adelic structure
-        height_dim: Optional[int] = None,  # Dimension of height space
         quantum_weight: float = 0.1,  # Weight for quantum corrections
         dtype: Optional[torch.dtype] = None
     ):
         super().__init__()
 
+        # Initialize dimensions
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
-        self.height_dim = motive_rank if height_dim is None else height_dim  # Use motive_rank as height_dim if not specified
+        # Set height_dim to match hidden_dim to ensure dimension compatibility
+        self.height_dim = hidden_dim if height_dim is None else height_dim
+        self.manifold_dim = hidden_dim if manifold_dim is None else manifold_dim  # Use hidden_dim as manifold_dim if not specified
         self.quantum_weight = quantum_weight
-        self.dtype = dtype if dtype is not None else torch.float32
+        self.dtype = dtype if dtype is not None else torch.float32  # Default to float32 for better compatibility
 
         # Initialize prime bases
         self.register_buffer(
@@ -57,52 +61,75 @@ class ArithmeticDynamics(nn.Module):
             torch.randn(num_primes, self.height_dim, dtype=self.dtype) / np.sqrt(num_primes * self.height_dim)
         )
 
-        # Initialize networks
+        # Initialize networks with the correct dtype
+        def init_linear(in_features: int, out_features: int) -> nn.Linear:
+            if self.dtype.is_complex:
+                # For complex dtypes, initialize with real and imaginary parts
+                real_weight = torch.randn(out_features, in_features) / np.sqrt(in_features)
+                imag_weight = torch.randn(out_features, in_features) / np.sqrt(in_features)
+                weight = torch.complex(real_weight, imag_weight)
+                
+                real_bias = torch.randn(out_features) / np.sqrt(out_features)
+                imag_bias = torch.randn(out_features) / np.sqrt(out_features)
+                bias = torch.complex(real_bias, imag_bias)
+                
+                linear = nn.Linear(in_features, out_features, bias=True)
+                with torch.no_grad():
+                    linear.weight.data = weight.to(self.dtype)
+                    linear.bias.data = bias.to(self.dtype)
+            else:
+                # For real dtypes, use standard initialization
+                linear = nn.Linear(in_features, out_features, dtype=self.dtype)
+            return linear
+
+        # Initialize height map
         self.height_map = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, height_dim or hidden_dim, dtype=self.dtype)
+            init_linear(hidden_dim // 2, self.height_dim)
         )
-        self.flow = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
+        
+        # Flow network should match height_dim
+        self.flow = init_linear(self.height_dim, self.height_dim)
         
         # Initialize L-function network to output motive_rank dimensions
         self.l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
+            init_linear(hidden_dim // 2, motive_rank)
         )
 
         # Adelic projection
         self.adelic_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, num_primes * motive_rank, dtype=self.dtype)
+            init_linear(hidden_dim // 2, num_primes * motive_rank)
         )
 
         # Output projection layers
         self.min_dim = hidden_dim  # Use hidden_dim as min_dim
         self.measure_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
+            init_linear(self.height_dim, hidden_dim // 2),  # Input is height_dim
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, hidden_dim, dtype=self.dtype)
+            init_linear(hidden_dim // 2, hidden_dim)  # Output is hidden_dim
         )
-        self.output_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
+        self.output_proj = init_linear(hidden_dim, hidden_dim)  # Keep same dimension
 
-        # Quantum correction networks - ensure same output size as l_function
+        # Quantum correction networks - ensure same output size as height_map
         self.quantum_height = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
+            init_linear(self.manifold_dim, self.manifold_dim // 2),  # Use manifold_dim/2 as intermediate
             nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
+            init_linear(self.manifold_dim // 2, self.height_dim)  # Output height_dim
         )
         
         self.quantum_l_function = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype),
+            init_linear(self.manifold_dim, self.manifold_dim // 2),  # Use manifold_dim/2 as intermediate
             nn.Tanh(),
-            nn.Linear(hidden_dim, motive_rank, dtype=self.dtype)  # Match l_function output size
+            init_linear(self.manifold_dim // 2, motive_rank)  # Output motive_rank
         )
 
         # Quantum correction projection
-        self.quantum_proj = nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)  # Keep same dimension
+        self.quantum_proj = init_linear(self.hidden_dim, self.manifold_dim)  # Project to manifold_dim instead of height_dim
 
     @staticmethod
     def _get_first_n_primes(n: int) -> List[int]:
@@ -133,17 +160,17 @@ class ArithmeticDynamics(nn.Module):
         """
         # Save original shape for later reshaping
         original_shape = x.shape
+        original_dtype = x.dtype
         
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
             # Flatten all but last dimension
             flat_shape = (-1, x.shape[-1])
             x = x.reshape(flat_shape)
-            # Project to hidden_dim using adaptive pooling
-            x = torch.nn.functional.adaptive_avg_pool1d(
-                x.unsqueeze(1),  # Add channel dimension
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
+            # Project to hidden_dim
+            x = self._project_to_hidden_dim(x)
+            # Ensure dtype is preserved
+            x = x.to(original_dtype)
         
         # Classical height
         classical_height = self.height_map(x)
@@ -172,17 +199,17 @@ class ArithmeticDynamics(nn.Module):
         """
         # Save original shape for later reshaping
         original_shape = x.shape
+        original_dtype = x.dtype
         
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
             # Flatten all but last dimension
             flat_shape = (-1, x.shape[-1])
             x = x.reshape(flat_shape)
-            # Project to hidden_dim using adaptive pooling
-            x = torch.nn.functional.adaptive_avg_pool1d(
-                x.unsqueeze(1),  # Add channel dimension
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
+            # Project to hidden_dim
+            x = self._project_to_hidden_dim(x)
+            # Ensure dtype is preserved
+            x = x.to(original_dtype)
         
         # Classical L-function
         classical_l = self.l_function(x)
@@ -212,120 +239,102 @@ class ArithmeticDynamics(nn.Module):
         # Save original shape and size for later reshaping
         original_shape = x.shape
         original_size = x.shape[-1]
+        original_dtype = x.dtype
+
+        # Preserve batch dimension if present
+        batch_size = x.shape[0] if x.dim() > 1 else 1
+        
+        # Flatten all dimensions except batch and last
+        if x.dim() > 2:
+            x = x.reshape(batch_size, -1, original_size)
+        # Add batch dimension if input is 1D
+        elif x.dim() == 1:
+            x = x.unsqueeze(0)
 
         # Reshape input to [-1, hidden_dim] if last dimension doesn't match
         if x.shape[-1] != self.hidden_dim:
-            # Flatten all but last dimension
-            flat_shape = (-1, x.shape[-1])
-            x_flat = x.reshape(flat_shape)
-            
-            # Project to hidden_dim using linear interpolation
-            x_real = x_flat.real
-            x_imag = x_flat.imag
-            
-            # Project real and imaginary parts separately
-            x_real_hidden = torch.nn.functional.interpolate(
-                x_real.unsqueeze(1),  # Add channel dimension
-                size=self.hidden_dim,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            x_imag_hidden = torch.nn.functional.interpolate(
-                x_imag.unsqueeze(1),  # Add channel dimension
-                size=self.hidden_dim,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Combine real and imaginary parts
-            x_hidden = torch.complex(x_real_hidden, x_imag_hidden)
-        else:
-            x_hidden = x
+            # Project to hidden_dim
+            x = self._project_to_hidden_dim(x)
+            # Ensure dtype is preserved
+            x = x.to(original_dtype)
 
-        # Apply height map
-        height = self.height_map(x_hidden)
+        # Compute height and L-function
+        height = self.compute_height(x)
+        l_values = self.compute_l_function(x)
 
-        # Apply quantum flow
-        flow = self.flow(height)
+        # Compute adelic projection
+        adelic = self.adelic_proj(x)
+        adelic = adelic.reshape(-1, self.num_primes, self.motive_rank)
 
-        # Project back to original size if needed
-        if original_size != self.hidden_dim:
-            # Split into real and imaginary parts
-            flow_real = flow.real
-            flow_imag = flow.imag
-            
-            # Project back using linear interpolation
-            flow_real_orig = torch.nn.functional.interpolate(
-                flow_real.unsqueeze(1),  # Add channel dimension
-                size=original_size,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            flow_imag_orig = torch.nn.functional.interpolate(
-                flow_imag.unsqueeze(1),  # Add channel dimension
-                size=original_size,
-                mode='linear'
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Combine real and imaginary parts
-            flow = torch.complex(flow_real_orig, flow_imag_orig)
+        # Apply flow
+        flow_output = self.flow(height)
 
-        # Reshape back to original shape
-        return flow.reshape(original_shape)
+        # Compute measure projection
+        measure = self.measure_proj(flow_output)
+
+        # Final output projection
+        output = self.output_proj(measure)
+
+        # Reshape output to match input shape except for last dimension
+        if len(original_shape) > 2:
+            new_shape = original_shape[:-1] + (self.hidden_dim,)
+            output = output.reshape(new_shape)
+        elif len(original_shape) == 1:
+            output = output.squeeze(0)
+
+        return output
 
     def forward(
         self, x: torch.Tensor, steps: int = 1, return_trajectory: bool = False
     ) -> Tuple[torch.Tensor, Dict]:
         """Apply arithmetic dynamics with quantum corrections.
-
+        
         Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_dim)
+            x: Input tensor of shape (batch_size, seq_len, hidden_dim) or (batch_size, hidden_dim)
             steps: Number of dynamics steps
             return_trajectory: Whether to return full trajectory
-
+            
         Returns:
             Processed tensor and metrics dictionary
         """
-        batch_size, seq_len, _ = x.shape
-        metrics = {}
-
+        # Handle both 2D and 3D inputs
+        if x.dim() == 2:
+            batch_size, feat_dim = x.shape
+            x = x.unsqueeze(1)  # Add sequence dimension
+            seq_len = 1
+        else:
+            batch_size, seq_len, feat_dim = x.shape
+        
         # Project to height space
-        height_coords = self.height_map(x.reshape(-1, self.hidden_dim))
-        height_coords = height_coords.view(batch_size, seq_len, self.height_dim)
-
-        # Initialize trajectory storage
-        if return_trajectory:
-            trajectory = [height_coords.clone()]
-
-        # Apply dynamics
-        for _ in range(steps):
-            # Compute base flow
-            base_flow = self.flow(height_coords.reshape(-1, self.height_dim))
-            base_flow = base_flow.view(batch_size, seq_len, self.height_dim)
-            
-            # Apply coupling with explicit gradient path
-            # [num_primes, height_dim] x [batch, seq, height_dim] -> [batch, seq, height_dim]
-            coupled_flow = torch.einsum('ph,bsh->bsh', self.coupling, base_flow)
-            
-            # Add L-function contribution
-            l_values = self.l_function(x.reshape(-1, self.hidden_dim))
-            l_values = l_values.view(batch_size, seq_len, self.height_dim)
-            
-            # Combine flows with L-function values
-            flow_field = coupled_flow + 0.1 * l_values
-            
-            # Update using exponential map
-            height_coords = height_coords + flow_field
-
-            if return_trajectory:
-                trajectory.append(height_coords.clone())
-
-        # Store metrics
-        metrics['height_norm'] = torch.norm(height_coords)
-        metrics['flow_norm'] = torch.norm(flow_field)
-        metrics['l_values_norm'] = torch.norm(l_values)
-        metrics['coupling_norm'] = torch.norm(self.coupling)
-
-        return height_coords, metrics
+        height_coords = self.height_map(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
+        
+        # Apply flow
+        base_flow = self.flow(height_coords)  # [batch_size * seq_len, height_dim]
+        
+        # Project back to hidden_dim for L-function
+        base_flow_hidden = self.measure_proj(base_flow)  # [batch_size * seq_len, hidden_dim]
+        
+        # Compute L-function values
+        l_values = self.l_function(base_flow_hidden)  # [batch_size * seq_len, motive_rank]
+        
+        # Apply quantum corrections
+        quantum_correction = self.quantum_height(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
+        quantum_l = self.quantum_l_function(x.reshape(-1, feat_dim))  # [batch_size * seq_len, motive_rank]
+        
+        # Combine classical and quantum terms
+        output = base_flow_hidden + self.quantum_weight * self.measure_proj(quantum_correction)
+        output = output.view(batch_size, seq_len, -1)  # Restore original shape
+        
+        # Update metrics
+        metrics = {
+            'height': torch.norm(height_coords).item(),
+            'l_value': torch.mean(l_values).item(),
+            'flow_magnitude': torch.norm(base_flow).item(),
+            'quantum_correction': torch.norm(quantum_correction).item(),
+            'quantum_l': torch.mean(quantum_l).item()
+        }
+        
+        return output, metrics
 
     def compute_modular_form(self, x: torch.Tensor) -> torch.Tensor:
         """Compute approximate modular form.
@@ -347,123 +356,171 @@ class ArithmeticDynamics(nn.Module):
 
     def compute_quantum_correction(self, metric: torch.Tensor) -> torch.Tensor:
         """Compute quantum corrections to the metric.
-
+        
         Args:
             metric: Input metric tensor of shape [batch_size, hidden_dim] or [batch_size, seq_len, hidden_dim]
                 or [batch_size, manifold_dim, manifold_dim] or higher dimensional tensors
-
+            
         Returns:
             Quantum correction tensor projected to measure space with shape matching the input metric
         """
         # Get original shape and flatten to 2D
-        orig_shape = metric.shape[:-2]  # Remove last two dimensions
-        metric_flat = metric.reshape(-1, metric.shape[-2] * metric.shape[-1])
+        orig_shape = metric.shape[:-1]  # Remove last dimension
+        metric_flat = metric.reshape(-1, metric.shape[-1])  # [batch_size * ..., hidden_dim]
         
-        # Project metric to height space
-        if metric_flat.shape[-1] != self.hidden_dim:
-            # Handle complex tensors by splitting real and imaginary parts
-            real_part = metric_flat.real.unsqueeze(1)  # Add channel dimension
-            imag_part = metric_flat.imag.unsqueeze(1)  # Add channel dimension
+        # Project to manifold space first if needed
+        if metric_flat.shape[-1] != self.manifold_dim:
+            # First project to hidden_dim if needed
+            if metric_flat.shape[-1] != self.hidden_dim:
+                # Handle complex numbers by splitting real and imaginary parts
+                if metric_flat.is_complex():
+                    real_part = metric_flat.real.unsqueeze(1)  # Add channel dimension
+                    imag_part = metric_flat.imag.unsqueeze(1)  # Add channel dimension
+                    
+                    # Interpolate real and imaginary parts separately
+                    real_proj = torch.nn.functional.interpolate(
+                        real_part,
+                        size=self.hidden_dim,
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension
+                    
+                    imag_proj = torch.nn.functional.interpolate(
+                        imag_part,
+                        size=self.hidden_dim,
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension
+                    
+                    # Combine back into complex tensor
+                    metric_flat = torch.complex(real_proj, imag_proj)
+                else:
+                    metric_flat = torch.nn.functional.interpolate(
+                        metric_flat.unsqueeze(1),  # Add channel dimension
+                        size=self.hidden_dim,
+                        mode='nearest'
+                    ).squeeze(1)  # Remove channel dimension
             
-            # Apply adaptive pooling to real and imaginary parts separately
-            real_pooled = torch.nn.functional.adaptive_avg_pool1d(
-                real_part,
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
+            metric_flat = self.quantum_proj(metric_flat)  # Project to manifold_dim
+        
+        # Project to height space
+        height_coords = self.quantum_height(metric_flat)  # [batch_size * ..., height_dim]
+        
+        # Project back to hidden_dim
+        quantum_measure = self.measure_proj(height_coords)  # [batch_size * ..., hidden_dim]
+        
+        # Reshape back to original dimensions
+        quantum_measure = quantum_measure.reshape(*orig_shape, self.hidden_dim)
             
-            imag_pooled = torch.nn.functional.adaptive_avg_pool1d(
-                imag_part,
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Recombine into complex tensor
-            metric_flat = torch.complex(real_pooled, imag_pooled)
-        
-        height_coords = self.height_map(metric_flat)  # [batch_size, height_dim]
-        
-        # Compute quantum correction using flow
-        correction = self.flow(height_coords)  # [batch_size, height_dim]
-        
-        # Project to measure space with correct dimensions
-        correction = self.measure_proj(correction)  # [batch_size, min_dim]
-        correction = self.quantum_proj(correction)
-        
-        # Add ones to ensure multiplicative stability
-        correction = correction + 1.0
-        
-        # Calculate the required size for the correction tensor
-        total_elements = metric.shape[-1] * metric.shape[-2]
-        
-        # Ensure correction has the right number of elements
-        if correction.shape[-1] != total_elements:
-            # Handle complex tensors by splitting real and imaginary parts
-            real_part = correction.real.unsqueeze(1)  # Add channel dimension
-            imag_part = correction.imag.unsqueeze(1)  # Add channel dimension
-            
-            # Apply adaptive pooling to real and imaginary parts separately
-            real_pooled = torch.nn.functional.adaptive_avg_pool1d(
-                real_part,
-                output_size=total_elements
-            ).squeeze(1)  # Remove channel dimension
-            
-            imag_pooled = torch.nn.functional.adaptive_avg_pool1d(
-                imag_part,
-                output_size=total_elements
-            ).squeeze(1)  # Remove channel dimension
-            
-            # Recombine into complex tensor
-            correction = torch.complex(real_pooled, imag_pooled)
-        
-        # Reshape to match input metric dimensions
-        correction = correction.reshape(*orig_shape, metric.shape[-2], metric.shape[-1])
-        
-        return correction
+        return quantum_measure
 
     def compute_quantum_metric(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute quantum geometric metric.
+        """Compute quantum metric tensor.
         
         Args:
-            x: Input tensor
+            x: Input tensor of shape [..., hidden_dim]
             
         Returns:
-            Quantum metric tensor with shape [batch_size, manifold_dim, manifold_dim]
+            Quantum metric tensor of shape [..., hidden_dim, hidden_dim]
         """
-        # Handle input tensor with different size
-        if x.shape[-1] != self.hidden_dim:
-            # Project to hidden_dim using adaptive pooling
-            x_flat = x.reshape(-1, x.shape[-1])
-            x = torch.nn.functional.adaptive_avg_pool1d(
-                x_flat.unsqueeze(1),  # Add channel dimension
-                output_size=self.hidden_dim
-            ).squeeze(1)  # Remove channel dimension
-            x = x.reshape(*x.shape[:-1], self.hidden_dim)
-            del x_flat  # Clean up intermediate tensor
+        # Save original shape for later reshaping
+        original_shape = x.shape[:-1]  # All but last dimension
         
-        # Project to height space - reuse memory
-        height_coords = self.height_map(x.reshape(-1, self.hidden_dim))  # [batch_size, hidden_dim]
+        # Flatten input to 2D
+        x_flat = x.reshape(-1, x.shape[-1])  # [batch_size * ..., hidden_dim]
         
-        # Compute L-function values - reuse memory
-        l_values = self.l_function(x.reshape(-1, self.hidden_dim))  # [batch_size, motive_rank]
+        # Project to quantum space
+        quantum_state = self.project_quantum_state(x_flat)  # [batch_size * ..., manifold_dim]
         
-        # Compute adelic projection - reuse memory
-        adelic = self.adelic_proj(x.reshape(-1, self.hidden_dim))  # [batch_size, num_primes * motive_rank]
-        adelic = adelic.view(-1, self.num_primes, self.motive_rank)  # [batch_size, num_primes, motive_rank]
+        # Project back to hidden_dim
+        quantum_measure = self.measure_proj(quantum_state)  # [batch_size * ..., hidden_dim]
         
-        # Combine components into quantum metric efficiently
-        # Use in-place operations where possible
-        quantum_metric = torch.einsum('bi,bj->bij', height_coords, height_coords)  # [batch_size, hidden_dim, hidden_dim]
+        # Compute outer product to get metric tensor
+        quantum_metric = torch.einsum('bi,bj->bij', quantum_measure, quantum_measure.conj())
         
-        # Add L-function correction in-place
-        l_correction = torch.einsum('bi,bj->bij', l_values, l_values)  # [batch_size, motive_rank, motive_rank]
-        
-        # Project quantum metric to match manifold dimensions
-        quantum_metric = self.measure_proj(quantum_metric.reshape(-1, self.hidden_dim))  # [batch_size * hidden_dim, hidden_dim]
-        quantum_metric = quantum_metric.view(-1, self.hidden_dim, self.hidden_dim)  # [batch_size, hidden_dim, hidden_dim]
-        
-        # Add L-function correction
-        quantum_metric = quantum_metric + 0.1 * l_correction
+        # Reshape back to original dimensions plus metric dimensions
+        if original_shape:
+            quantum_metric = quantum_metric.reshape(*original_shape, self.hidden_dim, self.hidden_dim)
         
         return quantum_metric
+
+    def project_quantum_state(self, x: torch.Tensor) -> torch.Tensor:
+        """Project input to quantum state space."""
+        # Project to hidden_dim if needed
+        if x.shape[-1] != self.hidden_dim:
+            x_flat = x.reshape(-1, x.shape[-1])  # [batch_size * ..., N]
+            
+            # Handle complex numbers by splitting real and imaginary parts
+            if x_flat.is_complex():
+                real_part = x_flat.real.unsqueeze(1)  # Add channel dimension
+                imag_part = x_flat.imag.unsqueeze(1)  # Add channel dimension
+                
+                # Interpolate real and imaginary parts separately
+                real_proj = torch.nn.functional.interpolate(
+                    real_part,
+                    size=self.hidden_dim,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+                
+                imag_proj = torch.nn.functional.interpolate(
+                    imag_part,
+                    size=self.hidden_dim,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+                
+                # Combine back into complex tensor
+                x_proj = torch.complex(real_proj, imag_proj)
+            else:
+                x_proj = torch.nn.functional.interpolate(
+                    x_flat.unsqueeze(1),  # Add channel dimension
+                    size=self.hidden_dim,
+                    mode='nearest'
+                ).squeeze(1)  # Remove channel dimension
+        else:
+            x_proj = x
+
+        # Convert to complex domain after interpolation
+        x_proj = x_proj.to(dtype=torch.complex64)
+
+        # Project to quantum state space
+        quantum_state = self.quantum_proj(x_proj)  # [batch_size * ..., manifold_dim]
+        
+        # Normalize the quantum state
+        quantum_state = quantum_state / torch.norm(quantum_state, dim=1, keepdim=True)
+        
+        return quantum_state
+
+    def _project_to_hidden_dim(self, x: torch.Tensor) -> torch.Tensor:
+        """Project input tensor to hidden_dim while preserving complex structure.
+        
+        Args:
+            x: Input tensor of any shape with last dimension != hidden_dim
+            
+        Returns:
+            Tensor with last dimension = hidden_dim, preserving complex structure
+        """
+        if x.is_complex():
+            # Handle complex tensors by separating real and imaginary parts
+            x_real = x.real
+            x_imag = x.imag
+            
+            # Project each part separately
+            x_real_proj = torch.nn.functional.adaptive_avg_pool1d(
+                x_real.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+            
+            x_imag_proj = torch.nn.functional.adaptive_avg_pool1d(
+                x_imag.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
+            
+            # Recombine into complex tensor
+            return torch.complex(x_real_proj, x_imag_proj)
+        else:
+            # For real tensors, just project directly
+            return torch.nn.functional.adaptive_avg_pool1d(
+                x.unsqueeze(1),  # Add channel dimension
+                output_size=self.hidden_dim
+            ).squeeze(1)  # Remove channel dimension
 
 
 class ArithmeticPattern(nn.Module):
@@ -622,66 +679,3 @@ class ModularFormComputer(nn.Module):
         
         return q_coeffs, metrics
     
-
-
-
-
-
-# class ArithmeticDynamics:
-#     """Implement arithmetic dynamics for attention evolution."""
-
-#     def __init__(self, hidden_dim: int, motive_rank: int, num_primes: int = 8, dtype: Optional[torch.dtype] = None):
-#         self.hidden_dim = hidden_dim
-#         self.motive_rank = motive_rank
-#         self.num_primes = num_primes
-#         self.dtype = dtype if dtype is not None else torch.float32
-
-#         # Project to hidden dimension first using adaptive pooling
-#         self.hidden_proj = nn.Sequential(
-#             nn.AdaptiveAvgPool1d(hidden_dim),  # Handle variable input sizes
-#             nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
-#         )
-
-#         # L-function computation
-#         self.l_function = nn.Sequential(
-#             nn.Linear(hidden_dim, hidden_dim // 2, dtype=self.dtype),
-#             nn.Tanh(),
-#             nn.Linear(hidden_dim // 2, motive_rank, dtype=self.dtype)
-#         )
-
-#         # Flow computation
-#         self.flow = nn.Linear(motive_rank, motive_rank, dtype=self.dtype)
-
-#     def compute_dynamics(self, state: torch.Tensor) -> torch.Tensor:
-#         """Compute one step of arithmetic dynamics.
-#         
-#         Args:
-#             state: Input tensor of shape [batch_size, *]
-#             
-#         Returns:
-#             Tensor of shape [batch_size, motive_rank]
-#         """
-#         # Ensure input is 2D: [batch_size, features]
-#         if state.dim() == 1:
-#             state = state.unsqueeze(0)
-#             
-#         # Flatten all dimensions after batch
-#         batch_size = state.shape[0]
-#         state_flat = state.reshape(batch_size, -1)  # [batch_size, num_features]
-#         
-#         # Add channel dimension for adaptive pooling
-#         state_channels = state_flat.unsqueeze(1)  # [batch_size, 1, num_features]
-#         
-#         # Project to hidden dimension using adaptive pooling
-#         hidden_state = self.hidden_proj[0](state_channels)  # [batch_size, 1, hidden_dim]
-#         hidden_state = hidden_state.squeeze(1)  # [batch_size, hidden_dim]
-#         hidden_state = self.hidden_proj[1](hidden_state)  # [batch_size, hidden_dim]
-#         
-#         # Compute L-function values
-#         l_values = self.l_function(hidden_state)  # [batch_size, motive_rank]
-
-#         # Evolve using flow
-#         evolved = self.flow(l_values)  # [batch_size, motive_rank]
-
-#         return evolved
-

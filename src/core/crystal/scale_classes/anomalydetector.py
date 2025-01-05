@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from src.utils.memory_management import register_tensor
+from utils.memory_management_util import register_tensor
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.memory_utils import memory_manager, memory_efficient_computation
 from src.core.quantum.state_space import QuantumState, HilbertSpace
@@ -458,6 +458,10 @@ class AnomalyDetector:
                     # Pad coefficients to match dimensions
                     coeffs1 = torch.nn.functional.pad(a1.coefficients, (0, self.dim - len(a1.coefficients)))
                     coeffs2 = torch.nn.functional.pad(a2.coefficients, (0, self.dim - len(a2.coefficients)))
+
+                    # Ensure coefficients have correct dtype
+                    coeffs1 = coeffs1.to(dtype=self.dtype)
+                    coeffs2 = coeffs2.to(dtype=self.dtype)
 
                     op1 = OperadicOperation(
                         source_dim=self.dim,

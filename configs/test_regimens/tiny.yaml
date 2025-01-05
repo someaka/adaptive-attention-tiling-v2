@@ -1,4 +1,6 @@
 # Test configuration for small hardware (laptops with limited resources)
+# Contains only performance-related settings that override base.yaml
+
 hardware_profile:
   name: "tiny"
   description: "Configuration for laptops with limited resources"
@@ -7,17 +9,55 @@ hardware_profile:
     cpu: "minimal"
     memory: "minimal"
 
-geometric_tests:
-  batch_size: 32
-  max_dim: 64
-  num_samples: 500
+# Performance-related parameters
+fiber_bundle:
+  batch_size: 16
+
+geometric:
+  batch_size: 16
+  max_samples: 200
+  max_iterations: 50
 
 pattern_tests:
-  max_patterns: 64
-  pattern_size: 64
-  num_iterations: 100
+  batch_size: 16
+  max_patterns: 32
+  pattern_size: 16
+  num_iterations: 50
+
+parallel_transport:
+  batch_size: 8
+  path_points: 25
+  test_cases: 5
+
+memory_management:
+  max_cached_tensors: 1000
+  gc_frequency: 100
+
+quantum:
+  dt: 0.01
+  batch_size: 16
+  max_iterations: 50
 
 performance_tests:
-  warmup_iters: 3
+  batch_size: 16
+  pattern_size: 16
+  num_iterations: 50
+  warmup_iterations: 5
   test_iters: 10
-  max_batch_size: 64
+  max_time: 1.0
+  min_time: 0.0001
+  tolerance: 1e-6
+  memory_limit_mb: 1024
+  profile_memory: true
+  profile_time: true
+
+geometric_tests:
+  dimensions: 4
+  num_heads: 8
+  hidden_dim: 64
+  batch_size: 16
+  max_iterations: 50
+  tolerance: 1e-6
+  manifold_dim: 3
+  num_samples: 100
+  max_dim: 8

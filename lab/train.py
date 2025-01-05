@@ -292,7 +292,7 @@ def train_model(config: TrainingConfig) -> SimpleTransformer:
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
     
     # Load training data
-    samples = load_tokenized_samples(config.samples_path)
+    samples = load_tokenized_samples(str(config.samples_path))
     input_ids, target_ids = prepare_data(samples)
     
     # Initialize metrics tracker

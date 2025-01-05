@@ -61,10 +61,6 @@ def hyperbolic_log(dim):
     del log
     cleanup_tensors()
 
-@pytest.mark.dependency(name="test_minkowski_inner_product")
-@pytest.mark.order(1)
-@pytest.mark.geometric
-@pytest.mark.level1
 def test_minkowski_inner_product(hyperbolic_exp, dim, batch_size):
     """Test Minkowski inner product computation. Level 1: Depends on basic tensor operations."""
     # Create test vectors with explicit cleanup
@@ -89,10 +85,6 @@ def test_minkowski_inner_product(hyperbolic_exp, dim, batch_size):
     del x, y, inner, time_part, space_part, expected
     cleanup_tensors()
 
-@pytest.mark.dependency(name="test_project_to_hyperboloid", depends=["test_minkowski_inner_product"])
-@pytest.mark.order(2)
-@pytest.mark.geometric
-@pytest.mark.level1
 def test_project_to_hyperboloid(hyperbolic_exp, dim, batch_size):
     """Test projection onto hyperboloid. Level 1: Depends on basic tensor operations."""
     # Create test points with explicit cleanup
@@ -115,10 +107,6 @@ def test_project_to_hyperboloid(hyperbolic_exp, dim, batch_size):
     del x, x_proj, inner
     cleanup_tensors()
 
-@pytest.mark.dependency(name="test_exp_log_inverse", depends=["test_minkowski_inner_product", "test_project_to_hyperboloid"])
-@pytest.mark.order(3)
-@pytest.mark.geometric
-@pytest.mark.level2
 def test_exp_log_inverse(hyperbolic_exp, hyperbolic_log, dim, batch_size):
     """Test that exp and log are inverse operations. Level 2: Depends on projection and inner product."""
     # Create test point and tangent vector with smaller magnitudes
@@ -143,10 +131,6 @@ def test_exp_log_inverse(hyperbolic_exp, hyperbolic_log, dim, batch_size):
     # Test recovery of tangent vector with looser tolerances
     assert torch.allclose(v, v_recovered, rtol=1e-3, atol=1e-3)
 
-@pytest.mark.dependency(name="test_parallel_transport", depends=["test_minkowski_inner_product", "test_project_to_hyperboloid"])
-@pytest.mark.order(4)
-@pytest.mark.geometric
-@pytest.mark.level2
 def test_parallel_transport(geometric_structures, dim, batch_size):
     """Test parallel transport operations. Level 2: Depends on projection and inner product."""
     # Create test points and vector
@@ -165,10 +149,6 @@ def test_parallel_transport(geometric_structures, dim, batch_size):
     v_transported_norm = torch.norm(v_transported, dim=-1)
     assert torch.allclose(v_norm, v_transported_norm, rtol=1e-4)
 
-@pytest.mark.dependency(name="test_geodesic_distance", depends=["test_minkowski_inner_product", "test_project_to_hyperboloid"])
-@pytest.mark.order(5)
-@pytest.mark.geometric
-@pytest.mark.level2
 def test_geodesic_distance(geometric_structures, dim, batch_size):
     """Test computation of geodesic distances. Level 2: Depends on inner product and projection."""
     # Create test points

@@ -696,6 +696,18 @@ class EmergenceValidator:
                 if state.ndim > 2:
                     state = state[0]  # Take first channel if still > 2D
         
+        # If we have a 1D tensor, reshape it into a square 2D tensor
+        if state.ndim == 1:
+            size = int(np.sqrt(state.shape[0]))
+            if size * size != state.shape[0]:
+                # If not a perfect square, pad to next perfect square
+                next_square = int(np.ceil(np.sqrt(state.shape[0]))) ** 2
+                padded = torch.zeros(next_square, device=state.device)
+                padded[:state.shape[0]] = state
+                state = padded
+                size = int(np.sqrt(next_square))
+            state = state.reshape(size, size)
+
         padding = 2
         height, width = state.shape
         # Add padding for circular boundary conditions
@@ -754,6 +766,10 @@ class SpatialValidator:
         """Validate spatial pattern properties."""
         # Compute wavelength
         wavelength = self._compute_wavelength(pattern)
+        
+        # Take mean wavelength for batched input
+        if wavelength.ndim > 0:
+            wavelength = wavelength.mean()
 
         # Analyze symmetry
         symmetry = self._analyze_symmetry(pattern)
@@ -773,56 +789,65 @@ class SpatialValidator:
 
     def _compute_wavelength(self, pattern: torch.Tensor) -> torch.Tensor:
         """Compute dominant wavelength from pattern.
-
+    
         Args:
             pattern: Pattern tensor of shape (batch_size, channels, height, width)
-
+    
         Returns:
             Wavelength tensor of shape (batch_size, channels)
         """
+        # Reshape pattern to have height and width dimensions if it doesn't
+        if pattern.ndim == 2:  # (batch_size, features)
+            size = int(np.sqrt(pattern.shape[1]))
+            if size * size != pattern.shape[1]:
+                # If not a perfect square, pad to next perfect square
+                next_square = int(np.ceil(np.sqrt(pattern.shape[1]))) ** 2
+                padded = torch.zeros(pattern.shape[0], next_square, device=pattern.device)
+                padded[:, :pattern.shape[1]] = pattern
+                pattern = padded
+                size = int(np.sqrt(next_square))
+            pattern = pattern.reshape(pattern.shape[0], 1, size, size)
+
         # Get size and create frequency grid
         N = pattern.shape[-1]
         freqs = torch.fft.fftfreq(N, dtype=torch.float32, device=pattern.device)
-        
+    
         # Create 2D frequency grids for x and y separately
         freqs_x = freqs[None, :].expand(N, N)
         freqs_y = freqs[:, None].expand(N, N)
-        
+    
         # Compute power spectrum
         fft = torch.fft.fft2(pattern)
         power = torch.abs(fft).pow(2)
-        
+    
         # Create mask for valid frequencies (exclude DC and above Nyquist)
         nyquist = 0.5
         mask_x = (freqs_x.abs() > 0) & (freqs_x.abs() <= nyquist)  # Explicitly exclude DC
         mask_y = (freqs_y.abs() > 0) & (freqs_y.abs() <= nyquist)  # Explicitly exclude DC
         mask = mask_x | mask_y  # Use OR to capture peaks in either direction
-        
+    
         # Get valid frequencies and reshape power
         batch_shape = power.shape[:-2]  # (batch_size, channels)
-        power_valid = power.reshape(*batch_shape, -1)[..., mask.reshape(-1)]
-        freqs_x_valid = freqs_x[mask]
-        freqs_y_valid = freqs_y[mask]
+        power_reshaped = power.reshape(*batch_shape, N * N)
+        mask_reshaped = mask.reshape(-1)
+        power_valid = power_reshaped[..., mask_reshaped]
         
         # Find peak frequency for each batch and channel
         peak_idx = torch.argmax(power_valid, dim=-1)  # Shape: (batch_size, channels)
-        peak_freq_x = freqs_x_valid[peak_idx]
-        peak_freq_y = freqs_y_valid[peak_idx]
+        freqs_valid = torch.maximum(
+            freqs_x[mask].abs(),
+            freqs_y[mask].abs()
+        )
+        peak_freqs = freqs_valid[peak_idx]
         
-        # For 2D patterns, we need to consider that peaks can appear in either x or y direction
-        # The wavelength is determined by the highest frequency component
-        peak_freqs = torch.maximum(peak_freq_x.abs(), peak_freq_y.abs())
+        # Convert frequency to wavelength
+        wavelengths = 1.0 / peak_freqs.clamp(min=1e-6)  # Avoid division by zero
         
-        # Convert to wavelength in pixels
-        # fftfreq gives frequencies in cycles per N samples, normalized by N
-        # To get wavelength in pixels: wavelength = 1 / f_fft
-        wavelength = 1.0 / peak_freqs  # Since freqs are already normalized
+        # Reshape wavelengths to match expected output shape (batch_size, 1, 1)
+        if wavelengths.ndim > 0:
+            wavelengths = wavelengths.view(*wavelengths.shape[:-1], 1, 1)
         
-        # Ensure output shape is correct for batched input
-        if len(pattern.shape) == 4:  # Batch case
-            wavelength = wavelength.reshape(-1, 1, 1)  # Make it (batch_size, 1, 1)
-
-        return wavelength
+        return wavelengths
 
     def _analyze_symmetry(self, pattern: torch.Tensor) -> str:
         """Analyze pattern symmetry."""

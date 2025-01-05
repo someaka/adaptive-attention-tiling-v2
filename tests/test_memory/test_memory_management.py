@@ -23,14 +23,15 @@ warnings.filterwarnings(
     category=FutureWarning
 )
 
-from src.utils.memory_management import (
+from utils.memory_management_util import (
     tensor_manager,
     memory_optimizer,
     register_tensor,
     optimize_memory,
     clear_memory,
     get_memory_stats,
-    DEBUG_MODE
+    DEBUG_MODE,
+    _is_tensor
 )
 from src.core.attention.geometric import HyperbolicExponential
 
@@ -77,7 +78,7 @@ def force_cleanup():
             # Additional cleanup
             for obj in gc.get_objects():
                 try:
-                    if torch.is_tensor(obj):
+                    if _is_tensor(obj):
                         del obj
                 except Exception:
                     continue

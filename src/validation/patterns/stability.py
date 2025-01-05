@@ -16,7 +16,7 @@ import torch.nn as nn
 import numpy as np
 
 from src.validation.base import ValidationResult
-from src.validation.flow.stability import (
+from validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     StructuralStabilityValidator,
@@ -161,83 +161,73 @@ class PatternValidator:
         
         # Combine results
         is_valid = bool(
-            linear_result.stable
-            and nonlinear_result.stable
-            and structural_result.stable
+            linear_result.is_valid
+            and nonlinear_result.is_valid
+            and structural_result.is_valid
             and torch.all(lyapunov_exponents < self.lyapunov_threshold)
             and all(v < self.perturbation_threshold for v in perturbation_response.values())
         )
         
+        # Extract stability data from validation results
+        linear_data = linear_result.data or {}
+        nonlinear_data = nonlinear_result.data or {}
+        structural_data = structural_result.data or {}
+        
+        # Create combined message
+        max_perturbation = max(float(v.max()) for v in perturbation_response.values())
+        message = "; ".join([
+            linear_result.message,
+            nonlinear_result.message,
+            structural_result.message,
+            f"Lyapunov exponents: {lyapunov_exponents.max():.2e}",
+            f"Perturbation response: {max_perturbation:.2e}"
+        ])
+        
         return PatternStabilityResult(
             is_valid=is_valid,
-            message="Pattern stability validation complete",
+            message=message,
             data={
-                "linear_result": {
-                    "stable": linear_result.stable,
-                    "eigenvalues": linear_result.eigenvalues.tolist(),
-                    "eigenvectors": linear_result.eigenvectors.tolist(),
-                    "growth_rates": linear_result.growth_rates.tolist()
-                },
-                "nonlinear_result": {
-                    "stable": nonlinear_result.stable,
-                    "lyapunov_function": nonlinear_result.lyapunov_function,
-                    "basin_size": nonlinear_result.basin_size,
-                    "perturbation_bound": nonlinear_result.perturbation_bound
-                },
-                "structural_result": {
-                    "stable": structural_result.stable,
-                    "sensitivity": structural_result.sensitivity,
-                    "robustness": structural_result.robustness,
-                    "bifurcation_distance": structural_result.bifurcation_distance
-                },
-                "lyapunov_exponents": lyapunov_exponents,
-                "perturbation_response": perturbation_response
+                "linear_result": linear_data,
+                "nonlinear_result": nonlinear_data,
+                "structural_result": structural_data,
+                "lyapunov_exponents": lyapunov_exponents.tolist(),
+                "perturbation_response": {
+                    k: v.tolist() for k, v in perturbation_response.items()
+                }
             },
-            linear_stability=linear_result.stable,
-            nonlinear_stability=nonlinear_result.stable,
-            structural_stability=structural_result.stable,
+            linear_stability=linear_result.is_valid,
+            nonlinear_stability=nonlinear_result.is_valid,
+            structural_stability=structural_result.is_valid,
             lyapunov_exponents=lyapunov_exponents,
             perturbation_response=perturbation_response
         )
 
     def _compute_lyapunov_exponents(
-        self,
-        pattern_flow: GeometricFlow,
-        initial_state: torch.Tensor,
-        time_steps: int
+        self, pattern_flow: GeometricFlow, initial_state: torch.Tensor, time_steps: int
     ) -> torch.Tensor:
-        """Compute Lyapunov exponents of the pattern flow."""
-        # Initialize perturbation vectors
-        dim = initial_state.shape[-1]
-        perturbations = torch.eye(dim, device=initial_state.device)
+        """Compute Lyapunov exponents for the pattern flow."""
+        # Create forward function for Jacobian computation
+        def forward_fn(state):
+            output, _ = pattern_flow(state)
+            # Return real part for complex tensors
+            return output.real if output.is_complex() else output
         
-        # Evolve perturbations
-        exponents = []
-        state = initial_state.clone()
+        # Get initial state
+        state = initial_state.detach().requires_grad_(True)
         
-        for _ in range(time_steps):
-            # Evolve state and perturbations
-            new_state = pattern_flow(state)
-            jacobian = torch.autograd.functional.jacobian(pattern_flow, state)
-            
-            # Convert jacobian tuple to tensor if needed
-            if isinstance(jacobian, tuple):
-                jacobian = torch.stack(list(jacobian))
-            
-            # Update perturbations
-            perturbations = torch.matmul(jacobian.float(), perturbations.float())
-            
-            # Compute local exponents
-            norms = torch.norm(perturbations, dim=-1)
-            exponents.append(torch.log(norms))
-            
-            # Normalize perturbations
-            perturbations = perturbations / norms.unsqueeze(-1)
-            
-            state = new_state
-            
-        # Average exponents
-        return torch.stack(exponents).mean(dim=0)
+        # Compute output with gradients enabled
+        output = forward_fn(state)
+        
+        # Compute gradient of output norm with respect to input
+        output_norm = torch.linalg.vector_norm(output, dim=-1)  # Only compute norm along last dimension
+        output_norm = output_norm.sum()  # Make sure we have a scalar for gradient computation
+        grad = torch.autograd.grad(output_norm, state, create_graph=False)[0]  # Disable create_graph
+        
+        # Compute local stability measure using vector norm
+        stability = torch.linalg.vector_norm(grad, dim=-1)  # Only compute norm along last dimension
+        
+        # Return stability measure as Lyapunov exponent approximation
+        return stability.unsqueeze(-1)  # Add dimension to match expected shape
 
     def _test_perturbation_response(
         self,
@@ -246,19 +236,48 @@ class PatternValidator:
     ) -> Dict[str, torch.Tensor]:
         """Test response to different types of perturbations."""
         responses = {}
+        dtype = initial_state.dtype
+        device = initial_state.device
+        
+        # Create noise in appropriate dtype
+        def create_noise(mode: str) -> torch.Tensor:
+            if dtype in [torch.complex64, torch.complex128]:
+                if mode == "uniform":
+                    real = torch.rand_like(initial_state, dtype=torch.float32) * 0.01
+                    imag = torch.rand_like(initial_state, dtype=torch.float32) * 0.01
+                    return torch.complex(real, imag).to(dtype=dtype)
+                else:  # gaussian
+                    real = torch.randn_like(initial_state, dtype=torch.float32) * 0.01
+                    imag = torch.randn_like(initial_state, dtype=torch.float32) * 0.01
+                    return torch.complex(real, imag).to(dtype=dtype)
+            else:
+                if mode == "uniform":
+                    return torch.rand_like(initial_state) * 0.01
+                else:  # gaussian
+                    return torch.randn_like(initial_state) * 0.01
         
         # Test small random perturbations
-        perturbed = initial_state + 0.01 * torch.randn_like(initial_state)
-        evolved_orig = pattern_flow(initial_state)
-        evolved_pert = pattern_flow(perturbed)
-        responses["random"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
+        noise = create_noise("gaussian")
+        perturbed = initial_state + noise
+        evolved_orig, _ = pattern_flow(initial_state)
+        evolved_pert, _ = pattern_flow(perturbed)
+        
+        # Compute response using appropriate norm
+        if dtype in [torch.complex64, torch.complex128]:
+            responses["random"] = torch.norm(evolved_pert - evolved_orig).abs() / torch.norm(initial_state).abs()
+        else:
+            responses["random"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
         
         # Test structured perturbations
-        for mode in range(min(3, initial_state.shape[-1])):
-            perturbation = torch.zeros_like(initial_state)
-            perturbation[..., mode] = 0.01
-            perturbed = initial_state + perturbation
-            evolved_pert = pattern_flow(perturbed)
-            responses[f"mode_{mode}"] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
+        for mode in ["uniform", "gaussian"]:
+            noise = create_noise(mode)
+            perturbed = initial_state + noise
+            evolved_pert, _ = pattern_flow(perturbed)
+            
+            # Compute response using appropriate norm
+            if dtype in [torch.complex64, torch.complex128]:
+                responses[mode] = torch.norm(evolved_pert - evolved_orig).abs() / torch.norm(initial_state).abs()
+            else:
+                responses[mode] = torch.norm(evolved_pert - evolved_orig) / torch.norm(initial_state)
             
         return responses

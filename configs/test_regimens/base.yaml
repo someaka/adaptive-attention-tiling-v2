@@ -1,0 +1,109 @@
+# Base configuration schema for all test regimens
+# All test configs should extend this base config
+
+# Required parameters for fiber bundle tests
+fiber_bundle:
+  base_dim: 3
+  fiber_dim: 3
+  dtype: "float32"
+  tolerance: 1e-5
+
+# Fiber bundle test specific parameters
+fiber_bundle_tests:
+  structure_group_dim: 4
+  test_tolerances:
+    projection: 1e-5
+    trivialization: 1e-5
+    transition: 1e-5
+    connection: 1e-5
+    transport: 1e-4
+    metric: 1e-5
+    torsion_free: 1e-5
+    vertical_preservation: 1e-5
+    linearity: 1e-5
+    structure_group: 1e-5
+    skew_symmetry: 1e-5
+    lie_bracket: 1e-5
+    finite_diff: 1e-3
+    horizontal: 1e-4
+    path_independence: 1e-4
+    norm_preservation: 1e-4
+    loop_triviality: 1e-4
+    symmetry: 1e-5
+    metric_compatibility: 1e-5
+  test_paths:
+    circular_points: 100
+    figure8_points: 200
+    max_angle: 2 * pi
+  test_vectors:
+    initial_norm: 1.0
+    perturbation_scale: 0.1
+
+# Geometric parameters
+geometric:
+  vector_scales: [0.1, 1.0, 10.0]  # Standard vector scales for tests
+  test_norms: [0.1, 1.0, 10.0]  # Standard test norms
+  dimensions: 4  # Base dimension for geometric tests
+  num_heads: 8  # Default number of attention heads
+  hidden_dim: 64  # Base hidden dimension
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
+  quantum_weight: 0.1  # Weight for quantum contribution
+  stress_energy_weight: 0.5  # Weight for stress-energy contribution
+  manifold_dim: 3  # Base manifold dimension
+
+# Pattern test parameters
+pattern_tests:
+  wavelength_scales: [0.1, 1.0, 10.0]  # Standard wavelength scales
+  stability_thresholds:
+    linear: 1e-5
+    nonlinear: 1e-4
+    structural: 1e-5
+  test_parameters:
+    min_pattern_size: 16
+    max_wavelength_ratio: 0.5
+    min_amplitude: 0.1
+
+# Parallel transport parameters
+parallel_transport:
+  methods: ["schild", "exponential"]  # Available transport methods
+  max_path_length: 10.0  # Maximum path length for transport
+
+# Memory management parameters
+memory_management:
+  defrag_threshold: 0.8  # Threshold for memory defragmentation
+  tensor_lifecycle: "normal"  # Default tensor lifecycle management
+
+# Numerical constants
+numerical_constants:
+  epsilons:
+    finite_diff: 1e-6
+    small_angle: 1e-4
+    tensor_compare: 1e-8
+  test_values:
+    small_loop_scale: 0.1
+    arc_angle: 0.7853981633974483  # pi/4
+    max_skew_error: 5e-5
+    max_torsion_error: 5e-5
+    max_group_error: 5e-5
+
+# Quantum parameters
+quantum:
+  dtype: "complex64"  # Fixed complex number type for quantum operations
+  manifold_dim: 3  # Manifold dimension for quantum operations
+  motive_rank: 2  # Rank of the motive
+  num_primes: 4  # Number of primes for arithmetic operations
+  min_scale: 1.0e-6  # Minimum scale for height computations
+  max_scale: 5.0  # Maximum scale for height computations
+  max_norm: 10.0  # Maximum norm for curvature bounds
+  fisher_rao_weight: 0.5  # Weight for Fisher-Rao metric
+  dt: 0.01  # Default timestep
+  tolerances:
+    state_norm: 1e-6
+    phase_comparison: 1e-5
+    geometric_phase: 1e-4
+    quantum_metric: 1e-5
+    berry_connection: 1e-5
+  validation:
+    convergence_threshold: 1e-6
+    stability_threshold: 1e-5
+    entanglement_threshold: 0.9

@@ -9,8 +9,8 @@ from src.core.patterns.motivic_integration import MotivicIntegrationSystem
 def integration_system():
     """Create a motivic integration system instance."""
     return MotivicIntegrationSystem(
-        manifold_dim=4,
-        hidden_dim=4,
+        manifold_dim=2,
+        hidden_dim=2,
         motive_rank=2,
         num_primes=3
     )
@@ -19,7 +19,7 @@ def integration_system():
 @pytest.fixture
 def test_pattern():
     """Create a test pattern tensor."""
-    return torch.randn(10, 4)  # Batch size 10, hidden dim 4
+    return torch.randn(5, 2)  # Batch size 5, hidden dim 2
 
 
 class TestMotivicIntegrationSystem:
@@ -27,16 +27,15 @@ class TestMotivicIntegrationSystem:
 
     def test_initialization(self, integration_system):
         """Test that system initializes correctly."""
-        assert integration_system.manifold_dim == 4
-        assert integration_system.hidden_dim == 4
+        assert integration_system.manifold_dim == 2
+        assert integration_system.hidden_dim == 2
         assert integration_system.motive_rank == 2
         assert integration_system.num_primes == 3
 
     def test_compute_measure(self, integration_system, test_pattern):
         """Test measure computation."""
         measure, metrics = integration_system.compute_measure(test_pattern)
-        min_dim = max(4, 2 * integration_system.motive_rank)
-        assert measure.shape == (test_pattern.shape[0], min_dim)
+        assert measure.shape == (test_pattern.shape[0], integration_system.manifold_dim)
         assert isinstance(metrics, dict)
 
     def test_compute_integral(self, integration_system, test_pattern):
@@ -82,15 +81,14 @@ class TestMotivicIntegrationSystem:
     def test_batch_processing(self, integration_system):
         """Test processing of different batch sizes."""
         # Test single sample
-        single = torch.randn(1, 4)
+        single = torch.randn(1, 2)
         measure, _ = integration_system.compute_measure(single)
-        min_dim = max(4, 2 * integration_system.motive_rank)
-        assert measure.shape == (1, min_dim)
+        assert measure.shape == (1, integration_system.manifold_dim)
 
         # Test batch
-        batch = torch.randn(5, 4)
+        batch = torch.randn(5, 2)
         measure, _ = integration_system.compute_measure(batch)
-        assert measure.shape == (5, min_dim)
+        assert measure.shape == (5, integration_system.manifold_dim)
 
     def test_quantum_effects(self, integration_system, test_pattern):
         """Test quantum correction effects."""
