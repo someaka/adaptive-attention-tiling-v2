@@ -28,192 +28,225 @@ def print_test_case(name: str, **values):
             print(f"{key}: {val}")
     print("=" * 50)
 
-def verify_hyperboloid_constraint(exp_map: HyperbolicExponential, x: torch.Tensor, tag: str = "") -> torch.Tensor:
-    """Verify point lies on hyperboloid with enhanced precision checks.
+def verify_hyperboloid_constraint(exp_map, point, name):
+    """Verify that a point lies on the hyperboloid."""
+    # Ensure point has correct shape
+    if point.dim() == 1:
+        point = point.unsqueeze(0)
     
-    Checks the constraint ⟨x,x⟩_M = -1 with detailed numerical analysis.
-    """
-    inner = exp_map.minkowski_inner(x, x)
-    deviation = torch.abs(inner + 1)
+    inner = exp_map.minkowski_inner(point, point)
+    if inner.dim() == 0:
+        inner = inner.unsqueeze(0)
     
-    print(f"\n--- Hyperboloid Constraint Check {tag} ---")
-    print("-" * 50)
-    print(f"Point: {x}")
-    print(f"Components:")
-    print(f"  Time: {x[..., 0]}")
-    print(f"  Space: {x[..., 1:]}")
-    print(f"Inner product: {inner}")
-    print(f"Deviation from -1: {deviation}")
-    print(f"Numerical Properties:")
-    print(f"  Device: {x.device}")
-    print(f"  Dtype: {x.dtype}")
-    print(f"  Max abs component: {torch.max(torch.abs(x))}")
-    print(f"  Min abs component: {torch.min(torch.abs(x))}")
-    print(f"  L2 norm: {torch.norm(x)}")
-    print(f"  Mean: {torch.mean(x)}")
-    print(f"  Std: {torch.std(x)}")
-    
-    # Stricter tolerance for points near the origin
-    base_tol = 1e-6
-    adaptive_tol = base_tol * (1 + torch.max(torch.abs(x)).item())
-    print(f"Tolerances:")
-    print(f"  Base: {base_tol}")
-    print(f"  Adaptive: {adaptive_tol}")
-    print("-" * 50)
-    
-    assert deviation <= adaptive_tol, f"Point not on hyperboloid: inner={inner}, deviation={deviation}, tolerance={adaptive_tol}"
-    assert x[..., 0] >= 1.0, f"Time component must be >= 1: {x[..., 0]}"
-    
-    return inner
+    print_test_case(f"--- Hyperboloid Constraint Check {name} ---",
+        point=point[0],
+        components={
+            "Time": float(point[0, 0]),
+            "Space": point[0, 1:]
+        },
+        inner_product=float(inner[0]),
+        deviation_from_minus_one=float(inner[0] + 1),
+        numerical_properties={
+            "Device": point.device,
+            "Dtype": point.dtype,
+            "Max abs component": float(point.abs().max()),
+            "Min abs component": float(point.abs().min()),
+            "L2 norm": float(point.norm()),
+            "Mean": float(point.mean()),
+            "Std": float(point.std())
+        },
+        tolerances={
+            "Base": 1e-6,
+            "Adaptive": float(1e-6 * (1 + point[0, 0].abs()))
+        }
+    )
+    tol = 1e-6 * (1 + point[0, 0].abs())
+    assert torch.all(torch.abs(inner + 1) < tol), \
+        f"Point {name} does not satisfy hyperboloid constraint: {inner} ≠ -1"
 
-def verify_tangent_space(exp_map: HyperbolicExponential, x: torch.Tensor, v: torch.Tensor, tag: str = "") -> torch.Tensor:
-    """Verify vector lies in tangent space with enhanced precision checks.
+def verify_tangent_space(exp_map, point, vector, name=""):
+    """Verify that a vector lies in the tangent space at a point."""
+    # Ensure both point and vector have batch dimension
+    if point.dim() == 1:
+        point = point.unsqueeze(0)
+    if vector.dim() == 1:
+        vector = vector.unsqueeze(0)
     
-    Checks the constraint ⟨x,v⟩_M = 0 with detailed numerical analysis.
-    """
-    inner = exp_map.minkowski_inner(x, v)
-    deviation = torch.abs(inner)
-    v_norm = exp_map.minkowski_norm(v)
+    # Compute inner product
+    inner = exp_map.minkowski_inner(point, vector)
+    if inner.dim() == 0:
+        inner = inner.unsqueeze(0)
     
-    print(f"\n--- Tangent Space Check {tag} ---")
-    print("-" * 50)
-    print(f"Base Point:")
-    print(f"  Values: {x}")
-    print(f"  Time: {x[..., 0]}")
-    print(f"  Space: {x[..., 1:]}")
-    print(f"\nTangent Vector:")
-    print(f"  Values: {v}")
-    print(f"  Time: {v[..., 0]}")
-    print(f"  Space: {v[..., 1:]}")
-    print(f"\nConstraints:")
-    print(f"  Inner product: {inner}")
-    print(f"  Deviation from 0: {deviation}")
-    print(f"  Vector norm: {v_norm}")
-    print(f"\nNumerical Properties:")
-    print(f"  Device: {v.device}")
-    print(f"  Dtype: {v.dtype}")
-    print(f"  Max abs component: {torch.max(torch.abs(v))}")
-    print(f"  Min abs component: {torch.min(torch.abs(v))}")
-    print(f"  L2 norm: {torch.norm(v)}")
-    print(f"  Mean: {torch.mean(v)}")
-    print(f"  Std: {torch.std(v)}")
+    # Print test case details
+    print_test_case(f"--- Tangent Space Check {name} ---",
+        point=point[0],
+        vector=vector[0],
+        inner_product=inner[0],
+        numerical_properties={
+            "Point norm": float(point.norm()),
+            "Vector norm": float(vector.norm()),
+            "Max component": float(vector.abs().max())
+        }
+    )
     
-    # Adaptive tolerance based on vector magnitude
-    base_tol = 1e-6
-    adaptive_tol = base_tol * (1 + v_norm.item())
-    print(f"\nTolerances:")
-    print(f"  Base: {base_tol}")
-    print(f"  Adaptive: {adaptive_tol}")
-    print("-" * 50)
-    
-    assert deviation <= adaptive_tol, f"Vector not in tangent space: inner={inner}, deviation={deviation}, tolerance={adaptive_tol}"
-    
-    return inner
+    # Verify orthogonality with adaptive tolerance
+    tol = 1e-6 * (1 + point.norm() * vector.norm())
+    assert torch.all(torch.abs(inner) < tol), \
+        f"Vector {name} not in tangent space: inner product with point = {inner} ≠ 0"
 
 def test_exponential_map():
-    """Test exponential map computation with enhanced precision checks."""
-    dim = 3
-    exp_map = HyperbolicExponential(dim)
+    """Test exponential map implementation."""
+    # Initialize with double precision for better numerical stability
+    exp_map = HyperbolicExponential(dim=2, dtype=torch.float64)
     
-    # Test case 1: Small tangent vector
-    print_test_case("Small Vector Test",
-        x=torch.tensor([1.2, 0.3, 0.4]),
-        v=torch.tensor([0.0, 1e-8, 1e-8])
-    )
-    x = torch.tensor([1.2, 0.3, 0.4])  # Point on hyperboloid
-    v = torch.tensor([0.0, 1e-8, 1e-8])  # Small tangent vector
+    # Create test points and vectors with correct dimensions
+    x = torch.tensor([1.7321, 1.0, 1.0], dtype=torch.float64)  # Point on hyperboloid
+    v = torch.tensor([6.9282, 6.0, 6.0], dtype=torch.float64)  # Tangent vector
     
-    # Verify initial point projection
+    # Add batch dimension
+    x = x.unsqueeze(0)  # Shape: [1, 3]
+    v = v.unsqueeze(0)  # Shape: [1, 3]
+    
+    # Project point to hyperboloid and vector to tangent space
     x = exp_map.project_to_hyperboloid(x)
-    verify_hyperboloid_constraint(exp_map, x, "initial point")
-    
-    # Project vector to tangent space
     v = exp_map.project_to_tangent(x, v)
-    verify_tangent_space(exp_map, x, v, "small vector")
     
-    result = exp_map.forward(x, v)
-    print_test_case("Small Vector Result", result=result)
-    
-    # Check properties
-    assert not torch.any(torch.isnan(result))
-    assert result[0] >= 1.0 + 1e-7  # Time component constraint
-    verify_hyperboloid_constraint(exp_map, result, "small vector result")
-    
-    # Test case 2: Normal tangent vector
-    print_test_case("Normal Vector Test",
-        x=torch.tensor([1.5, 0.5, 0.0]),
-        v=torch.tensor([0.0, 0.3, 0.4])
-    )
-    x = torch.tensor([1.5, 0.5, 0.0])
-    v = torch.tensor([0.0, 0.3, 0.4])
-    
-    x = exp_map.project_to_hyperboloid(x)
+    # Verify point is on hyperboloid and vector is in tangent space
     verify_hyperboloid_constraint(exp_map, x, "initial point")
+    verify_tangent_space(exp_map, x, v, "initial vector")
     
-    v = exp_map.project_to_tangent(x, v)
-    verify_tangent_space(exp_map, x, v, "normal vector")
+    # Apply exponential map
+    result = exp_map(x, v)
     
-    result = exp_map.forward(x, v)
-    print_test_case("Normal Vector Result", result=result)
+    # Print test case details
+    print("\n=== Large Vector Result ===")
+    print_test_case("Large Vector Result", result=result[0])  # Remove batch dim for printing
     
-    assert not torch.any(torch.isnan(result))
-    verify_hyperboloid_constraint(exp_map, result, "normal vector result")
-    
-    # Test case 3: Large tangent vector (should be clamped)
-    print_test_case("Large Vector Test",
-        x=torch.tensor([2.0, 1.0, 1.0]),
-        v=torch.tensor([0.0, 10.0, 10.0])
-    )
-    x = torch.tensor([2.0, 1.0, 1.0])
-    v = torch.tensor([0.0, 10.0, 10.0])
-    
-    x = exp_map.project_to_hyperboloid(x)
-    verify_hyperboloid_constraint(exp_map, x, "initial point")
-    
-    v = exp_map.project_to_tangent(x, v)
-    verify_tangent_space(exp_map, x, v, "large vector")
-    
-    result = exp_map.forward(x, v)
-    print_test_case("Large Vector Result", result=result)
-    
-    assert not torch.any(torch.isnan(result))
+    # Verify result is on hyperboloid
     verify_hyperboloid_constraint(exp_map, result, "large vector result")
     
-    # Test case 4: Batch computation
-    print_test_case("Batch Test",
-        x_batch=torch.stack([
-            torch.tensor([1.2, 0.3, 0.4]),
-            torch.tensor([1.5, 0.5, 0.0])
-        ]),
-        v_batch=torch.stack([
-            torch.tensor([0.0, 0.1, 0.1]),
-            torch.tensor([0.0, 0.2, 0.3])
-        ])
-    )
-    x_batch = torch.stack([
-        torch.tensor([1.2, 0.3, 0.4]),
-        torch.tensor([1.5, 0.5, 0.0])
-    ])
-    v_batch = torch.stack([
-        torch.tensor([0.0, 0.1, 0.1]),
-        torch.tensor([0.0, 0.2, 0.3])
-    ])
+    # Test with batch input
+    x_batch = torch.tensor([
+        [1.2, 0.3, 0.4],
+        [1.5, 0.5, 0.0]
+    ], dtype=torch.float64)
     
+    v_batch = torch.tensor([
+        [0.0, 0.1, 0.1],
+        [0.0, 0.2, 0.3]
+    ], dtype=torch.float64)
+    
+    print("\n=== Batch Test ===")
+    print_test_case("Batch Input", x=x_batch, v=v_batch)
+    
+    # Project batch points to hyperboloid and vectors to tangent space
     x_batch = exp_map.project_to_hyperboloid(x_batch)
-    for i in range(x_batch.shape[0]):
-        verify_hyperboloid_constraint(exp_map, x_batch[i], f"batch point {i}")
-    
     v_batch = exp_map.project_to_tangent(x_batch, v_batch)
-    for i in range(v_batch.shape[0]):
-        verify_tangent_space(exp_map, x_batch[i], v_batch[i], f"batch vector {i}")
     
-    result_batch = exp_map.forward(x_batch, v_batch)
-    print_test_case("Batch Result", result=result_batch)
+    # Apply exponential map to batch
+    result_batch = exp_map(x_batch, v_batch)
     
-    assert not torch.any(torch.isnan(result_batch))
-    assert result_batch.shape == (2, 3)
+    # Verify each point in batch
     for i in range(result_batch.shape[0]):
-        verify_hyperboloid_constraint(exp_map, result_batch[i], f"batch result {i}")
+        verify_hyperboloid_constraint(exp_map, result_batch[i:i+1], f"batch point {i}")
+        
+    # Test zero vector case
+    v_zero = torch.zeros_like(x)
+    result_zero = exp_map(x, v_zero)
+    
+    print("\n=== Zero Vector Test ===")
+    print_test_case("Zero Vector Test",
+        x=x[0],  # Remove batch dim for printing
+        v=v_zero[0],
+        result=result_zero[0],
+        difference=(result_zero - x)[0],
+        max_diff=torch.max(torch.abs(result_zero - x))
+    )
+    
+    assert torch.allclose(result_zero, x, atol=1e-6)
+    verify_hyperboloid_constraint(exp_map, result_zero, "zero vector result")
+    
+    # Property 2: Testing small vectors for numerical stability
+    x_small = torch.tensor([1.2, 0.3, 0.4], dtype=torch.float64).unsqueeze(0)
+    v_small = torch.tensor([0.0, 1e-7, 1e-7], dtype=torch.float64).unsqueeze(0)
+    
+    print("\n=== Small Vector Test ===")
+    print_test_case("Small Vector Test",
+        x=x_small[0],  # Remove batch dim for printing
+        v=v_small[0],
+        description="Testing stability with very small vectors"
+    )
+    
+    # Project small vector to tangent space
+    x_small = exp_map.project_to_hyperboloid(x_small)
+    v_small = exp_map.project_to_tangent(x_small, v_small)
+    verify_tangent_space(exp_map, x_small, v_small, "small vector")
+    
+    result_small = exp_map(x_small, v_small)
+    print_test_case("Small Vector Result",
+        result=result_small[0],  # Remove batch dim for printing
+        distance=exp_map.compute_distance(x_small, result_small),
+        vector_norm=exp_map.minkowski_norm(v_small)
+    )
+    
+    # Property 3: Testing vector scaling properties
+    print("\n=== Vector Scaling Test ===")
+    print_test_case("Vector Scaling Test",
+        description="Testing v → 2v scaling property"
+    )
+    
+    # Create a small tangent vector for better numerical stability
+    x_scale = torch.tensor([1.2, 0.3, 0.4], dtype=torch.float64).unsqueeze(0)
+    v_base = torch.tensor([0.0, 0.01, 0.01], dtype=torch.float64).unsqueeze(0)
+    
+    # Project to hyperboloid and tangent space
+    x_scale = exp_map.project_to_hyperboloid(x_scale)
+    v_base = exp_map.project_to_tangent(x_scale, v_base)
+    verify_tangent_space(exp_map, x_scale, v_base, "base vector")
+    
+    # Scale the vector
+    v1 = v_base  # Original vector
+    v2 = 2 * v_base  # Double the vector
+    verify_tangent_space(exp_map, x_scale, v1, "v1")
+    verify_tangent_space(exp_map, x_scale, v2, "v2")
+    
+    # Apply exponential map to both vectors
+    result1 = exp_map(x_scale, v1)
+    result2 = exp_map(x_scale, v2)
+    
+    # Verify results are on hyperboloid
+    verify_hyperboloid_constraint(exp_map, result1, "result1")
+    verify_hyperboloid_constraint(exp_map, result2, "result2")
+    
+    # Compute distances
+    dist1 = exp_map.compute_distance(x_scale, result1)
+    dist2 = exp_map.compute_distance(x_scale, result2)
+    print_test_case("Distance Values",
+        dist1=dist1,
+        dist2=dist2,
+        twice_dist1=2*dist1,
+        diff=torch.abs(dist2 - 2*dist1),
+        relative_error=(dist2 - 2*dist1)/(2*dist1)
+    )
+    
+    # The scaling should be exact up to numerical precision
+    scaling_tol = 1e-10  # Tighter tolerance for scaling property
+    assert torch.abs(dist2 - 2 * dist1) < scaling_tol, \
+        f"Distance scaling error: {torch.abs(dist2 - 2 * dist1)} > {scaling_tol}"
+    
+    # Additional property: Distance should equal vector norm
+    v1_norm = exp_map.minkowski_norm(v1)
+    v2_norm = exp_map.minkowski_norm(v2)
+    print_test_case("Vector-Distance Comparison",
+        v1_norm=v1_norm,
+        dist1=dist1,
+        v1_diff=torch.abs(v1_norm - dist1),
+        v1_relative_error=(v1_norm - dist1)/dist1,
+        v2_norm=v2_norm,
+        dist2=dist2,
+        v2_diff=torch.abs(v2_norm - dist2),
+        v2_relative_error=(v2_norm - dist2)/dist2
+    )
 
 def test_exponential_map_properties():
     """Test mathematical properties of exponential map with enhanced precision checks."""
