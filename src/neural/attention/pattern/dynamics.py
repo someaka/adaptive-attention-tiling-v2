@@ -186,51 +186,72 @@ class PatternDynamics(nn.Module):
         reaction_term: Optional[Callable] = None,
         steps: int = 100
     ) -> List[torch.Tensor]:
-        """Evolve pattern forward in time.
-        
-        Args:
-            pattern: Initial pattern
-            diffusion_coefficient: Diffusion coefficient
-            reaction_term: Optional custom reaction term
-            steps: Number of timesteps
-            
-        Returns:
-            List of evolved patterns
-        """
-        logging.info(f"Starting pattern evolution with diffusion_coefficient={diffusion_coefficient}, steps={steps}")
-        logging.info(f"Initial pattern - shape: {pattern.shape}, mean: {pattern.mean():.6f}, std: {pattern.std():.6f}")
+        """Evolve pattern forward in time."""
+        logging.info(f"Starting pattern evolution - diffusion_coeff={diffusion_coefficient}, steps={steps}")
+        logging.info(f"Initial state - shape: {pattern.shape}, mean: {pattern.mean():.6f}, std: {pattern.std():.6f}, norm: {torch.norm(pattern):.6f}")
         
         trajectory = []
         current = pattern
         
+        # Track key metrics
+        norms = []
+        means = []
+        stds = []
+        mass_changes = []
+        
         for step in range(steps):
-            # Log current state before normalization
-            logging.debug(f"Step {step} pre-norm - mean: {current.mean():.6f}, std: {current.std():.6f}")
+            # Enable logging only at key points
+            should_log = (step == 0 or step == steps-1 or step % 10 == 0)
             
             # Normalize current pattern
             norm = torch.norm(current.to(torch.float32), dim=(-2, -1), keepdim=True).clamp(min=1e-6)
             current = current / norm
-            logging.debug(f"Step {step} post-norm - mean: {current.mean():.6f}, std: {current.std():.6f}")
             
             trajectory.append(current)
             
-            # Apply reaction and diffusion with optional custom reaction term
+            # Apply reaction and diffusion
             if reaction_term is not None:
                 reaction = reaction_term(current)
             else:
-                reaction = self.reaction.reaction_term(current)
-            logging.debug(f"Step {step} reaction - mean: {reaction.mean():.6f}, std: {reaction.std():.6f}")
+                reaction = self.reaction.reaction_term(current, should_log=should_log)
+                
+            diffusion = self.diffusion.apply_diffusion(
+                current, 
+                diffusion_coefficient=diffusion_coefficient, 
+                dt=self.dt,
+                should_log=should_log
+            )
             
-            diffusion = self.diffusion.apply_diffusion(current, diffusion_coefficient=diffusion_coefficient, dt=self.dt)
-            logging.debug(f"Step {step} diffusion - mean: {diffusion.mean():.6f}, std: {diffusion.std():.6f}")
-            
-            # Update state
+            # Update state with stability check
             update = self.dt * (reaction + diffusion)
+            update_norm = torch.norm(update)
+            if update_norm > 1.0:
+                update = update * (0.9 / update_norm)
+                
             current = current + update
-            logging.debug(f"Step {step} update - mean: {update.mean():.6f}, std: {update.std():.6f}")
-            logging.debug(f"Step {step} final - mean: {current.mean():.6f}, std: {current.std():.6f}")
             
-        logging.info(f"Evolution complete - final pattern mean: {current.mean():.6f}, std: {current.std():.6f}")
+            # Track metrics
+            norms.append(torch.norm(current).item())
+            means.append(current.mean().item())
+            stds.append(current.std().item())
+            mass_changes.append(torch.abs(current.sum() - pattern.sum()) / pattern.sum())
+            
+            # Log every 10 steps
+            if should_log:
+                logging.info(f"Step {step}:")
+                logging.info(f"  - Norm: {norms[-1]:.6f}")
+                logging.info(f"  - Mean: {means[-1]:.6f}")
+                logging.info(f"  - Std: {stds[-1]:.6f}")
+                logging.info(f"  - Mass change: {mass_changes[-1]:.6f}")
+        
+        # Log final statistics
+        logging.info("\nEvolution complete:")
+        logging.info(f"  - Initial/final norm: {norms[0]:.6f}/{norms[-1]:.6f}")
+        logging.info(f"  - Initial/final mean: {means[0]:.6f}/{means[-1]:.6f}")
+        logging.info(f"  - Initial/final std: {stds[0]:.6f}/{stds[-1]:.6f}")
+        logging.info(f"  - Final mass change: {mass_changes[-1]:.6f}")
+        logging.info(f"  - Norm stability: {torch.std(torch.tensor(norms[-10:])):.6f}")
+        
         return trajectory
         
     def compute_jacobian(self, state: torch.Tensor) -> torch.Tensor:

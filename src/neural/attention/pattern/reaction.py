@@ -4,6 +4,7 @@ from typing import Optional, Callable, Protocol
 import torch
 from torch import nn
 from functools import partial
+import logging
 
 
 class ReactionTerm(Protocol):
@@ -38,20 +39,8 @@ class ReactionSystem:
             nn.Linear(hidden_size, grid_size * grid_size, dtype=torch.float32)
         )
     
-    def reaction_term(self, state: torch.Tensor) -> torch.Tensor:
-        """Default reaction term for pattern formation.
-        
-        This implements a simple activator-inhibitor system with:
-            - Autocatalytic production of activator
-            - Linear degradation of both species
-            - Nonlinear inhibition
-            
-        Args:
-            state: Input tensor [batch, channels, height, width]
-            
-        Returns:
-            Reaction term tensor [batch, channels, height, width]
-        """
+    def reaction_term(self, state: torch.Tensor, should_log: bool = False) -> torch.Tensor:
+        """Default reaction term for pattern formation."""
         # Extract activator and inhibitor
         activator = state[:,0:1]  # [batch, 1, height, width]
         inhibitor = state[:,1:2]  # [batch, 1, height, width]
@@ -60,8 +49,11 @@ class ReactionSystem:
         eps = 1e-10
         
         # Compute reaction terms with improved numerical stability
-        activator_term = (activator * activator) / (1.0 + inhibitor + eps) - activator
-        inhibitor_term = torch.clamp(activator * activator, min=0.0, max=10.0) - inhibitor
+        activator_squared = activator * activator
+        denominator = 1.0 + inhibitor + eps
+        
+        activator_term = (activator_squared) / denominator - activator
+        inhibitor_term = torch.clamp(activator_squared, min=0.0, max=10.0) - inhibitor
         
         # Scale terms for stability
         scale = 0.1
@@ -69,7 +61,16 @@ class ReactionSystem:
         inhibitor_term = scale * inhibitor_term
         
         # Combine terms
-        return torch.cat([activator_term, inhibitor_term], dim=1)
+        result = torch.cat([activator_term, inhibitor_term], dim=1)
+        
+        # Log key metrics if requested
+        if should_log:
+            logging.info(f"Reaction calculation:")
+            logging.info(f"  - Activator term - mean: {activator_term.mean():.6f}, std: {activator_term.std():.6f}")
+            logging.info(f"  - Inhibitor term - mean: {inhibitor_term.mean():.6f}, std: {inhibitor_term.std():.6f}")
+            logging.info(f"  - Combined result - mean: {result.mean():.6f}, std: {result.std():.6f}, norm: {torch.norm(result):.6f}")
+        
+        return result
 
     def _wrap_reaction_term(self, reaction_term: Callable, state: torch.Tensor) -> torch.Tensor:
         """Wrap reaction term to handle parameterized functions.

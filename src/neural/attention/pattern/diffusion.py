@@ -87,23 +87,16 @@ class DiffusionSystem(nn.Module):
         self,
         state: torch.Tensor,
         diffusion_coefficient: float,
-        dt: float
+        dt: float,
+        should_log: bool = False
     ) -> torch.Tensor:
-        """Apply diffusion to state.
-        
-        Args:
-            state: State tensor [batch, channels, height, width]
-            diffusion_coefficient: Diffusion coefficient (must be float)
-            dt: Time step
-            
-        Returns:
-            torch.Tensor: Diffused state
-        """
+        """Apply diffusion to state."""
         # Ensure diffusion coefficient is float
         if isinstance(diffusion_coefficient, torch.Tensor):
             diffusion_coefficient = float(diffusion_coefficient.item())
             
         # Ensure state has batch and channel dimensions
+        orig_dims = len(state.shape)
         if len(state.shape) == 2:  # [height, width]
             state = state.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
         elif len(state.shape) == 3:  # [channels, height, width]
@@ -116,22 +109,32 @@ class DiffusionSystem(nn.Module):
         kernel = kernel * (diffusion_coefficient * dt)
         kernel[0,0,1,1] = 1.0 - (diffusion_coefficient * dt)
         
+        if should_log:
+            logging.info(f"Diffusion step:")
+            logging.info(f"  - Input - mean: {state.mean():.6f}, std: {state.std():.6f}, norm: {torch.norm(state):.6f}")
+            logging.info(f"  - Kernel - center: {kernel[0,0,1,1]:.6f}, sum: {kernel.sum():.6f}")
+        
         # Expand kernel for each channel
         kernel = kernel.repeat(state.shape[1], 1, 1, 1)
         
-        # Apply periodic boundary conditions
+        # Apply periodic boundary conditions and convolution
         pad_size = 1
         padded = F.pad(state, (pad_size,)*4, mode='circular')
-        
-        # Apply convolution
         diffused = F.conv2d(padded, kernel, padding=0, groups=state.shape[1])
         
+        # Check conservation
+        mass_change = torch.abs(diffused.sum() - state.sum()) / state.sum()
+        
         # Remove extra dimensions if they were added
-        if len(state.shape) == 2:
+        if orig_dims == 2:
             diffused = diffused.squeeze(0).squeeze(0)
-        elif len(state.shape) == 3:
+        elif orig_dims == 3:
             diffused = diffused.squeeze(0)
-            
+        
+        if should_log:
+            logging.info(f"  - Output - mean: {diffused.mean():.6f}, std: {diffused.std():.6f}, norm: {torch.norm(diffused):.6f}")
+            logging.info(f"  - Mass change: {mass_change:.6f}")
+        
         return diffused
     
     def test_convergence(

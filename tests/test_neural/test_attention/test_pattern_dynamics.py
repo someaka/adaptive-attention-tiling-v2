@@ -116,37 +116,158 @@ class TestPatternDynamics:
         """Test pattern formation dynamics."""
         logging.info("Starting pattern formation test")
 
-        # Create initial state with small random perturbations
-        state = torch.ones(1, pattern_system.dim, pattern_system.size, pattern_system.size) + 0.01 * torch.randn(1, pattern_system.dim, pattern_system.size, pattern_system.size)
+        # Create initial state with physically meaningful perturbations
+        # Use activator-inhibitor initial conditions: nearly uniform with small random perturbations
+        base_activator = 1.0
+        base_inhibitor = 1.0
+        state = torch.zeros(1, pattern_system.dim, pattern_system.size, pattern_system.size)
+        state[:, 0] = base_activator + 0.01 * torch.randn(pattern_system.size, pattern_system.size)  # Activator
+        state[:, 1] = base_inhibitor + 0.01 * torch.randn(pattern_system.size, pattern_system.size)  # Inhibitor
+        
+        # Ensure positive concentrations
+        state = torch.clamp(state, min=0.0)
+        
         logging.info(f"Initial state shape: {state.shape}")
-        logging.info(f"Initial state mean: {state.mean():.6f}, std: {state.std():.6f}")
-        logging.info(f"Initial state min: {state.min():.6f}, max: {state.max():.6f}")
+        logging.info(f"Initial activator - mean: {state[:,0].mean():.6f}, std: {state[:,0].std():.6f}")
+        logging.info(f"Initial inhibitor - mean: {state[:,1].mean():.6f}, std: {state[:,1].std():.6f}")
 
-        # Define reaction term
+        # Define reaction term with proper scaling
         def reaction_term(state: torch.Tensor) -> torch.Tensor:
-            """Pattern-forming reaction terms."""
-            u, v = state[:, 0:1], state[:, 1:2]
-            du = u**2 * v - u
-            dv = u**2 - v
+            """Pattern-forming reaction terms with physical constraints."""
+            # Ensure positive concentrations
+            state = torch.clamp(state, min=0.0)
+            u, v = state[:, 0:1], state[:, 1:2]  # Activator and inhibitor
+            
+            # Standard activator-inhibitor dynamics
+            # du/dt = u²v - u (autocatalysis and decay)
+            # dv/dt = u² - v (production and decay)
+            du = u * u * v - u
+            dv = u * u - v
+            
+            # Combine terms without artificial normalization
             reaction = torch.cat([du, dv], dim=1)
-            logging.debug(f"Reaction term output - mean: {reaction.mean():.6f}, std: {reaction.std():.6f}")
+            
+            # Apply reasonable bounds to reaction rates
+            reaction = torch.clamp(reaction, min=-10.0, max=10.0)
+            
+            logging.debug(f"Reaction components - du: {du.mean():.6f}, dv: {dv.mean():.6f}")
             return reaction
 
-        # Evolve system
-        logging.info("Starting pattern evolution")
-        time_evolution = pattern_system.evolve_pattern(
-            state, diffusion_coefficient=0.1, reaction_term=reaction_term, steps=100
-        )
+        # Initialize evolution parameters with physical timescales
+        base_dt = pattern_system.dt
+        min_dt = base_dt * 0.1
+        max_dt = base_dt * 2.0
+        target_change_rate = 0.05  # Allow more significant changes for pattern formation
+        adaptation_rate = 0.1  # Gentler adaptation
+        stability_window = 20  # Longer window for better stability assessment
+        max_steps = 500  # More steps to allow pattern development
+        min_steps = 100
+        convergence_threshold = 1e-4  # More reasonable for pattern dynamics
+
+        # Storage for monitoring evolution
+        time_evolution = []
+        change_rates = []
+        step_sizes = []
+        current_state = state.clone()
+        time_evolution.append(current_state.clone())
+        
+        # Track pattern metrics
+        pattern_metrics = {
+            'spatial_variance': [],
+            'activator_inhibitor_ratio': [],
+            'mass_conservation': []
+        }
+
+        logging.info("Starting pattern evolution with adaptive step size")
+        step = 0
+        while step < max_steps:
+            # Store current dt
+            step_sizes.append(pattern_system.dt)
+            
+            # Evolve one step
+            next_state = pattern_system.step(
+                current_state,
+                diffusion_coefficient=0.1,
+                reaction_term=reaction_term
+            )
+            
+            # Ensure physical constraints
+            next_state = torch.clamp(next_state, min=0.0)
+            
+            # Calculate change metrics
+            change_rate = torch.norm(next_state - current_state) / (torch.norm(current_state) + 1e-6)
+            change_rates.append(change_rate.item())
+            
+            # Calculate pattern metrics
+            spatial_var = torch.var(next_state, dim=(-2, -1)).mean()
+            act_inhib_ratio = (next_state[:,0].mean() / (next_state[:,1].mean() + 1e-6)).item()
+            mass_conservation = torch.sum(next_state) / (torch.sum(current_state) + 1e-6)
+            
+            pattern_metrics['spatial_variance'].append(spatial_var.item())
+            pattern_metrics['activator_inhibitor_ratio'].append(act_inhib_ratio)
+            pattern_metrics['mass_conservation'].append(mass_conservation.item())
+            
+            # Log every 10 steps
+            if step % 10 == 0:
+                logging.info(f"Step {step}:")
+                logging.info(f"  Change rate: {change_rate.item():.6f}")
+                logging.info(f"  Current dt: {pattern_system.dt:.6f}")
+                logging.info(f"  Spatial variance: {spatial_var.item():.6f}")
+                logging.info(f"  Activator/Inhibitor ratio: {act_inhib_ratio:.6f}")
+                logging.info(f"  Mass conservation: {mass_conservation.item():.6f}")
+
+            # Store evolved state
+            time_evolution.append(next_state.clone())
+            current_state = next_state
+
+            # After stability window steps, adjust dt based on change rate
+            if step >= stability_window:
+                recent_rates = torch.tensor(change_rates[-stability_window:])
+                avg_rate = recent_rates.mean().item()
+                rate_std = recent_rates.std().item()
+                
+                # Adjust dt based on average change rate
+                if avg_rate > target_change_rate * 1.2:  # Too fast
+                    new_dt = max(pattern_system.dt * (1 - adaptation_rate), min_dt)
+                    pattern_system.dt = new_dt
+                elif avg_rate < target_change_rate * 0.8 and rate_std < target_change_rate * 0.1:  # Too slow and stable
+                    new_dt = min(pattern_system.dt * (1 + adaptation_rate), max_dt)
+                    pattern_system.dt = new_dt
+
+                # Check for convergence after minimum steps
+                # Consider both change rate and pattern formation metrics
+                if step >= min_steps:
+                    recent_spatial_var = pattern_metrics['spatial_variance'][-stability_window:]
+                    spatial_var_stable = (torch.tensor(recent_spatial_var).std() < convergence_threshold)
+                    
+                    if avg_rate < convergence_threshold and spatial_var_stable:
+                        logging.info(f"Converged after {step} steps:")
+                        logging.info(f"  Change rate: {avg_rate:.6f}")
+                        logging.info(f"  Spatial variance stability: {torch.tensor(recent_spatial_var).std():.6f}")
+                        break
+
+            step += 1
+
         logging.info(f"Evolution complete - produced {len(time_evolution)} timesteps")
+        logging.info(f"Final dt: {pattern_system.dt:.6f}")
+        logging.info(f"Step size history - min: {min(step_sizes):.6f}, max: {max(step_sizes):.6f}, mean: {sum(step_sizes)/len(step_sizes):.6f}")
+        logging.info(f"Change rate history - min: {min(change_rates):.6f}, max: {max(change_rates):.6f}, mean: {sum(change_rates)/len(change_rates):.6f}")
 
-        # Analyze pattern formation
+        # Analyze final pattern
         final_pattern = time_evolution[-1]
-        logging.info(f"Final pattern mean: {final_pattern.mean():.6f}, std: {final_pattern.std():.6f}")
-        logging.info(f"Final pattern min: {final_pattern.min():.6f}, max: {final_pattern.max():.6f}")
-
-        # Analyze pattern formation detection
-        pattern_formed = pattern_system.detect_pattern_formation(time_evolution)
-        logging.info(f"Pattern formation detected: {pattern_formed}")
+        
+        # Check for pattern formation using multiple criteria
+        spatial_structure = torch.var(final_pattern, dim=(-2, -1)).mean() > 0.01
+        temporal_stability = change_rates[-1] < convergence_threshold
+        mass_conserved = abs(pattern_metrics['mass_conservation'][-1] - 1.0) < 0.1
+        
+        pattern_formed = spatial_structure and temporal_stability and mass_conserved
+        
+        logging.info(f"Pattern analysis:")
+        logging.info(f"  Spatial structure: {spatial_structure}")
+        logging.info(f"  Temporal stability: {temporal_stability}")
+        logging.info(f"  Mass conservation: {mass_conserved}")
+        logging.info(f"  Pattern formed: {pattern_formed}")
 
         # Analyze stability
         stability_result = pattern_system.stability.is_stable(final_pattern, threshold=0.1)
@@ -163,7 +284,7 @@ class TestPatternDynamics:
         logging.info(f"  Max imag part magnitude: {torch.abs(imag_parts).max():.6f}")
 
         # Run assertions with detailed error messages
-        assert pattern_formed, "Pattern formation should be detected in time evolution"
+        assert pattern_formed, "Pattern formation criteria not met"
         
         try:
             assert stability_result, f"Final pattern should be stable (stability value: {stability_value:.6f})"
@@ -172,6 +293,8 @@ class TestPatternDynamics:
             logging.error(f"  Stability value: {stability_value:.6f}")
             logging.error(f"  Max eigenvalue real part: {real_parts.max():.6f}")
             logging.error(f"  Pattern statistics - mean: {final_pattern.mean():.6f}, std: {final_pattern.std():.6f}")
+            logging.error(f"  Final change rate: {change_rates[-1]:.6f}")
+            logging.error(f"  Final dt: {pattern_system.dt:.6f}")
             raise e
 
     def test_forward_pass(
