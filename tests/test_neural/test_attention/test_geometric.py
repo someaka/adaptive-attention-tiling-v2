@@ -154,7 +154,7 @@ class TestGeometricStructures:
         # Make v2 orthogonal to v1
         v2 = v2 - torch.dot(v1, v2) * v1 / torch.dot(v1, v1)
         
-        curvature = geometric_structures.compute_sectional_curvature(x, v1, v2)
+        curvature = geometric_structures.sectional_curvature(x, v1, v2)
         
         assert curvature.shape == ()  # Scalar output
         assert not torch.isnan(curvature)
@@ -252,37 +252,40 @@ class TestHyperbolicOperations:
 
     def test_log_map_properties(self, precision):
         """Test mathematical properties of logarithm map."""
-        print_memory_usage("Start log map test")
+        dim = 3
+        exp_map = HyperbolicExponential(dim, dtype=precision)
+        log_map = HyperbolicLogarithm(dim, dtype=precision)
         
-        # Create two points on the hyperboloid
-        x_spatial = torch.tensor([0.1, -0.2, 0.1], dtype=precision)
-        x_t = torch.sqrt(1 + torch.sum(x_spatial * x_spatial))
-        x = torch.cat([x_t.unsqueeze(0), x_spatial])
+        # Create points on hyperboloid
+        x = torch.tensor([1.2, 0.3, 0.4], dtype=precision)
+        y = torch.tensor([1.5, 0.5, 0.0], dtype=precision)
+        x = exp_map.project_to_hyperboloid(x)
+        y = exp_map.project_to_hyperboloid(y)
         
-        y_spatial = torch.tensor([0.12, -0.22, 0.11], dtype=precision)
-        y_t = torch.sqrt(1 + torch.sum(y_spatial * y_spatial))
-        y = torch.cat([y_t.unsqueeze(0), y_spatial])
+        print_test_case("Test Points",
+            x=x,
+            y=y
+        )
+        verify_hyperboloid_constraint(exp_map, x, "base point")
+        verify_hyperboloid_constraint(exp_map, y, "target point")
         
-        log_map = HyperbolicLogarithm(dim=4)
-        v = log_map(x, y)
+        # Compute logarithm map
+        v = log_map.forward(x, y)
+        print_test_case("Logarithm Result",
+            v=v,
+            norm=torch.norm(v)
+        )
+        verify_tangent_space(exp_map, x, v, "log vector")
         
-        # Compute hyperbolic distance
-        inner = -x[0]*y[0] + torch.sum(x[1:] * y[1:])
-        dist = torch.acosh(-inner)
-        
-        # Length of logarithm should equal hyperbolic distance
-        v_norm = torch.sqrt(torch.sum(v[1:] * v[1:]))
-        print(f"Distance: {dist:.6f}, Vector norm: {v_norm:.6f}, Diff: {abs(v_norm - dist):.6f}")
-        
-        assert torch.allclose(v_norm, dist, atol=1e-6)
-        
-        # Verify v is in tangent space (orthogonal to x in Minkowski sense)
-        inner = -x[0]*v[0] + torch.sum(x[1:] * v[1:])
-        print(f"Orthogonality: {inner:.6f}")
-        
-        assert torch.allclose(inner, torch.tensor(0.0, dtype=precision), atol=1e-6)
-        
-        print_memory_usage("End log map test")
+        # Verify distance preservation
+        dist = exp_map.compute_distance(x, y)
+        v_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v, v)))
+        print_test_case("Distance Check",
+            distance=dist,
+            vector_norm=v_norm,
+            difference=torch.abs(dist - v_norm)
+        )
+        assert torch.allclose(v_norm, dist, atol=1e-7)
 
     def test_exp_log_inverse(self, test_scales, precision):
         """Test that exp and log are inverses of each other."""
@@ -517,3 +520,167 @@ class TestParallelTransport:
         assert torch.allclose(pole_result, v)
         
         print_memory_usage("End same point transport test")
+
+def print_test_case(name: str, **values):
+    """Print test case details."""
+    print(f"\n=== {name} ===")
+    for key, val in values.items():
+        if isinstance(val, torch.Tensor):
+            print(f"{key}:")
+            print(f"  Shape: {val.shape}")
+            print(f"  Values: {val}")
+            print(f"  Dtype: {val.dtype}")
+            if len(val.shape) > 0:
+                print(f"  Norm (L2): {torch.norm(val)}")
+                if val.shape[-1] > 1:
+                    print(f"  Time component: {val[..., 0]}")
+                    print(f"  Space components: {val[..., 1:]}")
+        else:
+            print(f"{key}: {val}")
+    print("=" * 50)
+
+def verify_hyperboloid_constraint(exp_map: HyperbolicExponential, x: torch.Tensor, tag: str, atol: float = 1e-6):
+    """Verify point lies on hyperboloid."""
+    constraint = exp_map.minkowski_inner(x, x) + 1.0
+    print(f"\nHyperboloid constraint check ({tag}):")
+    print(f"  Constraint value: {constraint}")
+    print(f"  Time component: {x[..., 0]}")
+    print(f"  Space components norm: {torch.norm(x[..., 1:])}")
+    assert torch.allclose(constraint, torch.zeros_like(constraint), atol=atol), \
+        f"Point {tag} not on hyperboloid: {constraint}"
+    assert torch.all(x[..., 0] > 0), f"Time component not positive for {tag}: {x[..., 0]}"
+
+def verify_tangent_space(exp_map: HyperbolicExponential, x: torch.Tensor, v: torch.Tensor, tag: str, atol: float = 1e-6):
+    """Verify vector lies in tangent space."""
+    inner = exp_map.minkowski_inner(x, v)
+    print(f"\nTangent space check ({tag}):")
+    print(f"  Inner product: {inner}")
+    print(f"  Vector norm: {torch.norm(v)}")
+    assert torch.allclose(inner, torch.zeros_like(inner), atol=atol), \
+        f"Vector {tag} not in tangent space: {inner}"
+
+def test_hyperbolic_operations():
+    """Test hyperbolic exponential and logarithm maps with enhanced precision."""
+    dim = 3
+    exp_map = HyperbolicExponential(dim, dtype=torch.float64)
+    log_map = HyperbolicLogarithm(dim, dtype=torch.float64)
+    
+    # Test points
+    print_test_case("Base Points",
+        x=torch.tensor([1.2, 0.3, 0.4], dtype=torch.float64),
+        y=torch.tensor([1.5, 0.5, 0.0], dtype=torch.float64)
+    )
+    x = torch.tensor([1.2, 0.3, 0.4], dtype=torch.float64)
+    y = torch.tensor([1.5, 0.5, 0.0], dtype=torch.float64)
+    x = exp_map.project_to_hyperboloid(x)
+    y = exp_map.project_to_hyperboloid(y)
+    verify_hyperboloid_constraint(exp_map, x, "base point x")
+    verify_hyperboloid_constraint(exp_map, y, "base point y")
+    
+    # Test exp-log cycle
+    v = log_map.forward(x, y)
+    print_test_case("Log Map Result",
+        v=v,
+        norm=torch.norm(v)
+    )
+    verify_tangent_space(exp_map, x, v, "log map result")
+    
+    y_recovered = exp_map.forward(x, v)
+    print_test_case("Exp Map Result",
+        y_original=y,
+        y_recovered=y_recovered,
+        difference=y - y_recovered
+    )
+    verify_hyperboloid_constraint(exp_map, y_recovered, "recovered point")
+    assert torch.allclose(y, y_recovered, atol=1e-7)
+    
+    # Test distance preservation
+    dist_direct = exp_map.compute_distance(x, y)
+    v_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v, v)))
+    print_test_case("Distance Check",
+        direct_distance=dist_direct,
+        vector_norm=v_norm,
+        difference=torch.abs(dist_direct - v_norm)
+    )
+    assert torch.allclose(dist_direct, v_norm, atol=1e-7)
+
+def test_euclidean_operations():
+    """Test Euclidean exponential and logarithm maps."""
+    dim = 3
+    exp_map = EuclideanExponential(dim, dtype=torch.float64)
+    log_map = EuclideanLogarithm(dim, dtype=torch.float64)
+    
+    # Test points
+    print_test_case("Euclidean Points",
+        x=torch.tensor([0.0, 0.3, 0.4], dtype=torch.float64),
+        y=torch.tensor([0.5, 0.5, 0.0], dtype=torch.float64)
+    )
+    x = torch.tensor([0.0, 0.3, 0.4], dtype=torch.float64)
+    y = torch.tensor([0.5, 0.5, 0.0], dtype=torch.float64)
+    
+    # Test exp-log cycle
+    v = log_map.forward(x, y)
+    print_test_case("Euclidean Log Result",
+        v=v,
+        norm=torch.norm(v)
+    )
+    
+    y_recovered = exp_map.forward(x, v)
+    print_test_case("Euclidean Exp Result",
+        y_original=y,
+        y_recovered=y_recovered,
+        difference=y - y_recovered
+    )
+    assert torch.allclose(y, y_recovered, atol=1e-7)
+    
+    # Verify Euclidean properties
+    assert torch.allclose(v, y - x, atol=1e-7)
+    assert torch.allclose(y_recovered, x + v, atol=1e-7)
+
+def test_mixed_geometry():
+    """Test interaction between hyperbolic and Euclidean operations."""
+    dim = 3
+    hyp_exp = HyperbolicExponential(dim, dtype=torch.float64)
+    hyp_log = HyperbolicLogarithm(dim, dtype=torch.float64)
+    euc_exp = EuclideanExponential(dim, dtype=torch.float64)
+    euc_log = EuclideanLogarithm(dim, dtype=torch.float64)
+    
+    # Test points
+    print_test_case("Mixed Geometry Points",
+        hyp_x=torch.tensor([1.2, 0.3, 0.4], dtype=torch.float64),
+        euc_x=torch.tensor([0.0, 0.3, 0.4], dtype=torch.float64)
+    )
+    hyp_x = torch.tensor([1.2, 0.3, 0.4], dtype=torch.float64)
+    euc_x = torch.tensor([0.0, 0.3, 0.4], dtype=torch.float64)
+    
+    # Project hyperbolic point
+    hyp_x = hyp_exp.project_to_hyperboloid(hyp_x)
+    verify_hyperboloid_constraint(hyp_exp, hyp_x, "hyperbolic point")
+    
+    # Test small tangent vectors
+    hyp_v = torch.tensor([0.0, 0.1, 0.1], dtype=torch.float64)
+    euc_v = torch.tensor([0.1, 0.1, 0.1], dtype=torch.float64)
+    
+    # Project hyperbolic vector to tangent space
+    hyp_v = hyp_exp.project_to_tangent(hyp_x, hyp_v)
+    verify_tangent_space(hyp_exp, hyp_x, hyp_v, "hyperbolic vector")
+    
+    # Apply exponential maps
+    hyp_y = hyp_exp.forward(hyp_x, hyp_v)
+    euc_y = euc_exp.forward(euc_x, euc_v)
+    
+    print_test_case("Mixed Exponential Results",
+        hyp_result=hyp_y,
+        euc_result=euc_y
+    )
+    verify_hyperboloid_constraint(hyp_exp, hyp_y, "hyperbolic exp result")
+    
+    # Verify distances
+    hyp_dist = hyp_exp.compute_distance(hyp_x, hyp_y)
+    euc_dist = torch.norm(euc_y - euc_x)
+    
+    print_test_case("Mixed Distances",
+        hyperbolic_distance=hyp_dist,
+        euclidean_distance=euc_dist
+    )
+    assert hyp_dist > 0 and euc_dist > 0

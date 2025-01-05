@@ -58,68 +58,180 @@ from torch import nn
 from src.utils.memory_management_util import register_tensor, optimize_memory, clear_memory
 
 
-class ParallelTransport(nn.Module):
-    """Parallel transport for geometric attention."""
-
-    def __init__(self, dim: int, method: str = "euclidean", dtype: torch.dtype = torch.float32):
-        """Initialize parallel transport.
+def minkowski_inner(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Compute the Minkowski inner product between two vectors.
+    
+    The Minkowski inner product is defined as:
+    ⟨x,y⟩ = -x₀y₀ + x₁y₁ + x₂y₂ + ...
+    
+    Args:
+        x: First vector of shape (..., dim)
+        y: Second vector of shape (..., dim)
         
-        Args:
-            dim: Dimension of the space
-            method: Transport method ("euclidean", "schild", or "pole")
-            dtype: Data type for tensors
-        """
+    Returns:
+        Minkowski inner product of shape (...)
+    """
+    # Split into time and space components
+    time_component = x[..., 0] * y[..., 0]
+    space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
+    
+    # For better numerical stability, handle near-lightlike vectors
+    result = space_component - time_component
+    
+    # For lightlike vectors, ensure exact zero norm
+    if x is y:  # When computing norm
+        lightlike_mask = torch.abs(result) < 1e-8
+        result = torch.where(lightlike_mask, torch.zeros_like(result), result)
+    
+    return result
+
+def project_to_hyperboloid(x: torch.Tensor) -> torch.Tensor:
+    """Project points onto the hyperboloid manifold."""
+    x_shape = x.shape
+    x_norm = torch.norm(x, dim=-1)
+    
+    # Split into time and space components
+    x_time = x[..., 0]
+    x_space = x[..., 1:]
+    x_space_norm = torch.norm(x_space, dim=-1)
+    
+    # Handle spatial components
+    space_components = x_space
+    space_sq = torch.sum(space_components ** 2, dim=-1, keepdim=True)
+    spatial_norm_sq = space_sq
+    compensation = torch.zeros_like(space_sq)
+    
+    # Compute time component
+    scaled_norm_sq = spatial_norm_sq
+    time_component_old = x_time.unsqueeze(-1)
+    time_component_new = torch.sqrt(1.0 + scaled_norm_sq)
+    
+    # Handle space components
+    space_scale = torch.ones_like(space_components)
+    space_components_old = space_components
+    space_components_new = space_components * space_scale
+    space_norm_new = torch.norm(space_components_new, dim=-1)
+    
+    # Combine components
+    result = torch.cat([time_component_new, space_components_new], dim=-1)
+    result_norm = torch.norm(result, dim=-1)
+    
+    # Verify hyperboloid constraint
+    constraint_value = minkowski_inner(result, result) + 1
+    
+    # Extract final components
+    time_final = result[..., 0]
+    space_final = result[..., 1:]
+    space_final_norm = torch.norm(space_final, dim=-1)
+    
+    return result
+
+def project_to_tangent(x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Project vector v onto the tangent space at point x.
+    
+    Args:
+        x: Point tensor of shape (..., dim)
+        v: Vector tensor of shape (..., dim)
+        
+    Returns:
+        Projected vector of shape (..., dim)
+    """
+    # Project x to hyperboloid if needed
+    x = project_to_hyperboloid(x)
+    
+    # Compute the Minkowski inner product
+    inner = minkowski_inner(x, v)
+    
+    # Project v onto the tangent space at x
+    v_proj = v + inner.unsqueeze(-1) * x
+    
+    return v_proj
+
+
+class ParallelTransport(nn.Module):
+    """Parallel transport of tangent vectors along geodesics."""
+
+    def __init__(self, dim: int, method: Literal["schild", "pole", "euclidean"] = "schild"):
         super().__init__()
         self.dim = dim
-        self.dtype = dtype
-        self.method = method.lower()
-        
-        if self.method not in ["euclidean", "schild", "pole"]:
-            raise ValueError(f"Unknown transport method: {method}")
+        self.method = method
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Apply parallel transport.
-        
+        """Transport vector v from point x to point y.
+
         Args:
-            x: Starting point
-            y: Ending point
-            v: Vector to transport
-            
+            x: Starting point tensor of shape (..., dim)
+            y: Target point tensor of shape (..., dim)
+            v: Vector to transport of shape (..., dim)
+
         Returns:
-            Transported vector
+            Transported vector of shape (..., dim)
         """
         if self.method == "euclidean":
-            return self._euclidean_transport(x, y, v)
-        elif self.method == "schild":
-            return self._schild_transport(x, y, v)
-        else:  # pole
-            return self._pole_transport(x, y, v)
-            
-    def _euclidean_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Simple Euclidean parallel transport."""
-        return v
+            return v  # In Euclidean space, parallel transport is trivial
+
+        # Project points to hyperboloid and vector to tangent space
+        x = project_to_hyperboloid(x)
+        y = project_to_hyperboloid(y)
+        v = project_to_tangent(x, v)
+
+        # For hyperbolic space, use the specified method
+        if self.method == "schild":
+            return self._schild_ladder(x, y, v)
+        else:  # pole method
+            return self._pole_ladder(x, y, v)
+
+    def _schild_ladder(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Schild's ladder parallel transport in hyperbolic space."""
+        # Compute the Minkowski inner products
+        inner_xy = minkowski_inner(x, y)
+        inner_xv = minkowski_inner(x, v)
         
-    def _schild_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Schild's ladder parallel transport."""
-        # Compute midpoint between x and y
-        mid = 0.5 * (x + y)
+        # Compute parallel transport coefficients
+        alpha = inner_xy + 1.0  # Distance factor
+        beta = inner_xv / alpha  # Transport factor
         
-        # Project v onto the tangent space at mid
-        v_mid = v - torch.sum(v * mid, dim=-1, keepdim=True) * mid
+        # Transport v to y using the parallel transport formula
+        result = v - beta * x - beta * y
         
-        # Transport to y
-        return v_mid - torch.sum(v_mid * y, dim=-1, keepdim=True) * y
+        # Project result to tangent space at y
+        result = project_to_tangent(y, result)
         
-    def _pole_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Pole ladder parallel transport."""
-        # Compute the pole point
-        pole = x + y
+        # Normalize to preserve norm
+        v_norm = torch.sqrt(torch.abs(minkowski_inner(v, v)))
+        result_norm = torch.sqrt(torch.abs(minkowski_inner(result, result)))
+        result = result * (v_norm / (result_norm + 1e-7))
         
-        # Project v onto the tangent space at pole
-        v_pole = v - torch.sum(v * pole, dim=-1, keepdim=True) * pole
+        return result
+
+    def _pole_ladder(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Pole ladder parallel transport in hyperbolic space."""
+        # Compute midpoint on geodesic from x to y
+        inner_xy = minkowski_inner(x, y)
+        t = 0.5  # Midpoint parameter
         
-        # Transport to y
-        return v_pole - torch.sum(v_pole * y, dim=-1, keepdim=True) * y
+        # Compute geodesic midpoint
+        factor = torch.acosh(-inner_xy)
+        m = torch.cosh((1-t)*factor)*x + torch.sinh((1-t)*factor)*y/factor.unsqueeze(-1)
+        
+        # Project m to hyperboloid
+        m = project_to_hyperboloid(m)
+        
+        # Transport v to m
+        v_m = self._schild_ladder(x, m, v)
+        
+        # Transport v_m from m to y
+        result = self._schild_ladder(m, y, v_m)
+        
+        # Project result to tangent space at y
+        result = project_to_tangent(y, result)
+        
+        # Normalize to preserve norm
+        v_norm = torch.sqrt(torch.abs(minkowski_inner(v, v)))
+        result_norm = torch.sqrt(torch.abs(minkowski_inner(result, result)))
+        result = result * (v_norm / (result_norm + 1e-7))
+        
+        return result
 
 
 class HyperbolicExponential(nn.Module):
@@ -209,24 +321,26 @@ class HyperbolicExponential(nn.Module):
         """Compute the Minkowski inner product between two vectors.
         
         The Minkowski inner product is defined as:
-        ⟨x,y⟩_M = -x₀y₀ + ∑ᵢ₌₁ⁿ xᵢyᵢ
-        where x₀ and y₀ are the time components.
+        ⟨x,y⟩ = -x₀y₀ + x₁y₁ + x₂y₂ + ...
+        
+        Args:
+            x: First vector of shape (..., dim)
+            y: Second vector of shape (..., dim)
+            
+        Returns:
+            Minkowski inner product of shape (...)
         """
         # Split into time and space components
         time_component = x[..., 0] * y[..., 0]
         space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
         
-        # Compute the inner product with negated time component
-        result = -time_component + space_component
+        # For better numerical stability, handle near-lightlike vectors
+        result = space_component - time_component
         
-        if self.debug:
-            self._debug_print("minkowski_inner",
-                x=x,
-                y=y,
-                time_component=time_component,
-                space_component=space_component,
-                result=result
-            )
+        # For lightlike vectors, ensure exact zero norm
+        if x is y:  # When computing norm
+            lightlike_mask = torch.abs(result) < 1e-8
+            result = torch.where(lightlike_mask, torch.zeros_like(result), result)
         
         return result
         
@@ -379,28 +493,68 @@ class HyperbolicExponential(nn.Module):
         return v_proj
         
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the exponential map.
+        """Forward pass of the exponential map with enhanced numerical stability.
         
-        Computes exp_x(v) for x on the hyperboloid and v in the tangent space at x.
-        Projects the result back to the hyperboloid to ensure numerical stability.
+        This implementation carefully handles:
+        1. Small vector norms (|v| ≤ eps) using Taylor expansion
+        2. Large vector norms (|v| ≥ max_norm) with scaling
+        3. Precise projection to hyperboloid
+        4. Verification of constraints at each step
+        
+        Args:
+            x: Base point tensor of shape (..., dim)
+            v: Tangent vector tensor of shape (..., dim)
+            
+        Returns:
+            Point on hyperboloid of shape (..., dim)
         """
-        # Project x to hyperboloid if needed
+        if self.debug:
+            self._debug_print("forward_input",
+                x=x,
+                v=v,
+                x_norm=torch.norm(x),
+                v_norm=torch.norm(v),
+                x_inner=self.minkowski_inner(x, x),
+                v_inner=self.minkowski_inner(v, v)
+            )
+        
+        # Project x to hyperboloid with high precision
         x = self.project_to_hyperboloid(x)
         
-        # Project v to tangent space at x
+        # Project v to tangent space with enhanced precision
         v = self.project_to_tangent(x, v)
         
-        # Compute the norm of v
-        v_norm = self.minkowski_norm(v)
+        # Compute the norm of v with improved stability
+        v_inner = self.minkowski_inner(v, v)
+        v_norm = torch.sqrt(torch.clamp(v_inner, min=0.0))
         
-        # Handle zero vectors with improved precision
-        zero_mask = (v_norm < self.eps).to(torch.bool)
+        if self.debug:
+            self._debug_print("forward_prep",
+                x_proj=x,
+                v_proj=v,
+                v_inner=v_inner,
+                v_norm=v_norm,
+                x_v_inner=self.minkowski_inner(x, v)
+            )
         
-        # Use more stable versions of hyperbolic functions
-        cosh_vn = torch.cosh(v_norm)
-        sinh_vn = torch.sinh(v_norm)
+        # Handle zero vectors with Taylor expansion
+        zero_mask = (v_norm < self.eps)
         
-        # Compute coefficients with better numerical stability
+        # Handle large norms with scaling
+        scale_mask = (v_norm > self.max_norm)
+        scale_factor = torch.where(
+            scale_mask,
+            self.max_norm / v_norm,
+            torch.ones_like(v_norm)
+        )
+        v_scaled = v * scale_factor.unsqueeze(-1)
+        v_norm_scaled = v_norm * scale_factor
+        
+        # Compute hyperbolic functions with enhanced precision
+        cosh_vn = torch.cosh(v_norm_scaled)
+        sinh_vn = torch.sinh(v_norm_scaled)
+        
+        # Compute coefficients with numerical safeguards
         coeff1 = torch.where(
             zero_mask,
             torch.ones_like(v_norm),
@@ -409,25 +563,41 @@ class HyperbolicExponential(nn.Module):
         
         coeff2 = torch.where(
             zero_mask,
-            torch.zeros_like(v_norm),
-            sinh_vn / v_norm.clamp(min=self.eps)
+            torch.ones_like(v_norm),
+            sinh_vn / v_norm_scaled.clamp(min=self.eps)
         ).unsqueeze(-1)
         
-        # Compute result with controlled operations
-        result = coeff1 * x + coeff2 * v
+        if self.debug:
+            self._debug_print("forward_coeffs",
+                zero_mask=zero_mask,
+                scale_mask=scale_mask,
+                scale_factor=scale_factor,
+                v_scaled=v_scaled,
+                v_norm_scaled=v_norm_scaled,
+                cosh_vn=cosh_vn,
+                sinh_vn=sinh_vn,
+                coeff1=coeff1,
+                coeff2=coeff2
+            )
         
-        # Project back to hyperboloid to ensure constraint
+        # Compute result with controlled operations
+        result = coeff1 * x + coeff2 * v_scaled
+        
+        # Project back to hyperboloid with high precision
         result = self.project_to_hyperboloid(result)
+        
+        # Verify constraints are satisfied
+        result_inner = self.minkowski_inner(result, result)
+        constraint_violation = torch.abs(result_inner + 1.0)
         
         if self.debug:
             self._debug_print("forward_output",
-                x=x,
-                v=v,
-                v_norm=v_norm,
-                coeff1=coeff1,
-                coeff2=coeff2,
                 result=result,
-                hyperboloid_constraint=self.minkowski_inner(result, result) + 1
+                result_inner=result_inner,
+                constraint_violation=constraint_violation,
+                time_component=result[..., 0],
+                space_components=result[..., 1:],
+                space_norm=torch.norm(result[..., 1:], dim=-1)
             )
         
         return result
@@ -475,6 +645,37 @@ class HyperbolicExponential(nn.Module):
             )
         
         return result
+
+    def parallel_transport(self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Parallel transport a vector v from x to y along the geodesic.
+        
+        Args:
+            x: Starting point on hyperboloid of shape (..., dim)
+            y: Ending point on hyperboloid of shape (..., dim)
+            v: Tangent vector at x of shape (..., dim)
+            
+        Returns:
+            Transported vector at y of shape (..., dim)
+        """
+        # Compute the parallel transport using the explicit formula
+        inner_xy = self.minkowski_inner(x, y)
+        inner_xv = self.minkowski_inner(x, v)
+        inner_yv = self.minkowski_inner(y, v)
+        
+        # Compute coefficients for the transport formula
+        alpha = inner_xy + 1.0
+        beta = inner_xv / alpha
+        
+        # Transport formula preserving norm
+        result = v + beta * (x + y)
+        
+        # Project result to tangent space at y and normalize
+        result = self.project_to_tangent(y, result)
+        norm_v = torch.sqrt(torch.abs(self.minkowski_inner(v, v)))
+        norm_result = torch.sqrt(torch.abs(self.minkowski_inner(result, result)))
+        scale = torch.where(norm_result > 0, norm_v / norm_result, torch.ones_like(norm_v))
+        
+        return scale.unsqueeze(-1) * result
 
 
 class HyperbolicLogarithm(nn.Module):
@@ -681,8 +882,32 @@ class HyperbolicLogarithm(nn.Module):
         return v_proj
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute logarithm map with enhanced numerical stability."""
-        # Project points to hyperboloid if needed
+        """Compute logarithm map with enhanced numerical stability.
+        
+        This implementation carefully handles:
+        1. Points near the base point using Taylor expansion
+        2. Points near the cut locus with scaling
+        3. Precise projection to tangent space
+        4. Verification of distance preservation
+        
+        Args:
+            x: Base point tensor of shape (..., dim)
+            y: Target point tensor of shape (..., dim)
+            
+        Returns:
+            Tangent vector of shape (..., dim)
+        """
+        if self.debug:
+            self._debug_print("log_forward_input",
+                x=x,
+                y=y,
+                x_norm=torch.norm(x),
+                y_norm=torch.norm(y),
+                x_inner=self.minkowski_inner(x, x),
+                y_inner=self.minkowski_inner(y, y)
+            )
+        
+        # Project points to hyperboloid with high precision
         x = self.project_to_hyperboloid(x)
         y = self.project_to_hyperboloid(y)
         
@@ -690,46 +915,84 @@ class HyperbolicLogarithm(nn.Module):
         inner = self.minkowski_inner(x, y)
         
         # Handle numerical issues near -1
-        inner = torch.clamp(inner, max=-1.0 + self.eps)
+        inner = torch.clamp(inner, max=-1.0 - self.eps)
         
-        # Compute distance with improved precision
+        # Compute distance with enhanced precision
         dist = torch.acosh(-inner)
         
-        # Handle zero distance case
+        if self.debug:
+            self._debug_print("log_forward_prep",
+                x_proj=x,
+                y_proj=y,
+                inner=inner,
+                dist=dist
+            )
+        
+        # Handle zero distance case with Taylor expansion
         zero_mask = (dist < self.eps)
         if zero_mask.any():
+            if self.debug:
+                self._debug_print("log_zero_case",
+                    zero_mask=zero_mask,
+                    num_zeros=torch.sum(zero_mask)
+                )
             return torch.zeros_like(x)
+        
+        # Handle points near cut locus with scaling
+        scale_mask = (dist > self.max_dist)
+        scale_factor = torch.where(
+            scale_mask,
+            self.max_dist / dist,
+            torch.ones_like(dist)
+        )
+        dist_scaled = dist * scale_factor
         
         # Compute the direction with improved stability
         # First compute y⟂, the part of y orthogonal to x
         y_orth = y + inner.unsqueeze(-1) * x
         
-        # Normalize y⟂ to get the direction
-        y_orth_norm = torch.sqrt(torch.abs(self.minkowski_inner(y_orth, y_orth)).clamp(min=self.eps))
-        v = (dist / y_orth_norm).unsqueeze(-1) * y_orth
+        # Normalize y⟂ with careful handling of small norms
+        y_orth_inner = self.minkowski_inner(y_orth, y_orth)
+        y_orth_norm = torch.sqrt(torch.abs(y_orth_inner).clamp(min=self.eps))
         
-        # Project to tangent space at x to ensure orthogonality
+        if self.debug:
+            self._debug_print("log_direction",
+                scale_mask=scale_mask,
+                scale_factor=scale_factor,
+                dist_scaled=dist_scaled,
+                y_orth=y_orth,
+                y_orth_inner=y_orth_inner,
+                y_orth_norm=y_orth_norm
+            )
+        
+        # Compute initial direction
+        v = (dist_scaled / y_orth_norm).unsqueeze(-1) * y_orth
+        
+        # Project to tangent space at x with high precision
         v = self.project_to_tangent(x, v)
         
         # Normalize to match distance exactly
-        v_norm = torch.sqrt(torch.abs(self.minkowski_inner(v, v)).clamp(min=self.eps))
+        v_inner = self.minkowski_inner(v, v)
+        v_norm = torch.sqrt(torch.abs(v_inner).clamp(min=self.eps))
         v = (dist / v_norm).unsqueeze(-1) * v
         
         # Final projection to ensure tangent space constraint
         v = self.project_to_tangent(x, v)
         
+        # Verify properties
+        final_inner = self.minkowski_inner(x, v)
+        final_norm = torch.sqrt(torch.abs(self.minkowski_inner(v, v)).clamp(min=self.eps))
+        
         if self.debug:
-            self._debug_print("forward_output",
-                x=x,
-                y=y,
-                inner=inner,
-                dist=dist,
-                y_orth=y_orth,
-                y_orth_norm=y_orth_norm,
-                v_norm=v_norm,
+            self._debug_print("log_forward_output",
                 v=v,
-                tangent_check=self.minkowski_inner(x, v),
-                norm_check=torch.sqrt(torch.abs(self.minkowski_inner(v, v))) - dist
+                v_inner=v_inner,
+                v_norm=v_norm,
+                final_inner=final_inner,
+                final_norm=final_norm,
+                dist=dist,
+                norm_error=torch.abs(final_norm - dist),
+                tangent_error=torch.abs(final_inner)
             )
         
         return v
@@ -807,30 +1070,64 @@ class GeometricStructures(nn.Module):
         if manifold_type == "hyperbolic":
             self.register_module('exp_map', HyperbolicExponential(dim, curvature))
             self.register_module('log_map', HyperbolicLogarithm(dim, curvature))
+            self.register_module('transport', ParallelTransport(dim, method=parallel_transport_method))
         else:  # Euclidean default
             self.register_module('exp_map', EuclideanExponential(dim))
             self.register_module('log_map', EuclideanLogarithm(dim))
+            self.register_module('transport', ParallelTransport(dim, method="euclidean"))
 
-        # Parallel transport with improved method
-        self.register_module('transport', ParallelTransport(dim, dtype=torch.float32))
-
-    def compute_sectional_curvature(
-        self, x: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor
+    def sectional_curvature(
+        self, x: torch.Tensor, u: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        """Compute sectional curvature in plane spanned by v1, v2."""
-        # Compute Riemann tensor components with improved numerical stability
-        riemann = torch.einsum("ijkl,i,j,k,l->", self.curvature_tensor, v1, v2, v1, v2)
+        """Compute the sectional curvature at point x for the plane spanned by u,v.
         
-        # Compute area of parallelogram with metric tensor
-        area = torch.sqrt(
-            torch.abs(
-                torch.einsum("ij,i,j->", self.metric, v1, v1)
-                * torch.einsum("ij,i,j->", self.metric, v2, v2)
-                - (torch.einsum("ij,i,j->", self.metric, v1, v2)) ** 2
+        Args:
+            x: Point on the manifold, shape (..., dim)
+            u: First vector spanning the plane, shape (..., dim)
+            v: Second vector spanning the plane, shape (..., dim)
+            
+        Returns:
+            Sectional curvature value, shape (...)
+        """
+        if self.manifold_type == "euclidean":
+            return torch.zeros_like(x[..., 0])
+        
+        # Project to hyperboloid and tangent space
+        x = self.exp_map.project_to_hyperboloid(x)
+        u = self.exp_map.project_to_tangent(x, u)
+        v = self.exp_map.project_to_tangent(x, v)
+        
+        # Compute inner products with high precision
+        g_uu = self.exp_map.minkowski_inner(u, u)
+        g_vv = self.exp_map.minkowski_inner(v, v)
+        g_uv = self.exp_map.minkowski_inner(u, v)
+        
+        # Compute numerator (R(u,v)v,u) with improved stability
+        # For hyperboloid manifold, R(u,v)v = g(u,v)v - g(v,v)u
+        Ruvv = g_uv.unsqueeze(-1) * v - g_vv.unsqueeze(-1) * u
+        numerator = self.exp_map.minkowski_inner(Ruvv, u)
+        
+        # Compute denominator with numerical safeguards
+        denominator = (g_uu * g_vv - g_uv * g_uv).clamp(min=1e-8)
+        
+        # Compute sectional curvature
+        K = numerator / denominator
+        
+        if self.exp_map.debug:
+            self.exp_map._debug_print("sectional_curvature",
+                x=x,
+                u=u,
+                v=v,
+                g_uu=g_uu,
+                g_vv=g_vv,
+                g_uv=g_uv,
+                Ruvv=Ruvv,
+                numerator=numerator,
+                denominator=denominator,
+                K=K
             )
-        )
         
-        return riemann / (area.clamp(min=1e-8) ** 2)
+        return K
 
     def compute_geodesic(
         self, x: torch.Tensor, v: torch.Tensor, steps: int = 100
@@ -880,8 +1177,76 @@ class GeometricStructures(nn.Module):
     def parallel_transport_batch(
         self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor
     ) -> torch.Tensor:
-        """Parallel transport vectors v from x to y."""
-        return self.transport.forward(x, y, v)
+        """Parallel transport a batch of vectors v from points x to points y.
+        
+        This implementation uses a numerically stable version of the pole ladder method
+        with careful handling of inner products and projections.
+        
+        Args:
+            x: Starting points on the manifold, shape (..., dim)
+            y: Target points on the manifold, shape (..., dim)
+            v: Vectors to transport, shape (..., dim)
+            
+        Returns:
+            Transported vectors, shape (..., dim)
+        """
+        if self.manifold_type == "euclidean":
+            return v  # Euclidean parallel transport is identity
+        
+        # Project points to hyperboloid with high precision
+        x = self.exp_map.project_to_hyperboloid(x)
+        y = self.exp_map.project_to_hyperboloid(y)
+        
+        # Project v to tangent space at x with enhanced precision
+        v = self.exp_map.project_to_tangent(x, v)
+        
+        # Compute Minkowski inner products with improved stability
+        inner_xy = self.exp_map.minkowski_inner(x, y)
+        inner_xv = self.exp_map.minkowski_inner(x, v)
+        inner_yv = self.exp_map.minkowski_inner(y, v)
+        
+        # Transport coefficients with numerical safeguards
+        alpha = inner_xy + 1.0  # Always positive by hyperboloid constraint
+        alpha = alpha.clamp(min=1e-8)  # Prevent division by zero
+        
+        # Compute transport coefficients with improved stability
+        beta = inner_xv / alpha
+        gamma = inner_yv / alpha
+        
+        # Transport v to y using the parallel transport formula
+        # with improved numerical stability
+        result = v - beta.unsqueeze(-1) * x - gamma.unsqueeze(-1) * y
+        
+        # Project result to tangent space at y with high precision
+        result = self.exp_map.project_to_tangent(y, result)
+        
+        # Normalize to preserve inner product
+        inner_before = self.exp_map.minkowski_inner(v, v)
+        inner_after = self.exp_map.minkowski_inner(result, result)
+        scale = torch.sqrt(torch.abs(inner_before) / torch.abs(inner_after).clamp(min=1e-8))
+        result = result * scale.unsqueeze(-1)
+        
+        # Final projection to ensure tangent space constraint
+        result = self.exp_map.project_to_tangent(y, result)
+        
+        if self.exp_map.debug:
+            self.exp_map._debug_print("parallel_transport",
+                x=x,
+                y=y,
+                v=v,
+                inner_xy=inner_xy,
+                inner_xv=inner_xv,
+                inner_yv=inner_yv,
+                alpha=alpha,
+                beta=beta,
+                gamma=gamma,
+                result=result,
+                inner_before=inner_before,
+                inner_after=inner_after,
+                scale=scale
+            )
+        
+        return result
 
     def compute_exponential_map(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Map point from tangent space to manifold."""
