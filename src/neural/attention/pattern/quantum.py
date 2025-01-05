@@ -78,15 +78,16 @@ class QuantumGeometricTensor:
         # Ensure psi requires grad
         psi = psi.requires_grad_()
         
-        # Create parameter vector matching psi's batch dimensions
-        param = torch.zeros(psi.shape[:-3], device=psi.device, dtype=torch.complex64)
-        param[..., param_idx] = 1.0
+        # Create parameter vector for gradient computation
+        # We want a tensor that matches the shape of psi but has 1.0 at the specified parameter index
+        param = torch.zeros_like(psi)
+        param[:, param_idx] = 1.0  # Set the specified channel to 1.0
         
         # Compute derivative
         derivative = torch.autograd.grad(
             outputs=psi,
             inputs=psi,
-            grad_outputs=param.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(psi),
+            grad_outputs=param,
             create_graph=True
         )[0]
         

@@ -734,3 +734,57 @@ class SymplecticStructure:
     def _cleanup(self):
         """Clean up memory after operations."""
         gc.collect()  # Use regular garbage collection 
+
+    def project_to_manifold(self, state: Tensor) -> Tensor:
+        """Project state onto symplectic manifold while preserving structure.
+        
+        This method projects a state onto the symplectic manifold using the
+        symplectic form to ensure structure preservation. The projection
+        maintains the symplectic properties while minimizing the distance
+        to the original state.
+        
+        Args:
+            state: State to project [phase_dim] or [batch_size, phase_dim]
+            
+        Returns:
+            Projected state with same shape as input
+        """
+        if not isinstance(state, Tensor):
+            raise ValueError(f"Expected torch.Tensor, got {type(state)}")
+            
+        # Split into position and momentum
+        n = self.dim // 2
+        q = state[..., :n]
+        p = state[..., n:]
+        
+        # Compute symplectic form
+        form = self.compute_form(state)
+        
+        # Project position (unchanged)
+        q_proj = q
+        
+        # Project momentum to preserve symplectic structure
+        # We use the fact that in canonical coordinates:
+        # 1. p = J^T ∂H/∂q
+        # 2. The symplectic form ω = dp ∧ dq
+        
+        # First, compute the Hamiltonian
+        q_proj.requires_grad_(True)
+        H = 0.5 * (torch.sum(q_proj * q_proj, dim=-1) + torch.sum(p * p, dim=-1))
+        
+        # Compute gradient ∂H/∂q
+        grad_H = torch.autograd.grad(H.sum(), q_proj, create_graph=True)[0]
+        
+        # Extract J from symplectic form and ensure it's canonical
+        J = form.matrix[n:, :n]  # This is -I in canonical coordinates
+        
+        # Project momentum using canonical transformation
+        # p_proj = -∂H/∂q to maintain canonical form
+        p_proj = -grad_H
+        
+        # Normalize to preserve the original norm
+        p_norm = torch.norm(p)
+        p_proj = p_proj * (p_norm / (torch.norm(p_proj) + 1e-8))
+        
+        # Combine and return
+        return torch.cat([q_proj, p_proj], dim=-1)

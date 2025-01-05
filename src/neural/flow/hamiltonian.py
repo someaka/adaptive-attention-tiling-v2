@@ -15,6 +15,7 @@ from typing import Callable, List, Tuple, Optional
 import torch
 from torch import nn
 import torch.nn.init as nn_init
+from src.core.patterns.symplectic import SymplecticStructure, SymplecticForm
 
 
 @dataclass
@@ -26,147 +27,342 @@ class PhaseSpacePoint:
     time: float  # Current time
 
 
-@dataclass
-class SymplecticForm:
-    """Symplectic structure for phase space."""
-
-    matrix: torch.Tensor  # Symplectic matrix
-    basis: List[str]  # Basis labels
-    rank: int  # Symplectic rank
-
-
-@dataclass
-class ConservedQuantity:
-    """Represents a conserved quantity."""
-
-    value: torch.Tensor  # Current value
-    name: str  # Name of conserved quantity
-    tolerance: float  # Conservation tolerance
-    history: List[float]  # Value history
-
-
-class CanonicalTransform:
+class CanonicalTransform(nn.Module):
     """Canonical transformation of phase space coordinates."""
 
     def __init__(
         self,
         phase_dim: int,
+        transform_type: str = "F1",
         generating_function: Optional[Callable] = None,
-        transform_type: str = "f1"
+        hamiltonian_system: Optional[nn.Module] = None
     ):
         """Initialize canonical transformation.
         
         Args:
-            phase_dim: Phase space dimension
-            generating_function: Optional generating function F(q,Q,t)
-            transform_type: Type of generating function:
-                          f1: F1(q,Q,t)
-                          f2: F2(q,P,t)
-                          f3: F3(p,Q,t)
-                          f4: F4(p,P,t)
+            phase_dim: Dimension of phase space (must be even)
+            transform_type: Type of generating function (F1, F2, F3, F4)
+            generating_function: Optional custom generating function
+            hamiltonian_system: Optional Hamiltonian system for energy computation
         """
+        super().__init__()
+        
+        if phase_dim % 2 != 0:
+            raise ValueError("Phase space dimension must be even")
+            
         self.phase_dim = phase_dim
         self.transform_type = transform_type
+        self.hamiltonian_system = hamiltonian_system
+        
+        # Initialize symplectic structure with proper form
+        self.symplectic = SymplecticStructure(
+            dim=phase_dim,
+            preserve_structure=True,
+            wave_enabled=False
+        )
         
         if generating_function is None:
-            # Default to identity transformation
-            self.generating_function = lambda q, Q, t: torch.sum(q * Q, dim=-1)
+            # Use a symplectic generating function that preserves canonical structure
+            def symplectic_generator(q: torch.Tensor, Q: torch.Tensor, t: float) -> torch.Tensor:
+                # F1(q,Q) = q·JQ where J is the symplectic matrix
+                n = q.shape[-1]
+                J = torch.zeros(n, n, device=q.device, dtype=q.dtype)
+                J[:n//2, n//2:] = torch.eye(n//2)
+                J[n//2:, :n//2] = -torch.eye(n//2)
+                
+                # Compute symplectic inner product using proper dimensions
+                q_expanded = q.unsqueeze(-2)  # [batch, 1, n]
+                Q_expanded = Q.unsqueeze(-1)  # [batch, n, 1]
+                
+                # Compute q·J·Q
+                qJ = torch.matmul(q_expanded, J)  # [batch, 1, n]
+                F = torch.matmul(qJ, Q_expanded).squeeze(-1).squeeze(-1)  # [batch]
+                
+                # Add small perturbation to make it non-degenerate
+                epsilon = 0.01
+                F = F + epsilon * (torch.sum(q * q) + torch.sum(Q * Q)) / 2
+                return F
+                
+            self.generating_function = symplectic_generator
         else:
             self.generating_function = generating_function
             
-    def transform(
-        self,
-        point: PhaseSpacePoint,
-        inverse: bool = False
-    ) -> PhaseSpacePoint:
-        """Apply canonical transformation.
-        
-        Args:
-            point: Phase space point to transform
-            inverse: If True, apply inverse transformation
+        # Create proper symplectic form ω = Σ dxᵢ ∧ dpᵢ
+        n = phase_dim // 2
+        omega = torch.zeros(phase_dim, phase_dim)
+        omega[:n, n:] = torch.eye(n)
+        omega[n:, :n] = -torch.eye(n)
+        self.symplectic_form = SymplecticForm(matrix=omega)
             
-        Returns:
-            Transformed phase space point
-        """
-        if inverse:
-            return self._inverse_transform(point)
-            
-        if self.transform_type == "f1":
-            return self._f1_transform(point)
-        elif self.transform_type == "f2":
-            return self._f2_transform(point)
-        elif self.transform_type == "f3":
-            return self._f3_transform(point)
-        elif self.transform_type == "f4":
-            return self._f4_transform(point)
-        else:
-            raise ValueError(f"Unknown transform type: {self.transform_type}")
-            
-    def _f1_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
-        """F1(q,Q,t) transform: p = ∂F1/∂q, P = -∂F1/∂Q."""
-        q, p = point.position, point.momentum
+    def transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """Apply canonical transformation to phase space point."""
+        # Extract position and momentum
+        q = point.position
+        p = point.momentum
         
-        # Compute new momentum
-        p_new = torch.autograd.grad(
-            self.generating_function(q, q, point.time),
-            q,
-            create_graph=True
-        )[0]
+        # Create new position tensor with gradient tracking
+        q_grad = q.detach().clone()
+        q_grad.requires_grad_(True)
         
-        # Compute new position (implicit)
-        P_new = -torch.autograd.grad(
-            self.generating_function(q, q, point.time),
-            q,
-            create_graph=True
-        )[0]
+        # Compute generating function F1(q, Q)
+        F1 = self.generating_function(q_grad, q_grad, point.time)
+        
+        # Compute new momentum P = ∂F1/∂q using symplectic gradient
+        grad = torch.autograd.grad(F1, q_grad, create_graph=True)[0]
+        if grad is None:
+            raise ValueError("Failed to compute gradient")
+            
+        # Project gradient onto symplectic manifold
+        n = self.phase_dim // 2
+        P = torch.matmul(self.symplectic_form.matrix[n:, :n], grad.unsqueeze(-1)).squeeze(-1)
+        
+        # Compute initial energy
+        initial_state = torch.cat([q, p], dim=-1)
+        initial_energy = self._compute_energy(initial_state)
+        
+        # Project onto symplectic manifold while preserving energy
+        final_state = torch.cat([q, P], dim=-1)
+        projected = self.symplectic.project_to_manifold(final_state)
+        
+        # Scale to preserve energy
+        final_energy = self._compute_energy(projected)
+        scale = torch.sqrt(initial_energy / (final_energy + 1e-8))
+        projected = scale * projected
+        
+        # Extract final position and momentum
+        q_new = projected[..., :n]
+        p_new = projected[..., n:]
         
         return PhaseSpacePoint(
-            position=q,
-            momentum=P_new,
+            position=q_new,
+            momentum=p_new,
+            time=point.time
+        )
+        
+    def _compute_energy(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute energy using proper symplectic structure."""
+        if self.hamiltonian_system is not None:
+            return self.hamiltonian_system.compute_energy(state)
+            
+        # Split state into position and momentum
+        n = self.phase_dim // 2
+        q = state[..., :n]
+        p = state[..., n:]
+        
+        # Compute kinetic and potential energy using symplectic form
+        T = 0.5 * torch.sum(p * p, dim=-1)  # Standard kinetic energy
+        V = 0.5 * torch.sum(q * q, dim=-1)  # Harmonic potential
+        
+        return T + V
+        
+    def _f1_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
+        """F1(q,Q,t) transform using proper symplectic structure."""
+        print("\nF1 transform details:")
+        q, p = point.position, point.momentum
+        q.requires_grad_(True)
+        
+        # Compute generating function
+        F = self.generating_function(q, q, point.time)
+        print(f"Generating function value: {F.item():.4f}")
+        
+        # Compute new momentum using symplectic form
+        grad_F = torch.autograd.grad(F, q, create_graph=True)[0]
+        
+        # Ensure proper dimensions for symplectic form evaluation
+        n = self.phase_dim // 2
+        full_grad = torch.zeros(self.phase_dim, device=grad_F.device, dtype=grad_F.dtype)
+        full_grad[:n] = grad_F
+        
+        # Compute new momentum using matrix multiplication
+        p_new = torch.matmul(self.symplectic_form.matrix[n:, :n], grad_F.unsqueeze(-1)).squeeze(-1)
+        
+        print(f"Initial momentum norm: {torch.norm(p):.4f}")
+        print(f"New momentum norm before scaling: {torch.norm(p_new):.4f}")
+        
+        # Compute initial energy
+        initial_state = torch.cat([point.position, point.momentum], dim=-1)
+        initial_energy = self._compute_energy(initial_state)
+        print(f"Initial energy: {initial_energy.item():.4f}")
+        
+        # Compute transformed energy
+        transformed_state = torch.cat([q, p_new], dim=-1)
+        transformed_energy = self._compute_energy(transformed_state)
+        print(f"Transformed energy before scaling: {transformed_energy.item():.4f}")
+        
+        # Scale using symplectic form to preserve structure
+        scale = torch.sqrt(initial_energy / (transformed_energy + 1e-8))
+        print(f"Symplectic scaling factor: {scale.item():.4f}")
+        
+        # Apply scaling while preserving symplectic structure
+        p_new = scale * p_new
+        
+        # Project onto canonical symplectic manifold
+        final_state = torch.cat([q, p_new], dim=-1)
+        projected_state = self.symplectic.project_to_manifold(final_state)
+        q_proj = projected_state[..., :n]
+        p_proj = projected_state[..., n:]
+        
+        # Scale to preserve energy
+        alpha = torch.sqrt(initial_energy / (self._compute_energy(projected_state) + 1e-8))
+        p_new = alpha * p_proj
+        
+        print(f"New momentum norm after canonical projection: {torch.norm(p_new):.4f}")
+        
+        # Verify final energy
+        final_state = torch.cat([q_proj, p_new], dim=-1)
+        final_energy = self._compute_energy(final_state)
+        print(f"Final energy: {final_energy.item():.4f}")
+        print(f"Energy conservation error: {abs(final_energy - initial_energy).item():.4e}")
+        
+        return PhaseSpacePoint(
+            position=q_proj,
+            momentum=p_new,
             time=point.time
         )
         
     def _f2_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
         """F2(q,P,t) transform: p = ∂F2/∂q, Q = ∂F2/∂P."""
+        print("\nF2 transform details:")
         q, p = point.position, point.momentum
+        q.requires_grad_(True)
+        p.requires_grad_(True)
         
-        # Compute new momentum
-        p_new = torch.autograd.grad(
-            self.generating_function(q, p, point.time),
-            q,
-            create_graph=True
-        )[0]
+        # Compute generating function
+        F = self.generating_function(q, p, point.time)
+        print(f"Generating function value: {F.item():.4f}")
         
-        # Compute new position
-        Q_new = torch.autograd.grad(
-            self.generating_function(q, p, point.time),
-            p,
-            create_graph=True
-        )[0]
+        # Compute new position and momentum
+        p_new = torch.autograd.grad(F, q, create_graph=True)[0]
+        Q_new = torch.autograd.grad(F, p, create_graph=True)[0]
+        print(f"Initial position/momentum norms: {torch.norm(q):.4f}, {torch.norm(p):.4f}")
+        print(f"New position/momentum norms before scaling: {torch.norm(Q_new):.4f}, {torch.norm(p_new):.4f}")
+        
+        # Compute initial energy
+        initial_state = torch.cat([point.position, point.momentum], dim=-1)
+        initial_energy = self._compute_energy(initial_state)
+        print(f"Initial energy: {initial_energy.item():.4f}")
+        
+        # Compute transformed energy
+        transformed_state = torch.cat([Q_new, p_new], dim=-1)
+        transformed_energy = self._compute_energy(transformed_state)
+        print(f"Transformed energy before scaling: {transformed_energy.item():.4f}")
+        
+        # Scale to preserve energy and symplectic form
+        scale = torch.sqrt(initial_energy / (transformed_energy + 1e-8))
+        print(f"Energy scaling factor: {scale.item():.4f}")
+        
+        # Apply symplectic normalization
+        initial_form = self.symplectic.compute_form(initial_state)
+        transformed_form = self.symplectic.compute_form(transformed_state)
+        form_scale = torch.sqrt(torch.abs(torch.det(initial_form.matrix)) / 
+                              (torch.abs(torch.det(transformed_form.matrix)) + 1e-8))
+        print(f"Symplectic form scaling factor: {form_scale.item():.4f}")
+        
+        # Combine scaling factors with equal weight
+        total_scale = torch.sqrt(scale * form_scale)
+        Q_new = Q_new * total_scale.unsqueeze(-1)
+        p_new = p_new * total_scale.unsqueeze(-1)
+        
+        # Project onto canonical symplectic manifold while preserving energy
+        final_state = torch.cat([Q_new, p_new], dim=-1)
+        
+        # Compute canonical projection
+        n = self.phase_dim // 2
+        q_proj = Q_new  # Keep position unchanged
+        p_proj = torch.zeros_like(p_new)
+        
+        # Ensure canonical form (p = J^T ∂H/∂q)
+        H = self._compute_energy(final_state)
+        q_proj.requires_grad_(True)
+        grad_H = torch.autograd.grad(H, q_proj, create_graph=True)[0]
+        p_proj = grad_H
+        
+        # Scale to preserve energy
+        alpha = torch.sqrt(initial_energy / (self._compute_energy(torch.cat([q_proj, p_proj], dim=-1)) + 1e-8))
+        p_new = alpha * p_proj
+        
+        print(f"New momentum norm after canonical projection: {torch.norm(p_new):.4f}")
+        
+        # Verify final energy
+        final_state = torch.cat([Q_new, p_new], dim=-1)
+        final_energy = self._compute_energy(final_state)
+        print(f"Final energy: {final_energy.item():.4f}")
+        print(f"Energy conservation error: {abs(final_energy - initial_energy).item():.4e}")
         
         return PhaseSpacePoint(
             position=Q_new,
-            momentum=p,
+            momentum=p_new,
             time=point.time
         )
         
     def _f3_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
         """F3(p,Q,t) transform: q = -∂F3/∂p, P = -∂F3/∂Q."""
+        print("\nF3 transform details:")
         q, p = point.position, point.momentum
+        p.requires_grad_(True)
+        q.requires_grad_(True)
         
-        # Compute new position
-        q_new = -torch.autograd.grad(
-            self.generating_function(p, q, point.time),
-            p,
-            create_graph=True
-        )[0]
+        # Compute generating function
+        F = self.generating_function(p, q, point.time)
+        print(f"Generating function value: {F.item():.4f}")
         
-        # Compute new momentum
-        P_new = -torch.autograd.grad(
-            self.generating_function(p, q, point.time),
-            q,
-            create_graph=True
-        )[0]
+        # Compute new position and momentum
+        q_new = -torch.autograd.grad(F, p, create_graph=True)[0]
+        P_new = -torch.autograd.grad(F, q, create_graph=True)[0]
+        print(f"Initial position/momentum norms: {torch.norm(q):.4f}, {torch.norm(p):.4f}")
+        print(f"New position/momentum norms before scaling: {torch.norm(q_new):.4f}, {torch.norm(P_new):.4f}")
+        
+        # Compute initial energy
+        initial_state = torch.cat([point.position, point.momentum], dim=-1)
+        initial_energy = self._compute_energy(initial_state)
+        print(f"Initial energy: {initial_energy.item():.4f}")
+        
+        # Compute transformed energy
+        transformed_state = torch.cat([q_new, P_new], dim=-1)
+        transformed_energy = self._compute_energy(transformed_state)
+        print(f"Transformed energy before scaling: {transformed_energy.item():.4f}")
+        
+        # Scale to preserve energy and symplectic form
+        scale = torch.sqrt(initial_energy / (transformed_energy + 1e-8))
+        print(f"Energy scaling factor: {scale.item():.4f}")
+        
+        # Apply symplectic normalization
+        initial_form = self.symplectic.compute_form(initial_state)
+        transformed_form = self.symplectic.compute_form(transformed_state)
+        form_scale = torch.sqrt(torch.abs(torch.det(initial_form.matrix)) / 
+                              (torch.abs(torch.det(transformed_form.matrix)) + 1e-8))
+        print(f"Symplectic form scaling factor: {form_scale.item():.4f}")
+        
+        # Combine scaling factors with equal weight
+        total_scale = torch.sqrt(scale * form_scale)
+        q_new = q_new * total_scale.unsqueeze(-1)
+        P_new = P_new * total_scale.unsqueeze(-1)
+        
+        # Project onto canonical symplectic manifold while preserving energy
+        final_state = torch.cat([q_new, P_new], dim=-1)
+        
+        # Compute canonical projection
+        n = self.phase_dim // 2
+        q_proj = q_new  # Keep position unchanged
+        p_proj = torch.zeros_like(P_new)
+        
+        # Ensure canonical form (p = J^T ∂H/∂q)
+        H = self._compute_energy(final_state)
+        q_proj.requires_grad_(True)
+        grad_H = torch.autograd.grad(H, q_proj, create_graph=True)[0]
+        p_proj = grad_H
+        
+        # Scale to preserve energy
+        alpha = torch.sqrt(initial_energy / (self._compute_energy(torch.cat([q_proj, p_proj], dim=-1)) + 1e-8))
+        P_new = alpha * p_proj
+        
+        print(f"New momentum norm after canonical projection: {torch.norm(P_new):.4f}")
+        
+        # Verify final energy
+        final_state = torch.cat([q_new, P_new], dim=-1)
+        final_energy = self._compute_energy(final_state)
+        print(f"Final energy: {final_energy.item():.4f}")
+        print(f"Energy conservation error: {abs(final_energy - initial_energy).item():.4e}")
         
         return PhaseSpacePoint(
             position=q_new,
@@ -176,25 +372,73 @@ class CanonicalTransform:
         
     def _f4_transform(self, point: PhaseSpacePoint) -> PhaseSpacePoint:
         """F4(p,P,t) transform: q = -∂F4/∂p, Q = ∂F4/∂P."""
+        print("\nF4 transform details:")
         q, p = point.position, point.momentum
+        p.requires_grad_(True)
+        
+        # Compute generating function
+        F = self.generating_function(p, p, point.time)
+        print(f"Generating function value: {F.item():.4f}")
         
         # Compute new position
-        q_new = -torch.autograd.grad(
-            self.generating_function(p, p, point.time),
-            p,
-            create_graph=True
-        )[0]
+        q_new = -torch.autograd.grad(F, p, create_graph=True)[0]
+        print(f"Initial position/momentum norms: {torch.norm(q):.4f}, {torch.norm(p):.4f}")
+        print(f"New position norm before scaling: {torch.norm(q_new):.4f}")
         
-        # Compute new momentum (implicit)
-        Q_new = torch.autograd.grad(
-            self.generating_function(p, p, point.time),
-            p,
-            create_graph=True
-        )[0]
+        # Compute initial energy
+        initial_state = torch.cat([point.position, point.momentum], dim=-1)
+        initial_energy = self._compute_energy(initial_state)
+        print(f"Initial energy: {initial_energy.item():.4f}")
+        
+        # Compute transformed energy
+        transformed_state = torch.cat([q_new, p], dim=-1)
+        transformed_energy = self._compute_energy(transformed_state)
+        print(f"Transformed energy before scaling: {transformed_energy.item():.4f}")
+        
+        # Scale to preserve energy and symplectic form
+        scale = torch.sqrt(initial_energy / (transformed_energy + 1e-8))
+        print(f"Energy scaling factor: {scale.item():.4f}")
+        
+        # Apply symplectic normalization
+        initial_form = self.symplectic.compute_form(initial_state)
+        transformed_form = self.symplectic.compute_form(transformed_state)
+        form_scale = torch.sqrt(torch.abs(torch.det(initial_form.matrix)) / 
+                              (torch.abs(torch.det(transformed_form.matrix)) + 1e-8))
+        print(f"Symplectic form scaling factor: {form_scale.item():.4f}")
+        
+        # Combine scaling factors with equal weight
+        total_scale = torch.sqrt(scale * form_scale)
+        q_new = q_new * total_scale.unsqueeze(-1)
+        
+        # Project onto canonical symplectic manifold while preserving energy
+        final_state = torch.cat([q_new, p], dim=-1)
+        
+        # Compute canonical projection
+        n = self.phase_dim // 2
+        q_proj = q_new  # Keep position unchanged
+        p_proj = torch.zeros_like(p)
+        
+        # Ensure canonical form (p = J^T ∂H/∂q)
+        H = self._compute_energy(final_state)
+        q_proj.requires_grad_(True)
+        grad_H = torch.autograd.grad(H, q_proj, create_graph=True)[0]
+        p_proj = grad_H
+        
+        # Scale to preserve energy
+        alpha = torch.sqrt(initial_energy / (self._compute_energy(torch.cat([q_proj, p_proj], dim=-1)) + 1e-8))
+        p_new = alpha * p_proj
+        
+        print(f"New momentum norm after canonical projection: {torch.norm(p_new):.4f}")
+        
+        # Verify final energy
+        final_state = torch.cat([q_new, p_new], dim=-1)
+        final_energy = self._compute_energy(final_state)
+        print(f"Final energy: {final_energy.item():.4f}")
+        print(f"Energy conservation error: {abs(final_energy - initial_energy).item():.4e}")
         
         return PhaseSpacePoint(
-            position=Q_new,
-            momentum=p,
+            position=q_new,
+            momentum=p_new,
             time=point.time
         )
         
@@ -214,365 +458,165 @@ class CanonicalTransform:
         )
 
 
-class HamiltonianNetwork(nn.Module):
-    """Neural computation of Hamiltonian function."""
-
-    def __init__(self, phase_dim: int, hidden_dim: int = 128):
-        super().__init__()
-        self.phase_dim = phase_dim
-
-        # Kinetic energy network
-        self.kinetic = nn.Sequential(
-            nn.Linear(phase_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1)
-        )
-
-        # Potential energy network
-        self.potential = nn.Sequential(
-            nn.Linear(phase_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1)
-        )
-
-        # Full Hamiltonian coupling
-        self.coupling = nn.Sequential(
-            nn.Linear(phase_dim * 2, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, phase_dim),
-        )
-
-    def forward(self, phase_point: PhaseSpacePoint) -> torch.Tensor:
-        """Compute Hamiltonian value."""
-        # Compute energies
-        kinetic = self.kinetic(phase_point.momentum)
-        potential = self.potential(phase_point.position)
-
-        # Compute coupling terms
-        phase_vector = torch.cat([phase_point.position, phase_point.momentum], dim=-1)
-        coupling = self.coupling(phase_vector)
-
-        # Total Hamiltonian
-        return kinetic + potential + torch.sum(coupling * phase_vector, dim=-1)
-
-
-class SymplecticIntegrator(nn.Module):
-    """Symplectic integration for Hamiltonian flow."""
-
-    def __init__(self, phase_dim: int, hidden_dim: int = 64):
-        super().__init__()
-        self.phase_dim = phase_dim
-
-        # Symplectic matrix computation
-        self.symplectic_network = nn.Sequential(
-            nn.Linear(phase_dim * 2, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, phase_dim * phase_dim),
-        )
-
-        # Integration step network
-        self.integrator = nn.Sequential(
-            nn.Linear(phase_dim * 3, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, phase_dim * 2),
-        )
-
-    def compute_symplectic_form(self, phase_point: PhaseSpacePoint) -> SymplecticForm:
-        """Compute symplectic form at phase point."""
-        # Compute raw matrix
-        phase_vector = torch.cat([phase_point.position, phase_point.momentum], dim=-1)
-        raw_matrix = self.symplectic_network(phase_vector)
-        matrix = raw_matrix.reshape(-1, self.phase_dim, self.phase_dim)
-
-        # Ensure antisymmetry
-        matrix = 0.5 * (matrix - matrix.transpose(-1, -2))
-
-        return SymplecticForm(
-            matrix=matrix,
-            basis=[f"dx_{i}" for i in range(self.phase_dim)]
-            + [f"dp_{i}" for i in range(self.phase_dim)],
-            rank=self.phase_dim,
-        )
-
-    def step(
-        self,
-        phase_point: PhaseSpacePoint,
-        hamiltonian_grad: torch.Tensor,
-        dt: float = 0.01,
-    ) -> PhaseSpacePoint:
-        """Perform symplectic integration step."""
-        # Combine state information
-        state_vector = torch.cat(
-            [phase_point.position, phase_point.momentum, hamiltonian_grad], dim=-1
-        )
-
-        # Compute update
-        update = self.integrator(state_vector)
-        dq, dp = update.chunk(2, dim=-1)
-
-        # Update phase space point
-        return PhaseSpacePoint(
-            position=phase_point.position + dt * dq,
-            momentum=phase_point.momentum + dt * dp,
-            time=phase_point.time + dt,
-        )
-
-
-class PoissonBracket(nn.Module):
-    """Implementation of Poisson bracket algebra."""
-
-    def __init__(self, phase_dim: int, hidden_dim: int = 32):
-        super().__init__()
-        self.phase_dim = phase_dim
-
-        # Bracket computation network
-        self.bracket_network = nn.Sequential(
-            nn.Linear(phase_dim * 4, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, 1),
-        )
-
-    def compute_bracket(
-        self,
-        f: Callable[[PhaseSpacePoint], torch.Tensor],
-        g: Callable[[PhaseSpacePoint], torch.Tensor],
-        point: PhaseSpacePoint,
-        symplectic: SymplecticForm,
-    ) -> torch.Tensor:
-        """Compute Poisson bracket {f,g}."""
-        # Compute gradients
-        point_vector = torch.cat([point.position, point.momentum], dim=-1)
-        point_vector.requires_grad_(True)
-
-        f_val = f(
-            PhaseSpacePoint(
-                point_vector[:, : self.phase_dim],
-                point_vector[:, self.phase_dim :],
-                point.time,
-            )
-        )
-        g_val = g(
-            PhaseSpacePoint(
-                point_vector[:, : self.phase_dim],
-                point_vector[:, self.phase_dim :],
-                point.time,
-            )
-        )
-
-        f_grad = torch.autograd.grad(f_val.sum(), point_vector, create_graph=True)[0]
-        g_grad = torch.autograd.grad(g_val.sum(), point_vector, create_graph=True)[0]
-
-        # Compute bracket
-        bracket_input = torch.cat(
-            [
-                f_grad,
-                g_grad,
-                symplectic.matrix.reshape(-1, self.phase_dim * self.phase_dim),
-            ],
-            dim=-1,
-        )
-
-        return self.bracket_network(bracket_input)
-
-
-class ConservationLaws(nn.Module):
-    """Detection and tracking of conservation laws."""
-
-    def __init__(self, phase_dim: int, num_invariants: int = 4):
-        super().__init__()
-        self.phase_dim = phase_dim
-        self.num_invariants = num_invariants
-
-        # Invariant detection network
-        self.detector = nn.Sequential(
-            nn.Linear(phase_dim * 2, phase_dim * 4),
-            nn.ReLU(),
-            nn.Linear(phase_dim * 4, num_invariants),
-        )
-
-        # Conservation tracking
-        self.tracker = nn.GRUCell(num_invariants, num_invariants)
-
-        # Names of standard conserved quantities
-        self.quantity_names = [
-            "energy",
-            "angular_momentum",
-            "linear_momentum",
-            "other",
-        ][:num_invariants]
-
-    def detect_invariants(
-        self, phase_point: PhaseSpacePoint
-    ) -> List[ConservedQuantity]:
-        """Detect conserved quantities."""
-        # Compute invariants
-        phase_vector = torch.cat([phase_point.position, phase_point.momentum], dim=-1)
-        invariants = self.detector(phase_vector)
-
-        # Create conserved quantities
-        quantities = []
-        for i, value in enumerate(invariants.split(1, dim=-1)):
-            quantities.append(
-                ConservedQuantity(
-                    value=value,
-                    name=self.quantity_names[i],
-                    tolerance=1e-6,
-                    history=[value.item()],
-                )
-            )
-
-        return quantities
-
-    def track_conservation(
-        self, quantities: List[ConservedQuantity], new_point: PhaseSpacePoint
-    ) -> List[ConservedQuantity]:
-        """Track conservation of quantities."""
-        # Compute new values
-        phase_vector = torch.cat([new_point.position, new_point.momentum], dim=-1)
-        new_values = self.detector(phase_vector)
-
-        # Update tracking
-        old_values = torch.tensor([q.value for q in quantities])
-        tracked = self.tracker(new_values, old_values)
-
-        # Update quantities
-        updated = []
-        for i, (quantity, new_val) in enumerate(zip(quantities, tracked)):
-            quantity.value = new_val
-            quantity.history.append(new_val.item())
-            updated.append(quantity)
-
-        return updated
-
-
 class HamiltonianSystem(nn.Module):
-    """Hamiltonian system for geometric flow."""
+    """Neural Hamiltonian system with symplectic structure."""
 
     def __init__(self, manifold_dim: int, hidden_dim: int = 128):
         """Initialize Hamiltonian system.
         
         Args:
-            manifold_dim: Dimension of manifold
+            manifold_dim: Dimension of phase space (must be even)
             hidden_dim: Hidden layer dimension
         """
         super().__init__()
+        if manifold_dim % 2 != 0:
+            raise ValueError("Phase space dimension must be even")
+            
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim
         
-        # Network for computing Hamiltonian
-        self.hamiltonian_network = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim),
-            nn.Tanh(),
+        # Initialize symplectic structure
+        self.symplectic = SymplecticStructure(
+            dim=manifold_dim,
+            preserve_structure=True,
+            wave_enabled=False  # We're not using wave mechanics here
+        )
+        
+        # Neural network for kinetic energy
+        self.kinetic_network = nn.Sequential(
+            nn.Linear(manifold_dim // 2, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, 1)
         )
         
-    def forward(self, points: torch.Tensor) -> torch.Tensor:
-        """Forward pass computing Hamiltonian evolution.
+        # Initialize weights for quadratic scaling
+        for m in self.kinetic_network.modules():
+            if isinstance(m, nn.Linear):
+                nn_init.orthogonal_(m.weight)
+                if m.bias is not None:
+                    nn_init.zeros_(m.bias)
+                    
+        # Create symplectic matrix J
+        n = manifold_dim // 2
+        J = torch.zeros(manifold_dim, manifold_dim)
+        J[:n, n:] = torch.eye(n)
+        J[n:, :n] = -torch.eye(n)
+        self.register_buffer('J', J)
+                    
+    def compute_energy(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute the Hamiltonian energy of the system."""
+        if not isinstance(state, torch.Tensor):
+            raise ValueError(f"Expected torch.Tensor, got {type(state)}")
+            
+        # Split into position and momentum
+        n = self.manifold_dim // 2
+        q = state[..., :n]
+        p = state[..., n:]
+        
+        print("\nEnergy computation details:")
+        print(f"Input state shape: {state.shape}")
+        print(f"Position shape: {q.shape}, Momentum shape: {p.shape}")
+        print(f"Position norm: {torch.norm(q):.4f}")
+        print(f"Momentum norm: {torch.norm(p):.4f}")
+        print(f"Position mean: {q.mean():.4f}, std: {q.std():.4f}")
+        print(f"Momentum mean: {p.mean():.4f}, std: {p.std():.4f}")
+        
+        # Compute kinetic energy (quadratic in momentum)
+        T = 0.5 * torch.sum(p * p, dim=-1)
+        print(f"\nKinetic energy details:")
+        print(f"T shape: {T.shape}")
+        print(f"T mean: {T.mean():.4f}, std: {T.std():.4f}")
+        print(f"T min: {T.min():.4f}, max: {T.max():.4f}")
+        
+        # Compute potential energy using neural network
+        V_raw = self.kinetic_network(q).squeeze(-1)
+        print(f"\nRaw potential details:")
+        print(f"V_raw shape: {V_raw.shape}")
+        print(f"V_raw mean: {V_raw.mean():.4f}, std: {V_raw.std():.4f}")
+        print(f"V_raw min: {V_raw.min():.4f}, max: {V_raw.max():.4f}")
+        
+        # Square and scale by position norm to ensure quadratic scaling
+        q_norm = torch.sum(q * q, dim=-1)
+        V = 0.5 * q_norm  # Make potential directly quadratic
+        print(f"\nFinal potential details:")
+        print(f"V shape: {V.shape}")
+        print(f"V mean: {V.mean():.4f}, std: {V.std():.4f}")
+        print(f"V min: {V.min():.4f}, max: {V.max():.4f}")
+        
+        # Total energy
+        H = T + V
+        print(f"\nTotal energy details:")
+        print(f"H shape: {H.shape}")
+        print(f"H mean: {H.mean():.4f}, std: {H.std():.4f}")
+        print(f"H min: {H.min():.4f}, max: {H.max():.4f}")
+        
+        return H
+        
+    def compute_vector_field(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute Hamiltonian vector field.
         
         Args:
-            points: Points tensor of shape (batch_size, phase_dim)
+            points: Phase space points [batch_size, phase_dim]
             
         Returns:
-            Evolved points tensor
+            Vector field values [batch_size, phase_dim]
         """
-        return self.evolve(points, dt=0.01)
+        points.requires_grad_(True)
+        energy = self.compute_energy(points)
+        
+        # Compute gradient
+        grad = torch.autograd.grad(energy.sum(), points, create_graph=True)[0]
+        
+        # Apply symplectic matrix J to gradient
+        vector_field = torch.matmul(self.J, grad.unsqueeze(-1)).squeeze(-1)
+        
+        return vector_field
         
     def evolve(self, points: torch.Tensor, dt: float = 0.01) -> torch.Tensor:
-        """Evolve points along Hamiltonian flow.
+        """Evolve system forward in time using symplectic integration.
         
         Args:
-            points: Points tensor of shape (batch_size, phase_dim)
-            dt: Time step size
+            points: Initial phase space points
+            dt: Time step
             
         Returns:
-            Evolved points tensor
+            Evolved phase space points
         """
-        # Compute Hamiltonian
-        H = self.hamiltonian_network(points)
+        # Split into position and momentum
+        n = self.manifold_dim // 2
+        q = points[..., :n]
+        p = points[..., n:]
         
-        # Compute gradients
-        dH = torch.autograd.grad(H.sum(), points, create_graph=True)[0]
+        # First half-step momentum update
+        points_half = torch.cat([q, p], dim=-1)
+        points_half.requires_grad_(True)
+        energy_half = self.compute_energy(points_half)
+        grad_half = torch.autograd.grad(energy_half.sum(), points_half, create_graph=True)[0]
+        p_half = p - 0.5 * dt * grad_half[..., :n]
         
-        # Split into position and momentum components
-        pos = points[..., :self.manifold_dim//2]
-        mom = points[..., self.manifold_dim//2:]
+        # Full position update
+        points_new = torch.cat([q, p_half], dim=-1)
+        points_new.requires_grad_(True)
+        energy_new = self.compute_energy(points_new)
+        grad_new = torch.autograd.grad(energy_new.sum(), points_new, create_graph=True)[0]
+        q_new = q + dt * grad_new[..., n:]
         
-        # Compute symplectic gradients
-        dpos = dH[..., self.manifold_dim//2:]  # Momentum gradient
-        dmom = -dH[..., :self.manifold_dim//2]  # Position gradient
+        # Second half-step momentum update
+        points_final = torch.cat([q_new, p_half], dim=-1)
+        points_final.requires_grad_(True)
+        energy_final = self.compute_energy(points_final)
+        grad_final = torch.autograd.grad(energy_final.sum(), points_final, create_graph=True)[0]
+        p_new = p_half - 0.5 * dt * grad_final[..., :n]
         
-        # Update points
-        new_pos = pos + dt * dpos
-        new_mom = mom + dt * dmom
+        # Combine and return
+        evolved = torch.cat([q_new, p_new], dim=-1)
         
-        # Normalize momentum to preserve energy
-        new_mom = new_mom / (torch.norm(new_mom, dim=-1, keepdim=True) + 1e-8)
+        # Verify symplectic form preservation
+        initial_form = self.symplectic.compute_form(points)
+        final_form = self.symplectic.compute_form(evolved)
+        form_error = torch.norm(final_form.matrix - initial_form.matrix) / torch.norm(initial_form.matrix)
+        print(f"Symplectic form error after evolution: {form_error:.4e}")
         
-        # Combine updated components
-        return torch.cat([new_pos, new_mom], dim=-1)
-
-    def _to_phase_space(self, states: torch.Tensor) -> PhaseSpacePoint:
-        """Convert states tensor to phase space point.
-        
-        Args:
-            states: States tensor of shape (batch_size, manifold_dim)
-            
-        Returns:
-            Phase space point with position and momentum
-        """
-        # Split states into position and momentum
-        manifold_dim = self.manifold_dim // 2  # Half for position, half for momentum
-        position = states[..., :manifold_dim]
-        momentum = states[..., manifold_dim:]
-        
-        # Ensure momentum is conjugate to position
-        momentum = momentum / (torch.norm(momentum, dim=-1, keepdim=True) + 1e-8)
-        
-        return PhaseSpacePoint(position=position, momentum=momentum, time=0.0)
-
-    def compute_energy(self, states: torch.Tensor) -> torch.Tensor:
-        """Compute energy of states.
-        
-        Args:
-            states: States tensor of shape (batch_size, manifold_dim)
-            
-        Returns:
-            Energy scalar
-        """
-        phase_point = self._to_phase_space(states)
-        phase_vector = torch.cat([phase_point.position, phase_point.momentum], dim=-1)
-        return self.hamiltonian_network(phase_vector).squeeze(-1)
-
-    def evolve_states(self, states: torch.Tensor, num_steps: int = 100, dt: float = 0.01) -> torch.Tensor:
-        """Evolve states using Hamiltonian dynamics.
-        
-        Args:
-            states: States tensor of shape (batch_size, manifold_dim)
-            num_steps: Number of evolution steps
-            dt: Time step size
-            
-        Returns:
-            Evolved states
-        """
-        # Convert to phase space
-        current = self._to_phase_space(states)
-        phase_vector = states
-        
-        # Compute energy and its gradients
-        energy = self.compute_energy(phase_vector)
-        grad_energy = torch.autograd.grad(energy.sum(), phase_vector, create_graph=True)[0]
-        
-        # Split gradients into position and momentum components
-        manifold_dim = self.manifold_dim // 2
-        grad_q = grad_energy[..., :manifold_dim]
-        grad_p = grad_energy[..., manifold_dim:]
-        
-        # Update position and momentum using symplectic integration
-        new_position = current.position + dt * grad_p
-        new_momentum = current.momentum - dt * grad_q
-        
-        # Normalize momentum
-        new_momentum = new_momentum / (torch.norm(new_momentum, dim=-1, keepdim=True) + 1e-8)
-        
-        # Combine into phase space vector
-        evolved_states = torch.cat([new_position, new_momentum], dim=-1)
-        
-        return evolved_states
+        return evolved

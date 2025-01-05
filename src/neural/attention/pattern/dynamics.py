@@ -168,23 +168,30 @@ class PatternDynamics(nn.Module):
             
             # Apply quantum evolution using proper Hamiltonian
             if not hasattr(self, 'hamiltonian_system'):
-                self.hamiltonian_system = HamiltonianSystem(manifold_dim=2*self.dim)  # 2x for complex dimension
+                self.hamiltonian_system = HamiltonianSystem(manifold_dim=2)  # 2D phase space per point
                 
             # Convert quantum state to phase space representation
-            phase_space = torch.cat([
-                quantum_state.amplitudes.real,
-                quantum_state.amplitudes.imag
-            ], dim=-1)
+            # Reshape the amplitudes to combine all spatial dimensions
+            batch_size = quantum_state.amplitudes.shape[0]
+            amplitudes_flat = quantum_state.amplitudes.reshape(batch_size, -1)  # Flatten all spatial dims
+            
+            # Separate real and imaginary parts and combine into phase space points
+            phase_space = torch.stack([
+                amplitudes_flat.real,
+                amplitudes_flat.imag
+            ], dim=-1).reshape(batch_size, -1)  # Shape: (batch_size, num_points * 2)
             
             # Evolve using Hamiltonian dynamics
             evolved_phase = self.hamiltonian_system.evolve(phase_space, dt=self.dt)
             
+            # Reshape back to original dimensions
+            evolved_reshaped = evolved_phase.reshape(batch_size, -1, 2)  # Shape: (batch_size, num_points, 2)
+            evolved_complex = torch.complex(evolved_reshaped[..., 0], evolved_reshaped[..., 1])
+            evolved_reshaped = evolved_complex.reshape_as(quantum_state.amplitudes)
+            
             # Convert back to quantum state
             evolved = QuantumState(
-                amplitudes=torch.complex(
-                    evolved_phase[..., :self.dim],
-                    evolved_phase[..., self.dim:]
-                ),
+                amplitudes=evolved_reshaped,
                 basis_labels=quantum_state.basis_labels,
                 phase=quantum_state.phase
             )
