@@ -307,20 +307,13 @@ class HyperbolicExponential(nn.Module):
         # Compute time component with enhanced precision
         time_component_new = torch.sqrt(1.0 + scaled_norm_sq)
         
-        # Preserve the sign of the original time component
-        time_sign = torch.sign(time_component)
-        time_sign = torch.where(
-            (time_sign == 0).to(torch.bool),
-            torch.ones_like(time_sign),
-            time_sign
-        )
-        time_component_new = time_component_new * time_sign
+        # Always make time component positive
+        time_component_new = torch.abs(time_component_new)
         
         if self.debug:
             self._debug_print("project_to_hyperboloid_time",
                 scaled_norm_sq=scaled_norm_sq,
                 time_component_old=time_component,
-                time_sign=time_sign,
                 time_component_new=time_component_new
             )
         
@@ -400,13 +393,8 @@ class HyperbolicExponential(nn.Module):
         # Compute the norm of v
         v_norm = self.minkowski_norm(v)
         
-        # Handle zero vectors
+        # Handle zero vectors with improved precision
         zero_mask = (v_norm < self.eps).to(torch.bool)
-        if zero_mask.any():
-            return x
-        
-        # Compute the exponential map using stable operations
-        v_norm = torch.clamp(v_norm, min=self.eps)  # Avoid division by zero
         
         # Use more stable versions of hyperbolic functions
         cosh_vn = torch.cosh(v_norm)
@@ -417,16 +405,16 @@ class HyperbolicExponential(nn.Module):
             zero_mask,
             torch.ones_like(v_norm),
             cosh_vn
-        )
+        ).unsqueeze(-1)
         
         coeff2 = torch.where(
             zero_mask,
             torch.zeros_like(v_norm),
-            sinh_vn / v_norm
-        )
+            sinh_vn / v_norm.clamp(min=self.eps)
+        ).unsqueeze(-1)
         
         # Compute result with controlled operations
-        result = coeff1.unsqueeze(-1) * x + coeff2.unsqueeze(-1) * v
+        result = coeff1 * x + coeff2 * v
         
         # Project back to hyperboloid to ensure constraint
         result = self.project_to_hyperboloid(result)
@@ -550,44 +538,33 @@ class HyperbolicLogarithm(nn.Module):
         x = self.project_to_hyperboloid(x)
         y = self.project_to_hyperboloid(y)
         
-        # Compute Minkowski inner product
-        inner = -x[..., 0] * y[..., 0] + torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
+        # Compute Minkowski inner product with improved precision
+        inner = -self.minkowski_inner(x, y)
         
-        # Handle numerical issues near -1
-        inner = torch.clamp(inner, max=-1.0 - self.eps)
+        # Handle numerical issues near 1
+        inner = torch.clamp(inner, min=1.0 + self.eps)
         
-        # Compute distance (using the same formula as the test)
-        dist = torch.acosh(-inner)
+        # Compute distance with improved precision
+        dist = torch.acosh(inner)
         
         # Handle zero distance case
-        zero_mask = dist < self.eps
+        zero_mask = (dist < self.eps)
         if zero_mask.any():
             return torch.zeros_like(x)
-            
-        # Scale down large distances for numerical stability
-        scale_factor = torch.ones_like(dist)
-        large_dist_mask = dist > self.max_dist
-        if large_dist_mask.any():
-            scale_factor[large_dist_mask] = self.max_dist / dist[large_dist_mask]
-            dist = torch.where(large_dist_mask, self.max_dist, dist)
         
-        # Compute the direction
-        y_adj = y + torch.einsum('...,...d->...d', inner, x)
-        y_adj_norm = torch.sqrt(torch.clamp(self.minkowski_inner(y_adj, y_adj), min=self.eps))
+        # Compute the direction with improved stability
+        y_adj = y + inner.unsqueeze(-1) * x
+        y_adj_norm = torch.sqrt(self.minkowski_inner(y_adj, y_adj).clamp(min=self.eps))
         
-        # Compute initial direction
-        v = torch.einsum('...,...d->...d', dist / y_adj_norm, y_adj)
+        # Compute initial direction with careful scaling
+        v = (dist / y_adj_norm).unsqueeze(-1) * y_adj
         
         # Project to ensure we're exactly in the tangent space
         v = self.project_to_tangent(x, v)
         
-        # Use Minkowski norm for consistency with exponential map
-        v_norm = torch.sqrt(torch.clamp(self.minkowski_inner(v, v), min=self.eps))
-        v = torch.einsum('...,...d->...d', dist / v_norm, v)
-        
-        # Scale back if we scaled down
-        if large_dist_mask.any():
-            v = torch.einsum('...,...d->...d', 1.0 / scale_factor, v)
+        # Normalize to match the distance exactly
+        v_norm = torch.sqrt(-self.minkowski_inner(v, v).clamp(min=self.eps))
+        v = (dist / v_norm).unsqueeze(-1) * v
         
         return v
 
