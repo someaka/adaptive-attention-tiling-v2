@@ -467,47 +467,47 @@ class TestParallelTransport:
         """Test Schild's ladder parallel transport."""
         print("\n=== Testing Schild's Ladder Transport ===")
         print_memory_usage("Start Schild test")
-
+    
         # Create test points and vectors with controlled magnitudes
         v = torch.randn(dim, dtype=torch.float32) * 0.1
         x = torch.randn(dim, dtype=torch.float32) * 0.5
         y = torch.randn(dim, dtype=torch.float32) * 0.5
-        
+    
         print(f"\nInitial values:")
         print(f"x: {x}")
         print(f"y: {y}")
         print(f"v: {v}")
         print(f"Initial norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {torch.norm(v)}")
-
+    
         # Project points and vector with detailed logging
         print("\nProjecting to hyperboloid and tangent space...")
         x = transport_schild.exp_map.project_to_hyperboloid(x)
         y = transport_schild.exp_map.project_to_hyperboloid(y)
         v = transport_schild.exp_map.project_to_tangent(x, v)
-        
+    
         print(f"\nAfter projection:")
         print(f"x: {x}")
         print(f"y: {y}")
         print(f"v: {v}")
         print(f"Projected norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {torch.norm(v)}")
-        
+    
         # Verify initial conditions
         verify_hyperboloid_constraint(transport_schild.exp_map, x, "initial x")
         verify_hyperboloid_constraint(transport_schild.exp_map, y, "initial y")
         verify_tangent_space(transport_schild.exp_map, x, v, "initial v")
-
+    
         # Perform transport with detailed analysis
         print("\nPerforming parallel transport...")
         transported = transport_schild(v, x, y)
-        
+    
         # Verify transport properties
         properties = verify_parallel_transport_properties(transport_schild, x, y, v, transported, "Schild's ladder")
-        
+    
         # If verification fails, analyze the failure
-        if (abs(properties['y_tangent']) >= 1e-6 or 
+        if (abs(properties['y_tangent']) >= 1e-6 or
             abs(properties['norm_ratio'] - 1.0) >= 1e-5):
             analysis = analyze_transport_failure(transport_schild, x, y, v, transported, "Schild's ladder")
-        
+    
         # Original assertions with more context
         inner = transport_schild.exp_map.minkowski_inner(y, transported)
         if torch.abs(inner) >= 1e-6:
@@ -515,35 +515,38 @@ class TestParallelTransport:
             print(f"  Inner product <y,transported>: {inner}")
             print(f"  Threshold: 1e-6")
             assert False, f"Transported vector not in tangent space: {inner}"
-
-        norm_ratio = torch.norm(transported) / torch.norm(v)
+    
+        # Use Minkowski norm for comparison
+        v_norm = torch.sqrt(torch.abs(transport_schild.exp_map.minkowski_inner(v, v)))
+        transported_norm = torch.sqrt(torch.abs(transport_schild.exp_map.minkowski_inner(transported, transported)))
+        norm_ratio = transported_norm / v_norm
         if torch.abs(norm_ratio - 1.0) >= 1e-5:
             print(f"\nNorm preservation violation:")
-            print(f"  Norm ratio: {norm_ratio}")
+            print(f"  Minkowski norm ratio: {norm_ratio}")
             print(f"  Expected: 1.0 ± 1e-5")
-            assert False, f"Transport did not preserve norm: {norm_ratio}"
-
+            assert False, f"Transport did not preserve Minkowski norm: {norm_ratio}"
+            
     def test_pole_ladder(self, transport_pole, dim):
         """Test pole ladder parallel transport."""
         print("\n=== Testing Pole Ladder Transport ===")
         print_memory_usage("Start pole test")
-
+    
         # Create test points and vectors
         v = torch.randn(dim, dtype=torch.float32) * 0.1  # Smaller vectors for stability
         x = torch.randn(dim, dtype=torch.float32)
         y = torch.randn(dim, dtype=torch.float32)
-        
+    
         print(f"\nInitial values:")
         print(f"x: {x}")
         print(f"y: {y}")
         print(f"v: {v}")
         print(f"Initial norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {torch.norm(v)}")
-
+    
         # Project points to hyperboloid and vector to tangent space
         x = transport_pole.exp_map.project_to_hyperboloid(x)
         y = transport_pole.exp_map.project_to_hyperboloid(y)
         v = transport_pole.exp_map.project_to_tangent(x, v)
-        
+    
         print(f"\nAfter projection:")
         print(f"x: {x}")
         print(f"y: {y}")
@@ -551,24 +554,26 @@ class TestParallelTransport:
         print(f"Projected norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {torch.norm(v)}")
         print(f"Hyperboloid constraints - x: {transport_pole.exp_map.minkowski_inner(x, x) + 1}, y: {transport_pole.exp_map.minkowski_inner(y, y) + 1}")
         print(f"Tangent constraint - <x,v>: {transport_pole.exp_map.minkowski_inner(x, v)}")
-
+    
         # Test transport preserves vector norm approximately
         transported = transport_pole(v, x, y)
-        
+    
         print(f"\nTransport results:")
         print(f"Transported vector: {transported}")
         print(f"Transport norm: {torch.norm(transported)}")
         print(f"Original norm: {torch.norm(v)}")
-
+    
         # Verify transported vector is in tangent space at y
         inner = transport_pole.exp_map.minkowski_inner(y, transported)
         print(f"Tangent space check - <y,transported>: {inner}")
         assert torch.abs(inner) < 1e-6, f"Transported vector not in tangent space: {inner}"
-
-        # Verify norm preservation
-        norm_ratio = torch.norm(transported) / torch.norm(v)
-        print(f"Norm ratio (transported/original): {norm_ratio}")
-        assert torch.abs(norm_ratio - 1.0) < 1e-5, f"Transport did not preserve norm: {norm_ratio}"
+    
+        # Verify norm preservation using Minkowski norm
+        v_norm = torch.sqrt(torch.abs(transport_pole.exp_map.minkowski_inner(v, v)))
+        transported_norm = torch.sqrt(torch.abs(transport_pole.exp_map.minkowski_inner(transported, transported)))
+        norm_ratio = transported_norm / v_norm
+        print(f"Minkowski norm ratio (transported/original): {norm_ratio}")
+        assert torch.abs(norm_ratio - 1.0) < 1e-5, f"Transport did not preserve Minkowski norm: {norm_ratio}"
 
     def test_transport_zero_vector(self, transport_schild, transport_pole, dim):
         """Test parallel transport of zero vector."""

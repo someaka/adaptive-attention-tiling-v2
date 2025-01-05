@@ -313,18 +313,14 @@ class ParallelTransport(nn.Module):
         
         return self.exp_map.project_to_hyperboloid(mid)
     
-    def _stable_project_with_gram_schmidt(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def _stable_project_with_gram_schmidt(self, x: torch.Tensor, v: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Project vector v onto the tangent space at x using Gram-Schmidt orthogonalization.
         
         This method is more numerically stable than the standard projection formula.
+        If target_norm is provided, the output vector will be scaled to have that Minkowski norm.
         """
         assert self.exp_map is not None
         
-        # Store original norm
-        original_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
-        if original_norm < self.min_norm:
-            return torch.zeros_like(v)
-            
         # Ensure x is normalized
         x_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(x, x)))
         if x_norm > self.eps:
@@ -334,11 +330,14 @@ class ParallelTransport(nn.Module):
         inner = self.exp_map.minkowski_inner(x, v)
         result = v + x * inner
         
-        # Restore original norm
+        # Normalize if necessary
         result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
         if result_norm > self.eps:
-            result = result * (original_norm / result_norm)
-            
+            if target_norm is not None:
+                result = result * (target_norm / result_norm)
+            else:
+                result = result / result_norm
+                
         return result
         
     def _schild_ladder(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -356,30 +355,23 @@ class ParallelTransport(nn.Module):
         x = self.exp_map.project_to_hyperboloid(x)
         y = self.exp_map.project_to_hyperboloid(y)
         
-        # Store original norm
+        # Store original Minkowski norm
         original_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
         if original_norm < self.min_norm:
             return torch.zeros_like(v)
             
-        # Project and normalize initial vector
-        v = self._stable_project_with_gram_schmidt(x, v)
-        v = v / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
+        # Project initial vector and preserve Minkowski norm
+        v = self._stable_project_with_gram_schmidt(x, v, target_norm=original_norm)
         
         # Transport through midpoint with careful projections
         mid = self._stable_midpoint(x, y)
-        v_mid = self._stable_project_with_gram_schmidt(mid, v)
-        v_mid = v_mid / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))
+        v_mid = self._stable_project_with_gram_schmidt(mid, v, target_norm=original_norm)
         
         # Transport to final point
-        result = self._stable_project_with_gram_schmidt(y, v_mid)
-        
-        # Restore original norm
-        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
-        if result_norm > self.eps:
-            result = result * (original_norm / result_norm)
+        result = self._stable_project_with_gram_schmidt(y, v_mid, target_norm=original_norm)
         
         return result
-    
+        
     def _pole_ladder(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Parallel transport using pole ladder method with enhanced stability."""
         assert self.exp_map is not None
@@ -395,31 +387,21 @@ class ParallelTransport(nn.Module):
         x = self.exp_map.project_to_hyperboloid(x)
         y = self.exp_map.project_to_hyperboloid(y)
         
-        # Store original norm
+        # Store original Minkowski norm
         original_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
         if original_norm < self.min_norm:
             return torch.zeros_like(v)
             
-        # Project and normalize initial vector
-        v = self._stable_project_with_gram_schmidt(x, v)
-        v = v / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v, v)))
+        # Project initial vector and preserve Minkowski norm
+        v = self._stable_project_with_gram_schmidt(x, v, target_norm=original_norm)
         
-        # Compute midpoint and transport through it
+        # Transport through midpoint with careful projections
         mid = self._stable_midpoint(x, y)
-        v_mid = self._stable_project_with_gram_schmidt(mid, v)
-        v_mid = v_mid / torch.sqrt(torch.abs(self.exp_map.minkowski_inner(v_mid, v_mid)))
+        v_mid = self._stable_project_with_gram_schmidt(mid, v, target_norm=original_norm)
         
         # Transport to final point with double projection for stability
-        result = self._stable_project_with_gram_schmidt(y, v_mid)
-        result = self._stable_project_with_gram_schmidt(y, result)
-        
-        # Restore original norm
-        result_norm = torch.sqrt(torch.abs(self.exp_map.minkowski_inner(result, result)))
-        if result_norm > self.eps:
-            result = result * (original_norm / result_norm)
-            
-        # Final projection to ensure tangent space constraint
-        result = self._stable_project_with_gram_schmidt(y, result)
+        result = self._stable_project_with_gram_schmidt(y, v_mid, target_norm=original_norm)
+        result = self._stable_project_with_gram_schmidt(y, result, target_norm=original_norm)
         
         return result
     
