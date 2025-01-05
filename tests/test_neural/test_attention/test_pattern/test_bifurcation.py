@@ -179,14 +179,14 @@ def simple_parameterized_reaction():
             u = state[:, 0]  # First component
             v = state[:, 1] if state.shape[1] > 1 else torch.zeros_like(u)  # Second component or zeros
             
-            # Stronger reaction terms with more dramatic bifurcation behavior
-            du = 2.0 * param * u - 0.5 * torch.pow(u, 3) + 0.5 * v  # Increased linear term, reduced nonlinearity
-            dv = -0.5 * v + torch.pow(u, 2) - 0.1 * torch.pow(v, 3)  # Balanced feedback
+            # Much stronger reaction terms with more dramatic bifurcation behavior
+            du = 5.0 * param * u - 0.1 * torch.pow(u, 3) + 1.0 * v  # Increased linear and coupling terms
+            dv = -0.2 * v + 2.0 * torch.pow(u, 2) - 0.05 * torch.pow(v, 3)  # Stronger feedback
             
             return torch.stack([du, dv], dim=1)
         else:  # Flattened state
             # For single component, use a simpler nonlinearity with stronger parameter dependence
-            return 2.0 * param * state - 0.5 * torch.pow(state, 3)
+            return 5.0 * param * state - 0.1 * torch.pow(state, 3)
     return reaction
 
 
@@ -235,10 +235,10 @@ def test_state_evolution(pattern_system, simple_parameterized_reaction):
 
 def test_bifurcation_detection_components(pattern_system, simple_parameterized_reaction):
     """Test individual components of bifurcation detection."""
-    # Initial setup with small values
-    state = torch.zeros((1, 1, 4, 4))
-    # Focus on a smaller parameter range around the bifurcation point
-    params = torch.linspace(-0.2, 0.2, NUM_PARAMETER_POINTS)
+    # Initial setup with small values but non-zero to break symmetry
+    state = torch.ones((1, 1, 4, 4)) * 0.01  # Changed from zeros to small positive values
+    # Focus on a larger parameter range to see stronger effects
+    params = torch.linspace(-0.5, 0.5, NUM_PARAMETER_POINTS)  # Increased range further
 
     # Track stability and state values
     stability_values = []
@@ -247,15 +247,15 @@ def test_bifurcation_detection_components(pattern_system, simple_parameterized_r
     print("\nBifurcation analysis components:")
 
     for param in params:
-        # Evolve to steady state with larger time steps
+        # Evolve to steady state with larger time steps and reduced diffusion
         current_state = state.clone()
         for _ in range(CONVERGENCE_STEPS):
             current_state = pattern_system.reaction_diffusion(
                 current_state, 
                 simple_parameterized_reaction,
                 param,
-                dt=0.5,  # Increased time step
-                diffusion_coefficient=0.2  # Increased diffusion
+                dt=1.0,  # Increased time step further
+                diffusion_coefficient=0.05  # Reduced diffusion further to allow pattern formation
             )
 
         # Compute stability
