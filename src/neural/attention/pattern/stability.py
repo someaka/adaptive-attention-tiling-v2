@@ -70,7 +70,7 @@ class StabilityAnalyzer:
             reaction_term = self.pattern_system.reaction.compute_reaction
             
         # Get Jacobian
-        jacobian = self.compute_jacobian(state)
+        jacobian = self.compute_jacobian(state, reaction_term=reaction_term)
         
         # Compute eigenvalues
         eigenvalues = torch.linalg.eigvals(jacobian)
@@ -83,49 +83,88 @@ class StabilityAnalyzer:
     def compute_jacobian(
         self,
         state: torch.Tensor,
+        reaction_term: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         eps: float = 1e-6
     ) -> torch.Tensor:
         """Compute Jacobian matrix for pattern dynamics.
         
         Args:
             state (torch.Tensor): State to compute Jacobian at
+            reaction_term (Callable, optional): Reaction function. If None, uses system reaction.
             eps (float): Finite difference epsilon
             
         Returns:
             torch.Tensor: Jacobian matrix
         """
+        print("\nComputing Jacobian:")
+        print(f"Input state - shape: {state.shape}, mean: {state.mean():.6f}, std: {state.std():.6f}")
+        print(f"Epsilon: {eps}")
+        
         # Get pattern shape
         batch_size = state.shape[0]
-        n = int(torch.prod(torch.tensor(state.shape[1:])).item())
+        channels = state.shape[1]
+        spatial_size = int(torch.prod(torch.tensor(state.shape[2:])).item())
+        n = channels * spatial_size
         
-        # Reshape pattern for Jacobian computation
-        state_flat = state.reshape(batch_size, -1)
+        print(f"Dimensions - batch: {batch_size}, channels: {channels}, spatial_size: {spatial_size}")
+        print(f"Total Jacobian size: {n}x{n}")
         
         # Initialize Jacobian
-        J = torch.zeros((batch_size, n, n), dtype=torch.float64)
+        J = torch.zeros((n, n), dtype=state.dtype, device=state.device)
         
-        # Compute Jacobian using finite differences
+        # Reshape state to preserve batch dimension while flattening spatial dimensions
+        state_flat = state.reshape(batch_size, channels, -1)
+        print(f"Reshaped state - shape: {state_flat.shape}")
+        
+        # Track numerical properties
+        max_diff = -float('inf')
+        min_diff = float('inf')
+        total_diff_norm = 0
+        
         for i in range(n):
+            # Create perturbation
             perturb = torch.zeros_like(state_flat)
-            perturb[:, i] = eps
+            channel_idx = i // spatial_size
+            spatial_idx = i % spatial_size
+            perturb[:, channel_idx, spatial_idx] = eps
             
-            # Forward difference
-            state_plus = state_flat + perturb
-            state_plus = state_plus.reshape(state.shape)
-            forward = self.pattern_system.step(state_plus)
-            forward = forward.reshape(batch_size, -1)
-            
-            # Backward difference  
-            state_minus = state_flat - perturb
-            state_minus = state_minus.reshape(state.shape)
-            backward = self.pattern_system.step(state_minus)
-            backward = backward.reshape(batch_size, -1)
+            # Compute forward difference
+            if reaction_term is not None:
+                # Reshape perturbation to match original state shape for reaction term
+                perturb_shaped = perturb.reshape(state.shape)
+                state_shaped = state_flat.reshape(state.shape)
+                
+                f_plus = reaction_term(state_shaped + perturb_shaped)
+                f_minus = reaction_term(state_shaped - perturb_shaped)
+                
+                print(f"\nColumn {i}/{n}:")
+                print(f"f_plus - mean: {f_plus.mean():.6f}, std: {f_plus.std():.6f}")
+                print(f"f_minus - mean: {f_minus.mean():.6f}, std: {f_minus.std():.6f}")
+            else:
+                f_plus = self.pattern_system.reaction.compute_reaction(state_flat + perturb)
+                f_minus = self.pattern_system.reaction.compute_reaction(state_flat - perturb)
             
             # Central difference
-            J[:, :, i] = (forward - backward) / (2 * eps)
+            diff = (f_plus - f_minus) / (2 * eps)
+            diff_mean = diff.mean().item()
+            diff_std = diff.std().item()
+            diff_norm = torch.norm(diff).item()
             
-        # Average over batch
-        J = torch.mean(J, dim=0)
+            max_diff = max(max_diff, diff_mean)
+            min_diff = min(min_diff, diff_mean)
+            total_diff_norm += diff_norm
+            
+            # Take mean over batch dimension and reshape to match Jacobian column
+            J[:, i] = diff.mean(dim=0).reshape(-1)
+            
+            if i % 10 == 0:  # Log every 10th column
+                print(f"Column {i} stats - mean: {diff_mean:.6f}, std: {diff_std:.6f}, norm: {diff_norm:.6f}")
+        
+        print("\nJacobian computation complete:")
+        print(f"Max difference: {max_diff:.6f}")
+        print(f"Min difference: {min_diff:.6f}")
+        print(f"Average difference norm: {total_diff_norm/n:.6f}")
+        print(f"Jacobian stats - mean: {J.mean():.6f}, std: {J.std():.6f}, norm: {torch.norm(J):.6f}")
         
         return J
         

@@ -2,8 +2,10 @@
 
 from typing import List, Optional, Callable, Dict, Any, Union, Tuple
 import torch
+import torch.nn.functional as F
 from torch import nn
 import logging
+import numpy as np
 
 from .models import ReactionDiffusionState, StabilityInfo, StabilityMetrics, ControlSignal
 from .stability import StabilityAnalyzer
@@ -984,47 +986,130 @@ class PatternDynamics(nn.Module):
     def reaction_diffusion(
         self,
         state: torch.Tensor,
-        reaction_term: Optional[Callable] = None,
-        max_iterations: int = 100,
-        dt: float = 0.1
+        reaction: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        param: torch.Tensor,
+        dt: float = 0.5,
+        diffusion_coefficient: float = 0.1,
     ) -> torch.Tensor:
-        """Compute one step of reaction-diffusion dynamics.
-        
-        Args:
-            state: Current state tensor
-            reaction_term: Optional custom reaction term
-            max_iterations: Maximum iterations for numerical integration
-            dt: Time step for numerical integration
-            
-        Returns:
-            Updated state tensor
-        """
-        # Ensure state has batch dimension
+        """Compute one step of reaction-diffusion dynamics."""
+        # Add batch dimension if needed
         if len(state.shape) == 3:
-            state = state.unsqueeze(0)  # Add batch dimension
-            
-        # Apply reaction term first
-        if reaction_term is not None:
-            reaction = reaction_term(state)
-        else:
-            reaction = self.reaction.reaction_term(state)
-            
-        # Apply diffusion with proper shape
-        diffused = self.diffusion.apply_diffusion(state, 0.1, dt)  # Fixed diffusion coefficient
-        
-        # Combine reaction and diffusion with proper time step
-        updated = state + dt * (reaction + diffused)
-        
-        # Normalize to prevent unbounded growth
-        norm = torch.norm(updated, dim=(-2, -1), keepdim=True)
-        updated = torch.where(norm > 1e-8, updated / (norm + 1e-8), updated)
-        
+            state = state.unsqueeze(0)
+            print(f"Added batch dimension, new shape: {state.shape}")
+
+        # Add noise to zero state to break symmetry
+        if torch.all(state == 0):
+            noise = torch.randn_like(state) * 0.05
+            state = state + noise
+            print(f"Added noise to zero state - new mean: {state.mean():.6f}, std: {state.std():.6f}")
+
+        # Compute reaction term
+        reaction_term = reaction(state, param)
+        print(f"Custom reaction term - mean: {reaction_term.mean():.6f}, std: {reaction_term.std():.6f}")
+
+        # Apply diffusion term (Laplacian)
+        padded = F.pad(state, (1, 1, 1, 1), mode="circular")
+        diffusion_term = (
+            padded[:, :, :-2, 1:-1]  # up
+            + padded[:, :, 2:, 1:-1]  # down
+            + padded[:, :, 1:-1, :-2]  # left
+            + padded[:, :, 1:-1, 2:]  # right
+            - 4 * state
+        )
+        print(f"Diffusion term - mean: {diffusion_term.mean():.6f}, std: {diffusion_term.std():.6f}")
+
+        # Combine updates with larger step size
+        update = 2.0 * dt * reaction_term + diffusion_coefficient * diffusion_term
+        print(f"Combined update (before adding to state) - mean: {update.mean():.6f}, std: {update.std():.6f}")
+
+        # Update state
+        state = state + update
+        print(f"After adding update - mean: {state.mean():.6f}, std: {state.std():.6f}")
+
+        # Normalize if growth is extreme (increased threshold)
+        current_norm = torch.norm(state)
+        print(f"Current norm: {current_norm:.6f}")
+        if current_norm > 5.0:
+            state = state * (5.0 / current_norm)
+
         # Remove batch dimension if it was added
         if len(state.shape) == 4 and state.shape[0] == 1:
-            updated = updated.squeeze(0)
-            
-        return updated
+            state = state.squeeze(0)
+            print(f"Removed batch dimension, final shape: {state.shape}")
+
+        print(f"Final state - mean: {state.mean():.6f}, std: {state.std():.6f}\n")
+        return state
     
+    def compute_stability(
+        self,
+        state: torch.Tensor,
+        reaction: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        param: torch.Tensor,
+        epsilon: float = 1e-6,
+    ) -> float:
+        """Compute stability of the current state by analyzing the Jacobian."""
+        print("\nComputing Jacobian:")
+        print(f"Input state - shape: {state.shape}, mean: {state.mean():.6f}, std: {state.std():.6f}")
+        print(f"Epsilon: {epsilon}")
+
+        # Add batch dimension if needed
+        if len(state.shape) == 3:  # [channels, height, width]
+            state = state.unsqueeze(0)  # [batch, channels, height, width]
+
+        # Get dimensions
+        batch_size, num_channels, height, width = state.shape
+        spatial_size = height * width
+        total_size = num_channels * spatial_size
+        print(f"Dimensions - batch: {num_channels}, channels: {spatial_size}, spatial_size: {width}")
+        print(f"Total Jacobian size: {total_size}x{total_size}")
+
+        # Reshape state for Jacobian computation
+        state_flat = state.reshape(batch_size, -1)  # [batch, channels * height * width]
+        print(f"Reshaped state - shape: {state.shape}")
+
+        # Initialize Jacobian
+        jacobian = torch.zeros(total_size, total_size)
+
+        # Compute Jacobian column by column using finite differences
+        for i in range(total_size):
+            print(f"\nColumn {i}/{total_size}:")
+            # Create perturbation
+            perturb = torch.zeros_like(state_flat)
+            perturb[0, i] = epsilon
+
+            # Forward difference
+            state_plus = state_flat + perturb
+            state_plus = state_plus.reshape(batch_size, num_channels, height, width)
+            f_plus = reaction(state_plus, param)
+            f_plus_flat = f_plus.reshape(batch_size, -1)
+            print(f"f_plus - mean: {f_plus.mean():.6f}, std: {f_plus.std():.6f}")
+
+            # Backward difference
+            state_minus = state_flat - perturb
+            state_minus = state_minus.reshape(batch_size, num_channels, height, width)
+            f_minus = reaction(state_minus, param)
+            f_minus_flat = f_minus.reshape(batch_size, -1)
+            print(f"f_minus - mean: {f_minus.mean():.6f}, std: {f_minus.std():.6f}")
+
+            # Compute column of Jacobian
+            diff = (f_plus_flat - f_minus_flat) / (2 * epsilon)
+            jacobian[:, i] = diff[0]
+
+            if i % 10 == 0:  # Print stats periodically
+                print(f"Column {i} stats - mean: {diff.mean():.6f}, std: {diff.std():.6f}, norm: {torch.norm(diff):.6f}")
+
+        # Print Jacobian statistics
+        print("\nJacobian computation complete:")
+        print(f"Max difference: {jacobian.max():.6f}")
+        print(f"Min difference: {jacobian.min():.6f}")
+        print(f"Average difference norm: {torch.norm(jacobian, dim=1).mean():.6f}")
+        print(f"Jacobian stats - mean: {jacobian.mean():.6f}, std: {jacobian.std():.6f}, norm: {torch.norm(jacobian):.6f}")
+
+        # Return maximum eigenvalue magnitude as stability measure
+        eigenvalues = torch.linalg.eigvals(jacobian)
+        stability = torch.max(torch.abs(eigenvalues)).item()
+        return stability
+
     def stability_analysis(
         self,
         fixed_point: Union[ReactionDiffusionState, torch.Tensor],

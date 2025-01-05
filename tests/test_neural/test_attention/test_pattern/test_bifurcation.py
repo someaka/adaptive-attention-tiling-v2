@@ -2,6 +2,7 @@
 
 import torch
 import pytest
+import numpy as np
 
 from src.neural.attention.pattern.models import BifurcationDiagram
 from tests.test_neural.test_attention.test_pattern.conftest import assert_tensor_equal
@@ -173,10 +174,19 @@ def test_solution_branches(pattern_system, grid_size):
 def simple_parameterized_reaction():
     """Create a simple parameterized reaction that has a known bifurcation."""
     def reaction(state: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
-        # Simple cubic reaction: dx/dt = rx - x^3
-        # Has a pitchfork bifurcation at r = 0
-        # Scale down to prevent numerical instability
-        return 0.1 * (param * state - torch.pow(state, 3))
+        # More complex reaction with stronger nonlinearity and coupling
+        if len(state.shape) == 4:  # [batch, channels, height, width]
+            u = state[:, 0]  # First component
+            v = state[:, 1] if state.shape[1] > 1 else torch.zeros_like(u)  # Second component or zeros
+            
+            # Stronger reaction terms with more dramatic bifurcation behavior
+            du = 5.0 * param * u - 10.0 * torch.pow(u, 3) + 3.0 * v  # Increased coupling and nonlinearity
+            dv = -v + 5.0 * torch.pow(u, 2) - torch.pow(v, 3)  # Stronger feedback
+            
+            return torch.stack([du, dv], dim=1)
+        else:  # Flattened state
+            # For single component, use a more dramatic nonlinearity
+            return 5.0 * param * state - 10.0 * torch.pow(state, 3)
     return reaction
 
 
@@ -226,42 +236,46 @@ def test_bifurcation_detection_components(pattern_system, simple_parameterized_r
     # Initial setup with small values
     state = torch.zeros((1, 1, 4, 4))
     params = torch.linspace(-0.5, 0.5, NUM_PARAMETER_POINTS)  # Use class variable
-    
+
     # Track stability and state values
     stability_values = []
     state_values = []
-    
+
     print("\nBifurcation analysis components:")
-    
+
     for param in params:
-        reaction = lambda x: simple_parameterized_reaction(x, param)
-        
         # Evolve to steady state
         current_state = state.clone()
         for _ in range(CONVERGENCE_STEPS):  # Use class variable
-            current_state = pattern_system.reaction_diffusion(current_state, reaction)
-            
+            current_state = pattern_system.reaction_diffusion(
+                current_state, 
+                simple_parameterized_reaction,
+                param,
+                dt=0.1,
+                diffusion_coefficient=0.1
+            )
+
         # Compute stability
-        stability = pattern_system.stability.compute_stability(current_state, reaction)
+        stability = pattern_system.compute_stability(current_state, simple_parameterized_reaction, param)
         stability_values.append(stability)
-        
-        # Store state value
         state_values.append(current_state.mean().item())
-        
-        print(f"Param: {param.item():.3f}, Stability: {stability:.3f}, State: {state_values[-1]:.3f}")
-    
-    # Check for changes in stability and state
-    stability_changes = [abs(stability_values[i+1] - stability_values[i]) 
-                        for i in range(len(stability_values)-1)]
-    state_changes = [abs(state_values[i+1] - state_values[i]) 
-                    for i in range(len(state_values)-1)]
-    
+
+        print(f"Param: {param:.3f}, Stability: {stability:.3f}, State: {current_state.mean().item():.3f}")
+
+    # Convert to numpy arrays for analysis
+    stability_values = np.array(stability_values)
+    state_values = np.array(state_values)
+
+    # Check for significant changes
+    stability_changes = np.abs(np.diff(stability_values))
+    state_changes = np.abs(np.diff(state_values))
+
     print("\nChanges in stability:", [f"{x:.3f}" for x in stability_changes])
     print("Changes in state:", [f"{x:.3f}" for x in state_changes])
-    
-    # Assert that we see some significant changes
-    assert max(stability_changes) > 0.001, "No significant stability changes detected"
-    assert max(state_changes) > 0.001, "No significant state changes detected"
+
+    # Assert that we detect significant changes
+    assert np.any(stability_changes > 0.1), "No significant stability changes detected"
+    assert np.any(state_changes > 0.1), "No significant state changes detected"
 
 
 def test_convergence_at_bifurcation(pattern_system, simple_parameterized_reaction):
