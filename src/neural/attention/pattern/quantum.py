@@ -65,28 +65,28 @@ class QuantumGeometricTensor:
         
         return g, B
     
-    def _parameter_derivative(self, state: torch.Tensor, param_idx: int) -> torch.Tensor:
-        """Compute parameter derivative of state using autograd.
+    def _parameter_derivative(self, psi: torch.Tensor, param_idx: int) -> torch.Tensor:
+        """Compute derivative with respect to parameter.
         
         Args:
-            state: Quantum state vector
+            psi: Quantum state tensor
             param_idx: Parameter index
             
         Returns:
-            Parameter derivative
+            Parameter derivative tensor
         """
-        # Enable gradient computation
-        state_grad = state.detach().requires_grad_(True)
+        # Ensure psi requires grad
+        psi = psi.requires_grad_()
         
-        # Create parameter vector with matching dtype
-        param = torch.zeros(self.dim, dtype=state.dtype, device=state.device)
-        param[param_idx] = 1.0
+        # Create parameter vector matching psi's batch dimensions
+        param = torch.zeros(psi.shape[:-3], device=psi.device, dtype=torch.complex64)
+        param[..., param_idx] = 1.0
         
-        # Compute derivative using autograd
+        # Compute derivative
         derivative = torch.autograd.grad(
-            state_grad,
-            state_grad,
-            grad_outputs=param,
+            outputs=psi,
+            inputs=psi,
+            grad_outputs=param.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(psi),
             create_graph=True
         )[0]
         

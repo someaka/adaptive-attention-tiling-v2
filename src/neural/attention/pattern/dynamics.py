@@ -82,12 +82,18 @@ class PatternDynamics(nn.Module):
         Returns:
             Quantum state
         """
-        # Ensure state is normalized
-        state = torch.nn.functional.normalize(state, p=2, dim=-1)
+        print("\n=== _to_quantum_state conversion steps ===")
+        print(f"Input state norm: {torch.norm(state)}")
+        
+        # Ensure state is normalized globally
+        state = state / torch.norm(state)
+        print(f"After normalize: {torch.norm(state)}")
         
         # Convert to complex and ensure float32
         amplitudes = state.to(torch.complex64)
-        phase = torch.zeros_like(state, dtype=torch.float32)
+        print(f"After complex conversion norm: {torch.norm(amplitudes)}")
+        phase = torch.zeros_like(state, dtype=torch.complex64)
+        print(f"Phase shape: {phase.shape}, Phase dtype: {phase.dtype}")
         
         # Create basis labels based on state shape
         basis_size = state.shape[-1]
@@ -102,8 +108,11 @@ class PatternDynamics(nn.Module):
         
         # Verify normalization
         norm = quantum_state.norm()
+        print(f"Initial quantum state norm: {norm}")
         if not torch.allclose(norm, torch.tensor(1.0, dtype=torch.float32)):
+            print("Normalizing quantum state...")
             quantum_state.amplitudes = quantum_state.amplitudes / (norm + 1e-8)
+            print(f"Final quantum state norm: {quantum_state.norm()}")
             
         return quantum_state
         
@@ -116,16 +125,25 @@ class PatternDynamics(nn.Module):
         Returns:
             Classical state tensor
         """
+        print("\n=== _from_quantum_state conversion steps ===")
+        print(f"Input quantum state norm: {quantum_state.norm()}")
+        
         # Get amplitudes and phase
         amplitudes = quantum_state.amplitudes
         phase = quantum_state.phase
+        print(f"Amplitudes norm before phase: {torch.norm(amplitudes)}")
+        print(f"Phase abs range: min={torch.min(torch.abs(phase))}, max={torch.max(torch.abs(phase))}")
         
         # Combine amplitude and phase
         state = amplitudes * torch.exp(1j * phase)
+        print(f"After phase combination norm: {torch.norm(state)}")
         
-        # Convert to real and normalize
+        # Convert to real and normalize globally
         state = state.real.to(torch.float32)
-        state = torch.nn.functional.normalize(state, p=2, dim=-1)
+        print(f"After real conversion norm: {torch.norm(state)}")
+        
+        state = state / (torch.norm(state) + 1e-8)
+        print(f"After final normalization norm: {torch.norm(state)}")
         
         return state
 
