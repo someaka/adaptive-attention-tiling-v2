@@ -28,6 +28,35 @@ def config() -> ScaleTransitionConfig:
 
 
 @pytest.fixture
+def quantum_config() -> ScaleTransitionConfig:
+    """Create test configuration for quantum tests."""
+    return ScaleTransitionConfig(
+        min_scale=0.25,
+        max_scale=4.0,
+        num_scales=4,
+        dim=16,
+        use_quantum_bridge=True,
+        hidden_dim=16,
+        dtype=torch.complex64
+    )
+
+
+@pytest.fixture
+def quantum_transition_system(quantum_config: ScaleTransitionConfig) -> ScaleTransitionSystem:
+    """Create test transition system for quantum tests."""
+    system = ScaleTransitionSystem(quantum_config)
+    
+    # Ensure all components use complex64 dtype
+    for module in system.transition_layer.modules():
+        if isinstance(module, torch.nn.Linear):
+            module.weight.data = module.weight.data.to(dtype=torch.complex64)
+            if module.bias is not None:
+                module.bias.data = module.bias.data.to(dtype=torch.complex64)
+    
+    return system
+
+
+@pytest.fixture
 def transition_layer(config: ScaleTransitionConfig) -> ScaleTransitionLayer:
     """Create test transition layer."""
     return ScaleTransitionLayer(config)
@@ -292,7 +321,6 @@ class TestScaleTransitionSystem:
                         assert torch.all(base_diff < eps * max_amplification * 10), f"Scale transition not stable for perturbation {eps}"
 
 
-@pytest.mark.dependency(depends=["TestStateSpace"])
 class TestScaleTransition:
     """Tests for ScaleTransition."""
     
@@ -361,7 +389,6 @@ class TestScaleTransition:
             )
 
 
-@pytest.mark.dependency(depends=["TestStateSpace", "TestScaleTransition"])
 class TestTransitionAccuracy:
     """Tests for ScaleTransitionSystem."""
     
@@ -547,24 +574,25 @@ class TestTransitionAccuracy:
                         assert torch.all(base_diff < eps * max_amplification * 10), f"Scale transition not stable for perturbation {eps}"
 
 
-@pytest.mark.dependency(depends=["TestStateSpace", "TestScaleTransition", "TestTransitionAccuracy"])
 class TestQuantumPropertyPreservation:
     """Tests for QuantumPropertyPreservation."""
     
-    def test_quantum_property_preservation(self, transition_system: ScaleTransitionSystem) -> None:
+    def test_quantum_property_preservation(self, quantum_transition_system: ScaleTransitionSystem) -> None:
         """Test preservation of quantum properties during scale transitions."""
         # Create quantum-like test state (normalized with phase)
         batch_size = 8
-        dim = transition_system.config.dim
-        amplitudes = F.normalize(torch.randn(batch_size, dim), p=2, dim=-1)
-        phase = torch.exp(1j * torch.rand(batch_size, dim))
+        dim = quantum_transition_system.config.dim
+        amplitudes = F.normalize(torch.randn(batch_size, dim, dtype=torch.complex64), p=2, dim=-1)
+        phase = torch.exp(1j * torch.rand(batch_size, dim, dtype=torch.complex64))
         quantum_state = amplitudes * phase
+        # Normalize again after applying phase to ensure unit norm
+        quantum_state = F.normalize(quantum_state, p=2, dim=-1)
         
         # Test scale transition
         source_scale = 1.0
         target_scale = 2.0
         
-        transitioned = transition_system.transition_layer(
+        transitioned = quantum_transition_system.transition_layer(
             quantum_state,
             source_scale,
             target_scale
@@ -573,9 +601,10 @@ class TestQuantumPropertyPreservation:
         # Check normalization preservation
         orig_norm = torch.linalg.vector_norm(quantum_state, dim=-1)
         trans_norm = torch.linalg.vector_norm(transitioned, dim=-1)
+        scale_ratio = torch.tensor(target_scale / source_scale, dtype=trans_norm.dtype)
         assert torch.allclose(
             trans_norm / orig_norm,
-            torch.tensor(target_scale / source_scale),
+            scale_ratio,
             rtol=1e-4
         ), "Scale transition did not preserve quantum state normalization"
         

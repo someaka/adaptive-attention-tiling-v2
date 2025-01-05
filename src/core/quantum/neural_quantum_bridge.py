@@ -189,8 +189,8 @@ class NeuralQuantumBridge(nn.Module):
         Returns:
             Neural tensor
         """
-        # Get classical amplitudes
-        classical_flat = state.amplitudes.real.to(torch.float32)  # Convert to float32
+        # Get classical amplitudes and ensure dtype matches inverse projection
+        classical_flat = state.amplitudes.real.to(self.dtype)
         
         # Project back to hidden dimension
         batch_size = classical_flat.shape[0]
@@ -200,7 +200,7 @@ class NeuralQuantumBridge(nn.Module):
         
         # Project from manifold_dim back to hidden_dim using the inverse projection
         if not hasattr(self, 'inverse_projection'):
-            self.inverse_projection = nn.Linear(self.manifold_dim, self.hidden_dim, device=classical_flat.device)
+            self.inverse_projection = nn.Linear(self.manifold_dim, self.hidden_dim, device=classical_flat.device, dtype=self.dtype)
         output = self.inverse_projection(classical_flat)
         
         # Restore original norm
@@ -797,6 +797,10 @@ class NeuralQuantumBridge(nn.Module):
             raise ValueError("State tensor contains non-finite values")
 
         try:
+            # Store original norm for scale preservation
+            original_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+            scale_factor = target_scale / source_scale
+
             # Convert to quantum state with validation
             quantum_result = self.neural_to_quantum(state, return_validation=True)
             if isinstance(quantum_result, tuple):
@@ -848,8 +852,9 @@ class NeuralQuantumBridge(nn.Module):
                 alpha = 0.7  # Bias towards initial state to preserve structure
                 neural_state = alpha * state + (1 - alpha) * neural_state
 
-                # Normalize the output state
-                neural_state = torch.nn.functional.normalize(neural_state, p=2, dim=-1)
+                # Apply scale factor to preserve normalization
+                current_norm = torch.linalg.vector_norm(neural_state, dim=-1, keepdim=True)
+                neural_state = neural_state * (original_norm * scale_factor) / (current_norm + 1e-8)
 
                 # Validate final state
                 if not torch.isfinite(neural_state).all():

@@ -100,7 +100,8 @@ class ScaleTransitionLayer(nn.Module):
         scale_idx: int,
         transition_modules: nn.ModuleList,
         source_scale: float,
-        target_scale: float
+        target_scale: float,
+        apply_final_scale: bool = True
     ) -> torch.Tensor:
         """Apply scale transition with multiple steps if needed."""
         # Apply transitions one step at a time
@@ -155,10 +156,12 @@ class ScaleTransitionLayer(nn.Module):
             ref_state = curr_state.clone()
             
             remaining_steps -= curr_step
-            
-        # Apply final scale factor with stability check
-        final_scale = orig_norm * scale_factor
-        return curr_state * final_scale
+        
+        # Apply final scale factor with stability check only if requested
+        if apply_final_scale:
+            final_scale = orig_norm * scale_factor
+            return curr_state * final_scale
+        return curr_state
     
     def transition_up(
         self, 
@@ -174,8 +177,15 @@ class ScaleTransitionLayer(nn.Module):
         # Get scale index
         scale_idx = self._get_scale_idx(source_scale, target_scale)
             
-        # Apply scale transition
-        state = self._apply_scale_transition(state, scale_idx, self.scale_up, source_scale, target_scale)
+        # Apply scale transition without final scaling if using quantum bridge
+        state = self._apply_scale_transition(
+            state,
+            scale_idx,
+            self.scale_up,
+            source_scale,
+            target_scale,
+            apply_final_scale=self.quantum_bridge is None
+        )
         
         # Apply quantum bridge if enabled
         if self.quantum_bridge is not None:
@@ -201,8 +211,15 @@ class ScaleTransitionLayer(nn.Module):
         # Get scale index
         scale_idx = self._get_scale_idx(source_scale, target_scale)
             
-        # Apply scale transition
-        state = self._apply_scale_transition(state, scale_idx, self.scale_down, source_scale, target_scale)
+        # Apply scale transition without final scaling if using quantum bridge
+        state = self._apply_scale_transition(
+            state,
+            scale_idx,
+            self.scale_down,
+            source_scale,
+            target_scale,
+            apply_final_scale=self.quantum_bridge is None
+        )
         
         # Apply quantum bridge if enabled
         if self.quantum_bridge is not None:
@@ -337,11 +354,15 @@ class ScaleTransitionSystem:
         # Validate inputs
         self._validate_scales(source_scale, target_scale)
         
-        # Store original norm
-        orig_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
-        
-        # Normalize input state
-        state = F.normalize(state, p=2, dim=-1)
+        # Store original norm and handle complex states
+        if torch.is_complex(state):
+            orig_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+            # Normalize input state while preserving phase
+            state_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+            state = state / (state_norm + 1e-8)
+        else:
+            orig_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+            state = F.normalize(state, p=2, dim=-1)
         
         # Apply appropriate transition
         if target_scale > source_scale:
