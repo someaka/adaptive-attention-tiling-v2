@@ -1,17 +1,18 @@
+## Core Attention & Tiling Tests
 - [x] tests/core/attention/test_geometric.py
 - [x] tests/core/tiling/test_strategies.py
 
-
+## Metrics Tests
 - [x] tests/metrics/test_metrics_integration.py
 
-
+## Memory Tests
 - [x] tests/test_memory/test_memory_management.py
 
-
+## Utility Tests
 - [x] tests/test_utils/test_hardware/test_hardware_utils.py
 - [x] tests/test_utils/test_helpers.py
 
-
+## Validation Tests
 - [x] tests/test_validation/test_debug_flow.py
 - [x] tests/test_validation/test_flow_validation.py
 - [x] tests/test_validation/test_framework_motivic.py
@@ -24,19 +25,22 @@
 - [x] tests/test_validation/test_state_validation.py
 - [x] tests/test_validation/test_symplectic_validation.py
 
-
+## Performance Tests
 - [x] tests/performance/benchmarks/test_core.py
 - [x] tests/performance/cpu/test_algorithms.py
 - [x] tests/performance/cpu/test_memory_management.py
 - [x] tests/performance/cpu/test_memory.py
 - [x] tests/performance/cpu/test_vectorization.py
 
-
+## Core System Tests
+### CPU & Crystal Tests
 - [x] tests/test_core/test_cpu_operations.py
 - [x] tests/test_core/test_crystal/test_refraction.py
 - [x] tests/test_core/test_crystal/test_anomaly_polynomial.py
 - [x] tests/test_core/test_crystal/test_holographic_lift.py
 - [x] tests/test_core/test_crystal/test_scale.py
+
+### Flow & Pattern Tests
 - [x] tests/test_core/test_flow/test_neural.py
 - [x] tests/test_core/test_pattern_processing.py
 - [x] tests/test_core/test_patterns/test_arithmetic_dynamics.py
@@ -50,19 +54,24 @@
 - [x] tests/test_core/test_patterns/test_pattern_processor.py
 - [x] tests/test_core/test_patterns/test_riemannian.py
 - [x] tests/test_core/test_patterns/test_symplectic.py
+
+### Quantum Tests
 - [x] tests/test_core/test_quantum_state.py
 - [x] tests/test_core/test_quantum/test_neural_quantum_bridge.py
 - [x] tests/test_core/test_quantum/test_path_integral.py
 - [x] tests/test_core/test_quantum/test_state_space.py
 - [x] tests/test_core/test_scale_transition.py
 
-
+## Neural Network Tests (Pending)
+### Attention Tests
 - [ ] tests/test_neural/test_attention/test_exponential.py
 - [ ] tests/test_neural/test_attention/test_geometric.py
 - [ ] tests/test_neural/test_attention/test_hyperboloid.py
 - [ ] tests/test_neural/test_attention/test_logarithm.py
 - [ ] tests/test_neural/test_attention/test_minkowski.py
 - [ ] tests/test_neural/test_attention/test_pattern_dynamics.py
+
+### Pattern Tests
 - [ ] tests/test_neural/test_attention/test_pattern/test_bifurcation.py
 - [ ] tests/test_neural/test_attention/test_pattern/test_control.py
 - [ ] tests/test_neural/test_attention/test_pattern/test_diffusion_properties.py
@@ -70,11 +79,13 @@
 - [ ] tests/test_neural/test_attention/test_pattern/test_reaction_diffusion.py
 - [ ] tests/test_neural/test_attention/test_pattern/test_stability.py
 - [ ] tests/test_neural/test_attention/test_quantum_geometric_attention.py
+
+### Flow Tests
 - [ ] tests/test_neural/test_flow/test_geometric_flow.py
 - [ ] tests/test_neural/test_flow/test_hamiltonian.py
 - [ ] tests/test_neural/test_flow/test_tensor_shapes.py
 
-
+## Integration Tests (Pending)
 - [ ] tests/test_integration/test_cross_validation.py
 - [ ] tests/test_integration/test_end_to_end.py
 - [ ] tests/test_integration/test_pattern_neural_bridge.py

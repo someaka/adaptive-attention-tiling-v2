@@ -60,22 +60,22 @@ class TestGeometricStructures:
     @pytest.fixture
     def dim(self, test_config) -> int:
         """Return dimension for tests."""
-        return test_config["geometric_tests"]["dimensions"]
+        return test_config["geometric"]["dimensions"]
 
     @pytest.fixture
     def num_heads(self, test_config) -> int:
         """Return number of attention heads for tests."""
-        return test_config["geometric_tests"]["num_heads"]
+        return test_config["geometric"]["num_heads"]
 
     @pytest.fixture
     def batch_size(self, test_config) -> int:
         """Return batch size for tests."""
-        return test_config["geometric_tests"]["batch_size"]
+        return test_config["fiber_bundle"]["batch_size"]
 
     @pytest.fixture
     def dtype(self, test_config) -> torch.dtype:
         """Return data type for tests."""
-        return getattr(torch, test_config["geometric_tests"]["dtype"])
+        return getattr(torch, test_config["fiber_bundle"]["dtype"])
 
     @pytest.fixture
     def geometric_structures(self, dim, num_heads, dtype):
@@ -187,19 +187,19 @@ class TestHyperbolicOperations:
     """Test hyperbolic geometric operations."""
     
     @pytest.fixture
-    def test_scales(self, test_config) -> list[float]:
+    def test_scales(self) -> list[float]:
         """Return test scales for vector operations."""
-        return test_config["hyperbolic_tests"]["vector_scales"]
+        return [0.1, 0.5, 1.0, 2.0]  # Standard test scales
 
     @pytest.fixture
-    def test_norms(self, test_config) -> list[float]:
+    def test_norms(self) -> list[float]:
         """Return test norms for vector operations."""
-        return test_config["hyperbolic_tests"]["test_norms"]
+        return [0.1, 1.0, 5.0, 10.0]  # Standard test norms
 
     @pytest.fixture
     def precision(self, test_config) -> torch.dtype:
         """Return precision for tests."""
-        return getattr(torch, test_config["hyperbolic_tests"]["precision"])
+        return getattr(torch, test_config["fiber_bundle"]["dtype"])
 
     def test_hyperbolic_distance_formula(self, precision):
         """Test the hyperbolic distance formula directly."""
@@ -366,12 +366,12 @@ class TestHyperbolicOperations:
 
 
 class TestEuclideanOperations:
-    """Test suite for Euclidean operations."""
+    """Test Euclidean geometric operations."""
 
     @pytest.fixture
     def dim(self, test_config) -> int:
         """Return dimension for tests."""
-        return test_config["euclidean_tests"]["dimensions"]
+        return test_config["geometric"]["dimensions"]
 
     @pytest.fixture
     def test_batch_size(self, test_config) -> int:
@@ -428,12 +428,12 @@ class TestEuclideanOperations:
 
 
 class TestParallelTransport:
-    """Test suite for parallel transport."""
+    """Test parallel transport operations."""
 
     @pytest.fixture
     def dim(self, test_config) -> int:
         """Return dimension for tests."""
-        return test_config["parallel_transport"]["dimensions"]
+        return test_config["geometric"]["dimensions"]
 
     @pytest.fixture
     def methods(self, test_config) -> list[str]:
