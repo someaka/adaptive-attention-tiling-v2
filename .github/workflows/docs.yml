@@ -17,24 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -e ".[docs]"
-
-      - name: Build documentation
-        run: |
-          make docs
-
       - name: Setup Pages
         uses: actions/configure-pages@v4
+
+      - name: Create docs build directory
+        run: |
+          mkdir -p docs/_build/html
+          cp docs/*.md docs/_build/html/
+          # Create an index.html that links to all .md files
+          echo "<html><head><title>Documentation</title></head><body><h1>Documentation</h1><ul>" > docs/_build/html/index.html
+          for f in docs/*.md; do
+            filename=$(basename "$f" .md)
+            echo "<li><a href='$filename.md'>$filename</a></li>" >> docs/_build/html/index.html
+          done
+          echo "</ul></body></html>" >> docs/_build/html/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
