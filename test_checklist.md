@@ -83,7 +83,7 @@
 
 ### Flow Tests
 - [ ] tests/test_neural/test_flow/test_geometric_flow.py
-- [ ] tests/test_neural/test_flow/test_hamiltonian.py
+- [x] tests/test_neural/test_flow/test_hamiltonian.py
 - [ ] tests/test_neural/test_flow/test_tensor_shapes.py
 
 ## Integration Tests (Pending)

@@ -520,37 +520,44 @@ class HamiltonianSystem(nn.Module):
         print(f"Position shape: {q.shape}, Momentum shape: {p.shape}")
         print(f"Position norm: {torch.norm(q):.4f}")
         print(f"Momentum norm: {torch.norm(p):.4f}")
-        print(f"Position mean: {q.mean():.4f}, std: {q.std():.4f}")
-        print(f"Momentum mean: {p.mean():.4f}, std: {p.std():.4f}")
+        
+        # Safely compute statistics
+        def safe_stats(x: torch.Tensor, name: str):
+            mean = x.mean().item()
+            # Only compute std if we have more than 1 sample
+            std = x.std().item() if x.numel() > 1 else 0.0
+            min_val = x.min().item()
+            max_val = x.max().item()
+            print(f"{name} mean: {mean:.4f}, std: {std:.4f}")
+            print(f"{name} min: {min_val:.4f}, max: {max_val:.4f}")
+            
+        safe_stats(q, "Position")
+        safe_stats(p, "Momentum")
         
         # Compute kinetic energy (quadratic in momentum)
         T = 0.5 * torch.sum(p * p, dim=-1)
         print(f"\nKinetic energy details:")
         print(f"T shape: {T.shape}")
-        print(f"T mean: {T.mean():.4f}, std: {T.std():.4f}")
-        print(f"T min: {T.min():.4f}, max: {T.max():.4f}")
+        safe_stats(T, "T")
         
         # Compute potential energy using neural network
         V_raw = self.kinetic_network(q).squeeze(-1)
         print(f"\nRaw potential details:")
         print(f"V_raw shape: {V_raw.shape}")
-        print(f"V_raw mean: {V_raw.mean():.4f}, std: {V_raw.std():.4f}")
-        print(f"V_raw min: {V_raw.min():.4f}, max: {V_raw.max():.4f}")
+        safe_stats(V_raw, "V_raw")
         
         # Square and scale by position norm to ensure quadratic scaling
         q_norm = torch.sum(q * q, dim=-1)
         V = 0.5 * q_norm  # Make potential directly quadratic
         print(f"\nFinal potential details:")
         print(f"V shape: {V.shape}")
-        print(f"V mean: {V.mean():.4f}, std: {V.std():.4f}")
-        print(f"V min: {V.min():.4f}, max: {V.max():.4f}")
+        safe_stats(V, "V")
         
         # Total energy
         H = T + V
         print(f"\nTotal energy details:")
         print(f"H shape: {H.shape}")
-        print(f"H mean: {H.mean():.4f}, std: {H.std():.4f}")
-        print(f"H min: {H.min():.4f}, max: {H.max():.4f}")
+        safe_stats(H, "H")
         
         return H
         
