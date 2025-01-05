@@ -889,17 +889,17 @@ class StateValidator:
     def _position_operator(self, num_qubits: int) -> torch.Tensor:
         """Construct position operator."""
         dim = 2 ** num_qubits
-        diag = torch.arange(dim, dtype=torch.float32)
-        return torch.diag(diag)
+        diag = torch.arange(dim, dtype=torch.float64)
+        return torch.diag(diag).to(torch.complex128)
 
     def _momentum_operator(self, num_qubits: int) -> torch.Tensor:
         """Construct momentum operator."""
         dim = 2 ** num_qubits
-        p = torch.zeros((dim, dim), dtype=torch.complex64)
+        p = torch.zeros((dim, dim), dtype=torch.complex128)
         for i in range(dim-1):
-            p[i,i+1] = torch.tensor(1j, dtype=torch.complex64)
-            p[i+1,i] = torch.tensor(-1j, dtype=torch.complex64)
-        return p / torch.sqrt(torch.tensor(2.0))
+            p[i,i+1] = torch.tensor(1j, dtype=torch.complex128)
+            p[i+1,i] = torch.tensor(-1j, dtype=torch.complex128)
+        return p / torch.sqrt(torch.tensor(2.0, dtype=torch.complex128))
 
     def _hamiltonian(self, num_qubits: int) -> torch.Tensor:
         """Construct system Hamiltonian."""

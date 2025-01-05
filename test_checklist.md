@@ -36,7 +36,7 @@
 - [x] tests/test_core/test_crystal/test_refraction.py
 - [x] tests/test_core/test_crystal/test_anomaly_polynomial.py
 - [x] tests/test_core/test_crystal/test_holographic_lift.py
-- [ ] tests/test_core/test_crystal/test_scale.py
+- [x] tests/test_core/test_crystal/test_scale.py
 - [x] tests/test_core/test_flow/test_neural.py
 - [x] tests/test_core/test_pattern_processing.py
 - [x] tests/test_core/test_patterns/test_arithmetic_dynamics.py
@@ -53,8 +53,8 @@
 - [x] tests/test_core/test_quantum_state.py
 - [x] tests/test_core/test_quantum/test_neural_quantum_bridge.py
 - [x] tests/test_core/test_quantum/test_path_integral.py
-- [x] tests/test_core/test_quantum/test_state_space.py
-- [ ] tests/test_core/test_scale_transition.py
+- [ ] tests/test_core/test_quantum/test_state_space.py
+- [x] tests/test_core/test_scale_transition.py
 
 
 - [ ] tests/test_neural/test_attention/test_exponential.py
