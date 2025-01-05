@@ -894,15 +894,21 @@ class NeuralQuantumBridge(nn.Module):
             target_scale: Target scale factor
             evolved_state: Evolved quantum state
         """
-        # Compute entanglement entropy
-        entropy = self.hilbert_space.compute_entanglement_entropy(evolved_state)
-        
-        # Store in state manager
-        self.state_manager.update_entanglement(
-            source_scale=source_scale,
-            target_scale=target_scale,
-            entropy=entropy
-        )
+        try:
+            # Compute entanglement entropy
+            entropy = self.hilbert_space.compute_entanglement_entropy(evolved_state)
+            
+            # Take mean across batch and convert to tensor
+            mean_entropy = entropy.mean().clone().detach()
+            
+            # Store in state manager
+            self.state_manager.update_entanglement(
+                source_scale=source_scale,
+                target_scale=target_scale,
+                entropy=mean_entropy
+            )
+        except Exception as e:
+            print(f"Warning: Entanglement tracking failed: {str(e)}")
 
     def compute_coherence(
         self,

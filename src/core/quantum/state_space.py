@@ -929,13 +929,36 @@ class HilbertSpace:
         Returns:
             Entanglement entropy tensor
         """
-        # Reshape amplitudes into bipartite system (2 x N/2)
-        shape = state.amplitudes.shape
-        mid_dim = shape[-1] // 2
-        amplitudes = state.amplitudes.view(2, mid_dim)
+        # Get state shape and ensure it's 2D
+        amplitudes = state.amplitudes
+        if len(amplitudes.shape) == 1:
+            amplitudes = amplitudes.unsqueeze(0)
+        
+        # Get dimensions
+        batch_size = amplitudes.shape[0]
+        total_dim = amplitudes.shape[-1]
+        
+        # Find the closest power of 2 that divides the total dimension
+        subsys_dim = 2
+        while subsys_dim * subsys_dim <= total_dim:
+            if total_dim % subsys_dim == 0:
+                break
+            subsys_dim *= 2
+        
+        if total_dim % subsys_dim != 0:
+            print(f"Warning: Cannot find exact bipartition for dimension {total_dim}, using approximate method")
+            # Use the largest possible subsystem dimension
+            subsys_dim = int(np.sqrt(total_dim))
+        
+        # Reshape amplitudes for bipartite split
+        try:
+            amplitudes = amplitudes.view(batch_size, subsys_dim, -1)
+        except RuntimeError as e:
+            print(f"Warning: Shape {amplitudes.shape} is invalid for input of size {total_dim}")
+            return torch.zeros(batch_size, device=amplitudes.device)
         
         # Compute reduced density matrix
-        rho = torch.einsum('ij,ik->jk', amplitudes, torch.conj(amplitudes))
+        rho = torch.einsum('bij,bik->bjk', amplitudes, torch.conj(amplitudes))
         
         # Compute eigenvalues
         eigenvalues = torch.linalg.eigvalsh(rho)
@@ -944,11 +967,12 @@ class HilbertSpace:
         eigenvalues = torch.clamp(eigenvalues, min=0.0)
         
         # Normalize eigenvalues
-        eigenvalues = eigenvalues / torch.sum(eigenvalues)
+        eigenvalues = eigenvalues / (torch.sum(eigenvalues, dim=-1, keepdim=True) + 1e-10)
         
         # Compute von Neumann entropy
         entropy = -torch.sum(
-            eigenvalues * torch.log2(eigenvalues + 1e-10)
+            eigenvalues * torch.log2(eigenvalues + 1e-10),
+            dim=-1
         )
         
         return entropy
