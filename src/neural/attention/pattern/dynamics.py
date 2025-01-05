@@ -988,7 +988,7 @@ class PatternDynamics(nn.Module):
         state: torch.Tensor,
         reaction: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         param: torch.Tensor,
-        dt: float = 0.5,
+        dt: float = 1.0,
         diffusion_coefficient: float = 0.1,
     ) -> torch.Tensor:
         """Compute one step of reaction-diffusion dynamics."""
@@ -999,7 +999,7 @@ class PatternDynamics(nn.Module):
 
         # Add noise to zero state to break symmetry
         if torch.all(state == 0):
-            noise = torch.randn_like(state) * 0.05
+            noise = torch.randn_like(state) * 0.1
             state = state + noise
             print(f"Added noise to zero state - new mean: {state.mean():.6f}, std: {state.std():.6f}")
 
@@ -1019,7 +1019,7 @@ class PatternDynamics(nn.Module):
         print(f"Diffusion term - mean: {diffusion_term.mean():.6f}, std: {diffusion_term.std():.6f}")
 
         # Combine updates with larger step size
-        update = 2.0 * dt * reaction_term + diffusion_coefficient * diffusion_term
+        update = 4.0 * dt * reaction_term + diffusion_coefficient * diffusion_term
         print(f"Combined update (before adding to state) - mean: {update.mean():.6f}, std: {update.std():.6f}")
 
         # Update state
@@ -1029,8 +1029,8 @@ class PatternDynamics(nn.Module):
         # Normalize if growth is extreme (increased threshold)
         current_norm = torch.norm(state)
         print(f"Current norm: {current_norm:.6f}")
-        if current_norm > 5.0:
-            state = state * (5.0 / current_norm)
+        if current_norm > 10.0:
+            state = state * (10.0 / current_norm)
 
         # Remove batch dimension if it was added
         if len(state.shape) == 4 and state.shape[0] == 1:

@@ -146,6 +146,11 @@ class StabilityAnalyzer:
             
             # Central difference
             diff = (f_plus - f_minus) / (2 * eps)
+            
+            # Handle case where reaction returns more components than input
+            if diff.shape[1] > channels:
+                diff = diff[:, :channels]  # Only use first channels components
+            
             diff_mean = diff.mean().item()
             diff_std = diff.std().item()
             diff_norm = torch.norm(diff).item()
@@ -155,7 +160,8 @@ class StabilityAnalyzer:
             total_diff_norm += diff_norm
             
             # Take mean over batch dimension and reshape to match Jacobian column
-            J[:, i] = diff.mean(dim=0).reshape(-1)
+            diff_flat = diff.mean(dim=0).reshape(-1)  # Flatten all dimensions after batch
+            J[:, i] = diff_flat  # Assign to column
             
             if i % 10 == 0:  # Log every 10th column
                 print(f"Column {i} stats - mean: {diff_mean:.6f}, std: {diff_std:.6f}, norm: {diff_norm:.6f}")

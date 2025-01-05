@@ -180,13 +180,13 @@ def simple_parameterized_reaction():
             v = state[:, 1] if state.shape[1] > 1 else torch.zeros_like(u)  # Second component or zeros
             
             # Stronger reaction terms with more dramatic bifurcation behavior
-            du = 5.0 * param * u - 10.0 * torch.pow(u, 3) + 3.0 * v  # Increased coupling and nonlinearity
-            dv = -v + 5.0 * torch.pow(u, 2) - torch.pow(v, 3)  # Stronger feedback
+            du = 2.0 * param * u - 0.5 * torch.pow(u, 3) + 0.5 * v  # Increased linear term, reduced nonlinearity
+            dv = -0.5 * v + torch.pow(u, 2) - 0.1 * torch.pow(v, 3)  # Balanced feedback
             
             return torch.stack([du, dv], dim=1)
         else:  # Flattened state
-            # For single component, use a more dramatic nonlinearity
-            return 5.0 * param * state - 10.0 * torch.pow(state, 3)
+            # For single component, use a simpler nonlinearity with stronger parameter dependence
+            return 2.0 * param * state - 0.5 * torch.pow(state, 3)
     return reaction
 
 
@@ -214,12 +214,12 @@ def test_state_evolution(pattern_system, simple_parameterized_reaction):
     param = torch.tensor(1.0)
     
     # Define reaction
-    reaction = lambda x: simple_parameterized_reaction(x, param)
+    reaction = lambda state, p=param: simple_parameterized_reaction(state, p)
     
     # Evolve state
     states = []
     for _ in range(CONVERGENCE_STEPS):  # Use class variable
-        state = pattern_system.reaction_diffusion(state, reaction)
+        state = pattern_system.reaction_diffusion(state, reaction, param)
         states.append(state.mean().item())
         
     # Print evolution for debugging
@@ -287,13 +287,13 @@ def test_convergence_at_bifurcation(pattern_system, simple_parameterized_reactio
     print("\nConvergence near bifurcation point:")
     
     for param in params:
-        reaction = lambda x: simple_parameterized_reaction(x, param)
+        reaction = lambda state, p=param: simple_parameterized_reaction(state, p)
         
         # Track convergence
         current_state = state.clone()
         states = []
         for _ in range(CONVERGENCE_STEPS):  # Use class variable
-            current_state = pattern_system.reaction_diffusion(current_state, reaction)
+            current_state = pattern_system.reaction_diffusion(current_state, reaction, param)
             states.append(current_state.mean().item())
             
         print(f"\nParam {param.item():.3f} evolution:")
