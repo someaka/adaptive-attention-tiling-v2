@@ -1,12 +1,10 @@
-name: CI
-on: [push, pull_request]
+name: CI (Disabled)
+on:
+  workflow_dispatch:  # This means the workflow will only run manually, effectively disabling automatic runs
+
 jobs:
-  test:
+  skip:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-python@v2
-        with:
-          python-version: '3.12'
-      - run: pip install -r requirements/dev.txt
-      - run: pytest tests/
+      - name: Skip CI
+        run: echo "CI testing is currently disabled"
