@@ -203,8 +203,10 @@ def test_stability_computation(pattern_system, simple_parameterized_reaction):
     # Print stability for debugging
     print(f"\nStability value at param={param.item()}: {stability}")
     
-    assert not torch.isnan(torch.tensor(stability)), "Stability computation returned NaN"
-    assert not torch.isinf(torch.tensor(stability)), "Stability computation returned Inf"
+    # Convert stability to tensor properly for checks
+    stability_tensor = torch.as_tensor(stability).clone().detach()
+    assert not torch.isnan(stability_tensor), "Stability computation returned NaN"
+    assert not torch.isinf(stability_tensor), "Stability computation returned Inf"
 
 
 def test_state_evolution(pattern_system, simple_parameterized_reaction):
