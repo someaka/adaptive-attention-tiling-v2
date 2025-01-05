@@ -505,6 +505,40 @@ class HamiltonianSystem(nn.Module):
         J[n:, :n] = -torch.eye(n)
         self.register_buffer('J', J)
                     
+    def _to_phase_space(self, state: torch.Tensor) -> PhaseSpacePoint:
+        """Convert tensor input to PhaseSpacePoint.
+        
+        Args:
+            state: Tensor of shape [batch_size, phase_dim] containing position and momentum
+            
+        Returns:
+            PhaseSpacePoint object with position and momentum components
+        """
+        if not isinstance(state, torch.Tensor):
+            raise ValueError(f"Expected torch.Tensor, got {type(state)}")
+            
+        # Split into position and momentum
+        n = self.manifold_dim // 2
+        q = state[..., :n]
+        p = state[..., n:]
+        
+        return PhaseSpacePoint(
+            position=q,
+            momentum=p,
+            time=0.0  # Default time if not provided
+        )
+        
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """Evolve the system forward in time using symplectic integration.
+        
+        Args:
+            state: Phase space points [batch_size, phase_dim]
+            
+        Returns:
+            Evolved phase space points [batch_size, phase_dim]
+        """
+        return self.evolve(state)
+        
     def compute_energy(self, state: torch.Tensor) -> torch.Tensor:
         """Compute the Hamiltonian energy of the system."""
         if not isinstance(state, torch.Tensor):
@@ -616,6 +650,10 @@ class HamiltonianSystem(nn.Module):
         energy_final = self.compute_energy(points_final)
         grad_final = torch.autograd.grad(energy_final.sum(), points_final, create_graph=True)[0]
         p_new = p_half - 0.5 * dt * grad_final[..., :n]
+        
+        # Normalize momentum to have unit norm
+        p_norm = torch.norm(p_new, dim=-1, keepdim=True)
+        p_new = p_new / (p_norm + 1e-8)  # Add small epsilon to avoid division by zero
         
         # Combine and return
         evolved = torch.cat([q_new, p_new], dim=-1)

@@ -83,7 +83,6 @@ class TestGeometricFlow:
         """Create metric tensor for testing."""
         return flow.compute_metric(points)
 
-    @pytest.mark.dependency(name="metric_computation")
     def test_metric_computation(self, flow_layer, test_input):
         """Test metric tensor computation."""
         # Compute metric tensor
@@ -108,7 +107,6 @@ class TestGeometricFlow:
             
         assert is_positive_definite, "Metric tensor must be positive definite"
 
-    @pytest.mark.dependency(name="ricci_tensor", depends=["metric_computation"])
     def test_ricci_tensor(self, flow_layer, test_input):
         """Test Ricci tensor computation."""
         metric = flow_layer.compute_metric(test_input)
@@ -116,7 +114,6 @@ class TestGeometricFlow:
         assert isinstance(ricci, torch.Tensor)
         assert ricci.shape == metric.shape
 
-    @pytest.mark.dependency(name="flow_computation", depends=["ricci_tensor"])
     def test_flow_computation(self, flow_layer, test_input):
         """Test flow vector computation."""
         metric = flow_layer.compute_metric(test_input)
@@ -125,7 +122,6 @@ class TestGeometricFlow:
         assert isinstance(flow_vector, torch.Tensor)
         assert flow_vector.shape == (test_input.shape[0], flow_layer.manifold_dim)
 
-    @pytest.mark.dependency(name="flow_step", depends=["flow_computation"])
     def test_flow_step(self, flow_layer, test_input):
         """Test single flow step."""
         metric = flow_layer.compute_metric(test_input)
@@ -135,7 +131,6 @@ class TestGeometricFlow:
         assert evolved_metric.shape == metric.shape
         assert isinstance(flow_metrics, FlowMetrics)
 
-    @pytest.mark.dependency(name="flow_normalization", depends=["flow_step"])
     def test_flow_normalization(self, flow_layer, test_input):
         """Test flow normalization."""
         metric = flow_layer.compute_metric(test_input)
@@ -144,14 +139,12 @@ class TestGeometricFlow:
         normalized = flow_layer.normalize_flow(flow_vector, metric)
         assert torch.all(torch.isfinite(normalized))
 
-    @pytest.mark.dependency(name="singularity_detection", depends=["flow_normalization"])
     def test_singularity_detection(self, flow_layer, test_input):
         """Test singularity detection."""
         metric = flow_layer.compute_metric(test_input)
         singularity = flow_layer.detect_singularities(metric)
         assert isinstance(singularity, Singularity)
 
-    @pytest.mark.dependency(name="geometric_invariants", depends=["flow_step"])
     def test_geometric_invariants(self, flow_layer, test_input):
         """Test geometric invariant preservation."""
         metric = flow_layer.compute_metric(test_input)
@@ -168,7 +161,6 @@ class TestGeometricFlow:
         if torch.any(condition_number > 1e5):
             warnings.warn(f"High condition number detected: {condition_number.max():.2e}")
 
-    @pytest.mark.dependency(name="flow_stability", depends=["geometric_invariants"])
     def test_flow_stability(self, flow_layer, test_input):
         """Test flow stability."""
         metric = flow_layer.compute_metric(test_input)
@@ -184,7 +176,6 @@ class TestGeometricFlow:
         dets = [torch.linalg.det(m) for m in metrics]
         assert all(torch.all(d > 0) for d in dets)
 
-    @pytest.mark.dependency(name="flow_convergence", depends=["flow_stability"])
     def test_flow_convergence(self, flow_layer, test_input):
         """Test that flow converges to stable points."""
         # Compute initial metric with stability term
@@ -258,7 +249,6 @@ class TestGeometricFlow:
         final_avg = sum(ricci_norms[-window_size:]) / window_size
         assert initial_avg > final_avg, "Ricci norm did not decrease on average"
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_ricci_flow_stability(self, flow_layer, test_input):
         """Test Ricci flow stability."""
         metric = flow_layer.compute_metric(test_input)
@@ -266,7 +256,6 @@ class TestGeometricFlow:
         flow_vector = flow_layer.compute_flow(metric, 0.0)
         assert torch.all(torch.isfinite(flow_vector))
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_volume_preservation(self, flow_layer, test_input):
         """Test volume preservation."""
         metric = flow_layer.compute_metric(test_input)
@@ -276,7 +265,6 @@ class TestGeometricFlow:
         det_after = torch.linalg.det(evolved_metric)
         assert torch.allclose(det_before, det_after, rtol=1e-4)
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_flow_magnitude(self, flow_layer, test_input):
         """Test flow vector magnitudes."""
         metric = flow_layer.compute_metric(test_input)
@@ -284,21 +272,18 @@ class TestGeometricFlow:
         flow_vector = flow_layer.compute_flow(metric, 0.0)
         assert torch.all(torch.abs(flow_vector) < 1e2)
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_metric_conditioning(self, flow_layer, test_input):
         """Test metric tensor conditioning."""
         metric = flow_layer.compute_metric(test_input)
         condition_number = torch.linalg.cond(metric)
         assert torch.all(condition_number < 1e3)
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_singularity_analysis(self, flow_layer, test_input):
         """Test singularity analysis."""
         metric = flow_layer.compute_metric(test_input)
         singularity = flow_layer.detect_singularities(metric)
         assert isinstance(singularity, Singularity)
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_mean_curvature_flow(self, flow_layer, test_input):
         """Test mean curvature flow computation."""
         # Compute metric tensor
@@ -319,7 +304,6 @@ class TestGeometricFlow:
         flow_vector = flow_layer.compute_flow(test_input, mean_curvature)
         assert torch.all(torch.isfinite(flow_vector))
 
-    @pytest.mark.dependency(depends=["test_metric_computation"])
     def test_ricci_flow(self, flow_layer, test_input):
         """Test Ricci flow evolution."""
         metric = flow_layer.compute_metric(test_input)

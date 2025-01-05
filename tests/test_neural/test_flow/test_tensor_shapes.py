@@ -135,14 +135,21 @@ class TestTensorShapes:
         batch_size = phase_points.shape[0]
         manifold_dim = flow.manifold_dim  # This is the position space dimension (2)
         
-        # Test energy validation (uses full phase space)
+        # Extract position components for flow validation
+        position = phase_points[..., :manifold_dim].clone()  # Clone to avoid in-place modifications
+        position.requires_grad_(True)
+        
+        # Create flow field tensor with proper shape [time_steps=1, batch_size, dim]
+        flow_field = position.unsqueeze(0)  # Add time dimension
+        
+        # Test energy validation
         validator = FlowValidator(
             flow=flow,
             stability_threshold=1e-6,
             curvature_bounds=(-1.0, 1.0),
             max_energy=1e3
         )
-        result = validator.validate_flow(phase_points)
+        result = validator.validate_flow(flow_field)
         
         assert isinstance(result, FlowValidationResult), \
             "Validation result should be a FlowValidationResult"
@@ -160,6 +167,9 @@ class TestTensorShapes:
         position = phase_points[..., :manifold_dim].clone()  # Clone to avoid in-place modifications
         position.requires_grad_(True)
         
+        # Create flow field tensor with proper shape [time_steps=1, batch_size, dim]
+        flow_field = position.unsqueeze(0)  # Add time dimension
+        
         # Test convergence validation (uses position components only)
         validator = FlowValidator(
             flow=flow,
@@ -167,7 +177,7 @@ class TestTensorShapes:
             curvature_bounds=(-1.0, 1.0),
             max_energy=1e3
         )
-        result = validator.validate_flow(position)
+        result = validator.validate_flow(flow_field)
         
         assert isinstance(result, FlowValidationResult), \
             "Validation result should be a FlowValidationResult"
