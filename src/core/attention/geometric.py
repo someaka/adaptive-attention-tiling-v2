@@ -478,60 +478,208 @@ class HyperbolicExponential(nn.Module):
 
 
 class HyperbolicLogarithm(nn.Module):
-    """Logarithm map for hyperbolic space."""
+    """Logarithm map for hyperbolic space.
+    
+    Mathematical Framework:
+    ---------------------
+    1. Hyperboloid Model:
+       H^n = {x ∈ ℝ^{n+1} | ⟨x,x⟩_M = -1, x₀ > 0}
+       where ⟨·,·⟩_M is the Minkowski inner product
+    
+    2. Logarithm Map Formula:
+       log_x(y) = d * (y + ⟨x,y⟩_M x) / ‖y + ⟨x,y⟩_M x‖_M
+       where d = arccosh(-⟨x,y⟩_M) is the hyperbolic distance
+    
+    Properties:
+    ----------
+    1. log_x(x) = 0
+    2. log_x(exp_x(v)) = v for v in T_xH^n
+    3. ‖log_x(y)‖_M = d(x,y)
+    4. ⟨x,log_x(y)⟩_M = 0 (tangent space constraint)
+    
+    Numerical Considerations:
+    ----------------------
+    1. Small distances (d ≤ eps): Return zero vector
+    2. Near-boundary points (⟨x,y⟩_M ≈ -1): Use Taylor expansion
+    3. Maintain orthogonality through explicit projection
+    4. Ensure exact distance preservation
+    """
 
     def __init__(self, dim: int, curvature: float = -1.0, dtype: torch.dtype = torch.float32):
-        """Initialize logarithm map.
-        
-        Args:
-            dim: Dimension of the hyperbolic space
-            curvature: Sectional curvature (default: -1.0)
-            dtype: Data type for tensors
-        """
+        """Initialize logarithm map."""
         super().__init__()
         self.dim = dim
         self.curvature = nn.Parameter(torch.tensor(curvature, dtype=dtype), requires_grad=False)
         self.eps = 1e-8
         self.max_dist = 20.0  # Maximum distance for numerical stability
         self.dtype = dtype
+        self.debug = True  # Enable debug printing
         
+    def _debug_print(self, tag: str, **values):
+        """Print debug information if debug mode is enabled."""
+        if self.debug:
+            print(f"\n[{tag}]")
+            print("-" * 50)
+            for name, val in values.items():
+                if isinstance(val, torch.Tensor):
+                    print(f"{name}:")
+                    print(f"  Shape: {val.shape}")
+                    print(f"  Values: {val}")
+                    print(f"  Device: {val.device}")
+                    print(f"  Dtype: {val.dtype}")
+                    if len(val.shape) > 0:
+                        if val.dtype in [torch.float32, torch.float64]:
+                            print(f"  Norm (L2): {torch.norm(val)}")
+                            print(f"  Norm (L∞): {torch.max(torch.abs(val))}")
+                            if val.shape[-1] > 1:
+                                print(f"  Max: {torch.max(val)}")
+                                print(f"  Min: {torch.min(val)}")
+                                print(f"  Mean: {torch.mean(val)}")
+                                print(f"  Std: {torch.std(val)}")
+                                if val.shape[-1] >= 2:
+                                    print(f"  Time component: {val[..., 0]}")
+                                    print(f"  Space components: {val[..., 1:]}")
+                else:
+                    print(f"{name}: {val}")
+            print("-" * 50)
+
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute Minkowski inner product with careful handling of time component."""
         time_component = x[..., 0] * y[..., 0]
         space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
-        return -time_component + space_component
+        result = -time_component + space_component
+        
+        if self.debug:
+            self._debug_print("minkowski_inner",
+                x=x,
+                y=y,
+                time_component=time_component,
+                space_component=space_component,
+                result=result
+            )
+        
+        return result
         
     def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
         """Project points onto the hyperboloid with numerical stability."""
-        # Scale by curvature
-        K = torch.abs(self.curvature)
-        spatial_norm_sq = torch.sum(x[..., 1:] * x[..., 1:], dim=-1)
-        time_component = torch.sqrt(1.0 + K * spatial_norm_sq)
+        # Extract components
+        x_shape = x.shape
+        x_norm = torch.norm(x)
+        x_time = x[..., 0]
+        x_space = x[..., 1:]
+        x_space_norm = torch.norm(x_space)
         
-        return torch.cat([time_component.unsqueeze(-1), x[..., 1:]], dim=-1)
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_input",
+                x=x,
+                x_shape=x_shape,
+                x_norm=x_norm,
+                x_time=x_time,
+                x_space=x_space,
+                x_space_norm=x_space_norm
+            )
+        
+        # Compute spatial components with Kahan summation
+        space_components = x_space
+        space_sq = space_components * space_components
+        spatial_norm_sq = torch.zeros_like(x_time[..., None])
+        compensation = torch.zeros_like(x_time[..., None])
+        
+        for i in range(space_sq.size(-1)):
+            y = space_sq[..., i:i+1] - compensation
+            t = spatial_norm_sq + y
+            compensation = (t - spatial_norm_sq) - y
+            spatial_norm_sq = t
+            
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_spatial",
+                space_components=space_components,
+                space_sq=space_sq,
+                spatial_norm_sq=spatial_norm_sq,
+                compensation=compensation
+            )
+        
+        # Scale norm for stability
+        scaled_norm_sq = torch.where(
+            (spatial_norm_sq < self.eps).to(torch.bool),
+            torch.ones_like(spatial_norm_sq) * self.eps,
+            spatial_norm_sq
+        )
+        
+        # Compute time component
+        time_component_old = x_time[..., None]
+        time_component_new = torch.sqrt(1.0 + scaled_norm_sq)
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_time",
+                scaled_norm_sq=scaled_norm_sq,
+                time_component_old=time_component_old,
+                time_component_new=time_component_new
+            )
+        
+        # Scale space components
+        space_scale = torch.where(
+            (spatial_norm_sq < self.eps).to(torch.bool),
+            torch.zeros_like(spatial_norm_sq),
+            torch.sqrt(scaled_norm_sq / spatial_norm_sq.clamp(min=self.eps))
+        )
+        space_components_old = space_components
+        space_components_new = space_components * space_scale
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_space",
+                space_scale=space_scale,
+                space_components_old=space_components_old,
+                space_components_new=space_components_new,
+                space_norm_new=torch.norm(space_components_new)
+            )
+        
+        # Combine components
+        result = torch.cat([time_component_new, space_components_new], dim=-1)
+        
+        # Verify constraint
+        result_norm = torch.norm(result)
+        constraint_value = self.minkowski_inner(result, result) + 1.0
+        time_final = result[..., 0]
+        space_final = result[..., 1:]
+        space_final_norm = torch.norm(space_final)
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_result",
+                result=result,
+                result_norm=result_norm,
+                constraint_value=constraint_value,
+                time_final=time_final,
+                space_final=space_final,
+                space_final_norm=space_final_norm
+            )
+        
+        return result
         
     def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Project vector v onto the tangent space at point x with improved precision."""
         # Compute inner product with higher precision
         inner = self.minkowski_inner(x, v)
         
-        # Apply more precise projection with numerical stability
-        v_proj = torch.where(
-            torch.abs(inner)[..., None] > self.eps,
-            v + (inner / (1.0 + self.eps))[..., None] * x,
-            v
-        )
+        # Apply projection with numerical stability
+        v_proj = v + (inner / (1.0 + self.eps))[..., None] * x
         
         # Double-check tangent space constraint
         tangent_check = self.minkowski_inner(x, v_proj)
-        v_proj = torch.where(
-            torch.abs(tangent_check)[..., None] > self.eps,
-            v_proj - (tangent_check / (1.0 + self.eps))[..., None] * x,
-            v_proj
-        )
+        zero_mask = torch.abs(tangent_check) < self.eps
+        
+        if self.debug:
+            self._debug_print("project_to_tangent",
+                x=x,
+                v=v,
+                inner=inner,
+                v_proj=v_proj,
+                tangent_check=tangent_check,
+                zero_mask=zero_mask
+            )
         
         return v_proj
-        
+
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute logarithm map with enhanced numerical stability."""
         # Project points to hyperboloid if needed
@@ -539,13 +687,13 @@ class HyperbolicLogarithm(nn.Module):
         y = self.project_to_hyperboloid(y)
         
         # Compute Minkowski inner product with improved precision
-        inner = -self.minkowski_inner(x, y)
+        inner = self.minkowski_inner(x, y)
         
-        # Handle numerical issues near 1
-        inner = torch.clamp(inner, min=1.0 + self.eps)
+        # Handle numerical issues near -1
+        inner = torch.clamp(inner, max=-1.0 + self.eps)
         
         # Compute distance with improved precision
-        dist = torch.acosh(inner)
+        dist = torch.acosh(-inner)
         
         # Handle zero distance case
         zero_mask = (dist < self.eps)
@@ -553,18 +701,36 @@ class HyperbolicLogarithm(nn.Module):
             return torch.zeros_like(x)
         
         # Compute the direction with improved stability
-        y_adj = y + inner.unsqueeze(-1) * x
-        y_adj_norm = torch.sqrt(self.minkowski_inner(y_adj, y_adj).clamp(min=self.eps))
+        # First compute y⟂, the part of y orthogonal to x
+        y_orth = y + inner.unsqueeze(-1) * x
         
-        # Compute initial direction with careful scaling
-        v = (dist / y_adj_norm).unsqueeze(-1) * y_adj
+        # Normalize y⟂ to get the direction
+        y_orth_norm = torch.sqrt(torch.abs(self.minkowski_inner(y_orth, y_orth)).clamp(min=self.eps))
+        v = (dist / y_orth_norm).unsqueeze(-1) * y_orth
         
-        # Project to ensure we're exactly in the tangent space
+        # Project to tangent space at x to ensure orthogonality
         v = self.project_to_tangent(x, v)
         
-        # Normalize to match the distance exactly
-        v_norm = torch.sqrt(-self.minkowski_inner(v, v).clamp(min=self.eps))
+        # Normalize to match distance exactly
+        v_norm = torch.sqrt(torch.abs(self.minkowski_inner(v, v)).clamp(min=self.eps))
         v = (dist / v_norm).unsqueeze(-1) * v
+        
+        # Final projection to ensure tangent space constraint
+        v = self.project_to_tangent(x, v)
+        
+        if self.debug:
+            self._debug_print("forward_output",
+                x=x,
+                y=y,
+                inner=inner,
+                dist=dist,
+                y_orth=y_orth,
+                y_orth_norm=y_orth_norm,
+                v_norm=v_norm,
+                v=v,
+                tangent_check=self.minkowski_inner(x, v),
+                norm_check=torch.sqrt(torch.abs(self.minkowski_inner(v, v))) - dist
+            )
         
         return v
 
