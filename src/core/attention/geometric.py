@@ -360,14 +360,14 @@ class HyperbolicExponential(nn.Module):
         
     def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         """Project a vector onto the tangent space at x."""
-        # Compute the inner product
-        inner = self.minkowski_inner(x, v)
+        # Compute the inner product and ensure it has the right shape for broadcasting
+        inner = self.minkowski_inner(x, v).unsqueeze(-1)
         
         # Project v onto the tangent space at x
         v_proj = v + inner * x
         
         # Verify tangent space constraint (should be close to 0)
-        tangent_check = self.minkowski_inner(x, v_proj)
+        tangent_check = self.minkowski_inner(x, v_proj).unsqueeze(-1)
         
         # Handle numerical instabilities
         zero_mask = (tangent_check.abs() > eps).to(torch.bool)
@@ -379,7 +379,8 @@ class HyperbolicExponential(nn.Module):
                 v=v,
                 inner=inner,
                 v_proj=v_proj,
-                tangent_check=tangent_check
+                tangent_check=tangent_check,
+                zero_mask=zero_mask
             )
         
         return v_proj
