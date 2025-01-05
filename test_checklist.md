@@ -65,11 +65,13 @@
 ## Neural Network Tests (Pending)
 ### Attention Tests
 - [x] tests/test_neural/test_attention/test_exponential.py
-- [ ] tests/test_neural/test_attention/test_geometric.py
+- [x] tests/test_neural/test_attention/test_geometric.py
 - [x] tests/test_neural/test_attention/test_hyperboloid.py
 - [x] tests/test_neural/test_attention/test_logarithm.py
 - [x] tests/test_neural/test_attention/test_minkowski.py
 - [ ] tests/test_neural/test_attention/test_pattern_dynamics.py
+- [ ] tests/test_neural/test_attention/test_quantum_geometric_attention.py
+
 
 ### Pattern Tests
 - [ ] tests/test_neural/test_attention/test_pattern/test_bifurcation.py
@@ -78,7 +80,6 @@
 - [ ] tests/test_neural/test_attention/test_pattern/test_quantum.py
 - [ ] tests/test_neural/test_attention/test_pattern/test_reaction_diffusion.py
 - [ ] tests/test_neural/test_attention/test_pattern/test_stability.py
-- [ ] tests/test_neural/test_attention/test_quantum_geometric_attention.py
 
 ### Flow Tests
 - [ ] tests/test_neural/test_flow/test_geometric_flow.py

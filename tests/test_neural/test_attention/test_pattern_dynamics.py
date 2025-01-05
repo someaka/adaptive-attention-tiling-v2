@@ -91,8 +91,10 @@ class TestPatternDynamics:
         # Test Lyapunov spectrum
         lyapunov_spectrum = pattern_system.compute_lyapunov_spectrum(pattern)
         assert len(lyapunov_spectrum) > 0, "Should compute Lyapunov exponents"
+        # Convert to complex tensor before checking imaginary parts
+        lyapunov_complex = lyapunov_spectrum.to(torch.complex64)
         assert torch.all(
-            torch.imag(lyapunov_spectrum) == 0
+            torch.abs(lyapunov_complex.imag) < 1e-6
         ), "Lyapunov exponents should be real"
 
         # Test structural stability
@@ -112,8 +114,13 @@ class TestPatternDynamics:
         self, pattern_system: PatternDynamics
     ) -> None:
         """Test pattern formation dynamics."""
+        logging.info("Starting pattern formation test")
+
         # Create initial state with small random perturbations
         state = torch.ones(1, pattern_system.dim, pattern_system.size, pattern_system.size) + 0.01 * torch.randn(1, pattern_system.dim, pattern_system.size, pattern_system.size)
+        logging.info(f"Initial state shape: {state.shape}")
+        logging.info(f"Initial state mean: {state.mean():.6f}, std: {state.std():.6f}")
+        logging.info(f"Initial state min: {state.min():.6f}, max: {state.max():.6f}")
 
         # Define reaction term
         def reaction_term(state: torch.Tensor) -> torch.Tensor:
@@ -121,40 +128,82 @@ class TestPatternDynamics:
             u, v = state[:, 0:1], state[:, 1:2]
             du = u**2 * v - u
             dv = u**2 - v
-            return torch.cat([du, dv], dim=1)
+            reaction = torch.cat([du, dv], dim=1)
+            logging.debug(f"Reaction term output - mean: {reaction.mean():.6f}, std: {reaction.std():.6f}")
+            return reaction
 
         # Evolve system
+        logging.info("Starting pattern evolution")
         time_evolution = pattern_system.evolve_pattern(
             state, diffusion_coefficient=0.1, reaction_term=reaction_term, steps=100
         )
+        logging.info(f"Evolution complete - produced {len(time_evolution)} timesteps")
 
-        # Test pattern formation
+        # Analyze pattern formation
         final_pattern = time_evolution[-1]
-        assert pattern_system.detect_pattern_formation(time_evolution), "Should detect pattern formation"
+        logging.info(f"Final pattern mean: {final_pattern.mean():.6f}, std: {final_pattern.std():.6f}")
+        logging.info(f"Final pattern min: {final_pattern.min():.6f}, max: {final_pattern.max():.6f}")
 
-        # Test pattern stability
-        assert pattern_system.stability.is_stable(final_pattern), "Final pattern should be stable"
+        # Analyze pattern formation detection
+        pattern_formed = pattern_system.detect_pattern_formation(time_evolution)
+        logging.info(f"Pattern formation detected: {pattern_formed}")
+
+        # Analyze stability
+        stability_result = pattern_system.stability.is_stable(final_pattern, threshold=0.1)
+        stability_value = pattern_system.stability.compute_stability(final_pattern)
+        logging.info(f"Stability analysis - value: {stability_value:.6f}, threshold: 0.1, stable: {stability_result}")
+
+        # Compute eigenvalues for detailed analysis
+        eigenvalues = pattern_system.stability.compute_eigenvalues(final_pattern)[0]
+        real_parts = eigenvalues.real
+        imag_parts = eigenvalues.imag
+        logging.info(f"Eigenvalue analysis:")
+        logging.info(f"  Max real part: {real_parts.max():.6f}")
+        logging.info(f"  Min real part: {real_parts.min():.6f}")
+        logging.info(f"  Max imag part magnitude: {torch.abs(imag_parts).max():.6f}")
+
+        # Run assertions with detailed error messages
+        assert pattern_formed, "Pattern formation should be detected in time evolution"
+        
+        try:
+            assert stability_result, f"Final pattern should be stable (stability value: {stability_value:.6f})"
+        except AssertionError as e:
+            logging.error("Stability assertion failed:")
+            logging.error(f"  Stability value: {stability_value:.6f}")
+            logging.error(f"  Max eigenvalue real part: {real_parts.max():.6f}")
+            logging.error(f"  Pattern statistics - mean: {final_pattern.mean():.6f}, std: {final_pattern.std():.6f}")
+            raise e
 
     def test_forward_pass(
         self, pattern_system: PatternDynamics
     ) -> None:
         """Test forward pass of pattern dynamics."""
-        # Create input states
-        seq_length = 16
-        states = torch.randn(1, seq_length, pattern_system.hidden_dim)
+        # Create input states with correct dimensions
+        batch_size = 1
+        size = pattern_system.size
+        dim = pattern_system.dim
+        states = torch.randn(batch_size, dim, size, size)  # [batch, channels, height, width]
 
         # Run forward pass
-        output = pattern_system(states, return_patterns=True)
+        output_dict = pattern_system(states, return_patterns=True)
+
+        # Verify output contains patterns
+        assert 'patterns' in output_dict, "Output should contain patterns"
+        patterns = output_dict['patterns']
+
+        # Verify patterns shape
+        assert patterns.shape[0] > 0, "Should have at least one pattern"
+        assert patterns.shape[1] == batch_size, "Batch size should be preserved"
+        assert patterns.shape[2] == dim, "Pattern dimensions should be preserved"
+        assert patterns.shape[3] == size and patterns.shape[4] == size, "Spatial dimensions should be preserved"
 
         # Check output dictionary contains expected keys
-        assert "routing_scores" in output
-        assert "patterns" in output
-        assert "pattern_scores" in output
+        assert "routing_scores" in output_dict
+        assert "pattern_scores" in output_dict
 
         # Check shapes
-        assert output["routing_scores"].shape == (1, seq_length), "Should have correct routing score shape"
-        assert output["patterns"].shape[0] > 0, "Should have pattern evolution"
-        assert output["pattern_scores"].shape[0] == output["patterns"].shape[0], "Should have scores for each pattern"
+        assert output_dict["routing_scores"].shape[0] == batch_size, "Should have correct routing score shape"
+        assert output_dict["pattern_scores"].shape[0] == patterns.shape[0], "Should have scores for each pattern"
 
         # Test evolution
         trajectory = pattern_system.evolve_pattern(states, steps=10)

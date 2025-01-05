@@ -1,9 +1,14 @@
-"""Main pattern dynamics implementation."""
+"""Implementation of pattern dynamics."""
 
-from typing import Callable, List, Optional, Tuple, Union
-
+from typing import List, Optional, Callable, Dict, Any, Union, Tuple
 import torch
 from torch import nn
+import logging
+
+from .models import ReactionDiffusionState, StabilityInfo, StabilityMetrics, ControlSignal
+from .stability import StabilityAnalyzer
+from .reaction import ReactionSystem
+from .diffusion import DiffusionSystem
 
 from ...flow.hamiltonian import HamiltonianSystem
 from .stability import StabilityAnalyzer
@@ -192,12 +197,21 @@ class PatternDynamics(nn.Module):
         Returns:
             List of evolved patterns
         """
+        logging.info(f"Starting pattern evolution with diffusion_coefficient={diffusion_coefficient}, steps={steps}")
+        logging.info(f"Initial pattern - shape: {pattern.shape}, mean: {pattern.mean():.6f}, std: {pattern.std():.6f}")
+        
         trajectory = []
         current = pattern
         
-        for _ in range(steps):
+        for step in range(steps):
+            # Log current state before normalization
+            logging.debug(f"Step {step} pre-norm - mean: {current.mean():.6f}, std: {current.std():.6f}")
+            
             # Normalize current pattern
-            current = current / torch.norm(current.to(torch.float32), dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+            norm = torch.norm(current.to(torch.float32), dim=(-2, -1), keepdim=True).clamp(min=1e-6)
+            current = current / norm
+            logging.debug(f"Step {step} post-norm - mean: {current.mean():.6f}, std: {current.std():.6f}")
+            
             trajectory.append(current)
             
             # Apply reaction and diffusion with optional custom reaction term
@@ -205,9 +219,18 @@ class PatternDynamics(nn.Module):
                 reaction = reaction_term(current)
             else:
                 reaction = self.reaction.reaction_term(current)
-            diffusion = self.diffusion.apply_diffusion(current, diffusion_coefficient=diffusion_coefficient, dt=self.dt)
-            current = current + self.dt * (reaction + diffusion)
+            logging.debug(f"Step {step} reaction - mean: {reaction.mean():.6f}, std: {reaction.std():.6f}")
             
+            diffusion = self.diffusion.apply_diffusion(current, diffusion_coefficient=diffusion_coefficient, dt=self.dt)
+            logging.debug(f"Step {step} diffusion - mean: {diffusion.mean():.6f}, std: {diffusion.std():.6f}")
+            
+            # Update state
+            update = self.dt * (reaction + diffusion)
+            current = current + update
+            logging.debug(f"Step {step} update - mean: {update.mean():.6f}, std: {update.std():.6f}")
+            logging.debug(f"Step {step} final - mean: {current.mean():.6f}, std: {current.std():.6f}")
+            
+        logging.info(f"Evolution complete - final pattern mean: {current.mean():.6f}, std: {current.std():.6f}")
         return trajectory
         
     def compute_jacobian(self, state: torch.Tensor) -> torch.Tensor:
@@ -496,12 +519,16 @@ class PatternDynamics(nn.Module):
         Returns:
             True if stable pattern formed
         """
+        logging.info(f"Analyzing pattern formation over {len(evolution)} timesteps")
+        
         if len(evolution) < 2:
+            logging.warning("Insufficient timesteps for pattern detection")
             return False
             
         # Check if final states are similar (stable pattern)
         final_states = evolution[-10:]
         if len(final_states) < 2:
+            logging.warning("Insufficient final states for stability analysis")
             return False
             
         # Compute changes between consecutive states
@@ -509,10 +536,16 @@ class PatternDynamics(nn.Module):
         for i in range(len(final_states)-1):
             diff = torch.abs(final_states[i+1] - final_states[i]).mean()
             changes.append(diff.item())
+            logging.debug(f"State change at step {i}: {diff.item():.6f}")
             
         # Pattern formed if changes are small and consistent
         mean_change = sum(changes) / len(changes)
-        return bool(mean_change < 1e-3)
+        std_change = torch.tensor(changes).std().item()
+        logging.info(f"Pattern formation analysis - mean change: {mean_change:.6f}, std: {std_change:.6f}")
+        
+        is_stable = mean_change < 1e-3
+        logging.info(f"Pattern formation {'detected' if is_stable else 'not detected'}")
+        return bool(is_stable)
 
     def compute_lyapunov_spectrum(
         self,
