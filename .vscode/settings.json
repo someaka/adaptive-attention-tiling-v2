@@ -1,5 +1,5 @@
 {
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
     "python.analysis.extraPaths": ["${workspaceFolder}/src"],
     "terminal.integrated.defaultProfile.linux": "bash",
     "terminal.integrated.profiles.linux": {
@@ -9,9 +9,9 @@
         }
     },
     "terminal.integrated.env.linux": {
-        "VIRTUAL_ENV": "${workspaceFolder}/.venv",
-        "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}",
-        "PYTHONPATH": "${workspaceFolder}/src:${env:PYTHONPATH}"
+        "VIRTUAL_ENV": "${workspaceFolder}/venv",
+        "PATH": "${workspaceFolder}/venv/bin:${env:PATH}",
+        "PYTHONPATH": "${workspaceFolder}/src"
     },
     "python.analysis.diagnosticSeverityOverrides": {
         "reportPrivateUsage": "none",
@@ -29,5 +29,13 @@
     ],
     "python.analysis.typeCheckingMode": "basic",
     "python.analysis.diagnosticMode": "workspace",
-    "python.analysis.autoImportCompletions": true
+    "python.analysis.autoImportCompletions": true,
+    "python.testing.pytestArgs": [
+        "tests",
+        "--import-mode=importlib",
+        "-v"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "python.envFile": "${workspaceFolder}/.env"
 }

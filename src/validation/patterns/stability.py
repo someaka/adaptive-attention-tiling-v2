@@ -16,7 +16,7 @@ import torch.nn as nn
 import numpy as np
 
 from src.validation.base import ValidationResult
-from validation.flow.flow_stability import (
+from src.validation.flow.flow_stability import (
     LinearStabilityValidator,
     NonlinearStabilityValidator,
     StructuralStabilityValidator,

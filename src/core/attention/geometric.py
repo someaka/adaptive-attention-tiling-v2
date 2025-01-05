@@ -55,7 +55,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from utils.memory_management_util import register_tensor, optimize_memory, clear_memory
+from src.utils.memory_management_util import register_tensor, optimize_memory, clear_memory
 
 
 class ParallelTransport(nn.Module):

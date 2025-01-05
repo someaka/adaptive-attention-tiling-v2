@@ -5,7 +5,7 @@ import torch
 import logging
 from contextlib import contextmanager
 
-from utils.memory_management_util import (
+from src.utils.memory_management_util import (
     register_tensor,
     optimize_memory,
     clear_memory

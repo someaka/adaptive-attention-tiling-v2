@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from utils.memory_management_util import register_tensor
+from src.utils.memory_management_util import register_tensor
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.memory_utils import memory_manager, memory_efficient_computation
 from src.core.quantum.state_space import QuantumState, HilbertSpace
