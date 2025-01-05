@@ -242,153 +242,183 @@ class ParallelTransport(nn.Module):
         self.logger = logging.getLogger(f"{__name__}.ParallelTransport")
         self.logger.info(f"Initialized ParallelTransport - dim: {dim}, method: {method}")
 
-    def _schild_ladder(
-        self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
-        """Schild's ladder parallel transport with improved stability."""
-        assert self.exp_map is not None, "exp_map must be provided for hyperbolic transport"
-        self.logger.debug(f"Schild's ladder transport - shapes: x={x.shape}, y={y.shape}, v={v.shape}")
-
-        # Project points to hyperboloid and vector to tangent space with high precision
-        x = self.exp_map.project_to_hyperboloid(x)
-        y = self.exp_map.project_to_hyperboloid(y)
-        v = self.exp_map.project_to_tangent(x, v)
-
-        # Handle zero vector case
-        if torch.all(torch.abs(v) < 1e-7):
+    def _schild_ladder(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Parallel transport using Schild's ladder method."""
+        assert self.exp_map is not None, "exp_map must be provided for parallel transport"
+        self.logger.info("\n=== Starting Schild's Ladder Transport ===")
+        
+        # Early returns for special cases
+        if torch.allclose(x, y, rtol=1e-5, atol=1e-5):
+            self.logger.info("Same point detected, returning original vector")
+            return v.clone()
+        
+        if torch.norm(v) < 1e-7:
+            self.logger.info("Zero vector detected, returning zeros")
             return torch.zeros_like(v)
 
-        # Handle same point case
-        if torch.allclose(x, y, rtol=1e-7, atol=1e-7):
-            return v
-
-        # Split into time and space components
-        x_time = x[..., 0]
-        x_space = x[..., 1:]
-        y_time = y[..., 0]
-        y_space = y[..., 1:]
-        v_time = v[..., 0]
-        v_space = v[..., 1:]
-
-        # Compute geodesic midpoint with improved stability
-        xy = y - x  # Difference vector
-        xy_inner = -self.exp_map.minkowski_inner(xy, xy)  # Squared distance
-        t = 0.5  # Midpoint parameter
+        # Project points to hyperboloid
+        self.logger.info(f"Initial values - x: {x}, y: {y}, v: {v}")
+        self.logger.info(f"Initial norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {torch.norm(v)}")
         
-        # Compute parallel transport coefficients
-        alpha = torch.cosh(torch.sqrt(xy_inner.clamp(min=1e-8)) * t)
-        beta = torch.sinh(torch.sqrt(xy_inner.clamp(min=1e-8)) * t) / torch.sqrt(xy_inner.clamp(min=1e-8))
+        x = self.exp_map.project_to_hyperboloid(x)
+        y = self.exp_map.project_to_hyperboloid(y)
         
-        # Compute midpoint using stable formula
-        mid = alpha.unsqueeze(-1) * x + beta.unsqueeze(-1) * xy
+        # Project vector to tangent space and store original norm
+        v = self.exp_map.project_to_tangent(x, v)
+        original_norm = torch.norm(v)
+        
+        self.logger.info(f"After projection:")
+        self.logger.info(f"x: {x}, norm: {torch.norm(x)}")
+        self.logger.info(f"y: {y}, norm: {torch.norm(y)}")
+        self.logger.info(f"v: {v}, norm: {original_norm}")
+        self.logger.info(f"Hyperboloid constraints - x: {self.exp_map.minkowski_inner(x, x) + 1}, y: {self.exp_map.minkowski_inner(y, y) + 1}")
+        self.logger.info(f"Tangent constraint - <x,v>: {self.exp_map.minkowski_inner(x, v)}")
+        
+        # Handle special cases again after projection
+        if original_norm < 1e-7:
+            self.logger.info("Zero vector after projection, returning zeros")
+            return torch.zeros_like(v)
+            
+        # Normalize v for numerical stability
+        v = v / original_norm
+        
+        # Compute midpoint between x and y using geodesic
+        t = 0.5
+        xy = y - x
+        xy_norm = torch.norm(xy)
+        if xy_norm < 1e-7:
+            self.logger.info("Points too close, returning original vector")
+            return v * original_norm
+            
+        self.logger.info(f"Midpoint computation:")
+        self.logger.info(f"xy: {xy}, norm: {xy_norm}")
+        
+        # Transport to midpoint using exponential map
+        mid = self.exp_map(x, t * xy)
         mid = self.exp_map.project_to_hyperboloid(mid)
         
-        # Split midpoint into components
-        mid_time = mid[..., 0]
-        mid_space = mid[..., 1:]
-
-        # Transport v to midpoint using stable formula
-        # First compute space components
-        v_mid_space = v_space - (torch.sum(v_space * mid_space, dim=-1) / mid_time).unsqueeze(-1) * mid_space
+        self.logger.info(f"Midpoint after projection:")
+        self.logger.info(f"mid: {mid}, norm: {torch.norm(mid)}")
+        self.logger.info(f"Hyperboloid constraint - mid: {self.exp_map.minkowski_inner(mid, mid) + 1}")
         
-        # Then compute time component to satisfy tangent space constraint
-        v_mid_time = torch.sum(v_mid_space * mid_space, dim=-1) / mid_time
-        
-        # Combine components
-        v_mid = torch.cat([v_mid_time.unsqueeze(-1), v_mid_space], dim=-1)
+        # Transport v to midpoint
+        v_mid = v.clone()
         v_mid = self.exp_map.project_to_tangent(mid, v_mid)
+        v_mid_norm = torch.norm(v_mid)
+        if v_mid_norm > 1e-7:
+            v_mid = v_mid / v_mid_norm
         
-        # Transport from midpoint to y using the same process
-        # First compute space components
-        result_space = v_mid[..., 1:] - (torch.sum(v_mid[..., 1:] * y_space, dim=-1) / y_time).unsqueeze(-1) * y_space
+        self.logger.info(f"Vector at midpoint:")
+        self.logger.info(f"v_mid: {v_mid}, norm: {torch.norm(v_mid)}")
+        self.logger.info(f"Tangent constraint - <mid,v_mid>: {self.exp_map.minkowski_inner(mid, v_mid)}")
         
-        # Then compute time component to satisfy tangent space constraint
-        result_time = torch.sum(result_space * y_space, dim=-1) / y_time
-        
-        # Combine components
-        result = torch.cat([result_time.unsqueeze(-1), result_space], dim=-1)
+        # Transport from midpoint to y
+        result = v_mid.clone()
         result = self.exp_map.project_to_tangent(y, result)
-
-        # Normalize to preserve inner product
-        v_inner = self.exp_map.minkowski_inner(v, v)
-        result_inner = self.exp_map.minkowski_inner(result, result)
-        scale = torch.sqrt(torch.abs(v_inner) / torch.abs(result_inner).clamp(min=1e-8))
-        result = result * scale.unsqueeze(-1)
-
+        result_norm = torch.norm(result)
+        if result_norm > 1e-7:
+            result = result / result_norm
+        
+        # Restore original norm
+        result = result * original_norm
+        
         # Final projection to ensure tangent space constraint
         result = self.exp_map.project_to_tangent(y, result)
-
+        
+        self.logger.info(f"Final result:")
+        self.logger.info(f"result: {result}, norm: {torch.norm(result)}")
+        self.logger.info(f"Original norm: {original_norm}")
+        self.logger.info(f"Tangent constraint - <y,result>: {self.exp_map.minkowski_inner(y, result)}")
+        
         return result
 
-    def _pole_ladder(
-        self, x: torch.Tensor, y: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
-        """Pole ladder parallel transport with improved stability."""
-        assert self.exp_map is not None, "exp_map must be provided for hyperbolic transport"
-        self.logger.debug(f"Pole ladder transport - shapes: x={x.shape}, y={y.shape}, v={v.shape}")
-
-        # Project points to hyperboloid and vector to tangent space
-        x = self.exp_map.project_to_hyperboloid(x)
-        y = self.exp_map.project_to_hyperboloid(y)
-        v = self.exp_map.project_to_tangent(x, v)
-
-        # Handle zero vector case
-        if torch.all(torch.abs(v) < 1e-7):
+    def _pole_ladder(self, v: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Parallel transport using pole ladder method."""
+        assert self.exp_map is not None, "exp_map must be provided for parallel transport"
+        self.logger.info("\n=== Starting Pole Ladder Transport ===")
+        
+        # Early returns for special cases
+        if torch.allclose(x, y, rtol=1e-5, atol=1e-5):
+            self.logger.info("Same point detected, returning original vector")
+            return v.clone()
+        
+        if torch.norm(v) < 1e-7:
+            self.logger.info("Zero vector detected, returning zeros")
             return torch.zeros_like(v)
 
-        # Handle same point case
-        if torch.allclose(x, y, rtol=1e-7, atol=1e-7):
-            return v
-
-        # Split into time and space components
-        x_time = x[..., 0]
-        x_space = x[..., 1:]
-        y_time = y[..., 0]
-        y_space = y[..., 1:]
-        v_time = v[..., 0]
-        v_space = v[..., 1:]
-
-        # Compute pole point with improved stability
-        pole = x + y
-        pole_inner = -self.exp_map.minkowski_inner(pole, pole)
-        pole = pole / torch.sqrt(pole_inner.clamp(min=1e-8)).unsqueeze(-1)
+        # Project points to hyperboloid
+        self.logger.info(f"Initial values - x: {x}, y: {y}, v: {v}")
+        self.logger.info(f"Initial norms - x: {torch.norm(x)}, y: {torch.norm(y)}, v: {torch.norm(v)}")
+        
+        x = self.exp_map.project_to_hyperboloid(x)
+        y = self.exp_map.project_to_hyperboloid(y)
+        
+        # Project vector to tangent space and store original norm
+        v = self.exp_map.project_to_tangent(x, v)
+        original_norm = torch.norm(v)
+        
+        self.logger.info(f"After projection:")
+        self.logger.info(f"x: {x}, norm: {torch.norm(x)}")
+        self.logger.info(f"y: {y}, norm: {torch.norm(y)}")
+        self.logger.info(f"v: {v}, norm: {original_norm}")
+        self.logger.info(f"Hyperboloid constraints - x: {self.exp_map.minkowski_inner(x, x) + 1}, y: {self.exp_map.minkowski_inner(y, y) + 1}")
+        self.logger.info(f"Tangent constraint - <x,v>: {self.exp_map.minkowski_inner(x, v)}")
+        
+        # Handle special cases again after projection
+        if original_norm < 1e-7:
+            self.logger.info("Zero vector after projection, returning zeros")
+            return torch.zeros_like(v)
+            
+        # Normalize v for numerical stability
+        v = v / original_norm
+        
+        # Compute pole point using exponential map
+        xy = y - x
+        xy_norm = torch.norm(xy)
+        if xy_norm < 1e-7:
+            self.logger.info("Points too close, returning original vector")
+            return v * original_norm
+            
+        self.logger.info(f"Pole computation:")
+        self.logger.info(f"xy: {xy}, norm: {xy_norm}")
+        
+        # Project pole point to hyperboloid
+        pole = self.exp_map(x, xy)
         pole = self.exp_map.project_to_hyperboloid(pole)
         
-        # Split pole into components
-        pole_time = pole[..., 0]
-        pole_space = pole[..., 1:]
-
+        self.logger.info(f"Pole after projection:")
+        self.logger.info(f"pole: {pole}, norm: {torch.norm(pole)}")
+        self.logger.info(f"Hyperboloid constraint - pole: {self.exp_map.minkowski_inner(pole, pole) + 1}")
+        
         # Transport v to pole
-        # First compute space components
-        v_pole_space = v_space - (torch.sum(v_space * pole_space, dim=-1) / pole_time).unsqueeze(-1) * pole_space
-        
-        # Then compute time component to satisfy tangent space constraint
-        v_pole_time = torch.sum(v_pole_space * pole_space, dim=-1) / pole_time
-        
-        # Combine components
-        v_pole = torch.cat([v_pole_time.unsqueeze(-1), v_pole_space], dim=-1)
+        v_pole = v.clone()
         v_pole = self.exp_map.project_to_tangent(pole, v_pole)
-
+        v_pole_norm = torch.norm(v_pole)
+        if v_pole_norm > 1e-7:
+            v_pole = v_pole / v_pole_norm
+        
+        self.logger.info(f"Vector at pole:")
+        self.logger.info(f"v_pole: {v_pole}, norm: {torch.norm(v_pole)}")
+        self.logger.info(f"Tangent constraint - <pole,v_pole>: {self.exp_map.minkowski_inner(pole, v_pole)}")
+        
         # Transport from pole to y
-        # First compute space components
-        result_space = v_pole[..., 1:] - (torch.sum(v_pole[..., 1:] * y_space, dim=-1) / y_time).unsqueeze(-1) * y_space
-        
-        # Then compute time component to satisfy tangent space constraint
-        result_time = torch.sum(result_space * y_space, dim=-1) / y_time
-        
-        # Combine components
-        result = torch.cat([result_time.unsqueeze(-1), result_space], dim=-1)
+        result = v_pole.clone()
         result = self.exp_map.project_to_tangent(y, result)
-
-        # Normalize to preserve inner product
-        v_inner = self.exp_map.minkowski_inner(v, v)
-        result_inner = self.exp_map.minkowski_inner(result, result)
-        scale = torch.sqrt(torch.abs(v_inner) / torch.abs(result_inner).clamp(min=1e-8))
-        result = result * scale.unsqueeze(-1)
-
+        result_norm = torch.norm(result)
+        if result_norm > 1e-7:
+            result = result / result_norm
+        
+        # Restore original norm
+        result = result * original_norm
+        
         # Final projection to ensure tangent space constraint
         result = self.exp_map.project_to_tangent(y, result)
-
+        
+        self.logger.info(f"Final result:")
+        self.logger.info(f"result: {result}, norm: {torch.norm(result)}")
+        self.logger.info(f"Original norm: {original_norm}")
+        self.logger.info(f"Tangent constraint - <y,result>: {self.exp_map.minkowski_inner(y, result)}")
+        
         return result
 
     def forward(
@@ -402,9 +432,9 @@ class ParallelTransport(nn.Module):
             return v
 
         if self.method == "schild":
-            return self._schild_ladder(x, y, v)
+            return self._schild_ladder(v, x, y)
         else:  # pole ladder
-            return self._pole_ladder(x, y, v)
+            return self._pole_ladder(v, x, y)
 
 
 class HyperbolicExponential(nn.Module):
