@@ -1019,18 +1019,20 @@ class PatternDynamics(nn.Module):
         print(f"Diffusion term - mean: {diffusion_term.mean():.6f}, std: {diffusion_term.std():.6f}")
 
         # Combine updates with larger step size
-        update = 4.0 * dt * reaction_term + diffusion_coefficient * diffusion_term
+        update = dt * reaction_term + diffusion_coefficient * diffusion_term
         print(f"Combined update (before adding to state) - mean: {update.mean():.6f}, std: {update.std():.6f}")
 
         # Update state
         state = state + update
         print(f"After adding update - mean: {state.mean():.6f}, std: {state.std():.6f}")
 
-        # Normalize if growth is extreme (increased threshold)
+        # Normalize if growth is extreme (increased threshold) while preserving mass
         current_norm = torch.norm(state)
         print(f"Current norm: {current_norm:.6f}")
         if current_norm > 10.0:
-            state = state * (10.0 / current_norm)
+            # Preserve mass by normalizing each component separately
+            state_mean = state.mean(dim=(-2, -1), keepdim=True)
+            state = state_mean + (state - state_mean) * (10.0 / current_norm)
 
         # Remove batch dimension if it was added
         if len(state.shape) == 4 and state.shape[0] == 1:
