@@ -23,7 +23,7 @@ from src.validation.framework import ValidationFramework, ConcreteValidationResu
 from src.validation.geometric.model import ModelGeometricValidator
 from src.validation.quantum.state import QuantumStateValidator
 from src.validation.patterns.stability import PatternValidator as StabilityValidator
-from validation.flow.flow_stability import LinearStabilityValidator, NonlinearStabilityValidator
+from src.validation.flow.flow_stability import LinearStabilityValidator, NonlinearStabilityValidator
 from src.validation.base import ValidationResult
 from src.core.models.base import LayerGeometry, ModelGeometry
 from src.neural.attention.pattern.dynamics import PatternDynamics

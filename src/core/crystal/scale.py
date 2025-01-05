@@ -68,7 +68,7 @@ from torch import nn, Tensor
 
 # Import memory optimization utilities
 from src.core.performance.cpu.memory_management import MemoryManager, MemoryMetrics
-from utils.memory_management_util import optimize_memory, register_tensor
+from src.utils.memory_management_util import optimize_memory, register_tensor
 from src.core.crystal.scale_classes.rgflow import RGFlow
 from src.core.crystal.scale_classes.complextanh import ComplexTanh
 from src.core.crystal.scale_classes.scaleinvariance import ScaleInvariance

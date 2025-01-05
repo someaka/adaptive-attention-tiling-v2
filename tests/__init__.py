@@ -1,1 +1,1 @@
-"""Test package for adaptive attention tiling."""
+"""Test suite for Adaptive Attention Tiling."""

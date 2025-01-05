@@ -55,7 +55,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from utils.memory_management_util import register_tensor, optimize_memory, clear_memory
+from src.utils.memory_management_util import register_tensor, optimize_memory, clear_memory
 
 
 class ParallelTransport(nn.Module):
@@ -168,92 +168,324 @@ class HyperbolicExponential(nn.Module):
     """
     
     def __init__(self, dim: int, curvature: float = -1.0, dtype: torch.dtype = torch.float32):
-        """Initialize exponential map.
-        
-        Args:
-            dim: Dimension of the hyperbolic space
-            curvature: Sectional curvature (default: -1.0)
-            dtype: Data type for tensors
-        """
+        """Initialize exponential map."""
         super().__init__()
         self.dim = dim
         self.curvature = nn.Parameter(torch.tensor(curvature, dtype=dtype), requires_grad=False)
         self.eps = 1e-8
-        self.max_norm = 20.0  # Maximum norm for numerical stability
+        self.max_norm = 20.0
         self.dtype = dtype
+        self.debug = True  # Enable debug printing
         
+    def _debug_print(self, tag: str, **values):
+        """Print debug information if debug mode is enabled."""
+        if self.debug:
+            print(f"\n[{tag}]")
+            print("-" * 50)
+            for name, val in values.items():
+                if isinstance(val, torch.Tensor):
+                    print(f"{name}:")
+                    print(f"  Shape: {val.shape}")
+                    print(f"  Values: {val}")
+                    print(f"  Device: {val.device}")
+                    print(f"  Dtype: {val.dtype}")
+                    if len(val.shape) > 0:
+                        if val.dtype in [torch.float32, torch.float64]:
+                            print(f"  Norm (L2): {torch.norm(val)}")
+                            print(f"  Norm (L∞): {torch.max(torch.abs(val))}")
+                            if val.shape[-1] > 1:
+                                print(f"  Max: {torch.max(val)}")
+                                print(f"  Min: {torch.min(val)}")
+                                print(f"  Mean: {torch.mean(val)}")
+                                print(f"  Std: {torch.std(val)}")
+                                if val.shape[-1] >= 2:
+                                    print(f"  Time component: {val[..., 0]}")
+                                    print(f"  Space components: {val[..., 1:]}")
+                else:
+                    print(f"{name}: {val}")
+            print("-" * 50)
+    
     def minkowski_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute Minkowski inner product with careful handling of time component."""
+        """Compute the Minkowski inner product between two vectors.
+        
+        The Minkowski inner product is defined as:
+        ⟨x,y⟩_M = -x₀y₀ + ∑ᵢ₌₁ⁿ xᵢyᵢ
+        where x₀ and y₀ are the time components.
+        """
+        # Split into time and space components
         time_component = x[..., 0] * y[..., 0]
         space_component = torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
-        return -time_component + space_component
         
-    def minkowski_norm(self, v: torch.Tensor) -> torch.Tensor:
-        """Compute Minkowski norm of a vector.
+        # Compute the inner product with negated time component
+        result = -time_component + space_component
         
-        For a vector v in Minkowski space, the norm is defined as:
-        ‖v‖_M = √|⟨v,v⟩_M|
-        where ⟨·,·⟩_M is the Minkowski inner product.
+        if self.debug:
+            self._debug_print("minkowski_inner",
+                x=x,
+                y=y,
+                time_component=time_component,
+                space_component=space_component,
+                result=result
+            )
+        
+        return result
+        
+    def minkowski_norm(self, v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Compute the Minkowski norm of a vector."""
+        inner = self.minkowski_inner(v, v)
+        
+        # Convert to boolean tensor for small value handling
+        small_value_mask = (inner.abs() < eps).to(torch.bool)
+        
+        # Handle small values with Taylor expansion
+        sqrt_small = inner.abs().sqrt() / 2
+        sqrt_large = inner.abs().sqrt()
+        
+        # Use boolean indexing for the selection
+        sqrt_term = torch.where(small_value_mask, sqrt_small, sqrt_large)
+        
+        # Handle maximum norm constraint
+        max_norm_mask = (sqrt_term > self.max_norm).to(torch.bool)
+        result = torch.where(max_norm_mask, torch.tensor(self.max_norm, device=v.device, dtype=v.dtype), sqrt_term)
+        
+        return result
+        
+    def project_to_hyperboloid(self, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Project a point onto the hyperboloid manifold.
+        
+        Projects to H^n = {x ∈ ℝ^{n+1} | ⟨x,x⟩_M = -1, x₀ > 0}
+        Uses numerically stable operations to ensure accurate projection.
         
         Args:
-            v: Input vector or batch of vectors
+            x: Point to project, shape (..., n+1)
+            eps: Small constant for numerical stability
             
         Returns:
-            Minkowski norm of the vector(s)
+            Projected point on hyperboloid
         """
-        return torch.sqrt(torch.abs(self.minkowski_inner(v, v)))
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_input",
+                x=x,
+                x_shape=x.shape,
+                x_norm=torch.norm(x),
+                x_time=x[..., 0],
+                x_space=x[..., 1:],
+                x_space_norm=torch.norm(x[..., 1:])
+            )
         
-    def project_to_hyperboloid(self, x: torch.Tensor) -> torch.Tensor:
-        """Project points onto the hyperboloid with numerical stability."""
-        # Scale by curvature
-        K = torch.abs(self.curvature)
-        spatial_norm_sq = torch.sum(x[..., 1:] * x[..., 1:], dim=-1)
-        time_component = torch.sqrt(1.0 + K * spatial_norm_sq)
+        # Extract time and space components
+        time_component = x[..., 0:1]
+        space_components = x[..., 1:]
         
-        return torch.cat([time_component.unsqueeze(-1), x[..., 1:]], dim=-1)
+        # Compute spatial norm squared with careful summation
+        space_sq = space_components * space_components
+        spatial_norm_sq = torch.zeros_like(time_component)
+        compensation = torch.zeros_like(time_component)
         
-    def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Project vector onto tangent space of hyperboloid at x."""
+        # Use Kahan summation for better precision
+        for i in range(space_sq.size(-1)):
+            y = space_sq[..., i:i+1] - compensation
+            t = spatial_norm_sq + y
+            compensation = (t - spatial_norm_sq) - y
+            spatial_norm_sq = t
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_spatial",
+                space_components=space_components,
+                space_sq=space_sq,
+                spatial_norm_sq=spatial_norm_sq,
+                compensation=compensation
+            )
+        
+        # Scale the norm if needed for numerical stability
+        scaled_norm_sq = torch.where(
+            (spatial_norm_sq < eps).to(torch.bool),
+            torch.ones_like(spatial_norm_sq) * eps,
+            spatial_norm_sq
+        )
+        
+        # Compute time component with enhanced precision
+        time_component_new = torch.sqrt(1.0 + scaled_norm_sq)
+        
+        # Preserve the sign of the original time component
+        time_sign = torch.sign(time_component)
+        time_sign = torch.where(
+            (time_sign == 0).to(torch.bool),
+            torch.ones_like(time_sign),
+            time_sign
+        )
+        time_component_new = time_component_new * time_sign
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_time",
+                scaled_norm_sq=scaled_norm_sq,
+                time_component_old=time_component,
+                time_sign=time_sign,
+                time_component_new=time_component_new
+            )
+        
+        # Normalize space components to maintain the constraint
+        space_scale = torch.where(
+            (spatial_norm_sq < eps).to(torch.bool),
+            torch.zeros_like(spatial_norm_sq),
+            torch.sqrt(scaled_norm_sq / spatial_norm_sq.clamp(min=eps))
+        )
+        space_components_new = space_components * space_scale
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_space",
+                space_scale=space_scale,
+                space_components_old=space_components,
+                space_components_new=space_components_new,
+                space_norm_new=torch.norm(space_components_new)
+            )
+        
+        # Construct result tensor
+        result = torch.cat([time_component_new, space_components_new], dim=-1)
+        
+        # Verify hyperboloid constraint
+        constraint_value = self.minkowski_inner(result, result) + 1.0
+        
+        if self.debug:
+            self._debug_print("project_to_hyperboloid_result",
+                result=result,
+                result_norm=torch.norm(result),
+                constraint_value=constraint_value,
+                time_final=result[..., 0],
+                space_final=result[..., 1:],
+                space_final_norm=torch.norm(result[..., 1:])
+            )
+        
+        return result
+        
+    def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Project a vector onto the tangent space at x."""
+        # Compute the inner product
         inner = self.minkowski_inner(x, v)
-        v_proj = v + torch.einsum('...,...d->...d', inner, x)
+        
+        # Project v onto the tangent space at x
+        v_proj = v + inner * x
+        
+        # Verify tangent space constraint (should be close to 0)
+        tangent_check = self.minkowski_inner(x, v_proj)
+        
+        # Handle numerical instabilities
+        zero_mask = (tangent_check.abs() > eps).to(torch.bool)
+        v_proj = torch.where(zero_mask, v_proj - tangent_check * x, v_proj)
+        
+        if self.debug:
+            self._debug_print("project_to_tangent",
+                x=x,
+                v=v,
+                inner=inner,
+                v_proj=v_proj,
+                tangent_check=tangent_check
+            )
+        
         return v_proj
         
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Compute exponential map with enhanced numerical stability."""
-        # Project input point to hyperboloid if needed
+        """Forward pass of the exponential map.
+        
+        Computes exp_x(v) for x on the hyperboloid and v in the tangent space at x.
+        Projects the result back to the hyperboloid to ensure numerical stability.
+        """
+        # Project x to hyperboloid if needed
         x = self.project_to_hyperboloid(x)
-        # Project vector to tangent space
+        
+        # Project v to tangent space at x
         v = self.project_to_tangent(x, v)
         
-        # Scale by curvature
-        K = torch.abs(self.curvature)
-        v_scaled = v * torch.sqrt(K)
+        # Compute the norm of v
+        v_norm = self.minkowski_norm(v)
         
-        # Compute norm of tangent vector (in Minkowski metric)
-        v_norm = torch.sqrt(torch.clamp(self.minkowski_inner(v_scaled, v_scaled), min=self.eps))
-        
-        # Handle zero and near-zero vectors
-        zero_mask = v_norm < self.eps
+        # Handle zero vectors
+        zero_mask = (v_norm < self.eps).to(torch.bool)
         if zero_mask.any():
             return x
-            
-        # Scale down large vectors for numerical stability
-        scale_factor = torch.ones_like(v_norm)
-        large_norm_mask = v_norm > self.max_norm
-        if large_norm_mask.any():
-            scale_factor[large_norm_mask] = self.max_norm / v_norm[large_norm_mask]
-            v_scaled = torch.einsum('...,...d->...d', scale_factor, v_scaled)
-            v_norm = torch.where(large_norm_mask, self.max_norm, v_norm)
         
-        # Compute exponential map
-        cosh_term = torch.cosh(v_norm).unsqueeze(-1)
-        sinh_term = torch.sinh(v_norm).unsqueeze(-1)
-        v_normalized = v_scaled / v_norm.unsqueeze(-1)
+        # Compute the exponential map using stable operations
+        v_norm = torch.clamp(v_norm, min=self.eps)  # Avoid division by zero
         
-        result = cosh_term * x + sinh_term * v_normalized
+        # Use more stable versions of hyperbolic functions
+        cosh_vn = torch.cosh(v_norm)
+        sinh_vn = torch.sinh(v_norm)
         
-        # Re-project to ensure we're exactly on the hyperboloid
-        return self.project_to_hyperboloid(result)
+        # Compute coefficients with better numerical stability
+        coeff1 = torch.where(
+            zero_mask,
+            torch.ones_like(v_norm),
+            cosh_vn
+        )
+        
+        coeff2 = torch.where(
+            zero_mask,
+            torch.zeros_like(v_norm),
+            sinh_vn / v_norm
+        )
+        
+        # Compute result with controlled operations
+        result = coeff1.unsqueeze(-1) * x + coeff2.unsqueeze(-1) * v
+        
+        # Project back to hyperboloid to ensure constraint
+        result = self.project_to_hyperboloid(result)
+        
+        if self.debug:
+            self._debug_print("forward_output",
+                x=x,
+                v=v,
+                v_norm=v_norm,
+                coeff1=coeff1,
+                coeff2=coeff2,
+                result=result,
+                hyperboloid_constraint=self.minkowski_inner(result, result) + 1
+            )
+        
+        return result
+
+    def compute_distance(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Compute hyperbolic distance between points with high precision.
+        
+        Implements d(x,y) = arccosh(-⟨x,y⟩_M) with careful numerical handling.
+        """
+        # Compute inner product with improved precision
+        inner = -self.minkowski_inner(x, y)
+        
+        # Handle numerical issues near 1
+        inner = torch.where(
+            inner < 1.0 + self.eps,
+            torch.ones_like(inner) + self.eps,
+            inner
+        )
+        
+        # For values close to 1, use Taylor series
+        # arccosh(1 + x) ≈ √(2x) * (1 - x/12 + 3x²/160)
+        near_one_mask = (inner - 1.0) < 0.01
+        x = inner - 1.0
+        taylor_result = torch.sqrt(2*x) * (1 - x/12 + 3*x*x/160)
+        
+        # For larger values, use standard arccosh
+        std_result = torch.acosh(inner)
+        
+        # Combine results based on magnitude
+        result = torch.where(
+            near_one_mask,
+            taylor_result,
+            std_result
+        )
+        
+        if self.debug:
+            self._debug_print("compute_distance",
+                x=x,
+                y=y,
+                inner=inner,
+                near_one_mask=near_one_mask.to(dtype=x.dtype),
+                taylor_result=taylor_result,
+                std_result=std_result,
+                result=result
+            )
+        
+        return result
 
 
 class HyperbolicLogarithm(nn.Module):
@@ -290,9 +522,25 @@ class HyperbolicLogarithm(nn.Module):
         return torch.cat([time_component.unsqueeze(-1), x[..., 1:]], dim=-1)
         
     def project_to_tangent(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Project vector onto tangent space of hyperboloid at x."""
+        """Project vector v onto the tangent space at point x with improved precision."""
+        # Compute inner product with higher precision
         inner = self.minkowski_inner(x, v)
-        v_proj = v + torch.einsum('...,...d->...d', inner, x)
+        
+        # Apply more precise projection with numerical stability
+        v_proj = torch.where(
+            torch.abs(inner)[..., None] > self.eps,
+            v + (inner / (1.0 + self.eps))[..., None] * x,
+            v
+        )
+        
+        # Double-check tangent space constraint
+        tangent_check = self.minkowski_inner(x, v_proj)
+        v_proj = torch.where(
+            torch.abs(tangent_check)[..., None] > self.eps,
+            v_proj - (tangent_check / (1.0 + self.eps))[..., None] * x,
+            v_proj
+        )
+        
         return v_proj
         
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

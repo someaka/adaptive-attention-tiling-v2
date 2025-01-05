@@ -14,8 +14,8 @@ from enum import Enum
 import torch
 import numpy as np
 
-from validation.base import ValidationResult
-from core.quantum.types import QuantumState
+from src.validation.base import ValidationResult
+from src.core.quantum.types import QuantumState
 
 
 class StateValidationErrorType(Enum):
