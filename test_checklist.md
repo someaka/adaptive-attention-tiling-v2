@@ -76,7 +76,7 @@
 ### Pattern Tests
 - [x] tests/test_neural/test_attention/test_pattern/test_bifurcation.py
 - [x] tests/test_neural/test_attention/test_pattern/test_control.py
-- [ ] tests/test_neural/test_attention/test_pattern/test_diffusion_properties.py
+- [x] tests/test_neural/test_attention/test_pattern/test_diffusion_properties.py
 - [ ] tests/test_neural/test_attention/test_pattern/test_quantum.py
 - [x] tests/test_neural/test_attention/test_pattern/test_reaction_diffusion.py
 - [x] tests/test_neural/test_attention/test_pattern/test_stability.py
