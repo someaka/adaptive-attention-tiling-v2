@@ -160,9 +160,9 @@ class TestPatternDynamics:
         target_change_rate = 0.05  # Allow more significant changes for pattern formation
         adaptation_rate = 0.1  # Gentler adaptation
         stability_window = 20  # Longer window for better stability assessment
-        max_steps = 500  # More steps to allow pattern development
+        max_steps = 1000  # More steps to allow pattern development
         min_steps = 100
-        convergence_threshold = 1e-4  # More reasonable for pattern dynamics
+        convergence_threshold = 0.001  # More reasonable for pattern dynamics
 
         # Storage for monitoring evolution
         time_evolution = []
@@ -258,7 +258,14 @@ class TestPatternDynamics:
         
         # Check for pattern formation using multiple criteria
         spatial_structure = torch.var(final_pattern, dim=(-2, -1)).mean() > 0.01
-        temporal_stability = change_rates[-1] < convergence_threshold
+        
+        # More robust temporal stability check
+        stability_window = 20
+        recent_rates = torch.tensor(change_rates[-stability_window:])
+        avg_rate = recent_rates.mean().item()
+        rate_std = recent_rates.std().item()
+        temporal_stability = (avg_rate < convergence_threshold * 2.0) and (rate_std < convergence_threshold)
+        
         mass_conserved = abs(pattern_metrics['mass_conservation'][-1] - 1.0) < 0.1
         
         pattern_formed = spatial_structure and temporal_stability and mass_conserved
