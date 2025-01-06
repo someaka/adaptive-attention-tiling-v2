@@ -17,7 +17,7 @@ import torch
 import torch.linalg
 import logging
 
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.neural.attention.pattern.models import (
     ReactionDiffusionState,
     StabilityInfo,

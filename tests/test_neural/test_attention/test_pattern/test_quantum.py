@@ -4,7 +4,7 @@ import torch
 import pytest
 import logging
 
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.quantum.types import QuantumState
 from src.core.quantum.state_space import HilbertSpace
 

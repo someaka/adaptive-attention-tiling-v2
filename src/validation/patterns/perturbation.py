@@ -12,7 +12,7 @@ import torch
 import numpy as np
 from dataclasses import dataclass
 
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 
 @dataclass
 class PerturbationMetrics:

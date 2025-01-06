@@ -49,7 +49,7 @@ class IQuantumState(Protocol[T]):
     
     This interface unifies quantum state implementations across different layers:
     - Core quantum operations (core.quantum.types.QuantumState)
-    - Neural quantum states (neural.attention.pattern.quantum.QuantumState)
+    - Neural quantum states ( src.neural.attention.pattern.quantum.QuantumState)
     - Pattern-specific states (core.tiling.quantum_attention_tile.QuantumState)
     """
     

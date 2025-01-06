@@ -15,7 +15,7 @@ from scipy.fft import fft2, ifft2
 from numpy.typing import NDArray, ArrayLike
 from torch import Tensor
 
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.neural.flow.hamiltonian import HamiltonianSystem
 from src.validation.base import ValidationResult
 

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 
 
 @pytest.fixture

@@ -34,7 +34,7 @@ from ..patterns.symplectic import SymplecticStructure
 from ..patterns.riemannian import PatternRiemannianStructure
 from src.core.quantum.state_space import QuantumState, HilbertSpace
 from src.core.attention.geometric import GeometricStructures
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.tiling.state_manager import StateManager, StateConfig, StateType
 from src.core.tiling.attention_state import AttentionState
 from src.core.quantum.neural_quantum_bridge import NeuralQuantumBridge

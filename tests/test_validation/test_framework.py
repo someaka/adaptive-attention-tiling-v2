@@ -26,7 +26,7 @@ from src.validation.patterns.stability import PatternValidator as StabilityValid
 from src.validation.flow.flow_stability import LinearStabilityValidator, NonlinearStabilityValidator
 from src.validation.base import ValidationResult
 from src.core.models.base import LayerGeometry, ModelGeometry
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.tiling.geometric_flow import GeometricFlow
 from src.core.quantum.types import QuantumState
 from src.core.patterns.dynamics import PatternDynamics as CorePatternDynamics

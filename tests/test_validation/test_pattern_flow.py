@@ -29,7 +29,7 @@ from src.validation.geometric.flow import (
     TilingFlowValidator as FlowValidator,
     TilingFlowValidationResult as FlowValidationResult
 )
-from neural.attention.pattern.pattern_dynamics import PatternDynamics
+from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.tiling.geometric_flow import GeometricFlow
 from typing import Optional
 
