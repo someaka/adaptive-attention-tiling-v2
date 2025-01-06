@@ -7,7 +7,8 @@ cache optimization, and memory access pattern improvements.
 import gc
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
+import weakref
 
 import torch
 
@@ -31,39 +32,83 @@ class MemoryPool:
         self.current_size = 0
         self.pools: Dict[Tuple[int, ...], List[torch.Tensor]] = defaultdict(list)
         self.stats = defaultdict(int)
+        self.active_tensors: Set[int] = set()  # Track active tensor ids
+        self._cleanup_threshold = 0.5  # Cleanup at 50% capacity
 
     def acquire(self, shape: Tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
         """Acquire a tensor from the pool or create new if none available."""
+        # Check if we need to clean up
+        if self.current_size > self.max_size * self._cleanup_threshold:
+            self._cleanup()
+
         if self.pools.get(shape):
             self.stats["pool_hits"] += 1
-            return self.pools[shape].pop()
+            tensor = self.pools[shape].pop()
+            self.active_tensors.add(id(tensor))
+            return tensor
 
         self.stats["pool_misses"] += 1
         tensor = torch.empty(shape, dtype=dtype)
-        self.current_size += tensor.numel() * tensor.element_size()
+        size = tensor.numel() * tensor.element_size()
+        
+        # Only add to current size if we're actually allocating new memory
+        if size + self.current_size <= self.max_size:
+            self.current_size += size
+            self.active_tensors.add(id(tensor))
+        else:
+            # Force cleanup if we're over capacity
+            self._cleanup()
+            if size > self.max_size:
+                raise RuntimeError(f"Requested tensor size {size} exceeds pool maximum {self.max_size}")
+            self.current_size += size
+            self.active_tensors.add(id(tensor))
+            
         return tensor
 
     def release(self, tensor: torch.Tensor) -> None:
         """Release a tensor back to the pool."""
-        if self.current_size + tensor.numel() * tensor.element_size() > self.max_size:
+        tensor_id = id(tensor)
+        if tensor_id not in self.active_tensors:
+            return  # Already released or not from this pool
+            
+        # Remove from active tensors
+        self.active_tensors.remove(tensor_id)
+        
+        # Check if we need to clean up
+        if self.current_size > self.max_size * self._cleanup_threshold:
             self._cleanup()
-
+            return  # Don't add to pool if we're over threshold
+            
         shape = tuple(tensor.shape)
-        self.pools[shape].append(tensor)
-        self.current_size += tensor.numel() * tensor.element_size()
+        size = tensor.numel() * tensor.element_size()
+        
+        # Only add to pool if it won't exceed max size
+        if size + self.current_size <= self.max_size:
+            self.pools[shape].append(tensor)
+            self.current_size += size
 
     def _cleanup(self) -> None:
         """Clean up least recently used tensors."""
         freed_size = 0
-        target_size = self.max_size * 0.8  # Aim to free 20%
+        target_size = self.max_size * self._cleanup_threshold  # Aim to free down to threshold
 
-        for shape in sorted(self.pools, key=lambda x: len(self.pools[x])):
+        # Sort shapes by size (largest first) to free up more space quickly
+        shapes = sorted(
+            self.pools.keys(),
+            key=lambda x: sum(i for i in x) * torch.tensor([], dtype=torch.float32).element_size(),
+            reverse=True
+        )
+
+        for shape in shapes:
             while self.pools[shape] and self.current_size - freed_size > target_size:
                 tensor = self.pools[shape].pop()
                 freed_size += tensor.numel() * tensor.element_size()
+                # Ensure tensor is freed
+                del tensor
 
         self.current_size -= freed_size
         gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
 class CacheOptimizer:
@@ -108,6 +153,7 @@ class MemoryManager:
         self.cache_optimizer = CacheOptimizer()
         self.enable_monitoring = enable_monitoring
         self.stats: List[MemoryStats] = []
+        self._active_tensors: Set[int] = set()
 
     def create_pool(self, size: int) -> MemoryPool:
         """Create a new memory pool with specified size."""
@@ -124,6 +170,9 @@ class MemoryManager:
         self, tensor: torch.Tensor, access_pattern: str = "sequential"
     ) -> torch.Tensor:
         """Optimize tensor for memory efficiency."""
+        # Track tensor for cleanup
+        self._active_tensors.add(id(tensor))
+        
         # Ensure contiguous memory layout
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
@@ -149,10 +198,13 @@ class MemoryManager:
 
     def release_tensor(self, tensor: torch.Tensor) -> None:
         """Release tensor back to pool."""
-        if tensor.is_contiguous():
-            self.pool.release(tensor)
-        else:
-            self.pool.release(tensor.contiguous())
+        tensor_id = id(tensor)
+        if tensor_id in self._active_tensors:
+            self._active_tensors.remove(tensor_id)
+            if tensor.is_contiguous():
+                self.pool.release(tensor)
+            else:
+                self.pool.release(tensor.contiguous())
 
     def _calculate_fragmentation(self) -> float:
         """Calculate memory fragmentation ratio."""
@@ -180,6 +232,7 @@ class MemoryManager:
     def clear_stats(self) -> None:
         """Clear collected statistics."""
         self.clear_metrics()
+        self._active_tensors.clear()
 
     def allocate(
         self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32
@@ -187,3 +240,9 @@ class MemoryManager:
         """Allocate a tensor from the memory pool."""
         tensor = self.pool.acquire(shape, dtype)
         return self.optimize_tensor(tensor)
+
+    def __del__(self):
+        """Cleanup when the manager is deleted."""
+        self.clear_stats()
+        gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
