@@ -165,12 +165,26 @@ class TestGeometricStructures:
         """Test geodesic distance computation."""
         print_memory_usage("Start geodesic test")
         
+        print(f"\nMetric dtype: {geometric_structures.metric.dtype}")
+        
+        # Create tensor with explicit dtype matching the metric
         x = torch.randn(dim, dtype=geometric_structures.metric.dtype)
+        print(f"Input tensor x dtype: {x.dtype}")
+        
         x = x / (torch.norm(x) + 1e-8)  # Normalize with epsilon
+        print(f"Normalized x dtype: {x.dtype}")
         
         # Test distance to self
         self_distance = geometric_structures.compute_geodesic_distance(x, x)
-        assert torch.allclose(self_distance, torch.tensor(0.0), atol=1e-3)
+        # Convert back to float32 to match metric dtype
+        self_distance = self_distance.to(geometric_structures.metric.dtype)
+        print(f"Self distance dtype: {self_distance.dtype}")
+        print(f"Self distance value: {self_distance}")
+        
+        zero_tensor = torch.tensor(0.0, dtype=geometric_structures.metric.dtype)
+        print(f"Zero tensor dtype: {zero_tensor.dtype}")
+        
+        assert torch.allclose(self_distance, zero_tensor, atol=1e-3)
         
         # Test with different point
         y = torch.randn(dim, dtype=geometric_structures.metric.dtype)
@@ -280,7 +294,10 @@ class TestHyperbolicOperations:
         
         # Verify distance preservation
         dist = geom.compute_geodesic_distance(x.unsqueeze(0), y.unsqueeze(0))
+        # Convert dist back to precision dtype to match v_norm
+        dist = dist.to(dtype=precision)
         v_norm = torch.sqrt(torch.abs(exp_map.minkowski_inner(v.unsqueeze(0), v.unsqueeze(0))))
+        
         print_test_case("Distance Check",
             distance=dist,
             vector_norm=v_norm,
