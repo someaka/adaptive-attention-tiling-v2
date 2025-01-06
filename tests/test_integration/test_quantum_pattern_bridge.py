@@ -11,7 +11,7 @@ from typing import Tuple, Dict, Any
 
 from src.core.quantum.types import QuantumState
 from src.core.quantum.neural_quantum_bridge import NeuralQuantumBridge
-from src.neural.attention.pattern.dynamics import PatternDynamics
+from neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.neural.attention.pattern.quantum import QuantumGeometricTensor
 
 @pytest.fixture

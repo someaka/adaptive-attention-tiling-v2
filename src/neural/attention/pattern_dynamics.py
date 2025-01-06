@@ -25,7 +25,7 @@ from .pattern.models import (
     BifurcationDiagram
 )
 
-from .pattern.dynamics import PatternDynamics as _PatternDynamics
+from .pattern.pattern_dynamics import PatternDynamics as _PatternDynamics
 from .pattern.diffusion import DiffusionSystem
 
 class PatternDynamics(_PatternDynamics):

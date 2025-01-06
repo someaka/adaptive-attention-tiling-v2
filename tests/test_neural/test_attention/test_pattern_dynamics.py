@@ -17,7 +17,7 @@ import torch
 import torch.linalg
 import logging
 
-from src.neural.attention.pattern.dynamics import PatternDynamics
+from neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.neural.attention.pattern.models import (
     ReactionDiffusionState,
     StabilityInfo,
@@ -58,7 +58,8 @@ class TestPatternDynamics:
             boundary="periodic",
             dt=0.01,
             hidden_dim=64,
-            num_modes=8
+            num_modes=8,
+            quantum_enabled=True  # Enable quantum features for testing
         )
 
     def test_stability_analysis_basic(

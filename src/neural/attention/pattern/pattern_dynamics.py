@@ -291,7 +291,11 @@ class PatternDynamics(nn.Module):
             return next_state
         else:
             # Classical evolution
-            next_state = self.diffusion(state)
+            next_state = self.diffusion(
+                state,
+                diffusion_coefficient=0.1,  # Default diffusion coefficient
+                dt=self.dt
+            )
             next_state = next_state / torch.norm(next_state)
             return next_state
 

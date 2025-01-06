@@ -17,7 +17,7 @@ from .geometric.metric import GeometricMetricValidator, CurvatureBounds
 from .geometric.flow import TilingFlowValidator as FlowValidator, TilingFlowValidationResult
 from .geometric.model import GeometricValidationResult, ModelGeometricValidator
 from .quantum.state import QuantumStateValidator, QuantumStateValidationResult
-from ..neural.attention.pattern.dynamics import PatternDynamics as AttentionPatternDynamics
+from ..neural.attention.pattern.pattern_dynamics import PatternDynamics as AttentionPatternDynamics
 from ..core.patterns.riemannian import RiemannianFramework, PatternRiemannianStructure
 from ..core.tiling.geometric_flow import GeometricFlow
 from ..core.quantum.types import QuantumState

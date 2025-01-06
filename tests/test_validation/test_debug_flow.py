@@ -18,7 +18,7 @@ from src.validation.geometric.flow import (
     TilingFlowValidator as FlowValidator,
     TilingFlowValidationResult as FlowValidationResult
 )
-from src.neural.attention.pattern.dynamics import PatternDynamics
+from neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.tiling.geometric_flow import GeometricFlow
 
 # Test parameters for faster execution

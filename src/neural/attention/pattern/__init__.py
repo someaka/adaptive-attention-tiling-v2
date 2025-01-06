@@ -8,7 +8,7 @@ from .models import (
     BifurcationPoint,
     BifurcationDiagram
 )
-from .dynamics import PatternDynamics
+from .pattern_dynamics import PatternDynamics
 
 __all__ = [
     'ReactionDiffusionState',

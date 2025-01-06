@@ -11,7 +11,7 @@ from typing import Tuple, Dict, Any
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.neural.attention.pattern.dynamics import PatternDynamics
+from neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.patterns.pattern_processor import PatternProcessor
 from src.core.flow.neural import NeuralGeometricFlow
 from tests.utils.config_loader import load_test_config
