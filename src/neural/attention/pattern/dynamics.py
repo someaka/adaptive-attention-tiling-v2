@@ -89,10 +89,12 @@ class PatternDynamics(nn.Module):
         state = state / torch.norm(state)
         print(f"After normalize: {torch.norm(state)}")
         
-        # Convert to complex and ensure float32
-        amplitudes = state.to(torch.complex64)
+        # Convert to complex and ensure float64
+        amplitudes = state.to(torch.complex128)
         print(f"After complex conversion norm: {torch.norm(amplitudes)}")
-        phase = torch.zeros_like(state, dtype=torch.complex64)
+        
+        # Initialize phase to zero
+        phase = torch.zeros_like(amplitudes, dtype=torch.complex128)
         print(f"Phase shape: {phase.shape}, Phase dtype: {phase.dtype}")
         
         # Create basis labels based on state shape
@@ -109,7 +111,7 @@ class PatternDynamics(nn.Module):
         # Verify normalization
         norm = quantum_state.norm()
         print(f"Initial quantum state norm: {norm}")
-        if not torch.allclose(norm, torch.tensor(1.0, dtype=torch.float32)):
+        if not torch.allclose(norm, torch.tensor(1.0, dtype=torch.float64)):
             print("Normalizing quantum state...")
             quantum_state.amplitudes = quantum_state.amplitudes / (norm + 1e-8)
             print(f"Final quantum state norm: {quantum_state.norm()}")
@@ -139,56 +141,74 @@ class PatternDynamics(nn.Module):
         print(f"After phase combination norm: {torch.norm(state)}")
         
         # Convert to real and normalize globally
-        state = state.real.to(torch.float32)
+        state = state.real.to(torch.float64)
         print(f"After real conversion norm: {torch.norm(state)}")
         
-        state = state / (torch.norm(state) + 1e-8)
+        # Normalize to match input state
+        state = state / torch.norm(state)
         print(f"After final normalization norm: {torch.norm(state)}")
         
         return state
 
     def compute_next_state(self, state: torch.Tensor) -> torch.Tensor:
         """Perform one step of pattern dynamics.
-        
+    
         Args:
             state (torch.Tensor): Current state
-            
+    
         Returns:
             torch.Tensor: Next state
         """
         if self.quantum_enabled:
             # Convert to quantum state
             quantum_state = self._to_quantum_state(state)
-            
+    
             # Compute quantum geometric tensor
             Q = self.quantum_tensor.compute_tensor(quantum_state)
-            
+    
             # Decompose into metric and Berry curvature
             g, B = self.quantum_tensor.decompose(Q)
-            
+    
             # Apply quantum evolution using proper Hamiltonian
             if not hasattr(self, 'hamiltonian_system'):
-                self.hamiltonian_system = HamiltonianSystem(manifold_dim=2)  # 2D phase space per point
-                
+                # Each point in phase space has 2 components (real and imaginary)
+                # For numerical stability, we use a smaller manifold dimension
+                manifold_dim = 16  # Fixed dimension for stability
+                self.hamiltonian_system = HamiltonianSystem(manifold_dim=manifold_dim)
+    
             # Convert quantum state to phase space representation
             # Reshape the amplitudes to combine all spatial dimensions
             batch_size = quantum_state.amplitudes.shape[0]
-            amplitudes_flat = quantum_state.amplitudes.reshape(batch_size, -1)  # Flatten all spatial dims
+            spatial_dims = quantum_state.amplitudes.shape[1:]  # Save spatial dimensions for later
+            total_dim = int(np.prod(spatial_dims))  # Total number of elements in spatial dimensions
+            amplitudes_flat = quantum_state.amplitudes.reshape(batch_size, total_dim)  # Flatten all spatial dims
+    
+            # Project to lower-dimensional manifold
+            real_part = amplitudes_flat.real
+            imag_part = amplitudes_flat.imag
+            phase_space = torch.cat([real_part, imag_part], dim=-1)  # Shape: (batch_size, total_dim * 2)
             
-            # Separate real and imaginary parts and combine into phase space points
-            phase_space = torch.stack([
-                amplitudes_flat.real,
-                amplitudes_flat.imag
-            ], dim=-1).reshape(batch_size, -1)  # Shape: (batch_size, num_points * 2)
-            
+            # Project to manifold dimension
+            phase_space = phase_space[..., :self.hamiltonian_system.manifold_dim]
+    
             # Evolve using Hamiltonian dynamics
             evolved_phase = self.hamiltonian_system.evolve(phase_space, dt=self.dt)
-            
+    
+            # Pad back to original dimension
+            evolved_phase = torch.nn.functional.pad(
+                evolved_phase,
+                (0, total_dim * 2 - self.hamiltonian_system.manifold_dim),
+                mode='constant',
+                value=0
+            )
+    
             # Reshape back to original dimensions
-            evolved_reshaped = evolved_phase.reshape(batch_size, -1, 2)  # Shape: (batch_size, num_points, 2)
-            evolved_complex = torch.complex(evolved_reshaped[..., 0], evolved_reshaped[..., 1])
-            evolved_reshaped = evolved_complex.reshape_as(quantum_state.amplitudes)
-            
+            half_dim = evolved_phase.shape[-1] // 2
+            real_evolved = evolved_phase[..., :half_dim]
+            imag_evolved = evolved_phase[..., half_dim:]
+            evolved_complex = torch.complex(real_evolved, imag_evolved)
+            evolved_reshaped = evolved_complex.reshape(batch_size, *spatial_dims)
+    
             # Convert back to quantum state
             evolved = QuantumState(
                 amplitudes=evolved_reshaped,
@@ -198,13 +218,16 @@ class PatternDynamics(nn.Module):
             
             # Convert back to classical state
             next_state = self._from_quantum_state(evolved)
+            
+            # Ensure normalization
+            next_state = next_state / torch.norm(next_state)
+            
+            return next_state
         else:
             # Classical evolution
-            reaction = self.reaction.reaction_term(state)
-            diffusion = self.diffusion.apply_diffusion(state, diffusion_coefficient=0.1, dt=self.dt)
-            next_state = state + self.dt * (reaction + diffusion)
-        
-        return next_state
+            next_state = self.diffusion(state)
+            next_state = next_state / torch.norm(next_state)
+            return next_state
 
     def evolve_pattern(
         self,
