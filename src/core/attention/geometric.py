@@ -903,25 +903,41 @@ class GeometricStructures(nn.Module):
     def compute_geodesic_distance(
         self, x: torch.Tensor, y: torch.Tensor
     ) -> torch.Tensor:
-        """Compute geodesic distance between points."""
+        """Compute geodesic distance between points with improved numerical stability."""
         self.logger.debug(f"Computing geodesic distance - shapes: x={x.shape}, y={y.shape}")
         
-        # Project points to hyperbolic space
+        # Project points to hyperbolic space with improved stability
         if isinstance(self.exp_map, HyperbolicExponential):
+            # Convert to double precision for better numerical stability
+            x = x.to(torch.float64)
+            y = y.to(torch.float64)
+            
             x_proj = self.exp_map.project_to_hyperboloid(x)
             y_proj = self.exp_map.project_to_hyperboloid(y)
             
-            # For same points, return zero
-            if torch.allclose(x_proj, y_proj, atol=1e-7):
+            # For same points, return zero with proper shape
+            if torch.allclose(x_proj, y_proj, atol=1e-10):
                 self.logger.debug("Points are identical, returning zero distance")
-                return torch.zeros(x.shape[:-1], device=x.device)
+                return torch.zeros(x.shape[:-1], device=x.device, dtype=x.dtype)
             
-            # Compute hyperbolic distance directly using Minkowski inner product
-            inner = -self.exp_map.minkowski_inner(x_proj, y_proj)  # Should be ≥ 1
-            inner = torch.clamp(inner, min=1.0 + 1e-7)  # Ensure we stay in valid range
+            # Compute hyperbolic distance with improved stability
+            # Use -⟨x,y⟩ ≥ 1 for points on hyperboloid
+            inner = -self.exp_map.minkowski_inner(x_proj, y_proj)
             
-            # Return arccosh of inner product (true hyperbolic distance)
+            # Handle numerical issues near the boundary
+            eps = 1e-10
+            inner = torch.where(
+                inner < 1.0 + eps,
+                torch.ones_like(inner) + eps,
+                inner
+            )
+            
+            # Compute distance using arccosh with stable gradient
             distance = torch.acosh(inner)
+            
+            # Convert back to original precision
+            distance = distance.to(x.dtype)
+            
             self.logger.debug(f"Hyperbolic distance: {distance}")
             return distance
         else:

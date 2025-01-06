@@ -31,21 +31,22 @@ class QuantumState:
         elif self.phase.dtype != torch.complex128:
             self.phase = self.phase.to(torch.complex128)
 
-        # Normalize state vector
+        # Store original norm before normalization
         if len(self.amplitudes.shape) == 1:
             # Single state vector
             norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
-            self.amplitudes = self.amplitudes / (norm + 1e-8)
         else:
-            # Batch of state vectors
-            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=1, keepdim=True))
-            self.amplitudes = self.amplitudes / (norm + 1e-8)
-
+            # Batch of state vectors - normalize globally across all dimensions except batch
+            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape))), keepdim=True))
+        
         # Store original norm if not provided
         if self.original_norm is None:
             self.original_norm = norm.to(torch.float64)
         else:
             self.original_norm = self.original_norm.to(torch.float64)
+            
+        # Normalize state vector globally
+        self.amplitudes = self.amplitudes / (norm + 1e-8)
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -61,7 +62,8 @@ class QuantumState:
         """Compute the norm of the quantum state."""
         if len(self.amplitudes.shape) == 1:
             return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2)).to(torch.float64)
-        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=1)).to(torch.float64)
+        # For multi-dimensional tensors, compute norm across all dimensions except batch
+        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape))))).to(torch.float64)
 
     def density_matrix(self) -> torch.Tensor:
         """Compute the density matrix representation of the state."""

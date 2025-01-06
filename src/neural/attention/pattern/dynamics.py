@@ -27,6 +27,8 @@ from .models import (
 from .diffusion import DiffusionSystem
 from .reaction import ReactionSystem
 
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class PatternDynamics(nn.Module):
     """Complete pattern dynamics system with quantum integration."""
@@ -73,6 +75,36 @@ class PatternDynamics(nn.Module):
             self.quantum_flow = QuantumGeometricFlow(manifold_dim=space_dim, hidden_dim=hidden_dim)
             self.quantum_tensor = QuantumGeometricTensor(dim=space_dim)
             
+    def _log_tensor_stats(self, tensor: torch.Tensor, name: str, channel: Optional[int] = None):
+        """Helper to log tensor statistics."""
+        if channel is not None:
+            tensor = tensor[:, channel]
+            prefix = f"Channel {channel} - "
+        else:
+            prefix = ""
+            
+        logger.info(f"\n=== {prefix}{name} Statistics ===")
+        logger.info(f"Shape: {tensor.shape}")
+        logger.info(f"Dtype: {tensor.dtype}")
+        
+        if torch.is_complex(tensor):
+            abs_tensor = torch.abs(tensor)
+            logger.info(f"Abs Min: {torch.min(abs_tensor)}")
+            logger.info(f"Abs Max: {torch.max(abs_tensor)}")
+            logger.info(f"Abs Mean: {torch.mean(abs_tensor)}")
+            logger.info(f"Abs Std: {torch.std(abs_tensor)}")
+            logger.info(f"Phase min: {torch.min(torch.angle(tensor))}")
+            logger.info(f"Phase max: {torch.max(torch.angle(tensor))}")
+        else:
+            logger.info(f"Min: {torch.min(tensor)}")
+            logger.info(f"Max: {torch.max(tensor)}")
+            logger.info(f"Mean: {torch.mean(tensor)}")
+            logger.info(f"Std: {torch.std(tensor)}")
+            
+        logger.info(f"Norm: {torch.norm(tensor)}")
+        if len(tensor.shape) > 1:
+            logger.info(f"Channel norms: {torch.norm(tensor, dim=1)}")
+
     def _to_quantum_state(self, state: torch.Tensor) -> QuantumState:
         """Convert classical state to quantum state.
         
@@ -82,20 +114,32 @@ class PatternDynamics(nn.Module):
         Returns:
             Quantum state
         """
-        print("\n=== _to_quantum_state conversion steps ===")
-        print(f"Input state norm: {torch.norm(state)}")
+        logger.info("\n=== _to_quantum_state conversion steps ===")
+        self._log_tensor_stats(state, "Input state")
+        
+        # Log channel-wise statistics
+        for c in range(state.shape[1]):
+            self._log_tensor_stats(state, f"Input state channel {c}", channel=c)
         
         # Ensure state is normalized globally
         state = state / torch.norm(state)
-        print(f"After normalize: {torch.norm(state)}")
+        logger.info("\n=== After global normalization ===")
+        self._log_tensor_stats(state, "Normalized state")
+        for c in range(state.shape[1]):
+            self._log_tensor_stats(state, f"Normalized state channel {c}", channel=c)
         
         # Convert to complex and ensure float64
         amplitudes = state.to(torch.complex128)
-        print(f"After complex conversion norm: {torch.norm(amplitudes)}")
+        logger.info("\n=== After complex conversion ===")
+        self._log_tensor_stats(amplitudes, "Complex amplitudes")
+        for c in range(amplitudes.shape[1]):
+            self._log_tensor_stats(amplitudes, f"Complex amplitudes channel {c}", channel=c)
         
         # Initialize phase to zero
         phase = torch.zeros_like(amplitudes, dtype=torch.complex128)
-        print(f"Phase shape: {phase.shape}, Phase dtype: {phase.dtype}")
+        logger.info(f"\n=== Phase initialization ===")
+        logger.info(f"Phase shape: {phase.shape}")
+        logger.info(f"Phase dtype: {phase.dtype}")
         
         # Create basis labels based on state shape
         basis_size = state.shape[-1]
@@ -108,14 +152,12 @@ class PatternDynamics(nn.Module):
             phase=phase
         )
         
-        # Verify normalization
-        norm = quantum_state.norm()
-        print(f"Initial quantum state norm: {norm}")
-        if not torch.allclose(norm, torch.tensor(1.0, dtype=torch.float64)):
-            print("Normalizing quantum state...")
-            quantum_state.amplitudes = quantum_state.amplitudes / (norm + 1e-8)
-            print(f"Final quantum state norm: {quantum_state.norm()}")
-            
+        # Log quantum state properties
+        logger.info("\n=== Final quantum state ===")
+        self._log_tensor_stats(quantum_state.amplitudes, "Quantum state amplitudes")
+        for c in range(quantum_state.amplitudes.shape[1]):
+            self._log_tensor_stats(quantum_state.amplitudes, f"Quantum state channel {c}", channel=c)
+        
         return quantum_state
         
     def _from_quantum_state(self, quantum_state: QuantumState) -> torch.Tensor:
@@ -127,26 +169,50 @@ class PatternDynamics(nn.Module):
         Returns:
             Classical state tensor
         """
-        print("\n=== _from_quantum_state conversion steps ===")
-        print(f"Input quantum state norm: {quantum_state.norm()}")
+        logger.info("\n=== _from_quantum_state conversion steps ===")
+        self._log_tensor_stats(quantum_state.amplitudes, "Input quantum state")
+        for c in range(quantum_state.amplitudes.shape[1]):
+            self._log_tensor_stats(quantum_state.amplitudes, f"Input quantum state channel {c}", channel=c)
         
         # Get amplitudes and phase
         amplitudes = quantum_state.amplitudes
         phase = quantum_state.phase
-        print(f"Amplitudes norm before phase: {torch.norm(amplitudes)}")
-        print(f"Phase abs range: min={torch.min(torch.abs(phase))}, max={torch.max(torch.abs(phase))}")
+        
+        logger.info("\n=== Phase information ===")
+        self._log_tensor_stats(phase, "Phase tensor")
         
         # Combine amplitude and phase
         state = amplitudes * torch.exp(1j * phase)
-        print(f"After phase combination norm: {torch.norm(state)}")
+        logger.info("\n=== After phase combination ===")
+        self._log_tensor_stats(state, "Combined state")
+        for c in range(state.shape[1]):
+            self._log_tensor_stats(state, f"Combined state channel {c}", channel=c)
         
-        # Convert to real and normalize globally
+        # Convert to real and normalize channel-wise
         state = state.real.to(torch.float64)
-        print(f"After real conversion norm: {torch.norm(state)}")
+        logger.info("\n=== After real conversion ===")
+        self._log_tensor_stats(state, "Real state")
+        for c in range(state.shape[1]):
+            self._log_tensor_stats(state, f"Real state channel {c}", channel=c)
+            
+        # Normalize each channel independently to preserve relative magnitudes
+        for c in range(state.shape[1]):
+            channel = state[:, c]
+            channel_norm = torch.norm(channel)
+            if channel_norm > 1e-8:  # Avoid division by zero
+                state[:, c] = channel / channel_norm
+                
+        logger.info("\n=== After channel-wise normalization ===")
+        self._log_tensor_stats(state, "Channel normalized state")
+        for c in range(state.shape[1]):
+            self._log_tensor_stats(state, f"Channel normalized state {c}", channel=c)
         
-        # Normalize to match input state
+        # Final global normalization
         state = state / torch.norm(state)
-        print(f"After final normalization norm: {torch.norm(state)}")
+        logger.info("\n=== After final global normalization ===")
+        self._log_tensor_stats(state, "Final state")
+        for c in range(state.shape[1]):
+            self._log_tensor_stats(state, f"Final state channel {c}", channel=c)
         
         return state
 
