@@ -101,9 +101,9 @@ class HilbertSpace:
         Returns:
             Prepared quantum state
         """
-        # Ensure complex64 dtype
-        if amplitudes.dtype != torch.complex64:
-            amplitudes = amplitudes.to(dtype=torch.complex64)
+        # Ensure complex128 dtype
+        if amplitudes.dtype != torch.complex128:
+            amplitudes = amplitudes.to(dtype=torch.complex128)
             
         # Normalize state
         norm = torch.sqrt(torch.sum(torch.abs(amplitudes)**2, dim=-1, keepdim=True))
@@ -114,7 +114,7 @@ class HilbertSpace:
         state = QuantumState(
             amplitudes=amplitudes,
             basis_labels=self.basis_states,
-            phase=torch.zeros(1, dtype=torch.complex64, device=amplitudes.device)
+            phase=torch.zeros(1, dtype=torch.complex128, device=amplitudes.device)
         )
         
         return state
