@@ -110,13 +110,11 @@ class QuantumGeometricAttention(nn.Module):
         self.dtype = dtype
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Initialize quantum attention with correct dtype
-        self.quantum_attention = nn.Sequential(
+        # Initialize quantum attention with complex linear layers
+        self.quantum_attention = nn.ModuleList([
             nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim, elementwise_affine=True),  # Make this trainable
-            nn.ReLU(),
             nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
-        )
+        ])
 
         # Initialize quantum attention tiles
         self.tiles = nn.ModuleList([
@@ -402,12 +400,29 @@ class QuantumGeometricAttention(nn.Module):
 
         return final_patterns, metrics
 
+    def complex_softmax(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        """Apply softmax to complex tensor by using the absolute values.
+        
+        Args:
+            x: Complex tensor
+            dim: Dimension along which to apply softmax
+            
+        Returns:
+            Complex tensor with softmax applied to absolute values
+        """
+        abs_x = x.abs()
+        max_val = torch.max(abs_x, dim=dim, keepdim=True)[0]
+        exp_x = torch.exp(abs_x - max_val)
+        sum_exp_x = torch.sum(exp_x, dim=dim, keepdim=True)
+        softmax_abs = exp_x / (sum_exp_x + 1e-8)
+        return x * (softmax_abs / (abs_x + 1e-8))
+
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass through the quantum geometric attention layer.
 
         Args:
             x: Input tensor of shape (batch_size, seq_length, hidden_dim)
-            mask: Optional attention mask
+            mask: Optional attention mask of shape (batch_size, seq_length) or (batch_size, 1, seq_length, seq_length)
 
         Returns:
             Tensor of shape (batch_size, seq_length, hidden_dim)
@@ -418,16 +433,17 @@ class QuantumGeometricAttention(nn.Module):
         x_manifold = self.manifold_proj(x.reshape(-1, hidden_dim))
         x_manifold = x_manifold.reshape(batch_size, seq_length, -1)
 
-        # Apply quantum attention
+        # Apply quantum attention with custom complex layer norm
         quantum_output = x_manifold
         for layer in self.quantum_attention:
             quantum_output = layer(quantum_output)
-            # Replace GELU with complex ReLU
+            quantum_output = self.complex_layer_norm(quantum_output)
+            # Apply complex ReLU
             quantum_output = torch.where(
                 quantum_output.abs() > 0,
                 quantum_output,
                 torch.zeros_like(quantum_output)
-            )  # Complex ReLU
+            )
 
         # Project back to original space
         output = self.manifold_proj_inv(quantum_output.reshape(-1, quantum_output.shape[-1]))
@@ -444,11 +460,20 @@ class QuantumGeometricAttention(nn.Module):
 
         # Apply mask if provided
         if mask is not None:
-            mask = mask[:, None, :, None].expand(-1, self.num_heads, -1, seq_length)
+            # Handle different mask shapes
+            if mask.dim() == 2:  # (batch_size, seq_length)
+                # Convert to attention mask
+                mask = mask.unsqueeze(1).unsqueeze(1)  # (batch_size, 1, 1, seq_length)
+                mask = mask.expand(-1, self.num_heads, seq_length, seq_length)  # (batch_size, num_heads, seq_length, seq_length)
+            elif mask.dim() == 4:  # (batch_size, 1, seq_length, seq_length)
+                mask = mask.expand(-1, self.num_heads, -1, -1)
+            
+            # Ensure mask has correct shape
+            assert mask.shape == dots.shape, f"Mask shape {mask.shape} does not match attention scores shape {dots.shape}"
             dots = dots.masked_fill(~mask, float('-inf'))
 
-        # Apply attention
-        attn = F.softmax(dots, dim=-1)
+        # Apply attention with complex softmax
+        attn = self.complex_softmax(dots, dim=-1)
         out = torch.matmul(attn, v)
 
         # Combine heads and project
@@ -770,8 +795,17 @@ class QuantumGeometricAttention(nn.Module):
         # Compute metric as g_ij = sum_k (∂f_k/∂x_i)(∂f_k/∂x_j)
         metric_update = torch.einsum('...ki,...kj->...ij', jacobian, jacobian.conj())
         
-        # Add small diagonal term for numerical stability
-        metric = metric + metric_update + torch.eye(self.manifold_dim, dtype=self.dtype, device=self.device).unsqueeze(0) * 1e-6
+        # Scale metric to prevent numerical instability
+        scale = torch.max(torch.abs(metric_update))
+        if scale > 1:
+            metric_update = metric_update / scale
+        
+        # Add regularization term to ensure positive definiteness
+        reg_term = torch.eye(self.manifold_dim, dtype=self.dtype, device=self.device).unsqueeze(0) * 1e-3
+        metric = metric + metric_update + reg_term
+        
+        # Ensure Hermitian property
+        metric = 0.5 * (metric + metric.transpose(-2, -1).conj())
         
         return metric
 
@@ -1191,18 +1225,27 @@ class QuantumGeometricAttention(nn.Module):
         
         # Custom layer normalization for complex tensors
         def complex_layer_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-            # Compute mean and variance separately for real and imaginary parts
+            # Compute mean of real and imaginary parts separately
             mean_real = x.real.mean(dim=-1, keepdim=True)
             mean_imag = x.imag.mean(dim=-1, keepdim=True)
             
-            var_real = ((x.real - mean_real) ** 2).mean(dim=-1, keepdim=True)
-            var_imag = ((x.imag - mean_imag) ** 2).mean(dim=-1, keepdim=True)
+            # Center the real and imaginary parts
+            x_centered_real = x.real - mean_real
+            x_centered_imag = x.imag - mean_imag
             
-            # Normalize real and imaginary parts separately
-            x_real = (x.real - mean_real) / torch.sqrt(var_real + eps)
-            x_imag = (x.imag - mean_imag) / torch.sqrt(var_imag + eps)
+            # Compute variance of centered real and imaginary parts
+            var_real = (x_centered_real ** 2).mean(dim=-1, keepdim=True)
+            var_imag = (x_centered_imag ** 2).mean(dim=-1, keepdim=True)
             
-            return torch.complex(x_real, x_imag)
+            # Compute total variance
+            var_total = var_real + var_imag
+            
+            # Normalize
+            denom = torch.sqrt(var_total + eps)
+            x_norm_real = x_centered_real / denom
+            x_norm_imag = x_centered_imag / denom
+            
+            return torch.complex(x_norm_real, x_norm_imag)
         
         # Custom complex ReLU
         def complex_relu(x: torch.Tensor) -> torch.Tensor:
@@ -1762,7 +1805,7 @@ class QuantumGeometricAttention(nn.Module):
             x: Input tensor of shape (batch_size, seq_len, hidden_dim)
             
         Returns:
-            Updated tensor with same shape as input
+                Updated tensor with same shape as input
         """
         # Project to manifold space if needed
         if x.shape[-1] != self.flow.manifold_dim:
@@ -1809,7 +1852,7 @@ class QuantumGeometricAttention(nn.Module):
             
         # Create mask for attention scores
         # Expand mask to match attention scores shape [batch_size, num_heads, seq_len, seq_len]
-        expanded_mask = mask.unsqueeze(1).unsqueeze(2).expand(-1, self.num_heads, -1, mask.size(1))
+        expanded_mask = mask.unsqueeze(1).unsqueeze(2).expand(batch_size, self.num_heads, seq_len, seq_len)
         
         # Apply mask by setting masked positions to -inf
         masked_scores = attention_scores.masked_fill(~expanded_mask, float('-inf'))
@@ -1818,4 +1861,36 @@ class QuantumGeometricAttention(nn.Module):
         state.attention_scores = masked_scores
         
         return state
+    
+    def complex_layer_norm(self, x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+        """Custom layer normalization for complex tensors.
+        
+        Args:
+            x: Input tensor of shape [..., hidden_dim]
+            eps: Small value for numerical stability
+            
+        Returns:
+            Normalized tensor of same shape as input
+        """
+        # Compute mean of real and imaginary parts separately
+        mean_real = x.real.mean(dim=-1, keepdim=True)
+        mean_imag = x.imag.mean(dim=-1, keepdim=True)
+        
+        # Center the real and imaginary parts
+        x_centered_real = x.real - mean_real
+        x_centered_imag = x.imag - mean_imag
+        
+        # Compute variance of centered real and imaginary parts
+        var_real = (x_centered_real ** 2).mean(dim=-1, keepdim=True)
+        var_imag = (x_centered_imag ** 2).mean(dim=-1, keepdim=True)
+        
+        # Compute total variance
+        var_total = var_real + var_imag
+        
+        # Normalize
+        denom = torch.sqrt(var_total + eps)
+        x_norm_real = x_centered_real / denom
+        x_norm_imag = x_centered_imag / denom
+        
+        return torch.complex(x_norm_real, x_norm_imag)
     

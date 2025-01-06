@@ -62,7 +62,7 @@ class TestQuantumGeometricAttention:
     @pytest.fixture
     def num_heads(self) -> int:
         """Return number of attention heads for tests."""
-        return 2  # Reduced from 4 to better match dimensions
+        return 4  # Increased to match the hidden dimension
 
     @pytest.fixture
     def batch_size(self) -> int:
