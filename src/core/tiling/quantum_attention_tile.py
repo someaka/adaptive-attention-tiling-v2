@@ -78,38 +78,58 @@ class QuantumMotivicTile(nn.Module):
         self._neighbors: List['QuantumMotivicTile'] = []
 
         # Add cohomology projection
-        self.cohomology_proj = nn.Linear(hidden_dim, cohomology_dim, dtype=dtype)
-        self.cohomology_proj_inv = nn.Linear(cohomology_dim, hidden_dim, dtype=dtype)
-        
-        # Convert weights and bias to complex
-        with torch.no_grad():
-            self.cohomology_proj.weight.data = self.cohomology_proj.weight.data.to(dtype)
-            if self.cohomology_proj.bias is not None:
-                self.cohomology_proj.bias.data = self.cohomology_proj.bias.data.to(dtype)
-                
-            self.cohomology_proj_inv.weight.data = self.cohomology_proj_inv.weight.data.to(dtype)
-            if self.cohomology_proj_inv.bias is not None:
-                self.cohomology_proj_inv.bias.data = self.cohomology_proj_inv.bias.data.to(dtype)
+        self.cohomology_proj = nn.Linear(hidden_dim, cohomology_dim, dtype=dtype, device=device)
+        self.cohomology_proj_inv = nn.Linear(cohomology_dim, hidden_dim, dtype=dtype, device=device)
 
         # Add motive projection
-        self.motive_proj = nn.Linear(cohomology_dim, motive_rank, dtype=dtype)
-        self.motive_proj_inv = nn.Linear(motive_rank, cohomology_dim, dtype=dtype)
-        
-        # Convert weights and bias to complex
-        with torch.no_grad():
-            self.motive_proj.weight.data = self.motive_proj.weight.data.to(dtype)
-            if self.motive_proj.bias is not None:
-                self.motive_proj.bias.data = self.motive_proj.bias.data.to(dtype)
-                
-            self.motive_proj_inv.weight.data = self.motive_proj_inv.weight.data.to(dtype)
-            if self.motive_proj_inv.bias is not None:
-                self.motive_proj_inv.bias.data = self.motive_proj_inv.bias.data.to(dtype)
+        self.motive_proj = nn.Linear(cohomology_dim, motive_rank, dtype=dtype, device=device)
+        self.motive_proj_inv = nn.Linear(motive_rank, cohomology_dim, dtype=dtype, device=device)
 
-        # Load balancing state
-        self._load_factor = 1.0
+        # Initialize quantum structure
+        self._initialize_quantum_structure()
         
-        # Initialize quantum state
-        self.quantum_enabled = True
+        # Initialize complex weights
+        self._init_complex_weights()
+
+    def _init_complex_weights(self):
+        """Initialize weights with proper complex values."""
+        def init_complex_linear(layer):
+            if isinstance(layer, nn.Linear):
+                # Initialize real and imaginary parts separately
+                weight_shape = layer.weight.shape
+                std = 1.0 / math.sqrt(weight_shape[1])
+                
+                # Initialize real part with Glorot/Xavier initialization
+                real_weight = torch.randn(weight_shape, device=self.device) * std
+                imag_weight = torch.randn(weight_shape, device=self.device) * std
+                layer.weight.data = torch.complex(real_weight, imag_weight).to(self.dtype)
+                
+                if layer.bias is not None:
+                    real_bias = torch.randn(weight_shape[0], device=self.device) * std
+                    imag_bias = torch.randn(weight_shape[0], device=self.device) * std
+                    layer.bias.data = torch.complex(real_bias, imag_bias).to(self.dtype)
+
+        # Initialize all linear layers
+        for module in self.modules():
+            init_complex_linear(module)
+            
+        # Initialize quantum state with proper complex values
+        real_state = torch.randn(self.size, self.hidden_dim, device=self.device)
+        imag_state = torch.randn(self.size, self.hidden_dim, device=self.device)
+        norm = torch.sqrt(real_state.pow(2) + imag_state.pow(2)).clamp(min=1e-6)
+        real_state = real_state / norm
+        imag_state = imag_state / norm
+        self.quantum_state.data = torch.complex(real_state, imag_state).to(self.dtype)
+        
+        # Initialize cohomology basis with proper complex values
+        real_basis = torch.eye(self.cohomology_dim, device=self.device)
+        imag_basis = torch.zeros_like(real_basis)
+        self.cohomology_basis.data = torch.complex(real_basis, imag_basis).to(self.dtype)
+        
+        # Initialize motive basis with proper complex values
+        real_motive = torch.eye(self.motive_rank, device=self.device)
+        imag_motive = torch.zeros_like(real_motive)
+        self.motive_basis.data = torch.complex(real_motive, imag_motive).to(self.dtype)
 
     def _initialize_quantum_structure(self) -> None:
         """Initialize quantum structure and metrics components."""
@@ -128,21 +148,21 @@ class QuantumMotivicTile(nn.Module):
         })
 
         # Initialize quantum state parameters
-        self.register_buffer(
+        self.register_parameter(
             "quantum_state",
-            torch.zeros(self.size, self.hidden_dim, dtype=self.dtype)
+            nn.Parameter(torch.zeros(self.size, self.hidden_dim, dtype=self.dtype))
         )
 
-        # Initialize cohomology parameters
-        self.register_buffer(
+        # Initialize cohomology basis as trainable parameter
+        self.register_parameter(
             "cohomology_basis",
-            torch.eye(self.cohomology_dim, dtype=self.dtype)
+            nn.Parameter(torch.eye(self.cohomology_dim, dtype=self.dtype))
         )
 
-        # Initialize motive parameters
-        self.register_buffer(
+        # Initialize motive basis as trainable parameter
+        self.register_parameter(
             "motive_basis",
-            torch.eye(self.motive_rank, dtype=self.dtype)
+            nn.Parameter(torch.eye(self.motive_rank, dtype=self.dtype))
         )
 
     def get_metrics(self) -> MetricsDict:
@@ -280,45 +300,66 @@ class QuantumMotivicTile(nn.Module):
         # Update neighbors
         self._neighbors = neighbors.copy()
 
-    def forward(
-        self,
-        coords: torch.Tensor,
-        return_metrics: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Forward pass through quantum attention tile."""
-        # Initialize metrics
-        metrics: Dict[str, Any] = {}
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass through quantum motivic attention tile.
         
-        # Get dimensions
-        if coords.dim() == 3:
-            batch_size, seq_len, hidden_dim = coords.shape
-        else:
-            batch_size = coords.size(0)
-            seq_len = 1
-            hidden_dim = coords.size(-1)
-            coords = coords.view(batch_size, seq_len, hidden_dim)
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
+            mask: Optional attention mask
+            
+        Returns:
+            Output tensor of shape [batch_size, seq_len, hidden_dim]
+        """
+        batch_size, seq_len, _ = x.shape
         
-        # Project input coordinates
-        coords = self.input_proj(coords.reshape(-1, hidden_dim))  # [batch_size * seq_len, hidden_dim]
+        # Project input to hidden dimension
+        x = self.input_proj(x)  # [batch_size, seq_len, hidden_dim]
         
-        # Compute metric tensor
-        metric = self.compute_metric_tensor(coords)
+        # Project to cohomology space
+        x_cohom = self.cohomology_proj(x)  # [batch_size, seq_len, cohomology_dim]
         
-        # Compute geometric flow
-        flow_result = self.geometric_attention_flow(coords, metric, return_metrics)
-        if return_metrics:
-            coords, flow_metrics = flow_result
-            metrics.update(cast(Dict[str, Any], flow_metrics))
-        else:
-            coords = cast(torch.Tensor, flow_result)
+        # Project to motive space and reshape for multi-head
+        x_motive = self.motive_proj(x_cohom)  # [batch_size, seq_len, motive_rank]
+        x_motive = x_motive.view(batch_size, seq_len, self.num_heads, -1)
+        x_motive = x_motive.permute(0, 2, 1, 3)  # [batch_size, num_heads, seq_len, head_dim]
         
-        # Project output coordinates
-        coords = self.output_proj(coords).reshape(batch_size, seq_len, -1)
+        # Compute QKV
+        q = self.query(x_motive)  # [batch_size, num_heads, seq_len, head_dim]
+        k = self.key(x_motive)    # [batch_size, num_heads, seq_len, head_dim]
+        v = self.value(x_motive)  # [batch_size, num_heads, seq_len, head_dim]
         
-        if return_metrics:
-            return coords, metrics
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
-        return coords
+        # Handle complex attention scores by using magnitude for softmax
+        scores_magnitude = scores.abs()
+        
+        # Apply mask if provided
+        if mask is not None:
+            mask = mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
+            scores_magnitude = scores_magnitude.masked_fill(~mask, float('-inf'))
+        
+        # Apply softmax to magnitudes and preserve phases
+        attn_weights = torch.softmax(scores_magnitude, dim=-1)
+        scores_phase = torch.angle(scores)
+        attn = attn_weights * torch.exp(1j * scores_phase)
+        attn = self.dropout_layer(attn)
+        
+        # Compute output
+        out = torch.matmul(attn, v)  # [batch_size, num_heads, seq_len, head_dim]
+        
+        # Reshape and project back
+        out = out.permute(0, 2, 1, 3).contiguous()  # [batch_size, seq_len, num_heads, head_dim]
+        out = out.view(batch_size, seq_len, -1)     # [batch_size, seq_len, motive_rank]
+        
+        # Project back through cohomology space
+        out = self.motive_proj_inv(out)             # [batch_size, seq_len, cohomology_dim]
+        out = self.cohomology_proj_inv(out)         # [batch_size, seq_len, hidden_dim]
+        
+        # Final output projection
+        out = self.output_proj(out)                 # [batch_size, seq_len, hidden_dim]
+        
+        return out
 
     def compute_metric_tensor(self, coords: torch.Tensor) -> torch.Tensor:
         """Compute the metric tensor for the quantum manifold.

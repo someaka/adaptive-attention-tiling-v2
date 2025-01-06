@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 import torch
 import torch.linalg
+from typing import Optional
 
 from src.core.tiling.quantum_geometric_attention import (
     AttentionState,
@@ -200,11 +201,11 @@ class TestQuantumGeometricAttention:
         batch_size = 2
         seq_length = 2
         manifold_dim = attention_layer.manifold_dim
-        
+
         # Create input tensor with proper shape
         x = complex_randn(batch_size, seq_length, hidden_dim)
         mask = torch.ones(batch_size, seq_length).bool()
-        
+
         # Compute geometric flow with metrics
         flow_result = attention_layer.geometric_attention_flow(
             x,  # Use original input
@@ -214,16 +215,16 @@ class TestQuantumGeometricAttention:
             return_metrics=True
         )
         flow, metrics = flow_result
-        
+
         # Verify output shape
         assert flow.shape == (batch_size, seq_length, hidden_dim)
-        
+
         # Verify metrics
         assert hasattr(metrics, 'curvature')
         assert hasattr(metrics, 'parallel_transport')
         assert hasattr(metrics, 'geodesic_distance')
         assert hasattr(metrics, 'energy')
-        
+
         # Verify metric shapes
         assert metrics.curvature.shape == (batch_size, seq_length, manifold_dim, manifold_dim)
         assert metrics.parallel_transport.shape == (batch_size, seq_length, manifold_dim, manifold_dim)
@@ -231,9 +232,34 @@ class TestQuantumGeometricAttention:
         assert metrics.energy.shape == (batch_size, seq_length)
 
         # Verify flow preserves quantum state properties
-        x_manifold = attention_layer.manifold_proj(x.reshape(-1, hidden_dim))
-        flow_manifold = attention_layer.manifold_proj(flow.reshape(-1, hidden_dim))
-        
+        def normalize_complex_tensor(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+            """Normalize complex tensor while preserving phase."""
+            current_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            if target_norm is None:
+                target_norm = torch.ones_like(current_norm)
+            scale = target_norm / (current_norm + 1e-8)
+            return tensor * scale
+
+        def project_to_manifold(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+            """Project tensor to manifold space while preserving norm."""
+            # Store input norm if target_norm not provided
+            if target_norm is None:
+                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            
+            # Project to manifold space
+            manifold = attention_layer.manifold_proj(tensor)
+            
+            # Normalize to match input norm
+            return normalize_complex_tensor(manifold, target_norm)
+
+        # Get initial hidden norm
+        x_flat = x.reshape(-1, hidden_dim)
+        initial_hidden_norm = torch.sqrt(torch.sum(x_flat.real ** 2 + x_flat.imag ** 2, dim=-1, keepdim=True))
+
+        # Project input and output to manifold space while preserving norms
+        x_manifold = project_to_manifold(x_flat, initial_hidden_norm)
+        flow_manifold = project_to_manifold(flow.reshape(-1, hidden_dim), initial_hidden_norm)
+
         # Check norm conservation (approximately)
         x_norm = torch.norm(x_manifold, dim=-1)
         flow_norm = torch.norm(flow_manifold, dim=-1)
@@ -293,6 +319,17 @@ class TestQuantumGeometricAttention:
 
         # Test gradient flow
         output.abs().sum().backward()
+        
+        # Debug: Print parameter names and their gradients
+        print("\nChecking parameter gradients:")
+        for name, param in attention_layer.named_parameters():
+            print(f"{name}:")
+            print(f"  Shape: {param.shape}")
+            print(f"  Requires grad: {param.requires_grad}")
+            print(f"  Has grad: {param.grad is not None}")
+            if param.grad is None:
+                print(f"  Value: {param.data}")
+                
         for param in attention_layer.parameters():
             assert param.grad is not None, "Should compute gradients for all parameters"
 

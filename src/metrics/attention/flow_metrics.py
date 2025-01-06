@@ -190,44 +190,45 @@ def compute_parallel_transport(
     metric: torch.Tensor
 ) -> torch.Tensor:
     """Compute parallel transport along path.
-    
+
     Args:
         path: Path tensor [batch_size, seq_len, manifold_dim] or [batch_size, manifold_dim]
         metric: Metric tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
-        
+
     Returns:
         Parallel transport tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
     """
-    # Handle both 2D and 3D inputs
-    orig_shape = path.shape
-    if len(orig_shape) == 3:
-        batch_size, seq_len, manifold_dim = orig_shape
-        # Reshape to [batch_size * seq_len, manifold_dim]
-        path = path.reshape(-1, manifold_dim)
-        # Reshape metric to [batch_size * seq_len, manifold_dim, manifold_dim]
-        metric = metric.reshape(-1, manifold_dim, manifold_dim)
+    # Get dimensions
+    if len(path.shape) == 3:
+        batch_size, seq_len, manifold_dim = path.shape
     else:
-        batch_size, manifold_dim = orig_shape
-        seq_len = None
-    
-    # Compute Christoffel symbols
-    christoffel = compute_christoffel_symbols(metric)
-    
+        # If path is [N, manifold_dim], treat N as batch_size * seq_len
+        total_size, manifold_dim = path.shape
+        # Infer batch_size and seq_len from metric shape
+        batch_size = metric.shape[0]
+        seq_len = total_size // batch_size
+        # Reshape path to [batch_size, seq_len, manifold_dim]
+        path = path.reshape(batch_size, seq_len, manifold_dim)
+
+    # Ensure metric has correct shape
+    if len(metric.shape) == 3:
+        # Expand metric to include sequence dimension
+        metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
+
     # Initialize transport tensor
     transport = torch.zeros_like(metric)
-    
+
     # Compute transport components
     for i in range(manifold_dim):
         for j in range(manifold_dim):
-            transport[..., i, j] = path[..., i] * path[..., j]
-    
+            # Use broadcasting for batch and sequence dimensions
+            path_i = path[..., i].unsqueeze(-1).unsqueeze(-1)  # [batch_size, seq_len, 1, 1]
+            path_j = path[..., j].unsqueeze(-1).unsqueeze(-1)  # [batch_size, seq_len, 1, 1]
+            transport[..., i, j] = (path_i * path_j).squeeze(-1).squeeze(-1)
+
     # Apply metric compatibility
     transport = torch.einsum('...ij,...jk->...ik', transport, metric)
-    
-    # Reshape back to original shape if needed
-    if seq_len is not None:
-        transport = transport.reshape(batch_size, seq_len, manifold_dim, manifold_dim)
-    
+
     return transport
 
 
@@ -244,30 +245,37 @@ def compute_geodesic_distance(
     Returns:
         Geodesic distance [batch_size, seq_len] or [batch_size]
     """
-    # Handle both 2D and 3D inputs
-    orig_shape = path.shape
-    if len(orig_shape) == 3:
-        batch_size, seq_len, manifold_dim = orig_shape
-        # Reshape to [batch_size * seq_len, manifold_dim]
-        path = path.reshape(-1, manifold_dim)
-        # Reshape metric to [batch_size * seq_len, manifold_dim, manifold_dim]
-        metric = metric.reshape(-1, manifold_dim, manifold_dim)
+    # Get dimensions
+    if len(path.shape) == 3:
+        batch_size, seq_len, manifold_dim = path.shape
     else:
-        batch_size, manifold_dim = orig_shape
-        seq_len = None
+        # If path is [N, manifold_dim], treat N as batch_size * seq_len
+        total_size, manifold_dim = path.shape
+        # Infer batch_size and seq_len from metric shape
+        batch_size = metric.shape[0]
+        seq_len = total_size // batch_size
+        # Reshape path to [batch_size, seq_len, manifold_dim]
+        path = path.reshape(batch_size, seq_len, manifold_dim)
+
+    # Ensure metric has correct shape
+    if len(metric.shape) == 3:
+        # Expand metric to include sequence dimension
+        metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
+
+    # Compute metric inner product for each sequence position
+    # path: [batch_size, seq_len, manifold_dim]
+    # metric: [batch_size, seq_len, manifold_dim, manifold_dim]
+    # Compute (path_i * metric_ij * path_j) for each batch and sequence position
+    distance = torch.zeros(batch_size, seq_len, device=path.device, dtype=path.dtype)
     
-    # Compute metric inner product
-    distance = torch.sqrt(torch.einsum(
-        'bi,bij,bj->b',
-        path,
-        metric,
-        path
-    ))
-    
-    # Reshape back to original shape if needed
-    if seq_len is not None:
-        distance = distance.reshape(batch_size, seq_len)
-    
+    for b in range(batch_size):
+        for s in range(seq_len):
+            # Extract vectors and matrix for this position
+            p = path[b, s]  # [manifold_dim]
+            m = metric[b, s]  # [manifold_dim, manifold_dim]
+            # Compute p^T * M * p
+            distance[b, s] = torch.sqrt(torch.abs(p.conj() @ m @ p))
+
     return distance
 
 
@@ -284,31 +292,37 @@ def compute_flow_energy(
     Returns:
         Flow energy [batch_size, seq_len] or [batch_size]
     """
-    # Handle both 2D and 3D inputs
-    orig_shape = path.shape
-    if len(orig_shape) == 3:
-        batch_size, seq_len, manifold_dim = orig_shape
-        # Reshape to [batch_size * seq_len, manifold_dim]
-        path = path.reshape(-1, manifold_dim)
-        # Reshape metric to [batch_size * seq_len, manifold_dim, manifold_dim]
-        metric = metric.reshape(-1, manifold_dim, manifold_dim)
+    # Get dimensions
+    if len(path.shape) == 3:
+        batch_size, seq_len, manifold_dim = path.shape
     else:
-        batch_size, manifold_dim = orig_shape
-        seq_len = None
+        # If path is [N, manifold_dim], treat N as batch_size * seq_len
+        total_size, manifold_dim = path.shape
+        # Infer batch_size and seq_len from metric shape
+        batch_size = metric.shape[0]
+        seq_len = total_size // batch_size
+        # Reshape path to [batch_size, seq_len, manifold_dim]
+        path = path.reshape(batch_size, seq_len, manifold_dim)
+
+    # Ensure metric has correct shape
+    if len(metric.shape) == 3:
+        # Expand metric to include sequence dimension
+        metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
+
+    # Compute energy using metric inner product for each sequence position
+    # path: [batch_size, seq_len, manifold_dim]
+    # metric: [batch_size, seq_len, manifold_dim, manifold_dim]
+    energy = torch.zeros(batch_size, seq_len, device=path.device, dtype=path.dtype)
     
-    # Compute energy using metric inner product
-    energy = torch.einsum(
-        'bi,bij,bj->b',
-        path,
-        metric,
-        path
-    )
-    
-    # Reshape back to original shape if needed
-    if seq_len is not None:
-        energy = energy.reshape(batch_size, seq_len)
-    
-    return energy 
+    for b in range(batch_size):
+        for s in range(seq_len):
+            # Extract vectors and matrix for this position
+            p = path[b, s]  # [manifold_dim]
+            m = metric[b, s]  # [manifold_dim, manifold_dim]
+            # Compute p^T * M * p
+            energy[b, s] = torch.abs(p.conj() @ m @ p)
+
+    return energy
 
 
 def compute_ricci_curvature(

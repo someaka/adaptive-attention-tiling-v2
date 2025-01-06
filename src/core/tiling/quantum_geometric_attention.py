@@ -113,7 +113,7 @@ class QuantumGeometricAttention(nn.Module):
         # Initialize quantum attention with correct dtype
         self.quantum_attention = nn.Sequential(
             nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim, elementwise_affine=False),  # No learnable parameters to avoid dtype issues
+            nn.LayerNorm(self.manifold_dim, elementwise_affine=True),  # Make this trainable
             nn.ReLU(),
             nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
         )
@@ -128,7 +128,8 @@ class QuantumGeometricAttention(nn.Module):
                 resolution=1.0,
                 cohomology_dim=self.manifold_dim,
                 motive_rank=motive_rank,
-                dtype=dtype
+                dtype=dtype,
+                device=self.device
             )
             for _ in range(num_heads)
         ])
@@ -149,10 +150,10 @@ class QuantumGeometricAttention(nn.Module):
         )
         self.state_manager = StateManager(self.state_config, device=self.device)
         
-        # Initialize original scale buffer
-        self.register_buffer(
+        # Initialize original scale as parameter
+        self.register_parameter(
             'original_scale',
-            torch.ones(1, 1, 1, dtype=self.dtype, device=self.device)
+            nn.Parameter(torch.ones(1, 1, 1, dtype=self.dtype, device=self.device))
         )
         
         # Initialize neural quantum bridge
@@ -166,26 +167,26 @@ class QuantumGeometricAttention(nn.Module):
             device=device
         )
         
-        # Initialize metric tensor
-        self.register_parameter(
-            'metric',
-            nn.Parameter(torch.eye(self.manifold_dim, dtype=self.dtype, device=self.device))
-        )
+        # Initialize metric tensor as trainable parameter with complex initialization
+        metric_real = torch.eye(self.manifold_dim, device=self.device)
+        metric_imag = torch.zeros_like(metric_real)
+        metric = torch.complex(metric_real, metric_imag)
+        self.register_parameter('metric', nn.Parameter(metric.to(dtype)))
         
-        # Initialize manifold projections with correct dimensions
+        # Initialize manifold projections with correct dimensions and complex initialization
         self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=dtype, device=device)
         self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype, device=device)
         
-        # Initialize pattern projections
+        # Initialize pattern projections with complex initialization
         self.pattern_proj = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         self.pattern_proj_inv = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         
-        # Initialize attention components
+        # Initialize attention components with complex initialization
         self.query = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         self.key = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         self.value = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         
-        # Initialize to_qkv and to_out projections
+        # Initialize to_qkv and to_out projections with complex initialization
         expanded_dim = self.num_heads * hidden_dim
         self.to_qkv = nn.Linear(hidden_dim, 3 * expanded_dim, dtype=dtype, device=device)
         self.to_out = nn.Linear(expanded_dim, hidden_dim, dtype=dtype, device=device)
@@ -193,38 +194,90 @@ class QuantumGeometricAttention(nn.Module):
         # Initialize dropout
         self.dropout_layer = nn.Dropout(dropout)
         
-        # Initialize attention layers
+        # Initialize attention layers with complex initialization
         self.attention_layers = nn.ModuleList([
             nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
             for _ in range(num_layers)
         ])
         
+        # Initialize tiles
+        for tile in self.tiles:
+            tile._initialize_quantum_structure()
+            
+        # Initialize weights with proper complex values
+        self._init_complex_weights()
+        
         # Initialize geometric flow
         self.flow = GeometricFlow(
-            hidden_dim=self.manifold_dim,
+            hidden_dim=self.hidden_dim,
             manifold_dim=self.manifold_dim,
-            motive_rank=motive_rank,
-            num_charts=4,
-            integration_steps=10,
-            dt=0.1,
-            stability_threshold=1e-6,
-            dtype=dtype
-        ).to(self.device)
+            motive_rank=4,  # Default value
+            num_charts=4,  # Default value
+            integration_steps=10,  # Default value
+            dt=0.1,  # Default value
+            stability_threshold=1e-6,  # Default value
+            dtype=self.dtype
+        )
         
-        # Initialize arithmetic pattern
-        self.arithmetic = ArithmeticPattern(
-            input_dim=hidden_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            motive_rank=motive_rank,
-            dtype=dtype
-        ).to(self.device)
+        # Ensure all parameters require gradients
+        for param in self.parameters():
+            param.requires_grad = True
+
+    def _init_complex_weights(self):
+        """Initialize weights with proper complex values."""
+        def init_complex_linear(layer):
+            """Initialize complex linear layer with proper scaling."""
+            fan_in, fan_out = layer.weight.shape[0], layer.weight.shape[1]
+            bound = math.sqrt(6.0 / (fan_in + fan_out))
+            
+            # Initialize real and imaginary parts separately with proper scaling
+            real_weight = torch.empty_like(layer.weight.real)
+            imag_weight = torch.empty_like(layer.weight.imag)
+            
+            # Use Glorot/Xavier initialization for both parts
+            nn.init.uniform_(real_weight, -bound, bound)
+            nn.init.uniform_(imag_weight, -bound, bound)
+            
+            # Combine into complex weight and ensure requires_grad
+            weight = torch.complex(real_weight, imag_weight)
+            weight.requires_grad = True
+            layer.weight.data.copy_(weight)
+            
+            # Initialize bias if it exists
+            if layer.bias is not None:
+                real_bias = torch.empty_like(layer.bias.real)
+                imag_bias = torch.empty_like(layer.bias.imag)
+                bound = 1.0 / math.sqrt(fan_in)
+                nn.init.uniform_(real_bias, -bound, bound)
+                nn.init.uniform_(imag_bias, -bound, bound)
+                bias = torch.complex(real_bias, imag_bias)
+                bias.requires_grad = True
+                layer.bias.data.copy_(bias)
+            
+            # Ensure layer parameters require gradients
+            layer.weight.requires_grad = True
+            if layer.bias is not None:
+                layer.bias.requires_grad = True
+
+        # Initialize all linear layers with complex weights
+        init_complex_linear(self.manifold_proj)
+        init_complex_linear(self.manifold_proj_inv)
+        init_complex_linear(self.pattern_proj)
+        init_complex_linear(self.pattern_proj_inv)
+        init_complex_linear(self.query)
+        init_complex_linear(self.key)
+        init_complex_linear(self.value)
+        init_complex_linear(self.to_qkv)
+        init_complex_linear(self.to_out)
         
-        # Initialize manifold maps
-        self.transport = ParallelTransport(dim=self.manifold_dim)
-        
-        # Initialize weights
-        self._init_weights()
+        # Initialize attention layers
+        for layer in self.attention_layers:
+            init_complex_linear(layer)
+            
+        # Initialize quantum attention layers
+        for layer in self.quantum_attention:
+            if isinstance(layer, nn.Linear):
+                init_complex_linear(layer)
 
     def _init_weights(self):
         """Initialize weights with proper scaling."""
@@ -264,26 +317,13 @@ class QuantumGeometricAttention(nn.Module):
             self.pattern_proj_inv.bias.zero_()
             
             # Initialize attention components with small normal values
-            for layer in [self.to_qkv, self.to_out, self.query, self.key, self.value]:
-                if hasattr(layer, 'weight'):
-                    real_weight = torch.empty_like(layer.weight.real)
-                    nn.init.normal_(real_weight, std=0.02)
-                    imag_weight = torch.empty_like(layer.weight.imag)
-                    nn.init.normal_(imag_weight, std=0.02)
-                    layer.weight.copy_(torch.complex(real_weight, imag_weight))
-                if hasattr(layer, 'bias') and layer.bias is not None:
-                    layer.bias.zero_()
-            
-            # Initialize attention layers
-            for layer in self.attention_layers:
-                if hasattr(layer, 'weight'):
-                    real_weight = torch.empty_like(layer.weight.real)
-                    nn.init.normal_(real_weight, std=0.02)
-                    imag_weight = torch.empty_like(layer.weight.imag)
-                    nn.init.normal_(imag_weight, std=0.02)
-                    layer.weight.copy_(torch.complex(real_weight, imag_weight))
-                if hasattr(layer, 'bias') and layer.bias is not None:
-                    layer.bias.zero_()
+            for layer in [self.query, self.key, self.value, self.to_qkv, self.to_out]:
+                real_weight = torch.empty_like(layer.weight.real)
+                imag_weight = torch.empty_like(layer.weight.imag)
+                nn.init.normal_(real_weight, std=0.02)
+                nn.init.normal_(imag_weight, std=0.02)
+                layer.weight.copy_(torch.complex(real_weight, imag_weight))
+                layer.bias.zero_()
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
         """Compute Fisher information metric for states."""
@@ -362,71 +402,60 @@ class QuantumGeometricAttention(nn.Module):
 
         return final_patterns, metrics
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        return_metrics: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Forward pass through quantum geometric attention.
-        
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass through the quantum geometric attention layer.
+
         Args:
-            x: Input tensor [batch_size, seq_len, hidden_dim]
-            mask: Optional attention mask [batch_size, seq_len]
-            return_metrics: Whether to return attention metrics
-            
+            x: Input tensor of shape (batch_size, seq_length, hidden_dim)
+            mask: Optional attention mask
+
         Returns:
-            - Output tensor [batch_size, seq_len, hidden_dim]
-            - Optional dictionary of metrics if return_metrics is True
+            Tensor of shape (batch_size, seq_length, hidden_dim)
         """
-        # Initialize metrics
-        metrics: Dict[str, Any] = {}
-        
-        # Get dimensions
-        batch_size, seq_len, _ = x.shape
-        
-        # Project input to manifold space
-        x_proj = self.manifold_proj(x.reshape(-1, self.hidden_dim)).reshape(batch_size * seq_len, -1)
-        
-        # Process through attention tiles
-        tile_outputs = []
-        tile_metrics = []
-        
-        # Split input for each head
-        head_dim = x_proj.size(-1) // self.num_heads
-        x_heads = x_proj.view(batch_size, seq_len, self.num_heads, head_dim)
-        x_heads = x_heads.permute(0, 2, 1, 3).contiguous()  # [batch_size, num_heads, seq_len, head_dim]
-        
-        for i, tile in enumerate(self.tiles):
-            # Process through tile
-            if return_metrics:
-                tile_output, tile_metric = tile(x_heads[:, i], return_metrics=True)
-                tile_metrics.append(tile_metric)
-            else:
-                tile_output = tile(x_heads[:, i])
-            
-            # Handle both tensor and object returns
-            if hasattr(tile_output, 'coordinates'):
-                tile_outputs.append(tile_output.coordinates)
-            else:
-                tile_outputs.append(tile_output)
-        
-        # Combine head outputs [batch_size, num_heads, seq_len, head_dim]
-        combined_output = torch.stack(tile_outputs, dim=1)
-        
-        # Reshape to [batch_size, seq_len, hidden_dim]
-        output = combined_output.permute(0, 2, 1, 3).contiguous()
-        output = output.view(batch_size, seq_len, -1)
-        
+        batch_size, seq_length, hidden_dim = x.shape
+
+        # Project to manifold space
+        x_manifold = self.manifold_proj(x.reshape(-1, hidden_dim))
+        x_manifold = x_manifold.reshape(batch_size, seq_length, -1)
+
+        # Apply quantum attention
+        quantum_output = x_manifold
+        for layer in self.quantum_attention:
+            quantum_output = layer(quantum_output)
+            # Replace GELU with complex ReLU
+            quantum_output = torch.where(
+                quantum_output.abs() > 0,
+                quantum_output,
+                torch.zeros_like(quantum_output)
+            )  # Complex ReLU
+
         # Project back to original space
-        output = self.manifold_proj_inv(output.reshape(-1, self.hidden_dim)).reshape(batch_size, seq_len, -1)
-        
-        if return_metrics:
-            # Combine metrics from all tiles
-            metrics = self._combine_tile_metrics(tile_metrics)
-            return output, metrics
-            
-        return output
+        output = self.manifold_proj_inv(quantum_output.reshape(-1, quantum_output.shape[-1]))
+        output = output.reshape(batch_size, seq_length, hidden_dim)
+
+        # Split into query, key, value
+        qkv = self.to_qkv(output)
+        qkv = qkv.reshape(batch_size, seq_length, 3, self.num_heads, -1)
+        q, k, v = qkv.unbind(dim=2)
+
+        # Compute attention scores
+        scale = (hidden_dim // self.num_heads) ** -0.5
+        dots = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+        # Apply mask if provided
+        if mask is not None:
+            mask = mask[:, None, :, None].expand(-1, self.num_heads, -1, seq_length)
+            dots = dots.masked_fill(~mask, float('-inf'))
+
+        # Apply attention
+        attn = F.softmax(dots, dim=-1)
+        out = torch.matmul(attn, v)
+
+        # Combine heads and project
+        out = out.transpose(1, 2).reshape(batch_size, seq_length, -1)
+        out = self.to_out(out)
+
+        return out
 
     def prepare_attention_state(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -514,6 +543,9 @@ class QuantumGeometricAttention(nn.Module):
         Returns:
             Quantum features tensor
         """
+        # Store original shape
+        original_shape = x.shape
+        
         # Reshape input to [batch_size * seq_len, head_dim] if needed
         if x.dim() == 3:
             batch_size, seq_len, hidden_dim = x.shape
@@ -522,7 +554,10 @@ class QuantumGeometricAttention(nn.Module):
         # Project to manifold space
         x = x.reshape(-1, self.hidden_dim)  # Ensure correct input shape
         x = self.manifold_proj(x)  # Project to manifold space
-        x = x.reshape(-1, self.manifold_dim)  # Reshape for tile processing
+        
+        # Reshape back to 3D for tile processing
+        if len(original_shape) == 3:
+            x = x.reshape(original_shape[0], original_shape[1], -1)
         
         # Apply quantum attention through tiles
         for tile in self.tiles:
@@ -1024,19 +1059,85 @@ class QuantumGeometricAttention(nn.Module):
             # Reshape to [batch_size * seq_len, manifold_dim, manifold_dim]
             metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
 
+        def normalize_complex_tensor(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+            """Normalize complex tensor while preserving phase."""
+            current_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            if target_norm is None:
+                target_norm = torch.ones_like(current_norm)
+            scale = target_norm / (current_norm + 1e-8)
+            return tensor * scale
+
+        def project_to_manifold(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+            """Project tensor to manifold space while preserving norm."""
+            # Store input norm if target_norm not provided
+            if target_norm is None:
+                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            
+            # Project to manifold space
+            manifold = self.manifold_proj(tensor)
+            
+            # Normalize to match input norm
+            return normalize_complex_tensor(manifold, target_norm)
+
+        def project_to_hidden(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+            """Project tensor to hidden space while preserving norm."""
+            # Store input norm if target_norm not provided
+            if target_norm is None:
+                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            
+            # Project to hidden space
+            hidden = self.manifold_proj_inv(tensor)
+            
+            # Normalize to match input norm
+            return normalize_complex_tensor(hidden, target_norm)
+
+        # Get initial norms
+        initial_hidden_norm = torch.sqrt(torch.sum(current.reshape(-1, hidden_dim).real ** 2 + 
+                                         current.reshape(-1, hidden_dim).imag ** 2, dim=-1, keepdim=True))
+        print(f"\nInitial hidden norm: {initial_hidden_norm.mean().item():.4f}")
+
+        # Project initial state to manifold space
+        initial_manifold = project_to_manifold(current.reshape(-1, hidden_dim), initial_hidden_norm)
+        initial_manifold_norm = torch.sqrt(torch.sum(initial_manifold.real ** 2 + initial_manifold.imag ** 2, dim=-1, keepdim=True))
+        print(f"Initial manifold norm: {initial_manifold_norm.mean().item():.4f}")
+
         # Apply flow steps
         for step in range(num_steps):
+            print(f"\nStep {step + 1}/{num_steps}")
+            
             # Project to manifold space
-            current_manifold = self.manifold_proj(current.reshape(-1, hidden_dim)).reshape(batch_size, seq_len, -1)
+            current_manifold = project_to_manifold(current.reshape(-1, hidden_dim), initial_hidden_norm)
+            manifold_norm = torch.sqrt(torch.sum(current_manifold.real ** 2 + current_manifold.imag ** 2, dim=-1, keepdim=True))
+            print(f"Manifold norm: {manifold_norm.mean().item():.4f}")
 
             # Compute flow update
-            flow_update, flow_metrics = self.flow(current_manifold)  # Remove metric parameter and return_path=False
+            flow_update, flow_metrics = self.flow(current_manifold.reshape(batch_size, seq_len, -1))
+            flow_update = flow_update.reshape(-1, self.manifold_dim)
+            flow_norm = torch.sqrt(torch.sum(flow_update.real ** 2 + flow_update.imag ** 2, dim=-1, keepdim=True))
+            print(f"Flow update norm: {flow_norm.mean().item():.4f}")
 
-            # Project flow update back to hidden dimension space
-            flow_update = self.manifold_proj_inv(flow_update.reshape(-1, self.manifold_dim)).reshape(batch_size, seq_len, hidden_dim)
+            # Project flow update to hidden space
+            flow_update = project_to_hidden(flow_update, initial_hidden_norm)
+            flow_update = flow_update.reshape(batch_size, seq_len, hidden_dim)
+            hidden_norm = torch.sqrt(torch.sum(flow_update.real ** 2 + flow_update.imag ** 2, dim=-1, keepdim=True))
+            print(f"Hidden space norm: {hidden_norm.mean().item():.4f}")
 
-            # Update current state
+            # Update current state with small step size
             current = current + dt * flow_update
+            update_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
+            print(f"After update norm: {update_norm.mean().item():.4f}")
+
+            # Normalize current state to match initial norm
+            current = normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
+            current = current.reshape(batch_size, seq_len, hidden_dim)
+            current_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
+            print(f"Final norm for step: {current_norm.mean().item():.4f}")
+
+            # Ensure numerical stability
+            if torch.isnan(current).any() or torch.isinf(current).any():
+                print("Warning: Numerical instability detected, resetting to initial state")
+                current = x  # Reset to initial state if instability detected
+                break
 
             if return_metrics:
                 # Compute metrics for this step
@@ -1045,14 +1146,20 @@ class QuantumGeometricAttention(nn.Module):
                 
                 # Compute metrics for this step
                 curvature = compute_ricci_tensor(metric_expanded)  # [batch_size, seq_len, manifold_dim, manifold_dim]
-                parallel_transport = compute_parallel_transport(current_manifold, metric_expanded)  # [batch_size, seq_len, manifold_dim, manifold_dim]
-                geodesic_distance = compute_geodesic_distance(current_manifold, metric_expanded)  # [batch_size, seq_len]
-                energy = compute_flow_energy(current_manifold, metric_expanded)  # [batch_size, seq_len]
+                parallel_transport = compute_parallel_transport(current_manifold.reshape(batch_size, seq_len, -1), metric_expanded)  # [batch_size, seq_len, manifold_dim, manifold_dim]
+                geodesic_distance = compute_geodesic_distance(current_manifold.reshape(batch_size, seq_len, -1), metric_expanded)  # [batch_size, seq_len]
+                energy = compute_flow_energy(current_manifold.reshape(batch_size, seq_len, -1), metric_expanded)  # [batch_size, seq_len]
 
                 curvature_list.append(curvature)
                 parallel_transport_list.append(parallel_transport)
                 geodesic_distance_list.append(geodesic_distance)
                 energy_list.append(energy)
+
+        # Final normalization
+        current = normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
+        current = current.reshape(batch_size, seq_len, hidden_dim)
+        final_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
+        print(f"\nFinal norm: {final_norm.mean().item():.4f}")
 
         if return_metrics:
             metrics = FlowMetrics(
@@ -1557,17 +1664,17 @@ class QuantumGeometricAttention(nn.Module):
             state = x
             
         # Validate preparation
-        validation_result = self.preparation_validator.validate_preparation(
-            target=state,
-            prepared=state  # Self-validation for initial preparation
-        )
-        
-        if not validation_result.is_valid:
-            # Attempt to correct the state
-            state = self.preparation_validator.correct_state(
-                state=state,
-                error_type=validation_result.error_type or StateValidationErrorType.INVALID_NORM
+            validation_result = self.preparation_validator.validate_preparation(
+                target=state,
+                prepared=state  # Self-validation for initial preparation
             )
+            
+            if not validation_result.is_valid:
+                # Attempt to correct the state
+                state = self.preparation_validator.correct_state(
+                    state=state,
+                    error_type=validation_result.error_type or StateValidationErrorType.INVALID_NORM
+                )
             
         return state
         

@@ -330,6 +330,17 @@ class GeometricFlow(RiemannianFlow):
                 self.arithmetic.compute_quantum_metric(x)
             ).item()
         }
+
+        def normalize_complex_tensor(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+            """Normalize complex tensor while preserving phase."""
+            current_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            if target_norm is None:
+                target_norm = torch.ones_like(current_norm)
+            scale = target_norm / (current_norm + 1e-8)
+            return tensor * scale
+        
+        # Store initial norm
+        initial_norm = torch.sqrt(torch.sum(x.real ** 2 + x.imag ** 2, dim=-1, keepdim=True))
         
         # Perform integration steps
         current = x
@@ -344,15 +355,20 @@ class GeometricFlow(RiemannianFlow):
             # Apply flow layers
             for layer in self.flow_layers:
                 current = layer(current)
+                # Normalize after each layer to preserve norm
+                current = normalize_complex_tensor(current, initial_norm)
             
             # Store path if requested
             if return_path:
                 path.append(current)
+                
+        # Final normalization
+        current = normalize_complex_tensor(current, initial_norm)
         
-        # Add path to metrics if requested
+        # Update metrics with path if requested
         if return_path:
-            metrics['flow_path'] = torch.stack(path, dim=1)
-        
+            metrics['path'] = path
+            
         return current, metrics
     
     def compute_quantum_metric(self, x: torch.Tensor) -> torch.Tensor:
