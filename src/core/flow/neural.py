@@ -504,53 +504,50 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # Scale metric to preserve volume
         with torch.no_grad():
-            # Add regularization to prevent ill-conditioning
+            # Compute initial volume
+            det_before = torch.linalg.det(metric_tensor)
+            
+            # Add minimal regularization only for stability
             eye = torch.eye(
                 self.manifold_dim,
                 device=metric.device,
                 dtype=metric.dtype
             ).unsqueeze(0).expand(batch_size, -1, -1)
-            new_metric = new_metric + 1e-3 * eye  # Increased regularization
+            reg_metric = new_metric + self.stability_threshold * eye
             
-            # Compute scale factor with clamping to prevent extreme values
-            det_before = torch.linalg.det(metric_tensor)
-            det_after = torch.linalg.det(new_metric)
-            scale = (det_before / (det_after + 1e-8)).pow(1/self.manifold_dim)
-            scale = torch.clamp(scale, min=0.1, max=10.0)  # Prevent extreme scaling
+            # Compute determinant after flow step
+            det_after = torch.linalg.det(reg_metric)
+            
+            # Compute scale factor more precisely
+            scale = torch.pow(torch.abs(det_before) / (torch.abs(det_after) + self.stability_threshold), 1.0/self.manifold_dim)
+            
+            # Apply less restrictive clamping
+            scale = torch.clamp(scale, min=0.01, max=100.0)
             scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
-            new_metric = new_metric * scale
             
-            # Ensure final metric is symmetric
+            # Scale metric to preserve volume
+            new_metric = reg_metric * scale
+            
+            # Ensure symmetry
             new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
             
-            # Project onto positive definite cone with increased minimum eigenvalue
-            try:
-                eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
-                eigenvalues = torch.clamp(eigenvalues, min=1e-2)  # Increased minimum eigenvalue
-                new_metric = torch.matmul(
-                    torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                    eigenvectors.transpose(-2, -1)
-                )
-            except RuntimeError:
-                # If eigendecomposition fails, add more regularization
-                new_metric = new_metric + 1e-2 * eye
-                eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
-                eigenvalues = torch.clamp(eigenvalues, min=1e-2)
-                new_metric = torch.matmul(
-                    torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                    eigenvectors.transpose(-2, -1)
-                )
+            # Project onto positive definite cone with minimal eigenvalue bound
+            eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+            eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
+            new_metric = torch.matmul(
+                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+                eigenvectors.transpose(-2, -1)
+            )
             
-            # Verify and fix volume preservation
+            # Final volume check and correction if needed
             det_final = torch.linalg.det(new_metric)
-            if not torch.allclose(det_before, det_final, rtol=1e-4):
-                # Apply one more correction if needed
-                scale = (det_before / (det_final + 1e-8)).pow(1/self.manifold_dim)
-                scale = torch.clamp(scale, min=0.1, max=10.0)
+            rel_error = torch.abs(det_final - det_before) / (torch.abs(det_before) + self.stability_threshold)
+            
+            if torch.any(rel_error > 1e-6):
+                # One final precise correction
+                scale = torch.pow(torch.abs(det_before) / (torch.abs(det_final) + self.stability_threshold), 1.0/self.manifold_dim)
                 scale = scale.view(-1, 1, 1)
                 new_metric = new_metric * scale
-                
-                # Ensure final metric is symmetric
                 new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
         
         # Initialize quantum metrics efficiently

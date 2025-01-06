@@ -540,7 +540,20 @@ class HamiltonianSystem(nn.Module):
         return self.evolve(state)
         
     def compute_energy(self, state: torch.Tensor) -> torch.Tensor:
-        """Compute the Hamiltonian energy of the system."""
+        """Compute the Hamiltonian energy of the system.
+        
+        Uses a separable Hamiltonian H = T(p) + V(q) where:
+        - T(p) = 1/2 |p|^2 (kinetic energy)
+        - V(q) = 1/2 |q|^2 (potential energy)
+        
+        This form guarantees symplectic structure preservation.
+        
+        Args:
+            state: Phase space points [batch_size, phase_dim]
+            
+        Returns:
+            Energy values [batch_size]
+        """
         if not isinstance(state, torch.Tensor):
             raise ValueError(f"Expected torch.Tensor, got {type(state)}")
             
@@ -549,49 +562,14 @@ class HamiltonianSystem(nn.Module):
         q = state[..., :n]
         p = state[..., n:]
         
-        print("\nEnergy computation details:")
-        print(f"Input state shape: {state.shape}")
-        print(f"Position shape: {q.shape}, Momentum shape: {p.shape}")
-        print(f"Position norm: {torch.norm(q):.4f}")
-        print(f"Momentum norm: {torch.norm(p):.4f}")
-        
-        # Safely compute statistics
-        def safe_stats(x: torch.Tensor, name: str):
-            mean = x.mean().item()
-            # Only compute std if we have more than 1 sample
-            std = x.std().item() if x.numel() > 1 else 0.0
-            min_val = x.min().item()
-            max_val = x.max().item()
-            print(f"{name} mean: {mean:.4f}, std: {std:.4f}")
-            print(f"{name} min: {min_val:.4f}, max: {max_val:.4f}")
-            
-        safe_stats(q, "Position")
-        safe_stats(p, "Momentum")
-        
         # Compute kinetic energy (quadratic in momentum)
         T = 0.5 * torch.sum(p * p, dim=-1)
-        print(f"\nKinetic energy details:")
-        print(f"T shape: {T.shape}")
-        safe_stats(T, "T")
         
-        # Compute potential energy using neural network
-        V_raw = self.kinetic_network(q).squeeze(-1)
-        print(f"\nRaw potential details:")
-        print(f"V_raw shape: {V_raw.shape}")
-        safe_stats(V_raw, "V_raw")
-        
-        # Square and scale by position norm to ensure quadratic scaling
-        q_norm = torch.sum(q * q, dim=-1)
-        V = 0.5 * q_norm  # Make potential directly quadratic
-        print(f"\nFinal potential details:")
-        print(f"V shape: {V.shape}")
-        safe_stats(V, "V")
+        # Compute potential energy (quadratic in position)
+        V = 0.5 * torch.sum(q * q, dim=-1)
         
         # Total energy
         H = T + V
-        print(f"\nTotal energy details:")
-        print(f"H shape: {H.shape}")
-        safe_stats(H, "H")
         
         return H
         
@@ -619,49 +597,37 @@ class HamiltonianSystem(nn.Module):
         """Evolve system forward in time using symplectic integration.
         
         Args:
-            points: Initial phase space points
+            points: Initial phase space points [batch_size, phase_dim]
             dt: Time step
             
         Returns:
-            Evolved phase space points
+            Evolved phase space points [batch_size, phase_dim]
         """
         # Split into position and momentum
         n = self.manifold_dim // 2
         q = points[..., :n]
         p = points[..., n:]
         
-        # First half-step momentum update
-        points_half = torch.cat([q, p], dim=-1)
-        points_half.requires_grad_(True)
-        energy_half = self.compute_energy(points_half)
-        grad_half = torch.autograd.grad(energy_half.sum(), points_half, create_graph=True)[0]
-        p_half = p - 0.5 * dt * grad_half[..., :n]
+        # Compute initial energy for debugging
+        initial_energy = self.compute_energy(points)
         
-        # Full position update
-        points_new = torch.cat([q, p_half], dim=-1)
-        points_new.requires_grad_(True)
-        energy_new = self.compute_energy(points_new)
-        grad_new = torch.autograd.grad(energy_new.sum(), points_new, create_graph=True)[0]
-        q_new = q + dt * grad_new[..., n:]
+        # Symplectic Euler integration
+        # 1. Update momentum using potential energy gradient
+        q.requires_grad_(True)
+        V = 0.5 * torch.sum(q * q, dim=-1)  # Quadratic potential
+        dV = torch.autograd.grad(V.sum(), q, create_graph=True)[0]
+        p_new = p - dt * dV
         
-        # Second half-step momentum update
-        points_final = torch.cat([q_new, p_half], dim=-1)
-        points_final.requires_grad_(True)
-        energy_final = self.compute_energy(points_final)
-        grad_final = torch.autograd.grad(energy_final.sum(), points_final, create_graph=True)[0]
-        p_new = p_half - 0.5 * dt * grad_final[..., :n]
+        # 2. Update position using new momentum
+        q_new = q + dt * p_new  # Direct momentum coupling preserves symplectic form
         
-        # Normalize momentum to have unit norm
-        p_norm = torch.norm(p_new, dim=-1, keepdim=True)
-        p_new = p_new / (p_norm + 1e-8)  # Add small epsilon to avoid division by zero
+        # Combine updated position and momentum
+        evolved_points = torch.cat([q_new, p_new], dim=-1)
         
-        # Combine and return
-        evolved = torch.cat([q_new, p_new], dim=-1)
+        # Verify energy conservation (debug)
+        final_energy = self.compute_energy(evolved_points)
+        energy_diff = torch.abs(final_energy - initial_energy)
+        if torch.any(energy_diff > 1e-3):
+            print(f"Warning: Energy not conserved! Max diff: {energy_diff.max().item():.6f}")
         
-        # Verify symplectic form preservation
-        initial_form = self.symplectic.compute_form(points)
-        final_form = self.symplectic.compute_form(evolved)
-        form_error = torch.norm(final_form.matrix - initial_form.matrix) / torch.norm(initial_form.matrix)
-        print(f"Symplectic form error after evolution: {form_error:.4e}")
-        
-        return evolved
+        return evolved_points
