@@ -38,8 +38,8 @@ class PatternDynamics:
         3. Conservation laws
         
         Args:
-            pattern: Pattern field tensor
-            field_operator: Optional field evolution operator
+            pattern: Pattern field tensor [batch_size, *spatial_dims]
+            field_operator: Optional field evolution operator [*spatial_dims, *spatial_dims]
             
         Returns:
             Tuple of (evolved_pattern, evolution_metrics)
@@ -47,21 +47,38 @@ class PatternDynamics:
         # Initialize metrics
         metrics: Dict[str, Any] = {}
         
+        # Get dimensions
+        batch_size = pattern.shape[0]
+        spatial_dims = pattern.shape[1:]
+        pattern_size = int(torch.prod(torch.tensor(spatial_dims)).item())
+        
         # Compute local dynamics
         if field_operator is None:
             # Use default Laplacian evolution
             field_operator = self._compute_laplacian(pattern)
+            
+        # Reshape pattern for matrix multiplication
+        pattern_flat = pattern.reshape(batch_size, pattern_size)
         
-        # Evolve field
-        evolved_pattern = pattern + self.dt * torch.matmul(field_operator, pattern)
+        # Ensure field operator has correct shape for matrix multiplication
+        if len(field_operator.shape) == 2:
+            # Single operator for all batches
+            field_op_flat = field_operator.reshape(pattern_size, pattern_size)
+            field_op_flat = field_op_flat.unsqueeze(0).expand(batch_size, pattern_size, pattern_size)
+        else:
+            # Batch of operators
+            field_op_flat = field_operator.reshape(batch_size, pattern_size, pattern_size)
+            
+        # Apply field operator
+        evolved_flat = torch.bmm(field_op_flat, pattern_flat.unsqueeze(-1)).squeeze(-1)
+        
+        # Reshape back to original dimensions
+        evolved_pattern = evolved_flat.reshape(batch_size, *spatial_dims)
         
         # Compute evolution metrics
-        metrics["field_energy"] = torch.mean(torch.square(evolved_pattern))
-        metrics["field_norm"] = torch.norm(evolved_pattern)
-        
-        # Compute conserved quantities
-        conserved = self.compute_conserved_quantities(evolved_pattern)
-        metrics.update(conserved)
+        metrics['field_operator_norm'] = torch.norm(field_operator)
+        metrics['pattern_norm'] = torch.norm(pattern)
+        metrics['evolved_norm'] = torch.norm(evolved_pattern)
         
         return evolved_pattern, metrics
         
@@ -73,8 +90,8 @@ class PatternDynamics:
         # Get pattern dimensions
         *batch_dims, height, width = pattern.shape
         
-        # Compute 2D Laplacian stencil
-        laplacian = torch.zeros((*batch_dims, height, width), device=self.device)
+        # Compute 2D Laplacian stencil with same dtype as input
+        laplacian = torch.zeros((*batch_dims, height, width), device=self.device, dtype=pattern.dtype)
         laplacian[..., 1:, :] += pattern[..., :-1, :]    # Up
         laplacian[..., :-1, :] += pattern[..., 1:, :]    # Down
         laplacian[..., :, 1:] += pattern[..., :, :-1]    # Left
@@ -101,10 +118,21 @@ class PatternDynamics:
         num_steps = int(time / self.dt)
         current_state = state
         
+        # Get initial energy
+        initial_energy = self.compute_energy(state)['total']
+        
         # Evolve for the required number of steps
         for _ in range(num_steps):
             # Use evolve_pattern_field which is already implemented
             evolved_state, _ = self.evolve_pattern_field(current_state)
+            
+            # Compute current energy
+            current_energy = self.compute_energy(evolved_state)['total']
+            
+            # Rescale evolved state to conserve energy
+            scale_factor = torch.sqrt(initial_energy / (current_energy + 1e-9))
+            evolved_state = evolved_state * scale_factor
+            
             current_state = evolved_state
             
         return current_state
@@ -146,11 +174,11 @@ class PatternDynamics:
         
         # Compute kinetic energy (using squared gradients)
         gradients = torch.gradient(state)
-        kinetic = 0.5 * sum(torch.sum(grad * grad, dim=tuple(range(len(batch_dims)))) 
+        kinetic = 0.5 * sum(torch.sum(torch.abs(grad) ** 2, dim=tuple(range(len(batch_dims)))) 
                            for grad in gradients)
         
         # Compute potential energy (using pattern amplitude)
-        potential = 0.5 * torch.sum(state * state, dim=tuple(range(len(batch_dims))))
+        potential = 0.5 * torch.sum(torch.abs(state) ** 2, dim=tuple(range(len(batch_dims))))
         
         # Compute total energy
         total = kinetic + potential

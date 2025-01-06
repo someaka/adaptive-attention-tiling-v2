@@ -1549,27 +1549,67 @@ class PatternDynamics(nn.Module):
         state: torch.Tensor,
         time: float
     ) -> torch.Tensor:
-        """Evolve pattern state forward in time.
+        """Evolve state forward in time.
+        
+        Args:
+            state: Initial state tensor
+            time: Time to evolve for
+            
+        Returns:
+            Evolved state tensor
+        """
+        # Validate input
+        if not isinstance(time, (int, float)):
+            raise TypeError(f"Time must be numeric, got {type(time)}")
+        if time < 0:
+            raise ValueError(f"Time must be non-negative, got {time}")
+        
+        # Initialize evolved state
+        evolved = state.clone()
+        
+        # Apply time evolution
+        dt = self.dt
+        steps = int(time / dt)
+        
+        for _ in range(steps):
+            # Compute update
+            update = self._compute_update(evolved)
+            
+            # Update state
+            evolved = evolved + dt * update
+            
+            # Normalize to preserve norm
+            norm = torch.norm(evolved, dim=-1, keepdim=True)
+            evolved = evolved / norm
+            
+        return evolved
+
+    def _compute_update(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute state update based on dynamics.
         
         Args:
             state: Current state tensor
-            time: Evolution time
             
         Returns:
-            Evolved state
+            Update tensor
         """
-        # Convert to float64 for numerical stability
-        state = state.to(torch.float64)
+        # Compute kinetic term
+        kinetic = -0.5 * self._laplacian(state)
         
-        # Apply diffusion with time step
-        diffused = self.apply_diffusion(state, diffusion_coefficient=0.1, dt=time)
+        # Compute potential term (can be customized)
+        potential = torch.zeros_like(state)
         
-        # Apply reaction with time step
-        reacted = self.apply_reaction(diffused, dt=time)
+        return kinetic + potential
+
+    def _laplacian(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute Laplacian of state.
         
-        # Ensure non-negative values and normalize
-        evolved = torch.clamp(reacted, min=0.0)
-        evolved = evolved / (evolved.norm(dim=-1, keepdim=True) + 1e-8)
-        
-        # Convert back to original dtype
-        return evolved.to(state.dtype)
+        Args:
+            state: Input state tensor
+            
+        Returns:
+            Laplacian tensor
+        """
+        # Simple finite difference approximation
+        # Can be replaced with more sophisticated methods
+        return -2 * state
