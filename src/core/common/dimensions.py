@@ -365,8 +365,8 @@ class DimensionManager(nn.Module):
         Returns:
             Converted QuantumTensor
         """
-        # Create a new tensor with the same data
-        new_tensor = tensor.clone()
+        # Create a new tensor with the same data and dtype
+        new_tensor = tensor.clone().to(dtype=tensor.dtype)
         # Convert to QuantumTensor
         return QuantumTensor(new_tensor.detach().requires_grad_(tensor.requires_grad))
 

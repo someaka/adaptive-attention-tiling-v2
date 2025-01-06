@@ -210,26 +210,29 @@ class TestNeuralGeometricFlow:
         # Use a reduced batch size for testing
         test_batch_size = min(batch_size, 4)
         
+        # Get dtype from neural_flow instance
+        dtype = neural_flow.dtype
+        
         # Create metric tensor with manifold dimensions
         manifold_dim = neural_flow.manifold_dim
         hidden_dim = neural_flow.quantum_bridge.hidden_dim
-        metric = torch.zeros(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=torch.float32)
+        metric = torch.zeros(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
         
         # Initialize with identity to preserve geometric structure
-        metric[:] = torch.eye(manifold_dim, device=device, dtype=torch.float32)
+        metric[:] = torch.eye(manifold_dim, device=device, dtype=dtype)
         
         # Create a valid Ricci tensor matching manifold_dim
-        ricci = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=torch.float32)
+        ricci = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
         # Make the Ricci tensor symmetric as required
         ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
         
         # Create attention pattern matching manifold_dim
-        attention_pattern = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=torch.float32)
+        attention_pattern = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
         attention_pattern = torch.softmax(attention_pattern, dim=-1)  # Normalize attention weights
         
         # Project metric tensor to hidden dimension for quantum bridge
         metric_flat = metric.reshape(test_batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
-        metric_padded = torch.zeros(test_batch_size, hidden_dim, device=device, dtype=torch.float32)
+        metric_padded = torch.zeros(test_batch_size, hidden_dim, device=device, dtype=dtype)
         metric_padded[:, :manifold_dim * manifold_dim] = metric_flat
         
         # Run flow step

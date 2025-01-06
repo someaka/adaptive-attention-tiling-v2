@@ -232,7 +232,6 @@ def get_quantum_state_tensor(state: Union[QuantumState, Tuple[QuantumState, Any]
     return cast(torch.Tensor, tensor)  # Ensure return type is Tensor
 
 
-@pytest.mark.dependency(depends=["TestStateSpace", "TestScaleTransition", "TestTransitionAccuracy"])
 class TestEndToEnd:
     """End-to-end integration tests."""
     

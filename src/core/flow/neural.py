@@ -252,20 +252,20 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Projection networks with proper dimensioning
         self.expectation_projection = nn.Sequential(
             nn.Linear(manifold_squared, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim),
+            nn.LayerNorm(self.manifold_dim, dtype=self.dtype, device=self.device),
             nn.ReLU()
         )
         
         self.metric_projection = nn.Sequential(
             nn.Linear(manifold_squared, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim),
+            nn.LayerNorm(self.manifold_dim, dtype=self.dtype, device=self.device),
             nn.ReLU()
         )
         
         # Correction network with residual connection and proper dimensioning
         self.quantum_correction_net = nn.Sequential(
             nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim),
+            nn.LayerNorm(self.manifold_dim, dtype=self.dtype, device=self.device),
             nn.ReLU(),
             nn.Linear(self.manifold_dim, self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
         )
@@ -301,8 +301,8 @@ class NeuralGeometricFlow(PatternFormationFlow):
     def _to_real(self, tensor: torch.Tensor) -> torch.Tensor:
         """Convert complex tensor to real tensor by taking real part."""
         if tensor.is_complex():
-            return tensor.real
-        return tensor
+            return tensor.real.to(dtype=self.dtype)
+        return tensor.to(dtype=self.dtype)
 
     def _to_tensor_type(self, tensor: torch.Tensor, tensor_type: type) -> TensorType:
         """Convert torch.Tensor to appropriate TensorType."""
