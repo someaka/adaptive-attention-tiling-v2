@@ -102,12 +102,26 @@ class QuantumMotivicTile(nn.Module):
                 # Initialize real part with Glorot/Xavier initialization
                 real_weight = torch.randn(weight_shape, device=self.device) * std
                 imag_weight = torch.randn(weight_shape, device=self.device) * std
-                layer.weight.data = torch.complex(real_weight, imag_weight).to(self.dtype)
+                
+                # Create complex weight tensor
+                complex_weight = torch.complex(real_weight, imag_weight)
+                
+                # Ensure the weight is complex and has the correct dtype
+                if not torch.is_complex(complex_weight):
+                    complex_weight = complex_weight.to(dtype=torch.complex64)
+                layer.weight = nn.Parameter(complex_weight)
                 
                 if layer.bias is not None:
                     real_bias = torch.randn(weight_shape[0], device=self.device) * std
                     imag_bias = torch.randn(weight_shape[0], device=self.device) * std
-                    layer.bias.data = torch.complex(real_bias, imag_bias).to(self.dtype)
+                    
+                    # Create complex bias tensor
+                    complex_bias = torch.complex(real_bias, imag_bias)
+                    
+                    # Ensure the bias is complex and has the correct dtype
+                    if not torch.is_complex(complex_bias):
+                        complex_bias = complex_bias.to(dtype=torch.complex64)
+                    layer.bias = nn.Parameter(complex_bias)
 
         # Initialize all linear layers
         for module in self.modules():
@@ -119,20 +133,56 @@ class QuantumMotivicTile(nn.Module):
         norm = torch.sqrt(real_state.pow(2) + imag_state.pow(2)).clamp(min=1e-6)
         real_state = real_state / norm
         imag_state = imag_state / norm
-        self.quantum_state.data = torch.complex(real_state, imag_state).to(self.dtype)
+        quantum_state = torch.complex(real_state, imag_state)
+        if not torch.is_complex(quantum_state):
+            quantum_state = quantum_state.to(dtype=torch.complex64)
+        self.quantum_state = nn.Parameter(quantum_state)
         
         # Initialize cohomology basis with proper complex values
         real_basis = torch.eye(self.cohomology_dim, device=self.device)
         imag_basis = torch.zeros_like(real_basis)
-        self.cohomology_basis.data = torch.complex(real_basis, imag_basis).to(self.dtype)
+        cohomology_basis = torch.complex(real_basis, imag_basis)
+        if not torch.is_complex(cohomology_basis):
+            cohomology_basis = cohomology_basis.to(dtype=torch.complex64)
+        self.cohomology_basis = nn.Parameter(cohomology_basis)
         
         # Initialize motive basis with proper complex values
         real_motive = torch.eye(self.motive_rank, device=self.device)
         imag_motive = torch.zeros_like(real_motive)
-        self.motive_basis.data = torch.complex(real_motive, imag_motive).to(self.dtype)
+        motive_basis = torch.complex(real_motive, imag_motive)
+        if not torch.is_complex(motive_basis):
+            motive_basis = motive_basis.to(dtype=torch.complex64)
+        self.motive_basis = nn.Parameter(motive_basis)
 
     def _initialize_quantum_structure(self) -> None:
         """Initialize quantum structure and metrics components."""
+        # Initialize quantum state with proper complex values
+        real_state = torch.randn(self.size, self.hidden_dim, device=self.device)
+        imag_state = torch.randn(self.size, self.hidden_dim, device=self.device)
+        norm = torch.sqrt(real_state.pow(2) + imag_state.pow(2)).clamp(min=1e-6)
+        real_state = real_state / norm
+        imag_state = imag_state / norm
+        quantum_state = torch.complex(real_state, imag_state)
+        if not torch.is_complex(quantum_state):
+            quantum_state = quantum_state.to(dtype=torch.complex64)
+        self.register_parameter('quantum_state', nn.Parameter(quantum_state))
+        
+        # Initialize cohomology basis with proper complex values
+        real_basis = torch.eye(self.cohomology_dim, device=self.device)
+        imag_basis = torch.zeros_like(real_basis)
+        cohomology_basis = torch.complex(real_basis, imag_basis)
+        if not torch.is_complex(cohomology_basis):
+            cohomology_basis = cohomology_basis.to(dtype=torch.complex64)
+        self.register_parameter('cohomology_basis', nn.Parameter(cohomology_basis))
+        
+        # Initialize motive basis with proper complex values
+        real_motive = torch.eye(self.motive_rank, device=self.device)
+        imag_motive = torch.zeros_like(real_motive)
+        motive_basis = torch.complex(real_motive, imag_motive)
+        if not torch.is_complex(motive_basis):
+            motive_basis = motive_basis.to(dtype=torch.complex64)
+        self.register_parameter('motive_basis', nn.Parameter(motive_basis))
+        
         # Initialize base metrics
         self._metrics = cast(MetricsDict, {
             "ifq": 0.0,  # Information flow quotient
@@ -146,24 +196,6 @@ class QuantumMotivicTile(nn.Module):
             "flow": 0.0,
             "load_distribution": 1.0
         })
-
-        # Initialize quantum state parameters
-        self.register_parameter(
-            "quantum_state",
-            nn.Parameter(torch.zeros(self.size, self.hidden_dim, dtype=self.dtype))
-        )
-
-        # Initialize cohomology basis as trainable parameter
-        self.register_parameter(
-            "cohomology_basis",
-            nn.Parameter(torch.eye(self.cohomology_dim, dtype=self.dtype))
-        )
-
-        # Initialize motive basis as trainable parameter
-        self.register_parameter(
-            "motive_basis",
-            nn.Parameter(torch.eye(self.motive_rank, dtype=self.dtype))
-        )
 
     def get_metrics(self) -> MetricsDict:
         """Get current metrics."""
@@ -306,17 +338,26 @@ class QuantumMotivicTile(nn.Module):
         Args:
             x: Input tensor of shape [batch_size, seq_len, hidden_dim]
             mask: Optional attention mask
-            
+        
         Returns:
             Output tensor of shape [batch_size, seq_len, hidden_dim]
         """
         batch_size, seq_len, _ = x.shape
         
+        # Convert input to complex type if needed
+        if not torch.is_complex(x):
+            x = x.to(dtype=torch.complex64)
+        
         # Project input to hidden dimension
         x = self.input_proj(x)  # [batch_size, seq_len, hidden_dim]
+        if not torch.is_complex(x):
+            x = x.to(dtype=torch.complex64)
         
         # Project to cohomology space using cohomology basis
         x_cohom_raw = self.cohomology_proj(x)  # [batch_size, seq_len, cohomology_dim]
+        if not torch.is_complex(x_cohom_raw):
+            x_cohom_raw = x_cohom_raw.to(dtype=torch.complex64)
+
         x_cohom = torch.matmul(
             torch.matmul(x_cohom_raw, self.cohomology_basis.T),
             self.cohomology_basis
@@ -324,22 +365,33 @@ class QuantumMotivicTile(nn.Module):
         
         # Project to motive space using motive basis
         x_motive_raw = self.motive_proj(x_cohom)  # [batch_size, seq_len, motive_rank]
+        if not torch.is_complex(x_motive_raw):
+            x_motive_raw = x_motive_raw.to(dtype=torch.complex64)
+
         x_motive = torch.matmul(
             torch.matmul(x_motive_raw, self.motive_basis.T),
             self.motive_basis
         )  # [batch_size, seq_len, motive_rank]
         
-        # Ensure quantum state is properly connected to computation graph
+        # Ensure quantum state is properly connected to computation graph and is complex
         quantum_state = self.quantum_state.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, size, hidden_dim]
+        if not torch.is_complex(quantum_state):
+            quantum_state = quantum_state.to(dtype=torch.complex64)
         
         # Project quantum state to motive space through cohomology space
         quantum_cohom_raw = self.cohomology_proj(quantum_state)  # [batch_size, size, cohomology_dim]
+        if not torch.is_complex(quantum_cohom_raw):
+            quantum_cohom_raw = quantum_cohom_raw.to(dtype=torch.complex64)
+
         quantum_cohom = torch.matmul(
             torch.matmul(quantum_cohom_raw, self.cohomology_basis.T),
             self.cohomology_basis
         )  # [batch_size, size, cohomology_dim]
         
         quantum_motive_raw = self.motive_proj(quantum_cohom)  # [batch_size, size, motive_rank]
+        if not torch.is_complex(quantum_motive_raw):
+            quantum_motive_raw = quantum_motive_raw.to(dtype=torch.complex64)
+
         quantum_motive = torch.matmul(
             torch.matmul(quantum_motive_raw, self.motive_basis.T),
             self.motive_basis
@@ -347,8 +399,16 @@ class QuantumMotivicTile(nn.Module):
         
         # Compute quantum attention in motive space
         q = self.query(x_motive)  # [batch_size, seq_len, motive_rank]
+        if not torch.is_complex(q):
+            q = q.to(dtype=torch.complex64)
+        
         k = self.key(quantum_motive)  # [batch_size, size, motive_rank]
+        if not torch.is_complex(k):
+            k = k.to(dtype=torch.complex64)
+        
         v = self.value(quantum_motive)  # [batch_size, size, motive_rank]
+        if not torch.is_complex(v):
+            v = v.to(dtype=torch.complex64)
         
         # Compute attention scores
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.motive_rank)
@@ -384,15 +444,23 @@ class QuantumMotivicTile(nn.Module):
         )  # [batch_size, seq_len, motive_rank]
         
         out_cohom = self.motive_proj_inv(out_motive)  # [batch_size, seq_len, cohomology_dim]
+        if not torch.is_complex(out_cohom):
+            out_cohom = out_cohom.to(dtype=torch.complex64)
+        
         out_cohom = torch.matmul(
             torch.matmul(out_cohom, self.cohomology_basis.T),
             self.cohomology_basis
         )  # [batch_size, seq_len, cohomology_dim]
         
+        # Project back to hidden dimension
         out = self.cohomology_proj_inv(out_cohom)  # [batch_size, seq_len, hidden_dim]
+        if not torch.is_complex(out):
+            out = out.to(dtype=torch.complex64)
         
-        # Final output projection
+        # Final projection
         out = self.output_proj(out)  # [batch_size, seq_len, hidden_dim]
+        if not torch.is_complex(out):
+            out = out.to(dtype=torch.complex64)
         
         return out
 

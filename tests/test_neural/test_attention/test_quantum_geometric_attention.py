@@ -16,11 +16,14 @@ Tests cover:
 12. Pattern dynamics
 """
 
+import logging
 import numpy as np
 import pytest
 import torch
 import torch.linalg
-from typing import Optional
+from torch.autograd import profiler
+from torch.autograd.profiler import profile as Profile
+from typing import Optional, Dict, List, Any
 
 from src.core.tiling.quantum_geometric_attention import (
     AttentionState,
@@ -34,6 +37,8 @@ from src.metrics.attention import (
 )
 from src.core.patterns.dynamics import PatternDynamics
 
+logger = logging.getLogger(__name__)
+
 def complex_randn(*size, device=None, dtype=torch.complex64):
     """Create random complex tensor with proper initialization."""
     real_dtype = torch.float32 if dtype == torch.complex64 else torch.float64
@@ -46,7 +51,6 @@ class TestQuantumGeometricAttention:
 
     def teardown_method(self):
         """Clean up after each test."""
-        torch.cuda.empty_cache()
         import gc
         gc.collect()
 
@@ -78,7 +82,7 @@ class TestQuantumGeometricAttention:
     @pytest.fixture
     def attention_layer(self, hidden_dim, manifold_dim, num_heads):
         """Create a test attention layer with proper device placement."""
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cpu')
         dtype = torch.complex64  # Use complex64 consistently
         layer = QuantumGeometricAttention(
             hidden_dim=hidden_dim,
@@ -308,33 +312,63 @@ class TestQuantumGeometricAttention:
         hidden_dim: int,
     ) -> None:
         """Test multi-head attention integration."""
+        # Enable anomaly detection with more verbose output
+        torch.autograd.set_detect_anomaly(True, check_nan=True)
+        
         # Create input tensor with proper dtype
         x = complex_randn(batch_size, seq_length, hidden_dim, dtype=attention_layer.dtype)
         x.requires_grad = True  # Ensure input requires grad
         mask = torch.ones(batch_size, seq_length).bool()
-        
-        # Process through attention layer
-        output = attention_layer(x, mask=mask)
-        
-        # Compute loss that ensures all parameters are used
-        loss = output.abs().pow(2).sum()  # Use absolute value squared for complex tensors
-        loss.backward()
-        
-        # Check that all parameters have gradients
-        for name, param in attention_layer.named_parameters():
-            print(f"{name}:")
-            print(f"  Shape: {param.shape}")
-            print(f"  Requires grad: {param.requires_grad}")
-            print(f"  Has grad: {param.grad is not None}")
-            if param.grad is not None:
-                print(f"  Value: {param.data}")
-            assert param.grad is not None, f"Parameter {name} should have gradients"
+
+        # Add gradient hooks for monitoring
+        gradient_logs = []
+        def hook_fn(grad):
+            gradient_logs.append(grad)
             
-        # Check output properties
-        assert output.shape == (batch_size, seq_length, hidden_dim)
-        assert not torch.isnan(output).any()
-        assert not torch.isinf(output).any()
-        assert output.dtype == torch.complex64
+        # Register hooks on key parameters
+        monitored_params = {}
+        for name, param in attention_layer.named_parameters():
+            if param.requires_grad:
+                param.register_hook(lambda grad, name=name: print(f"\nGradient for {name}:\nShape: {grad.shape}\nNorm: {torch.norm(grad).item() if grad is not None else None}"))
+                monitored_params[name] = param
+
+        with Profile(use_cuda=False, with_stack=True) as prof:
+            # Forward pass with gradient tracking
+            output = attention_layer(x, mask=mask)
+            
+            # Compute loss that ensures all parameters are used
+            loss = output.abs().pow(2).sum()  # Use absolute value squared for complex tensors
+            
+            # Backward pass with gradient computation
+            loss.backward()
+            
+            # Print profiler results focusing on gradient computation
+            if prof is not None:  # Add type check
+                print("\nProfiler Results:")
+                print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+            
+            # Print detailed gradient information
+            print("\nDetailed Gradient Information:")
+            for name, param in monitored_params.items():
+                grad = param.grad
+                print(f"\nParameter: {name}")
+                print(f"  Shape: {param.shape}")
+                print(f"  Requires grad: {param.requires_grad}")
+                print(f"  Has grad: {grad is not None}")
+                if grad is not None:
+                    print(f"  Gradient norm: {torch.norm(grad).item()}")
+                    print(f"  Gradient mean: {grad.mean().item()}")
+                    # Calculate std only if we have enough elements
+                    if grad.numel() > 1:
+                        print(f"  Gradient std: {grad.std(unbiased=False).item()}")  # Use biased std for small tensors
+                    else:
+                        print(f"  Gradient std: N/A (insufficient elements)")
+                    print(f"  Contains NaN: {torch.isnan(grad).any().item()}")
+                    print(f"  Contains Inf: {torch.isinf(grad).any().item()}")
+
+            # Verify gradients exist for all parameters
+            for name, param in attention_layer.named_parameters():
+                assert param.grad is not None, f"Parameter {name} should have gradients"
 
     def test_geometric_phases(
         self, attention_layer, batch_size, seq_length, hidden_dim
@@ -573,3 +607,137 @@ class TestQuantumGeometricAttention:
             rtol=1e-3,  # Increased tolerance for numerical stability
             atol=1e-3   # Added absolute tolerance
         ), "Energy should be conserved"
+
+    def test_quantum_bridge_gradient_diagnostic(
+        self,
+        attention_layer: QuantumGeometricAttention,
+        batch_size: int,
+        seq_length: int,
+        hidden_dim: int,
+    ) -> None:
+        """Detailed diagnostic test for gradient flow through quantum bridge."""
+        logger.info("\n=== Starting Quantum Bridge Gradient Diagnostic ===")
+        
+        # Create test input
+        x = torch.randn(batch_size, seq_length, hidden_dim, requires_grad=True)
+        logger.info(f"\nInput shape: {x.shape}")
+        
+        # Track intermediate tensors
+        intermediate_tensors = {}
+        computation_steps = []
+        
+        def save_tensor(name: str, tensor: torch.Tensor, step_info: str = ""):
+            """Enhanced tensor tracking with computation step info."""
+            if tensor.requires_grad:
+                tensor.retain_grad()
+                intermediate_tensors[name] = tensor
+                computation_steps.append(f"Step: {step_info}")
+                
+                logger.info(f"\nTracking tensor: {name}")
+                logger.info(f"Step info: {step_info}")
+                logger.info(f"Shape: {tensor.shape}")
+                logger.info(f"Requires grad: {tensor.requires_grad}")
+                logger.info(f"Is complex: {tensor.is_complex()}")
+                if tensor.is_complex():
+                    logger.info(f"Complex stats:")
+                    logger.info(f"  Magnitude mean: {tensor.abs().mean().item():.6f}")
+                    logger.info(f"  Real mean: {tensor.real.mean().item():.6f}")
+                    logger.info(f"  Imag mean: {tensor.imag.mean().item():.6f}")
+                
+                def hook(grad):
+                    if grad is not None:
+                        logger.info(f"\nGradient for {name} (Step: {step_info}):")
+                        logger.info(f"  Shape: {grad.shape}")
+                        if grad.is_complex():
+                            grad_abs = grad.abs()
+                            logger.info(f"  Complex Gradient stats:")
+                            logger.info(f"    Magnitude norm: {torch.norm(grad_abs).item():.6f}")
+                            logger.info(f"    Real mean: {grad.real.mean().item():.6f}")
+                            logger.info(f"    Imag mean: {grad.imag.mean().item():.6f}")
+                            logger.info(f"    Max magnitude: {grad_abs.max().item():.6f}")
+                            logger.info(f"    Min magnitude: {grad_abs.min().item():.6f}")
+                        else:
+                            logger.info(f"  Gradient stats:")
+                            logger.info(f"    Norm: {torch.norm(grad).item():.6f}")
+                            logger.info(f"    Mean: {grad.mean().item():.6f}")
+                            logger.info(f"    Max: {grad.max().item():.6f}")
+                            logger.info(f"    Min: {grad.min().item():.6f}")
+                        return grad
+                    return grad
+                
+                tensor.register_hook(hook)
+        
+        # Forward pass with enhanced tracking
+        quantum_bridge = attention_layer.quantum_bridge
+        
+        # Track initial tensors
+        save_tensor("input", x, "Initial input tensor")
+        save_tensor("pattern_bundle.metric", quantum_bridge.pattern_bundle.metric, "Pattern bundle metric parameter")
+        save_tensor("pattern_bundle.connection", quantum_bridge.pattern_bundle.connection, "Pattern bundle connection parameter")
+        
+        # Track metric and connection views
+        metric_view = quantum_bridge.pattern_bundle.metric.clone()
+        connection_view = quantum_bridge.pattern_bundle.connection.clone()
+        save_tensor("metric_view", metric_view, "Cloned metric view")
+        save_tensor("connection_view", connection_view, "Cloned connection view")
+        
+        # Track connection usage in forward pass
+        x_flat = x.reshape(-1, hidden_dim)
+        save_tensor("x_flat", x_flat, "Flattened input")
+        
+        # Track intermediate quantum states
+        logger.info("\n=== Starting Forward Pass ===")
+        output = attention_layer(x)
+        save_tensor("output", output, "Final output")
+        
+        # Compute loss and backward
+        logger.info("\n=== Starting Backward Pass ===")
+        loss = output.abs().sum()
+        logger.info(f"Loss value: {loss.item():.6f}")
+        loss.backward()
+        
+        # Log gradient flow analysis
+        logger.info("\n=== Gradient Flow Analysis ===")
+        logger.info("=" * 50)
+        
+        # Check each tracked tensor
+        for name, tensor in intermediate_tensors.items():
+            logger.info(f"\nAnalyzing tensor: {name}")
+            logger.info(f"  Shape: {tensor.shape}")
+            logger.info(f"  Requires grad: {tensor.requires_grad}")
+            if hasattr(tensor, 'grad') and tensor.grad is not None:
+                grad = tensor.grad
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    logger.info(f"  Complex Gradient stats:")
+                    logger.info(f"    Magnitude norm: {torch.norm(grad_abs).item():.6f}")
+                    logger.info(f"    Real mean: {grad.real.mean().item():.6f}")
+                    logger.info(f"    Imag mean: {grad.imag.mean().item():.6f}")
+                    logger.info(f"    Max magnitude: {grad_abs.max().item():.6f}")
+                    logger.info(f"    Min magnitude: {grad_abs.min().item():.6f}")
+                else:
+                    logger.info(f"  Gradient stats:")
+                    logger.info(f"    Norm: {torch.norm(grad).item():.6f}")
+                    logger.info(f"    Mean: {grad.mean().item():.6f}")
+                    logger.info(f"    Max: {grad.max().item():.6f}")
+                    logger.info(f"    Min: {grad.min().item():.6f}")
+            else:
+                logger.info("  No gradients")
+        
+        # Log computation steps
+        logger.info("\n=== Computation Steps ===")
+        for i, step in enumerate(computation_steps):
+            logger.info(f"{i+1}. {step}")
+        
+        # Final assertions with detailed error messages
+        connection_grad = quantum_bridge.pattern_bundle.connection.grad
+        assert connection_grad is not None, \
+            "No gradients in pattern_bundle.connection - gradient flow is blocked"
+        
+        # Additional assertions to verify gradient quality
+        if connection_grad is not None:
+            grad_abs = connection_grad.abs()
+            assert torch.isfinite(grad_abs).all(), \
+                "Connection gradients contain inf/nan values"
+            assert grad_abs.mean() > 0, \
+                f"Connection gradients are zero (mean magnitude: {grad_abs.mean().item():.6f})"

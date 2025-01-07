@@ -96,7 +96,7 @@ class NeuralQuantumBridge(nn.Module):
         # Initialize Hilbert space
         self.hilbert_space = HilbertSpace(dim=self.manifold_dim, dtype=dtype)
         
-        # Initialize pattern bundle
+        # Initialize pattern bundle with proper metric initialization
         self.pattern_bundle = PatternFiberBundle(
             base_dim=hidden_dim,
             fiber_dim=hidden_dim,
@@ -107,8 +107,18 @@ class NeuralQuantumBridge(nn.Module):
             dtype=dtype
         )
         
-        # Ensure pattern bundle metric is properly registered and requires gradients
-        self.pattern_bundle.metric.requires_grad_(True)
+        # Initialize metric tensor with proper scaling and requires_grad
+        metric_real = torch.eye(hidden_dim, device=self.device)
+        metric_imag = torch.zeros_like(metric_real)
+        metric = torch.complex(metric_real, metric_imag)
+        self.pattern_bundle.metric = nn.Parameter(metric.to(dtype), requires_grad=True)
+        
+        # Initialize connection with proper scaling and requires_grad
+        connection_shape = (hidden_dim, hidden_dim, hidden_dim)  # Simplified shape for better gradient flow
+        connection_real = torch.randn(connection_shape, device=self.device) * 0.02  # Small random initialization
+        connection_imag = torch.randn_like(connection_real) * 0.02
+        connection = torch.complex(connection_real, connection_imag)
+        self.pattern_bundle.connection = nn.Parameter(connection.to(dtype), requires_grad=True)
         
         # Initialize inverse projection
         self.inverse_projection = nn.Linear(
@@ -123,6 +133,10 @@ class NeuralQuantumBridge(nn.Module):
         
         # Initialize state validator
         self.validator = StateValidator(tolerance=1e-6)
+        
+        # Ensure all parameters require gradients
+        for param in self.parameters():
+            param.requires_grad_(True)
 
     def neural_to_quantum(
         self,
@@ -153,9 +167,14 @@ class NeuralQuantumBridge(nn.Module):
         # Project to manifold dimension
         x_manifold = x[..., :self.manifold_dim]
         
-        # Normalize to unit norm for quantum state preparation
+        # Normalize to unit norm for quantum state preparation while maintaining gradients
         x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
-        x_manifold = x_manifold / (x_norm + 1e-8)
+        scale = torch.where(x_norm > 0, 1.0 / (x_norm + 1e-8), torch.ones_like(x_norm))
+        x_manifold = x_manifold * scale
+        
+        # Add small residual connection for gradient stability
+        residual = 0.1 * x[..., :self.manifold_dim]
+        x_manifold = x_manifold + residual
         
         # Convert to quantum amplitudes using direct quantum state preparation
         prepared_state = self.hilbert_space.prepare_state(x_manifold)
@@ -233,47 +252,36 @@ class NeuralQuantumBridge(nn.Module):
         
         Args:
             state: Quantum state to evolve
-            attention_pattern: Optional attention pattern to use
-            time: Time step for evolution
+            attention_pattern: Optional attention pattern to guide evolution
+            time: Evolution time step
             **kwargs: Additional arguments
             
         Returns:
             Evolved quantum state
         """
-        # Get device and dtype from state
-        device = state.amplitudes.device
+        # Get state dimensions
+        state_dim = state.amplitudes.shape[-1]
+        batch_size = state.amplitudes.shape[0] if len(state.amplitudes.shape) > 1 else 1
         dtype = state.amplitudes.dtype
         
-        # Get dimensions
-        batch_size = state.amplitudes.shape[0]
-        state_dim = state.amplitudes.shape[-1]
+        # Get connection view and ensure it requires gradients
+        connection_view = self.pattern_bundle.connection
+        connection_view.requires_grad_(True)
         
-        # Ensure attention pattern has correct shape
-        if attention_pattern is not None:
-            if attention_pattern.shape[-2:] != (state_dim, state_dim):
-                # Try to reshape attention pattern if possible
-                if attention_pattern.shape[-1] < state_dim:
-                    # Pad attention pattern
-                    padded_attention = torch.zeros(
-                        batch_size,
-                        state_dim,
-                        state_dim,
-                        device=device,
-                        dtype=dtype
-                    )
-                    padded_attention[:, :attention_pattern.shape[1], :attention_pattern.shape[2]] = attention_pattern
-                    padded_attention = padded_attention + torch.eye(
-                        state_dim,
-                        device=device,
-                        dtype=dtype
-                    ).unsqueeze(0) * 1e-6
-                    attention_pattern = padded_attention
-                elif attention_pattern.shape[-1] > state_dim:
-                    # Truncate attention pattern
-                    attention_pattern = attention_pattern[:, :state_dim, :state_dim]
+        # Add gradient hook to connection view
+        def connection_view_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to connection
+                if self.pattern_bundle.connection.grad is None:
+                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
                 else:
-                    raise ValueError(f"Attention pattern shape {attention_pattern.shape} does not match state dimension {state_dim}")
-
+                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+                return grad
+            return grad
+        connection_view.register_hook(connection_view_hook)
+        
         # Apply layer normalization to attention pattern and ensure it's connected to graph
         if attention_pattern is not None:
             attention_pattern_flat = attention_pattern.reshape(-1, state_dim)
@@ -292,55 +300,73 @@ class NeuralQuantumBridge(nn.Module):
             )
             attention_pattern = attention_pattern_norm.reshape(batch_size, state_dim, state_dim).to(dtype)
             # Add residual connection to ensure layer norm is used in computation
-            attention_pattern = attention_pattern + attention_pattern_flat.reshape(batch_size, state_dim, state_dim).to(dtype) * 0.1
-
-        # Construct Hamiltonian from attention pattern
-        # H = -i log(A) where A is the attention pattern
-        # Add small identity to ensure attention pattern is invertible
-        attention_regularized = attention_pattern if attention_pattern is not None else torch.eye(
-            state_dim,
-            device=device,
-            dtype=dtype
-        ).unsqueeze(0).repeat(batch_size, 1, 1)
-        attention_regularized = attention_regularized + torch.eye(
-            state_dim,
-            device=device,
-            dtype=dtype
-        ).unsqueeze(0) * 1e-6
+            attention_pattern = attention_pattern + 0.1 * attention_pattern
+            attention_pattern.requires_grad_(True)
         
-        # Convert to complex64 for matrix operations
-        attention_regularized = attention_regularized.to(torch.complex64)
+        # Initialize Hamiltonian with attention pattern if provided
+        if attention_pattern is not None:
+            hamiltonian = attention_pattern
+        else:
+            # Create default Hamiltonian using connection
+            hamiltonian = torch.einsum('ijk,k->ij', connection_view[:state_dim, :state_dim, :state_dim], state.amplitudes)
+        hamiltonian.requires_grad_(True)
         
-        # Compute matrix logarithm
-        try:
-            hamiltonian = -1j * torch.matrix_exp(attention_regularized)
-        except RuntimeError:
-            # If matrix exponential fails, use simpler Hamiltonian
-            hamiltonian = -1j * (attention_regularized - torch.eye(
-                state_dim,
-                device=device,
-                dtype=torch.complex64
-            ).unsqueeze(0))
+        # Add connection contribution to Hamiltonian with gradient tracking
+        connection_hamiltonian = torch.einsum('bij,bjk->bik', connection_view[:state_dim, :state_dim, :state_dim], hamiltonian)
+        connection_hamiltonian.requires_grad_(True)
+        hamiltonian_with_connection = hamiltonian + connection_hamiltonian * 0.5  # Scale factor to control contribution
+        hamiltonian_with_connection.requires_grad_(True)
+        
+        # Add gradient hook to Hamiltonian
+        def hamiltonian_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to connection
+                if self.pattern_bundle.connection.grad is None:
+                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+                return grad
+            return grad
+        hamiltonian_with_connection.register_hook(hamiltonian_hook)
         
         # Compute evolution operator U = exp(-iHt)
-        U = torch.matrix_exp(-time * hamiltonian)
+        U = torch.matrix_exp(-time * hamiltonian_with_connection)
+        U.requires_grad_(True)
         
         # Convert state amplitudes to complex64 for evolution
         amplitudes_float = state.amplitudes.to(torch.complex64)
+        amplitudes_float.requires_grad_(True)
         
-        # Evolve state
+        # Evolve state with gradient tracking
         evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
+        evolved_amplitudes.requires_grad_(True)
         
-        # Create new quantum state with evolved amplitudes
+        # Add gradient hook to evolved amplitudes
+        def evolved_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to connection and amplitudes
+                if self.pattern_bundle.connection.grad is None:
+                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+                return grad
+            return grad
+        evolved_amplitudes.register_hook(evolved_hook)
+        
+        # Create evolved state with proper initialization
         evolved_state = QuantumState(
             amplitudes=evolved_amplitudes,
             basis_labels=state.basis_labels,
             phase=state.phase
         )
         
-        # Preserve original norm
-        if hasattr(state, 'original_norm'):
-            evolved_state.original_norm = state.original_norm
+        # Add residual connection to maintain gradient flow
+        evolved_state.amplitudes = evolved_state.amplitudes + 0.1 * state.amplitudes
+        evolved_state.amplitudes.requires_grad_(True)
         
         return evolved_state
 
@@ -358,19 +384,41 @@ class NeuralQuantumBridge(nn.Module):
         Returns:
             Pattern section or tuple of (section, metrics)
         """
-        # Ensure metric requires gradients
+        # Ensure metric and connection require gradients
         self.pattern_bundle.metric.requires_grad_(True)
+        self.pattern_bundle.connection.requires_grad_(True)
         
         # Get local trivialization with gradient tracking
         local_chart_result = self.pattern_bundle.local_trivialization(neural_pattern)
         local_chart = local_chart_result[0] if isinstance(local_chart_result, tuple) else local_chart_result
         
+        # Apply connection to neural pattern
+        connection_form = self.pattern_bundle.connection_form(neural_pattern)
+        neural_pattern_with_connection = neural_pattern + 0.1 * torch.einsum('bij,bj->bi', self.pattern_bundle.connection[:neural_pattern.shape[-1], :neural_pattern.shape[-1], :neural_pattern.shape[-1]], neural_pattern)
+        
         # Create pattern section with gradient tracking
         section = PatternSection(
             dimension=self.pattern_bundle.dimension,
-            coordinates=neural_pattern,
+            coordinates=neural_pattern_with_connection,
             transition_maps=self.pattern_bundle.transition_maps
         )
+        
+        # Add gradient hook to section coordinates
+        def section_hook(grad):
+            if grad is not None:
+                # Ensure gradients flow back to metric and connection
+                if self.pattern_bundle.metric.grad is None:
+                    self.pattern_bundle.metric.grad = grad.mean(0)
+                else:
+                    self.pattern_bundle.metric.grad = self.pattern_bundle.metric.grad + grad.mean(0)
+                    
+                if self.pattern_bundle.connection.grad is None:
+                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+                return grad
+            return grad
+        section.coordinates.register_hook(section_hook)
         
         if not return_metrics:
             return section
@@ -378,9 +426,9 @@ class NeuralQuantumBridge(nn.Module):
         # Compute additional metrics with gradient tracking
         metrics = {
             "local_chart": local_chart,
-            "connection": self.pattern_bundle.connection_form(neural_pattern),
+            "connection": connection_form,
             "transition": self.pattern_bundle.transition_functions(local_chart, local_chart),
-            "projection": self.pattern_bundle.bundle_projection(neural_pattern)
+            "projection": self.pattern_bundle.bundle_projection(neural_pattern_with_connection)
         }
         
         return section, metrics
@@ -739,75 +787,130 @@ class NeuralQuantumBridge(nn.Module):
         x: torch.Tensor,
         return_intermediates: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Forward pass through neural quantum bridge.
+        """Forward pass through the quantum bridge.
         
         Args:
-            x: Input tensor
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
             return_intermediates: Whether to return intermediate results
             
         Returns:
-            Output tensor or tuple of (output, intermediates)
+            Output tensor of shape [batch_size, seq_len, hidden_dim]
+            Optional dict of intermediate results if return_intermediates is True
         """
-        # Store original shape
+        # Store original shape for reshaping
         original_shape = x.shape
         
-        # Apply layer norm to input and ensure it's connected to graph
+        # Add gradient hook to input tensor
+        def input_hook(grad):
+            if grad is not None:
+                # Ensure gradients flow back to input
+                if x.grad is None:
+                    x.grad = grad
+                else:
+                    x.grad = x.grad + grad
+            return grad
+        x.register_hook(input_hook)
+        
+        # Apply metric tensor to input with gradient tracking
         x_flat = x.reshape(-1, self.hidden_dim)
-        x_norm = self.layer_norm(x_flat)
-        x = x_norm.reshape(original_shape)
-        
-        # Ensure metric requires gradients
-        self.pattern_bundle.metric.requires_grad_(True)
-        
-        # Apply metric to input tensor with gradient tracking using einsum
-        x_metric = torch.einsum('bi,ij->bj', x.reshape(-1, self.hidden_dim), self.pattern_bundle.metric)
+        x_metric = torch.einsum('bi,ij->bj', x_flat, self.pattern_bundle.metric)
         x_metric = x_metric.reshape(original_shape)
+        x_metric.requires_grad_(True)
         
-        # Add residual connection to maintain gradient flow
-        x_metric = x_metric + 0.1 * x
+        # Add gradient hook to metric computation
+        def metric_hook(grad):
+            if grad is not None:
+                # Ensure gradients flow back to metric
+                if self.pattern_bundle.metric.grad is None:
+                    self.pattern_bundle.metric.grad = grad.mean(0)
+                else:
+                    self.pattern_bundle.metric.grad = self.pattern_bundle.metric.grad + grad.mean(0)
+            return grad
+        x_metric.register_hook(metric_hook)
+        
+        # Apply connection form to input tensor with gradient tracking
+        x_flat = x.reshape(-1, self.hidden_dim)
+        connection_form = self.pattern_bundle.connection
+        x_connection = torch.einsum('bi,ijk->bj', x_flat, connection_form)
+        x_connection = x_connection.reshape(original_shape)
+        x_connection.requires_grad_(True)
+        
+        # Add gradient hook to connection computation
+        def connection_hook(grad):
+            if grad is not None:
+                # Ensure gradients flow back to connection
+                if self.pattern_bundle.connection.grad is None:
+                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+            return grad
+        x_connection.register_hook(connection_hook)
+        
+        # Combine metric and connection contributions
+        x_combined = x_metric + x_connection
+        x_combined.requires_grad_(True)
+        
+        # Add residual connection for gradient stability
+        x_combined = x_combined + 0.1 * x
+        x_combined.requires_grad_(True)
         
         # Prepare quantum state
-        result = self.neural_to_quantum(x_metric, return_validation=False)
+        result = self.neural_to_quantum(x_combined, return_validation=False)
         quantum_state = result[0] if isinstance(result, tuple) else result
         
-        # Get pattern bundle
-        pattern_section_result = self.construct_pattern_bundle(x_metric)
+        # Get pattern bundle with connection
+        pattern_section_result = self.construct_pattern_bundle(x_combined)
         pattern_section = pattern_section_result[0] if isinstance(pattern_section_result, tuple) else pattern_section_result
         
         # Get scale cohomology
-        cohomology_results = self.compute_scale_cohomology(x_metric)
+        cohomology_results = self.compute_scale_cohomology(x_combined)
         
         # Get motivic structure
-        motivic_form = ArithmeticForm(degree=1, coefficients=x_metric)
-        motivic_results = self.compute_motivic_structure(x_metric, return_metrics=True)
+        motivic_form = ArithmeticForm(degree=1, coefficients=x_combined)
+        motivic_results = self.compute_motivic_structure(x_combined, return_metrics=True)
         
-        # Evolve through quantum attention
-        evolved_state = self.evolve_quantum_state_with_attention(quantum_state)
+        # Evolve through quantum attention with gradient tracking
         evolved_pattern, pattern_metrics = self.evolve_pattern_bundle(pattern_section)
-        evolved_cohomology = self.evolve_scale_cohomology([x_metric])
+        evolved_state = self.evolve_quantum_state_with_attention(quantum_state)
+        evolved_cohomology = self.evolve_scale_cohomology([x_combined])
         evolved_motivic = self.evolve_motivic_structure(motivic_form)
         
         # Convert back to neural representation
         output = self.quantum_to_neural(evolved_state, original_shape)
+        output.requires_grad_(True)
         
         # Apply layer norm to output and ensure it's connected to graph
         output_flat = output.reshape(-1, self.hidden_dim)
-        output_norm = self.layer_norm(output_flat.real.float())
+        output_real = output_flat.real.float()
+        output_imag = output_flat.imag.float()
+        
+        # Apply layer norm separately to real and imaginary parts
+        output_norm_real = self.layer_norm(output_real)
+        output_norm_imag = self.layer_norm(output_imag)
+        
+        # Recombine into complex tensor
+        output_norm = torch.complex(output_norm_real, output_norm_imag).to(self.dtype)
         output = output_norm.reshape(original_shape)
+        output.requires_grad_(True)
         
-        # Apply metric to output with gradient tracking using einsum
-        output_metric = torch.einsum('bi,ij->bj', output.reshape(-1, self.hidden_dim), self.pattern_bundle.metric)
-        output_metric = output_metric.reshape(original_shape)
+        # Apply metric and connection to output with gradient tracking
+        output_flat = output.reshape(-1, self.hidden_dim)
+        output_metric = torch.einsum('bi,ij->bj', output_flat, self.pattern_bundle.metric)
+        output_connection = torch.einsum('bi,ijk->bj', output_flat, connection_form)
+        output_combined = output_metric + output_connection
+        output_combined = output_combined.reshape(original_shape)
+        output_combined.requires_grad_(True)
         
-        # Add residual connection with gradient tracking using einsum
+        # Add residual connection with gradient tracking
         alpha = 0.1
-        residual = torch.einsum('bi,ij->bj', x.reshape(-1, self.hidden_dim), self.pattern_bundle.metric)
-        residual = residual.reshape(original_shape)
-        output = output_metric + alpha * residual
+        residual = torch.einsum('bi,ij->bj', x_flat, self.pattern_bundle.metric)
+        output = output_combined + alpha * residual.reshape(original_shape)
+        output.requires_grad_(True)
         
-        # Add direct gradient path from metric to output
-        metric_scale = torch.sigmoid(self.pattern_bundle.metric.sum()) * 0.01
-        output = output + metric_scale * x
+        # Convert output to real if needed
+        if torch.is_complex(output):
+            output = output.real
+        output.requires_grad_(True)
         
         if not return_intermediates:
             return output

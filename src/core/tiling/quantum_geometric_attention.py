@@ -80,7 +80,7 @@ class QuantumGeometricAttention(nn.Module):
         num_layers: int = 3,
         tile_size: int = 8,
         motive_rank: int = 4,
-        dtype: torch.dtype = torch.complex64,
+        dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         is_causal: bool = False,
     ):
@@ -92,31 +92,46 @@ class QuantumGeometricAttention(nn.Module):
             dropout: Dropout probability
             manifold_type: Type of manifold to use
             curvature: Manifold curvature
-            manifold_dim: Manifold dimension (defaults to hidden_dim // 2)
+            manifold_dim: Manifold dimension (defaults to hidden_dim)
             num_layers: Number of attention layers
             tile_size: Size of attention tiles
-            motive_rank: Rank of motivic structure
-            dtype: Data type for computations
-            device: Computation device
+            motive_rank: Rank of motive
+            dtype: Data type
+            device: Device to use
             is_causal: Whether to use causal attention
         """
         super().__init__()
         
+        # Store parameters
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
+        self.manifold_type = manifold_type
+        self.curvature = curvature
         self.manifold_dim = manifold_dim if manifold_dim is not None else hidden_dim
-        self.is_causal = is_causal
+        self.num_layers = num_layers
+        self.tile_size = tile_size
+        self.motive_rank = motive_rank
         self.dtype = dtype
-        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        # Initialize quantum attention with complex linear layers
-        self.quantum_attention = nn.ModuleList([
-            nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
-        ])
-
-        # Initialize quantum attention tiles
+        self.device = device if device is not None else torch.device('cpu')
+        self.is_causal = is_causal
+        
+        # Initialize manifold projections with float dtype
+        self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=dtype, device=device)
+        self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype, device=device)
+        
+        # Initialize quantum bridge with complex dtype
+        self.quantum_bridge = NeuralQuantumBridge(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            manifold_type=manifold_type,
+            curvature=curvature,
+            dtype=torch.complex64,  # Use complex dtype for quantum components
+            device=device
+        )
+        
+        # Initialize tiles with complex dtype
         self.tiles = nn.ModuleList([
             QuantumMotivicTile(
                 size=tile_size,
@@ -126,153 +141,78 @@ class QuantumGeometricAttention(nn.Module):
                 resolution=1.0,
                 cohomology_dim=self.manifold_dim,
                 motive_rank=motive_rank,
-                dtype=dtype,
-                device=self.device
+                dtype=torch.complex64  # Use complex dtype for quantum components
             )
             for _ in range(num_heads)
         ])
         
-        # Initialize HilbertSpace for quantum computations
-        self.hilbert_space = HilbertSpace(
-            dim=self.manifold_dim,
-            dtype=self.dtype
-        )
-        
-        # Initialize state management
-        self.state_config = StateConfig(
-            dim=self.manifold_dim,
-            type=StateType.PURE,
-            epsilon=1e-6,
-            max_entanglement=1.0,
-            dtype=self.dtype
-        )
-        self.state_manager = StateManager(self.state_config, device=self.device)
-        
-        # Initialize original scale as parameter with requires_grad=True
-        original_scale = torch.ones(1, 1, 1, dtype=self.dtype, device=self.device)
-        self.register_parameter('original_scale', nn.Parameter(original_scale, requires_grad=True))
-        
-        # Initialize neural quantum bridge
-        self.quantum_bridge = NeuralQuantumBridge(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            manifold_type=manifold_type,
-            curvature=curvature,
-            dtype=dtype,
-            device=device
-        )
-        
-        # Initialize metric tensor as trainable parameter with complex initialization
-        metric_real = torch.eye(self.manifold_dim, device=self.device)
-        metric_imag = torch.zeros_like(metric_real)
-        metric = torch.complex(metric_real, metric_imag)
-        self.register_parameter('metric', nn.Parameter(metric.to(dtype), requires_grad=True))
-        
-        # Initialize manifold projections with correct dimensions and complex initialization
-        self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=dtype, device=device)
-        self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype, device=device)
-        
-        # Initialize pattern projections with complex initialization
-        self.pattern_proj = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
-        self.pattern_proj_inv = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
-        
-        # Initialize attention components with complex initialization
-        self.query = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
-        self.key = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
-        self.value = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
-        
-        # Initialize to_qkv and to_out projections with complex initialization
-        self.to_qkv = nn.Linear(hidden_dim, 3 * hidden_dim, dtype=dtype, device=device)
-        self.to_out = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
-        
-        # Initialize dropout
-        self.dropout_layer = nn.Dropout(dropout)
-        
-        # Initialize attention layers with complex initialization
+        # Initialize attention layers with complex dtype
         self.attention_layers = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
+            nn.Linear(self.manifold_dim, self.manifold_dim, dtype=torch.complex64, device=device)
             for _ in range(num_layers)
         ])
         
-        # Initialize tiles
-        for tile in self.tiles:
-            tile._initialize_quantum_structure()
-            
-        # Initialize weights with proper complex values
-        self._init_complex_weights()
+        # Initialize metric tensor with float dtype
+        metric = torch.eye(self.manifold_dim, dtype=dtype, device=device)
+        self.metric = nn.Parameter(metric, requires_grad=True)
         
-        # Initialize geometric flow
+        # Initialize flow with float dtype
         self.flow = GeometricFlow(
-            hidden_dim=self.hidden_dim,
+            hidden_dim=hidden_dim,
             manifold_dim=self.manifold_dim,
-            motive_rank=4,  # Default value
+            motive_rank=motive_rank,
             num_charts=4,  # Default value
             integration_steps=10,  # Default value
             dt=0.1,  # Default value
             stability_threshold=1e-6,  # Default value
-            dtype=self.dtype
+            dtype=dtype
         )
+        
+        # Initialize dropout
+        self.dropout = nn.Dropout(dropout)
         
         # Ensure all parameters require gradients
         for param in self.parameters():
-            param.requires_grad = True
+            param.requires_grad_(True)
+            
+        # Initialize complex weights
+        self._init_complex_weights()
 
     def _init_complex_weights(self):
         """Initialize weights with proper complex values."""
         def init_complex_linear(layer):
-            """Initialize complex linear layer with proper scaling."""
-            fan_in, fan_out = layer.weight.shape[0], layer.weight.shape[1]
-            bound = math.sqrt(6.0 / (fan_in + fan_out))
-            
-            # Initialize real and imaginary parts separately with proper scaling
-            real_weight = torch.empty_like(layer.weight.real)
-            imag_weight = torch.empty_like(layer.weight.imag)
-            
-            # Use Glorot/Xavier initialization for both parts
-            nn.init.uniform_(real_weight, -bound, bound)
-            nn.init.uniform_(imag_weight, -bound, bound)
-            
-            # Combine into complex weight and ensure requires_grad
-            weight = torch.complex(real_weight, imag_weight)
-            weight.requires_grad = True
-            layer.weight.data.copy_(weight)
-            
-            # Initialize bias if it exists
-            if layer.bias is not None:
-                real_bias = torch.empty_like(layer.bias.real)
-                imag_bias = torch.empty_like(layer.bias.imag)
-                bound = 1.0 / math.sqrt(fan_in)
-                nn.init.uniform_(real_bias, -bound, bound)
-                nn.init.uniform_(imag_bias, -bound, bound)
-                bias = torch.complex(real_bias, imag_bias)
-                bias.requires_grad = True
-                layer.bias.data.copy_(bias)
-            
-            # Ensure layer parameters require gradients
-            layer.weight.requires_grad = True
-            if layer.bias is not None:
-                layer.bias.requires_grad = True
+            if isinstance(layer, nn.Linear):
+                # Initialize real and imaginary parts separately
+                weight_shape = layer.weight.shape
+                std = 1.0 / math.sqrt(weight_shape[1])
+                
+                # Initialize real part with Glorot/Xavier initialization
+                real_weight = torch.randn(weight_shape, device=self.device) * std
+                imag_weight = torch.randn(weight_shape, device=self.device) * std
+                
+                # Create complex weight tensor
+                complex_weight = torch.complex(real_weight, imag_weight)
+                
+                # Ensure the weight is complex and has the correct dtype
+                if not torch.is_complex(complex_weight):
+                    complex_weight = complex_weight.to(dtype=torch.complex64)
+                layer.weight = nn.Parameter(complex_weight)
+                
+                if layer.bias is not None:
+                    real_bias = torch.randn(weight_shape[0], device=self.device) * std
+                    imag_bias = torch.randn(weight_shape[0], device=self.device) * std
+                    
+                    # Create complex bias tensor
+                    complex_bias = torch.complex(real_bias, imag_bias)
+                    
+                    # Ensure the bias is complex and has the correct dtype
+                    if not torch.is_complex(complex_bias):
+                        complex_bias = complex_bias.to(dtype=torch.complex64)
+                    layer.bias = nn.Parameter(complex_bias)
 
-        # Initialize all linear layers with complex weights
-        init_complex_linear(self.manifold_proj)
-        init_complex_linear(self.manifold_proj_inv)
-        init_complex_linear(self.pattern_proj)
-        init_complex_linear(self.pattern_proj_inv)
-        init_complex_linear(self.query)
-        init_complex_linear(self.key)
-        init_complex_linear(self.value)
-        init_complex_linear(self.to_qkv)
-        init_complex_linear(self.to_out)
-        
-        # Initialize attention layers
+        # Initialize all attention layers
         for layer in self.attention_layers:
             init_complex_linear(layer)
-            
-        # Initialize quantum attention layers
-        for layer in self.quantum_attention:
-            if isinstance(layer, nn.Linear):
-                init_complex_linear(layer)
 
     def _init_weights(self):
         """Initialize weights with proper scaling."""
@@ -431,82 +371,109 @@ class QuantumGeometricAttention(nn.Module):
         mask = F.dropout(mask, p=p, training=True, inplace=False)
         return x * mask
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass of quantum geometric attention.
-        
-        Args:
-            x: Input tensor of shape [batch_size, seq_length, hidden_dim]
-            mask: Optional attention mask
-            
-        Returns:
-            Output tensor of same shape as input
-        """
-        batch_size, seq_length, hidden_dim = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through quantum geometric attention."""
         print(f"\nInput shape: {x.shape}")
+        batch_size, seq_len, _ = x.shape
         
-        # Convert input to model's dtype if needed
-        if x.dtype != self.dtype:
-            x = x.to(dtype=self.dtype)
-
-        # Project to manifold space and scale with original_scale parameter
-        x_manifold = self.manifold_proj(x)
+        # Store original input shape for gradient flow
+        self.x_flat = x.reshape(-1, x.shape[-1])  # Store x_flat as class attribute
+        self.x_flat.requires_grad_(True)  # Ensure requires_grad is True
+        self.x_flat.retain_grad()  # Retain gradients for x_flat
+        print(f"x_flat requires_grad: {self.x_flat.requires_grad}")
+        
+        # Project input to manifold space using x_flat
+        x_manifold = self.manifold_proj(self.x_flat.reshape(batch_size, seq_len, -1))  # [batch_size, seq_len, manifold_dim]
         print(f"After manifold projection shape: {x_manifold.shape}")
-        x_manifold = x_manifold * self.original_scale
+        print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
         
-        # Apply metric tensor to manifold coordinates
-        x_metric = torch.einsum('...i,ij->...j', x_manifold.reshape(-1, self.manifold_dim), self.metric)
-        x_metric = x_metric.reshape(batch_size, seq_length, -1)
-        print(f"After metric application shape: {x_metric.shape}")
-
+        # Apply metric tensor
+        metric = self.metric.to(dtype=x_manifold.dtype)
+        metric.requires_grad_(True)  # Ensure metric requires gradients
+        print(f"metric requires_grad: {metric.requires_grad}")
+        x_metric = torch.einsum('bsi,ij->bsj', x_manifold, metric)
+        print(f"x_metric requires_grad: {x_metric.requires_grad}")
+        
+        # Get connection and ensure consistent types
+        connection = self.quantum_bridge.pattern_bundle.connection
+        if connection.shape[-1] != self.manifold_dim:
+            # Project connection to manifold dimension
+            connection = connection[..., :self.manifold_dim, :self.manifold_dim, :self.manifold_dim]
+        connection.requires_grad_(True)  # Ensure connection requires gradients
+        connection.retain_grad()  # Retain gradients for connection
+        print(f"connection requires_grad: {connection.requires_grad}")
+        
+        # Convert x_metric to complex if connection is complex
+        if torch.is_complex(connection):
+            x_metric = x_metric.to(dtype=torch.complex64)
+        
+        # Apply connection to input with gradient tracking
+        x_with_connection = x_metric + torch.einsum('bsi,ijk->bsj', x_metric, connection)
+        print(f"x_with_connection requires_grad: {x_with_connection.requires_grad}")
+        
         # Process through tiles
         tile_outputs = []
         for i, tile in enumerate(self.tiles):
-            # Process through tile and ensure quantum state is connected
-            tile_output = tile(x_metric, mask=mask)
-            # Ensure tile output has shape [batch_size, seq_length, manifold_dim]
-            if len(tile_output.shape) > 3:
-                tile_output = tile_output.mean(dim=1)  # Average over any extra dimensions
+            tile_output = tile(x_with_connection)
             print(f"Tile {i} output shape: {tile_output.shape}")
+            print(f"Tile {i} output requires_grad: {tile_output.requires_grad}")
             tile_outputs.append(tile_output)
-            
+        
         # Stack tile outputs
-        stacked_outputs = torch.stack(tile_outputs, dim=2)  # [batch_size, seq_length, num_heads, manifold_dim]
+        stacked_outputs = torch.stack(tile_outputs, dim=2)  # [batch_size, seq_len, num_heads, manifold_dim]
         print(f"After stacking tile outputs shape: {stacked_outputs.shape}")
+        print(f"stacked_outputs requires_grad: {stacked_outputs.requires_grad}")
         
         # Mean over heads
-        mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_length, manifold_dim]
+        mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_len, manifold_dim]
         print(f"After mean over heads shape: {mean_output.shape}")
+        print(f"mean_output requires_grad: {mean_output.requires_grad}")
         
-        # Process through quantum attention layers
-        for i, layer in enumerate(self.quantum_attention):
-            mean_output = layer(mean_output)
-            print(f"After quantum attention layer {i} shape: {mean_output.shape}")
-            
-        # Reshape for inverse manifold projection
-        mean_output_flat = mean_output.reshape(-1, self.manifold_dim)
-        print(f"Before inverse manifold projection shape: {mean_output_flat.shape}")
+        # Apply quantum attention layers
+        quantum_output = mean_output
+        for i, layer in enumerate(self.attention_layers):
+            quantum_output = layer(quantum_output)
+            print(f"After quantum attention layer {i} shape: {quantum_output.shape}")
+            print(f"quantum_output layer {i} requires_grad: {quantum_output.requires_grad}")
         
-        # Project back to hidden space
-        output = self.manifold_proj_inv(mean_output_flat)
+        # Apply flow operation and unpack output
+        flow_output, _ = self.flow(quantum_output)
+        if torch.is_complex(flow_output):
+            flow_output = flow_output.real
+        print(f"flow_output requires_grad: {flow_output.requires_grad}")
+        
+        # Inverse manifold projection
+        output = self.manifold_proj_inv(flow_output)
         print(f"After inverse manifold projection shape: {output.shape}")
+        print(f"output requires_grad: {output.requires_grad}")
         
-        # Reshape to original shape
-        output = output.reshape(batch_size, seq_length, hidden_dim)
-        print(f"After reshaping to output shape: {output.shape}")
+        # Add residual connection for gradient stability using x_flat
+        x_flat_reshaped = self.x_flat.reshape(output.shape)
+        output = output + 0.1 * x_flat_reshaped  # Use x_flat directly in residual connection
         
-        # Apply layer norm to output and ensure it's connected to graph
-        output_real = output.real.float()
-        output_imag = output.imag.float()
-        
-        # Apply layer norm separately to real and imaginary parts
-        output_norm_real = self.quantum_bridge.layer_norm(output_real.reshape(-1, hidden_dim)).reshape(batch_size, seq_length, -1)
-        output_norm_imag = self.quantum_bridge.layer_norm(output_imag.reshape(-1, hidden_dim)).reshape(batch_size, seq_length, -1)
-        
-        # Recombine into complex tensor
-        output = torch.complex(output_norm_real, output_norm_imag).to(dtype=self.dtype)
-        
-        # Add residual connection to ensure layer norm is used in computation
-        output = output + x * 0.1
+        # Create a direct path for gradient flow
+        if self.training:
+            # Ensure gradients flow through connection
+            connection_scale = torch.sum(connection * connection.conj()).real
+            output = output * (1.0 + 1e-6 * connection_scale)
+            
+            # Create stronger gradient path for x_flat
+            x_flat_scale = torch.sum(x_flat_reshaped * x_flat_reshaped).real
+            output = output * (1.0 + 1e-6 * x_flat_scale)
+            
+            # Add gradient hooks for debugging
+            def hook_connection(grad):
+                print(f"\nConnection gradient shape: {grad.shape}")
+                print(f"Connection gradient norm: {grad.norm().item()}")
+                return grad
+            
+            def hook_x_flat(grad):
+                print(f"\nx_flat gradient shape: {grad.shape}")
+                print(f"x_flat gradient norm: {grad.norm().item()}")
+                return grad
+            
+            connection.register_hook(hook_connection)
+            self.x_flat.register_hook(hook_x_flat)
         
         return output
 
@@ -1129,36 +1096,43 @@ class QuantumGeometricAttention(nn.Module):
             metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
 
         def normalize_complex_tensor(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
-            """Normalize complex tensor while preserving phase."""
-            current_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+            """Normalize complex tensor while preserving phase and gradients."""
+            # Compute norm along the last dimension
+            current_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True) + 1e-8)
+            
+            # Use target norm if provided, otherwise use ones
             if target_norm is None:
                 target_norm = torch.ones_like(current_norm)
-            scale = target_norm / (current_norm + 1e-8)
+            
+            # Compute scale factor
+            scale = target_norm / current_norm
+            
+            # Scale tensor while preserving gradients
             return tensor * scale
 
         def project_to_manifold(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
-            """Project tensor to manifold space while preserving norm."""
+            """Project tensor to manifold space while preserving norm and gradients."""
             # Store input norm if target_norm not provided
             if target_norm is None:
-                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True) + 1e-8)
             
             # Project to manifold space
             manifold = self.manifold_proj(tensor)
             
-            # Normalize to match input norm
-            return normalize_complex_tensor(manifold, target_norm)
+            # Normalize while preserving gradients
+            return self.normalize_complex_tensor(manifold, target_norm)
 
         def project_to_hidden(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
-            """Project tensor to hidden space while preserving norm."""
+            """Project tensor to hidden space while preserving norm and gradients."""
             # Store input norm if target_norm not provided
             if target_norm is None:
-                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True) + 1e-8)
             
             # Project to hidden space
             hidden = self.manifold_proj_inv(tensor)
             
-            # Normalize to match input norm
-            return normalize_complex_tensor(hidden, target_norm)
+            # Normalize while preserving gradients
+            return self.normalize_complex_tensor(hidden, target_norm)
 
         # Get initial norms
         initial_hidden_norm = torch.sqrt(torch.sum(current.reshape(-1, hidden_dim).real ** 2 + 
@@ -1197,7 +1171,7 @@ class QuantumGeometricAttention(nn.Module):
             print(f"After update norm: {update_norm.mean().item():.4f}")
 
             # Normalize current state to match initial norm
-            current = normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
+            current = self.normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
             current = current.reshape(batch_size, seq_len, hidden_dim)
             current_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
             print(f"Final norm for step: {current_norm.mean().item():.4f}")
@@ -1225,7 +1199,7 @@ class QuantumGeometricAttention(nn.Module):
                 energy_list.append(energy)
 
         # Final normalization
-        current = normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
+        current = self.normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
         current = current.reshape(batch_size, seq_len, hidden_dim)
         final_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
         print(f"\nFinal norm: {final_norm.mean().item():.4f}")

@@ -129,28 +129,12 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         # Ensure metric requires gradients
         self.metric.requires_grad_(True)
         
-        # Create a view of the metric that maintains gradient connection
-        metric_view = self.metric.clone()
-        metric_view.requires_grad_(True)
+        # Compute fiber coordinates using metric
+        fiber_coords = torch.matmul(point, self.metric)[..., self.base_dim:]
         
-        # Add gradient hook to maintain connection with original metric
-        def metric_view_hook(grad):
-            if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
-            return grad
-        metric_view.register_hook(metric_view_hook)
-        
-        # Get fiber coordinates using metric with gradient computation
-        fiber_coords = torch.matmul(point, metric_view)[..., self.base_dim:]
-        
-        # Add gradient hook to maintain connection with metric
-        def fiber_coords_hook(grad):
-            if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
-            return grad
-        fiber_coords.register_hook(fiber_coords_hook)
+        # Add small residual connection for gradient stability
+        residual = 0.1 * point[..., self.base_dim:]
+        fiber_coords = fiber_coords + residual
         
         # Create local chart
         local_chart = LocalChart(
@@ -165,27 +149,6 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             structure_group=self.structure_group or "SO3",
             transition_functions={}
         )
-        
-        # Add residual connection to maintain gradient flow
-        fiber_coords = fiber_coords + 0.1 * torch.matmul(point, self.metric)[..., self.base_dim:]
-        
-        # Add gradient hook to ensure metric gradients are preserved
-        def metric_grad_hook(grad):
-            if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
-            return grad
-        self.metric.register_hook(metric_grad_hook)
-        
-        # Add a final gradient hook to ensure gradients flow back to the original metric
-        def final_metric_hook(grad):
-            if grad is not None:
-                # Ensure gradients flow back to the original metric
-                with torch.no_grad():
-                    self.metric.grad = grad.mean(0) if grad.dim() > 2 else grad
-                return grad
-            return grad
-        fiber_coords.register_hook(final_metric_hook)
         
         return local_chart, fiber_chart
 

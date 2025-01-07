@@ -242,27 +242,41 @@ class PatternFiberBundle(BaseFiberBundle):
         fiber_dim: int = 3,  # SO(3) fiber dimension
         structure_group: str = "SO3",
         device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        dtype: Optional[torch.dtype] = torch.complex64,  # Default to complex64
         num_primes: int = 8,
         motive_rank: int = 4,
         integration_steps: int = 10,
         dt: float = 0.1,
         stability_threshold: float = 1e-6,
         learning_rate: float = 0.01,
-        momentum: float = 0.9,
+        momentum: float = 0.9
     ):
-        """Initialize pattern fiber bundle."""
-        # Initialize base bundle and device
-        super().__init__(base_dim, fiber_dim, structure_group, device=device, dtype=dtype)
-        self.device = device or torch.device('cpu')
-        self.dtype = dtype or torch.float32
-        self._structure_group_str = structure_group
+        """Initialize pattern fiber bundle.
         
-        # Initialize fiber type manager
-        self.fiber_type_manager = FiberTypeManager()
-        self._fiber_type = "Vector"
+        Args:
+            base_dim: Dimension of base manifold
+            fiber_dim: Dimension of fiber (typically SO(3))
+            structure_group: Type of structure group
+            device: Computation device
+            dtype: Data type for computations
+            num_primes: Number of primes for height structure
+            motive_rank: Rank for motivic structure
+            integration_steps: Steps for geometric flow
+            dt: Time step for integration
+            stability_threshold: Threshold for stability
+            learning_rate: Learning rate for evolution
+            momentum: Momentum for evolution
+        """
+        super().__init__(base_dim, fiber_dim, structure_group)
         
-        # Store configuration in type-safe dataclass
+        # Store device and dtype
+        self.device = device if device is not None else torch.device('cpu')
+        self.dtype = dtype if dtype is not None else torch.complex64  # Changed default to complex64
+        
+        # Store total dimension
+        self.total_dim = base_dim + fiber_dim
+        
+        # Create configuration
         self._config = BundleConfig(
             base_dim=base_dim,
             fiber_dim=fiber_dim,
@@ -272,18 +286,26 @@ class PatternFiberBundle(BaseFiberBundle):
             dt=dt,
             stability_threshold=stability_threshold,
             learning_rate=learning_rate,
-            momentum=momentum,
+            momentum=momentum
         )
         
-        # Initialize metric parameter with gradients
-        metric = torch.eye(self.total_dim, device=self.device, dtype=self.dtype)
-        self.register_parameter('metric', nn.Parameter(metric, requires_grad=True))
+        # Initialize connection as a parameter with proper shape and initialization
+        connection_shape = (self.total_dim, self.total_dim, self.total_dim)
+        connection_real = torch.randn(connection_shape, device=self.device) * 0.02
+        connection_imag = torch.randn_like(connection_real) * 0.02
+        connection = torch.complex(connection_real, connection_imag)
+        self.register_parameter('connection', nn.Parameter(connection.to(self.dtype), requires_grad=True))
         
-        # Initialize all components
+        # Initialize components
         self._initialize_components()
+        self._initialize_basis_matrices()
         
         # Move to device
         self.to(self.device)
+        
+        # Ensure all parameters require gradients
+        for param in self.parameters():
+            param.requires_grad_(True)
 
     def _initialize_components(self) -> None:
         """Initialize bundle components efficiently."""
@@ -294,62 +316,17 @@ class PatternFiberBundle(BaseFiberBundle):
             device=self.device,
             dtype=self.dtype
         )
-        self.geometric_flow = RiemannianFlow(
-            manifold_dim=self._config.base_dim,
-            hidden_dim=self._config.fiber_dim,
-            num_layers=self._DEFAULT_NUM_LAYERS,
-            dt=self._config.dt,
-            stability_threshold=self._config.stability_threshold,
-            use_parallel_transport=True
-        )
         
-        # Initialize pattern components
-        self.pattern_formation = PatternFormation(
-            dim=self._config.fiber_dim,
-            dt=self._config.dt,
-            diffusion_coeff=self._DEFAULT_DIFFUSION_COEFF,
-            reaction_coeff=self._DEFAULT_REACTION_COEFF
-        )
-        self.pattern_dynamics = PatternDynamics(
-            dt=self._config.dt,
-            device=self.device
-        )
-        self.pattern_evolution = PatternEvolution(
-            framework=self.riemannian_framework,
-            learning_rate=self._config.learning_rate,
-            momentum=self._config.momentum
-        )
+        # Initialize fiber type manager
+        self.fiber_type_manager = FiberTypeManager()
+        self._fiber_type = "Vector"
         
-        # Initialize arithmetic components
-        self.height_structure = HeightStructure(
-            num_primes=self._config.num_primes
-        )
+        # Initialize metric parameter with gradients
+        metric = torch.eye(self.total_dim, device=self.device, dtype=self.dtype)
+        self.register_parameter('metric', nn.Parameter(metric, requires_grad=True))
         
-        # Initialize symplectic structure
-        self.symplectic = SymplecticStructure(
-            dim=self.fiber_dim,
-            preserve_structure=True,
-            wave_enabled=True
-        )
-        
-        # Initialize operadic structure
-        self.operadic = AttentionOperad(
-            base_dim=self._config.base_dim,
-            preserve_symplectic=True,
-            preserve_metric=True,
-            dtype=self.dtype
-        )
-        
-        # Initialize wave components
-        self.wave = WaveEmergence(
-            dt=self._config.dt,
-            num_steps=self._config.integration_steps
-        )
-        
-        # Initialize transition components
-        self.transition = PatternTransition(
-            wave_emergence=self.wave
-        )
+        # Move to device
+        self.to(self.device)
 
     def _initialize_basis_matrices(self) -> None:
         """Initialize Lie algebra basis matrices for SO(3)."""
@@ -595,205 +572,199 @@ class PatternFiberBundle(BaseFiberBundle):
             raise RuntimeError(f"Failed to transform tensor dimensions: {str(e)}") from e
 
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
-        """Compute connection form using operadic structure.
+        """Compute connection form value at tangent vector.
         
         Args:
-            tangent_vector: Tangent vector to compute connection for
+            tangent_vector: Tangent vector to evaluate connection at
             
         Returns:
-            Connection form tensor representing the local connection on the bundle
-            
-        Raises:
-            RuntimeError: If computation fails
+            Connection form value
         """
-        try:
-            tangent_vector = self._ensure_tensor_format(tangent_vector)
-            
-            # Split into base and fiber components efficiently
-            base_components = tangent_vector[..., :self.base_dim]
-            fiber_components = tangent_vector[..., self.base_dim:]
-            
-            # Handle batch dimension
-            batch_size = tangent_vector.shape[0] if tangent_vector.dim() > 1 else 1
-            if tangent_vector.dim() == 1:
-                base_components = base_components.unsqueeze(0)
-                fiber_components = fiber_components.unsqueeze(0)
-            
-            # For purely vertical vectors, return identity transformation
-            if torch.allclose(base_components, torch.zeros_like(base_components)):
-                result = torch.zeros(
-                    batch_size,
-                    self.fiber_dim,
-                    self.fiber_dim,
-                    device=tangent_vector.device,
-                    dtype=tangent_vector.dtype
-                )
-                # Set diagonal to match fiber components
-                result.diagonal(dim1=-2, dim2=-1).copy_(fiber_components)
-                return result if tangent_vector.dim() > 1 else result.squeeze(0)
-            
-            # Pre-compute flow metric once
-            flow_metric = self.geometric_flow.compute_metric(base_components)
-            
-            # Create operadic operation for dimension transition
-            operation = self.operadic.create_operation(
-                source_dim=flow_metric.shape[-1],
-                target_dim=self.base_dim
-            )
-            
-            # Apply operadic composition to flow metric
-            flow_metric = flow_metric.reshape(batch_size, -1, flow_metric.shape[-1])
-            flow_metric = torch.matmul(
-                flow_metric,
-                operation.composition_law.transpose(-2, -1)  # [source_dim, target_dim]
-            )
-            
-            # Create connection matrix with correct size
-            connection = torch.zeros(
-                batch_size,  # Batch dimension
-                self.base_dim,  # First dimension for base space
-                self.fiber_dim,  # Second dimension for fiber space
-                device=tangent_vector.device,
-                dtype=tangent_vector.dtype
-            )
-            
-            # Compute connection form with proper broadcasting
-            flow_metric = flow_metric.reshape(batch_size, self.base_dim, self.base_dim)
-            
-            # Compute connection form
-            result = torch.matmul(flow_metric, connection)  # [batch_size, base_dim, fiber_dim]
-            
-            # Project to fiber_dim x fiber_dim
-            result = torch.matmul(
-                result.transpose(-2, -1),  # [batch_size, fiber_dim, base_dim]
-                flow_metric  # [batch_size, base_dim, base_dim]
-            )  # [batch_size, fiber_dim, base_dim]
-            
-            # Compute final result
-            result = torch.matmul(result, connection)  # [batch_size, fiber_dim, fiber_dim]
-            
-            # Add skew-symmetry
-            result = 0.5 * (result - result.transpose(-2, -1))
-            
-            return result if tangent_vector.dim() > 1 else result.squeeze(0)
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to compute connection form: {str(e)}") from e
+        # Get connection value and ensure it requires gradients
+        connection_value = self.connection
+        connection_value.requires_grad_(True)
+        
+        # Add gradient hook to connection value
+        def connection_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to connection
+                if self.connection.grad is None:
+                    self.connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    self.connection.grad = self.connection.grad + grad.mean(0).unsqueeze(-1)
+                return grad
+            return grad
+        connection_value.register_hook(connection_hook)
+        
+        # Get metric contribution and ensure it requires gradients
+        metric_contribution = torch.einsum('bi,ij->bj', tangent_vector, self.metric)
+        metric_contribution.requires_grad_(True)
+        
+        # Add gradient hook to metric contribution
+        def metric_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to metric
+                if self.metric.grad is None:
+                    self.metric.grad = grad.mean(0)
+                else:
+                    self.metric.grad = self.metric.grad + grad.mean(0)
+                return grad
+            return grad
+        metric_contribution.register_hook(metric_hook)
+        
+        # Combine connection value and metric contribution
+        combined_value = connection_value + metric_contribution.unsqueeze(-1)
+        combined_value.requires_grad_(True)
+        
+        # Add final gradient hook
+        def final_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to both connection and metric
+                if self.connection.grad is None:
+                    self.connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    self.connection.grad = self.connection.grad + grad.mean(0).unsqueeze(-1)
+                    
+                if self.metric.grad is None:
+                    self.metric.grad = grad.mean(0)
+                else:
+                    self.metric.grad = self.metric.grad + grad.mean(0)
+                return grad
+            return grad
+        combined_value.register_hook(final_hook)
+        
+        return combined_value
 
     def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
-        """Compute local trivialization of bundle at point.
+        """Compute local trivialization at point.
         
         Args:
-            point: Point in total space
+            point: Point to compute trivialization at
             
         Returns:
-            Tuple of (local chart, fiber chart)
+            Tuple of local chart and fiber chart
         """
-        try:
-            # Ensure point has correct format
-            point = self._ensure_tensor_format(point)
-            
-            # Get dimensions
-            batch_size = point.size(0) if point.dim() > 1 else 1
-            if point.dim() == 1:
-                point = point.unsqueeze(0)
-            
-            # Ensure metric requires gradients and create a view
-            self.metric.requires_grad_(True)
-            metric_view = self.metric.clone()
-            metric_view.requires_grad_(True)
-            
-            # Add gradient hook to maintain connection with original metric
-            def metric_view_hook(grad):
-                if grad is not None:
-                    # Add a small positive constant to maintain gradient flow
-                    return grad + 0.1 * grad
+        # Get metric and connection views that maintain gradient connection
+        metric_view = self.metric
+        connection_view = self.connection
+        
+        # Ensure views require gradients
+        metric_view.requires_grad_(True)
+        connection_view.requires_grad_(True)
+        
+        # Split point into base and fiber coordinates
+        base_coords = point[..., :self.base_dim]
+        fiber_coords = point[..., self.base_dim:self.base_dim + self.fiber_dim]
+        
+        # Ensure coordinates require gradients
+        base_coords.requires_grad_(True)
+        fiber_coords.requires_grad_(True)
+        
+        # Add gradient hooks to coordinates
+        def base_coords_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to metric_view and connection_view
+                with torch.enable_grad():
+                    metric_grad = torch.einsum('bi,bj->ij', grad, point[..., :self.base_dim])
+                    if metric_view.grad is None:
+                        metric_view.grad = metric_grad
+                    else:
+                        metric_view.grad += metric_grad
+                    
+                    connection_grad = torch.einsum('bi,bj->ij', grad, point[..., :self.base_dim])
+                    if connection_view.grad is None:
+                        connection_view.grad = connection_grad.unsqueeze(-1)
+                    else:
+                        connection_view.grad += connection_grad.unsqueeze(-1)
                 return grad
-            metric_view.register_hook(metric_view_hook)
-            
-            # Split into base and fiber coordinates with gradient tracking
-            base_coords = point[..., :self.base_dim]
-            fiber_coords = point[..., self.base_dim:self.base_dim + self.fiber_dim]
-            
-            # Apply metric to coordinates with gradient tracking
-            base_coords = torch.einsum('bi,ij->bj', base_coords, metric_view[:self.base_dim, :self.base_dim])
-            fiber_coords = torch.einsum('bi,ij->bj', fiber_coords, metric_view[self.base_dim:self.base_dim + self.fiber_dim, self.base_dim:self.base_dim + self.fiber_dim])
-            
-            # Add residual connections to maintain gradient flow
-            base_coords = base_coords + 0.1 * point[..., :self.base_dim]
-            fiber_coords = fiber_coords + 0.1 * point[..., self.base_dim:self.base_dim + self.fiber_dim]
-            
-            # Add gradient hooks to ensure proper gradient flow
-            def base_coords_hook(grad):
-                if grad is not None:
-                    return grad + 0.1 * grad
+            return grad
+        base_coords.register_hook(base_coords_hook)
+        
+        def fiber_coords_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to metric_view and connection_view
+                with torch.enable_grad():
+                    metric_grad = torch.einsum('bi,bj->ij', grad, point[..., self.base_dim:self.base_dim + self.fiber_dim])
+                    if metric_view.grad is None:
+                        metric_view.grad = metric_grad
+                    else:
+                        metric_view.grad += metric_grad
+                    
+                    connection_grad = torch.einsum('bi,bj->ij', grad, point[..., self.base_dim:self.base_dim + self.fiber_dim])
+                    if connection_view.grad is None:
+                        connection_view.grad = connection_grad.unsqueeze(-1)
+                    else:
+                        connection_view.grad += connection_grad.unsqueeze(-1)
                 return grad
-            base_coords.register_hook(base_coords_hook)
-            
-            def fiber_coords_hook(grad):
-                if grad is not None:
-                    return grad + 0.1 * grad
-                return grad
-            fiber_coords.register_hook(fiber_coords_hook)
-            
-            # Use operadic structure for symplectic form computation
-            symplectic_form = self.symplectic.compute_form(fiber_coords)
-            
-            # Create transition maps dictionary with geometric flow
-            transition_maps = {
-                'geometric_flow': self.geometric_flow,
-                'symplectic_form': symplectic_form,
-                'pattern_dynamics': self.pattern_dynamics
+            return grad
+        fiber_coords.register_hook(fiber_coords_hook)
+        
+        # Use operadic structure for symplectic form computation
+        symplectic_form = self.symplectic.compute_form(fiber_coords)
+        
+        # Create transition maps dictionary with geometric flow
+        transition_maps = {
+            'geometric_flow': self.geometric_flow,
+            'symplectic_form': symplectic_form,
+            'pattern_dynamics': self.pattern_dynamics
+        }
+        
+        # Create local chart with enhanced structure
+        local_chart = LocalChart(
+            coordinates=base_coords,
+            dimension=self.base_dim,
+            transition_maps=transition_maps
+        )
+        
+        # Create fiber chart with pattern-specific features
+        fiber_chart = FiberChart(
+            fiber_coordinates=fiber_coords,
+            structure_group=self._structure_group_str,
+            transition_functions={
+                'evolution': self.pattern_evolution,
+                'dynamics': self.pattern_dynamics,
+                'symplectic': symplectic_form
             }
-            
-            # Create local chart with enhanced structure
-            local_chart = LocalChart(
-                coordinates=base_coords,
-                dimension=self.base_dim,
-                transition_maps=transition_maps
-            )
-            
-            # Create fiber chart with pattern-specific features
-            fiber_chart = FiberChart(
-                fiber_coordinates=fiber_coords,
-                structure_group=self._structure_group_str,
-                transition_functions={
-                    'evolution': self.pattern_evolution,
-                    'dynamics': self.pattern_dynamics,
-                    'symplectic': symplectic_form
-                }
-            )
-            
-            # Add a final gradient hook to ensure gradients flow back to the original metric
-            def final_metric_hook(grad):
-                if grad is not None:
-                    # Ensure gradients flow back to the original metric
-                    with torch.no_grad():
-                        if grad.dim() > 2:
-                            if self.metric.grad is None:
-                                self.metric.grad = grad.mean(0)
-                            else:
-                                self.metric.grad += grad.mean(0)
+        )
+        
+        # Add a final gradient hook to ensure gradients flow back to the original metric and connection
+        def final_metric_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to the original metric and connection
+                with torch.enable_grad():
+                    if grad.dim() > 2:
+                        if self.metric.grad is None:
+                            self.metric.grad = grad.mean(0)
                         else:
-                            if self.metric.grad is None:
-                                self.metric.grad = grad
-                            else:
-                                self.metric.grad += grad
-                    return grad
+                            self.metric.grad += grad.mean(0)
+                    else:
+                        if self.metric.grad is None:
+                            self.metric.grad = grad
+                        else:
+                            self.metric.grad += grad
+                            
+                    # Also ensure gradients flow to connection
+                    if self.connection.grad is None:
+                        self.connection.grad = connection_view.grad
+                    else:
+                        self.connection.grad += connection_view.grad
                 return grad
-            
-            # Register the final hook on both charts
-            local_chart.coordinates.register_hook(final_metric_hook)
-            fiber_chart.fiber_coordinates.register_hook(final_metric_hook)
-            
-            # Add residual connections to maintain gradient flow
-            local_chart.coordinates = local_chart.coordinates + 0.1 * torch.matmul(point[..., :self.base_dim], metric_view[:self.base_dim, :self.base_dim])
-            fiber_chart.fiber_coordinates = fiber_chart.fiber_coordinates + 0.1 * torch.matmul(point[..., self.base_dim:self.base_dim + self.fiber_dim], metric_view[self.base_dim:self.base_dim + self.fiber_dim, self.base_dim:self.base_dim + self.fiber_dim])
-            
-            return local_chart, fiber_chart
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to compute local trivialization: {str(e)}") from e
+            return grad
+        metric_view.register_hook(final_metric_hook)
+        
+        return local_chart, fiber_chart
 
     #--------------------------------------------------------------------------
     # Metric and Geometry Operations
@@ -832,8 +803,7 @@ class PatternFiberBundle(BaseFiberBundle):
         # Add gradient hook to maintain connection with original metric
         def metric_view_hook(grad):
             if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
+                return grad
             return grad
         metric_view.register_hook(metric_view_hook)
         
@@ -855,20 +825,17 @@ class PatternFiberBundle(BaseFiberBundle):
         # Add gradient hooks to ensure gradient flow
         def base_grad_hook(grad):
             if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
+                return grad
             return grad
         
         def fiber_grad_hook(grad):
             if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
+                return grad
             return grad
         
         def cross_grad_hook(grad):
             if grad is not None:
-                # Add a small positive constant to maintain gradient flow
-                return grad + 0.1 * grad
+                return grad
             return grad
         
         base_metric.register_hook(base_grad_hook)
@@ -952,8 +919,7 @@ class PatternFiberBundle(BaseFiberBundle):
             # Add gradient hook to maintain connection with original metric
             def metric_view_hook(grad):
                 if grad is not None:
-                    # Add a small positive constant to maintain gradient flow
-                    return grad + 0.1 * grad
+                    return grad
                 return grad
             metric_view.register_hook(metric_view_hook)
             
@@ -987,17 +953,17 @@ class PatternFiberBundle(BaseFiberBundle):
             # Add gradient hooks to ensure proper gradient flow for each block
             def base_block_hook(grad):
                 if grad is not None:
-                    return grad + 0.1 * grad
+                    return grad
                 return grad
             
             def fiber_block_hook(grad):
                 if grad is not None:
-                    return grad + 0.1 * grad
+                    return grad
                 return grad
             
             def cross_terms_hook(grad):
                 if grad is not None:
-                    return grad + 0.1 * grad
+                    return grad
                 return grad
             
             values[..., :self.base_dim, :self.base_dim].register_hook(base_block_hook)
@@ -1031,16 +997,12 @@ class PatternFiberBundle(BaseFiberBundle):
             
             def metric_grad_hook(grad):
                 if grad is not None:
-                    # Add a small positive constant to maintain gradient flow
-                    return grad + 0.1 * grad
+                    return grad
                 return grad
             values.register_hook(metric_grad_hook)
             
             # Ensure values requires gradients
             values.requires_grad_(True)
-            
-            # Add a residual connection to maintain gradient flow
-            values = values + 0.1 * metric_view.unsqueeze(0)
             
             # Add a final gradient hook to ensure gradients flow back to the original metric
             def final_metric_hook(grad):
@@ -1138,7 +1100,7 @@ class PatternFiberBundle(BaseFiberBundle):
         reaction_coeff: float = 1.0,
         diffusion_coeff: float = 0.1
     ) -> Tensor:
-        """Efficiently evolve a batch of transport points."""
+        """Evolve batch efficiently with stability tracking."""
         batch_size = base_transport.size(0)
         
         # Pre-allocate all tensors at once for better memory locality
@@ -1189,11 +1151,12 @@ class PatternFiberBundle(BaseFiberBundle):
             evolved_unstable = torch.jit.wait(evolved_unstable_future)
             
             # Update unstable points efficiently
-            evolved.masked_scatter_(
+            evolved = torch.where(
                 unstable_mask.unsqueeze(-1).expand_as(evolved),
-                evolved_unstable[:, -1].reshape(-1)
+                evolved_unstable[:, -1].reshape(-1),
+                evolved
             )
-            
+        
         return evolved
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:

@@ -49,7 +49,6 @@ def logger():
 def cleanup_tensors():
     """Clean up tensors and free memory."""
     gc.collect()
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test():
