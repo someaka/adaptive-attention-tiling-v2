@@ -484,44 +484,99 @@ class QuantumGeometricAttention(nn.Module):
         
         return output
 
-    def prepare_attention_state(
-        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> AttentionState:
-        """Prepare attention state with optional mask."""
-        if mask is None:
-            mask = torch.ones(x.shape[:-1], device=x.device, dtype=self.dtype)
+    def prepare_attention_state(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> AttentionState:
+        """Prepare attention state from input tensor.
         
-        # Initialize quantum and geometric states with correct dimensions
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
+            mask: Optional attention mask
+            
+        Returns:
+            AttentionState object containing quantum state
+        """
         batch_size, seq_len, _ = x.shape
         
-        # Initialize quantum state with random values and normalize
-        quantum_state = torch.randn(
-            batch_size, self.num_heads, seq_len, self.manifold_dim,
-            dtype=self.dtype, device=x.device
+        # Project to manifold space
+        x_manifold = self.manifold_proj(x)  # [batch_size, seq_len, manifold_dim]
+        
+        # Normalize quantum state
+        quantum_state = self.normalize_complex_tensor(x_manifold)
+        
+        # Reshape for multi-head attention
+        quantum_state = quantum_state.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+        
+        # Create state manager with config
+        config = StateConfig(
+            dim=self.hidden_dim,
+            type=StateType.PURE,
+            dtype=x.dtype
         )
-        # Normalize quantum state along the last dimension
-        quantum_state = quantum_state / quantum_state.norm(dim=-1, keepdim=True)
+        state_manager = StateManager(config, device=x.device)
+        state_manager.states["quantum"] = quantum_state
         
-        # Initialize geometric state
-        geometric_state = torch.zeros(
-            batch_size, self.num_heads, seq_len, self.manifold_dim,
-            dtype=self.dtype, device=x.device
+        # Initialize geometric and manifold states
+        geometric_state = torch.zeros_like(quantum_state)
+        manifold_state = torch.zeros_like(quantum_state)
+        
+        # Create attention state with all required parameters
+        state = AttentionState(
+            state_manager=state_manager,
+            geometric_state=geometric_state,
+            manifold_state=manifold_state
         )
         
-        # Initialize AttentionState
-        state = AttentionState.initialize(
-            hidden_dim=self.hidden_dim,
-            num_heads=self.num_heads,
-            device=x.device,
-            dtype=self.dtype
-        )
+        # Apply mask if provided
+        if mask is not None:
+            state = self.apply_mask(state, mask)
+            
+        return state
+
+    def apply_mask(self, state: AttentionState, mask: torch.Tensor) -> AttentionState:
+        """Apply attention mask to the quantum state.
         
-        # Store quantum state in state manager
-        state.state_manager.states["quantum"] = quantum_state
+        Args:
+            state: The current attention state
+            mask: Boolean mask tensor of shape [batch_size, seq_length]
+            
+        Returns:
+            Updated attention state with mask applied
+        """
+        if mask is None:
+            return state
+            
+        # Get quantum state
+        quantum_state = state.state_manager.states.get("quantum")
+        if quantum_state is None:
+            return state
+            
+        # Expand mask for multi-head attention
+        expanded_mask = mask.unsqueeze(1).unsqueeze(-1)  # [batch_size, 1, seq_len, 1]
+        expanded_mask = expanded_mask.expand(-1, quantum_state.size(1), -1, -1)  # [batch_size, num_heads, seq_len, 1]
         
-        # Initialize geometric components
-        state.geometric_state = geometric_state
-        state.manifold_state = geometric_state.clone()
+        # Initialize attention scores if not present
+        if state.attention_scores is None:
+            # Create attention scores with -inf where mask is False
+            attention_mask = mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
+            attention_mask = attention_mask.expand(-1, self.num_heads, mask.size(1), -1)  # [batch_size, num_heads, seq_len, seq_len]
+            
+            state.attention_scores = torch.full(
+                (mask.size(0), self.num_heads, mask.size(1), mask.size(1)),
+                float("-inf"),
+                device=mask.device
+            )
+            # Set 0 where mask is True
+            state.attention_scores = state.attention_scores.masked_fill(attention_mask, 0.0)
+        else:
+            # Apply mask to existing attention scores
+            attention_mask = mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
+            attention_mask = attention_mask.expand(-1, self.num_heads, mask.size(1), -1)  # [batch_size, num_heads, seq_len, seq_len]
+            state.attention_scores = state.attention_scores.masked_fill(~attention_mask, float("-inf"))
+        
+        # Apply mask to quantum state
+        masked_quantum_state = quantum_state * expanded_mask
+        
+        # Update state
+        state.state_manager.states["quantum"] = masked_quantum_state
         
         return state
 
@@ -1117,107 +1172,13 @@ class QuantumGeometricAttention(nn.Module):
             # Reshape to [batch_size * seq_len, manifold_dim, manifold_dim]
             metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
 
-        def project_to_manifold(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
-            """Project tensor to manifold space while preserving norm and gradients."""
-            # Store input norm if target_norm not provided
-            if target_norm is None:
-                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True) + 1e-8)
-            
-            # Project to manifold space
-            manifold = self.manifold_proj(tensor)
-            
-            # Normalize while preserving gradients
-            return self.normalize_complex_tensor(manifold, target_norm)
-
-        def project_to_hidden(tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
-            """Project tensor to hidden space while preserving norm and gradients."""
-            # Store input norm if target_norm not provided
-            if target_norm is None:
-                target_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True) + 1e-8)
-            
-            # Project to hidden space
-            hidden = self.manifold_proj_inv(tensor)
-            
-            # Normalize while preserving gradients
-            return self.normalize_complex_tensor(hidden, target_norm)
-
-        # Get initial norms
-        initial_hidden_norm = torch.sqrt(torch.sum(current.reshape(-1, hidden_dim).real ** 2 + 
-                                         current.reshape(-1, hidden_dim).imag ** 2, dim=-1, keepdim=True))
-        print(f"\nInitial hidden norm: {initial_hidden_norm.mean().item():.4f}")
-
-        # Project initial state to manifold space
-        initial_manifold = project_to_manifold(current.reshape(-1, hidden_dim), initial_hidden_norm)
-        initial_manifold_norm = torch.sqrt(torch.sum(initial_manifold.real ** 2 + initial_manifold.imag ** 2, dim=-1, keepdim=True))
-        print(f"Initial manifold norm: {initial_manifold_norm.mean().item():.4f}")
-
-        # Apply flow steps
-        for step in range(num_steps):
-            print(f"\nStep {step + 1}/{num_steps}")
-            
-            # Project to manifold space
-            current_manifold = project_to_manifold(current.reshape(-1, hidden_dim), initial_hidden_norm)
-            manifold_norm = torch.sqrt(torch.sum(current_manifold.real ** 2 + current_manifold.imag ** 2, dim=-1, keepdim=True))
-            print(f"Manifold norm: {manifold_norm.mean().item():.4f}")
-
-            # Compute flow update
-            flow_update, flow_metrics = self.flow(current_manifold.reshape(batch_size, seq_len, -1))
-            flow_update = flow_update.reshape(-1, self.manifold_dim)
-            flow_norm = torch.sqrt(torch.sum(flow_update.real ** 2 + flow_update.imag ** 2, dim=-1, keepdim=True))
-            print(f"Flow update norm: {flow_norm.mean().item():.4f}")
-
-            # Project flow update to hidden space
-            flow_update = project_to_hidden(flow_update, initial_hidden_norm)
-            flow_update = flow_update.reshape(batch_size, seq_len, hidden_dim)
-            hidden_norm = torch.sqrt(torch.sum(flow_update.real ** 2 + flow_update.imag ** 2, dim=-1, keepdim=True))
-            print(f"Hidden space norm: {hidden_norm.mean().item():.4f}")
-
-            # Update current state with small step size
-            current = current + dt * flow_update
-            update_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
-            print(f"After update norm: {update_norm.mean().item():.4f}")
-
-            # Normalize current state to match initial norm
-            current = self.normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
-            current = current.reshape(batch_size, seq_len, hidden_dim)
-            current_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
-            print(f"Final norm for step: {current_norm.mean().item():.4f}")
-
-            # Ensure numerical stability
-            if torch.isnan(current).any() or torch.isinf(current).any():
-                print("Warning: Numerical instability detected, resetting to initial state")
-                current = x  # Reset to initial state if instability detected
-                break
-
-            if return_metrics:
-                # Compute metrics for this step
-                # Expand metric for each sequence position
-                metric_expanded = metric.unsqueeze(1).expand(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
-                
-                # Compute metrics for this step
-                curvature = compute_ricci_tensor(metric_expanded)  # [batch_size, seq_len, manifold_dim, manifold_dim]
-                parallel_transport = compute_parallel_transport(current_manifold.reshape(batch_size, seq_len, -1), metric_expanded)  # [batch_size, seq_len, manifold_dim, manifold_dim]
-                geodesic_distance = compute_geodesic_distance(current_manifold.reshape(batch_size, seq_len, -1), metric_expanded)  # [batch_size, seq_len]
-                energy = compute_flow_energy(current_manifold.reshape(batch_size, seq_len, -1), metric_expanded)  # [batch_size, seq_len]
-
-                curvature_list.append(curvature)
-                parallel_transport_list.append(parallel_transport)
-                geodesic_distance_list.append(geodesic_distance)
-                energy_list.append(energy)
-
-        # Final normalization
-        current = self.normalize_complex_tensor(current.reshape(-1, hidden_dim), initial_hidden_norm)
-        current = current.reshape(batch_size, seq_len, hidden_dim)
-        final_norm = torch.sqrt(torch.sum(current.real ** 2 + current.imag ** 2, dim=-1, keepdim=True))
-        print(f"\nFinal norm: {final_norm.mean().item():.4f}")
-
+        # Return result based on metrics flag
         if return_metrics:
             metrics = FlowMetrics(
-                curvature=torch.stack(curvature_list)[-1],  # Take last step
-                parallel_transport=torch.stack(parallel_transport_list)[-1],  # Take last step
-                geodesic_distance=torch.stack(geodesic_distance_list)[-1],  # Take last step
-                energy=torch.stack(energy_list)[-1]  # Take last step
+                curvature=torch.stack(curvature_list) if curvature_list else torch.zeros(1, device=x.device),
+                parallel_transport=torch.stack(parallel_transport_list) if parallel_transport_list else torch.zeros(1, device=x.device),
+                geodesic_distance=torch.stack(geodesic_distance_list) if geodesic_distance_list else torch.zeros(1, device=x.device),
+                energy=torch.stack(energy_list) if energy_list else torch.zeros(1, device=x.device)
             )
             return current, metrics
-
         return current
