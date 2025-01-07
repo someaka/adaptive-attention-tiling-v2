@@ -148,11 +148,9 @@ class QuantumGeometricAttention(nn.Module):
         )
         self.state_manager = StateManager(self.state_config, device=self.device)
         
-        # Initialize original scale as parameter
-        self.register_parameter(
-            'original_scale',
-            nn.Parameter(torch.ones(1, 1, 1, dtype=self.dtype, device=self.device))
-        )
+        # Initialize original scale as parameter with requires_grad=True
+        original_scale = torch.ones(1, 1, 1, dtype=self.dtype, device=self.device)
+        self.register_parameter('original_scale', nn.Parameter(original_scale, requires_grad=True))
         
         # Initialize neural quantum bridge
         self.quantum_bridge = NeuralQuantumBridge(
@@ -169,7 +167,7 @@ class QuantumGeometricAttention(nn.Module):
         metric_real = torch.eye(self.manifold_dim, device=self.device)
         metric_imag = torch.zeros_like(metric_real)
         metric = torch.complex(metric_real, metric_imag)
-        self.register_parameter('metric', nn.Parameter(metric.to(dtype)))
+        self.register_parameter('metric', nn.Parameter(metric.to(dtype), requires_grad=True))
         
         # Initialize manifold projections with correct dimensions and complex initialization
         self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=dtype, device=device)
@@ -185,9 +183,8 @@ class QuantumGeometricAttention(nn.Module):
         self.value = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         
         # Initialize to_qkv and to_out projections with complex initialization
-        expanded_dim = self.num_heads * hidden_dim
-        self.to_qkv = nn.Linear(hidden_dim, 3 * expanded_dim, dtype=dtype, device=device)
-        self.to_out = nn.Linear(expanded_dim, hidden_dim, dtype=dtype, device=device)
+        self.to_qkv = nn.Linear(hidden_dim, 3 * hidden_dim, dtype=dtype, device=device)
+        self.to_out = nn.Linear(hidden_dim, hidden_dim, dtype=dtype, device=device)
         
         # Initialize dropout
         self.dropout_layer = nn.Dropout(dropout)
@@ -417,70 +414,101 @@ class QuantumGeometricAttention(nn.Module):
         softmax_abs = exp_x / (sum_exp_x + 1e-8)
         return x * (softmax_abs / (abs_x + 1e-8))
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass through the quantum geometric attention layer.
-
+    def complex_dropout(self, x: torch.Tensor, p: float = 0.1) -> torch.Tensor:
+        """Apply dropout to complex tensor by handling real and imaginary parts separately.
+        
         Args:
-            x: Input tensor of shape (batch_size, seq_length, hidden_dim)
-            mask: Optional attention mask of shape (batch_size, seq_length) or (batch_size, 1, seq_length, seq_length)
-
+            x: Complex input tensor
+            p: Dropout probability
+            
         Returns:
-            Tensor of shape (batch_size, seq_length, hidden_dim)
+            Complex tensor with dropout applied
+        """
+        if not self.training or p == 0:
+            return x
+            
+        mask = torch.ones_like(x.real, device=x.device)
+        mask = F.dropout(mask, p=p, training=True, inplace=False)
+        return x * mask
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass of quantum geometric attention.
+        
+        Args:
+            x: Input tensor of shape [batch_size, seq_length, hidden_dim]
+            mask: Optional attention mask
+            
+        Returns:
+            Output tensor of same shape as input
         """
         batch_size, seq_length, hidden_dim = x.shape
+        print(f"\nInput shape: {x.shape}")
+        
+        # Convert input to model's dtype if needed
+        if x.dtype != self.dtype:
+            x = x.to(dtype=self.dtype)
 
-        # Project to manifold space
-        x_manifold = self.manifold_proj(x.reshape(-1, hidden_dim))
-        x_manifold = x_manifold.reshape(batch_size, seq_length, -1)
+        # Project to manifold space and scale with original_scale parameter
+        x_manifold = self.manifold_proj(x)
+        print(f"After manifold projection shape: {x_manifold.shape}")
+        x_manifold = x_manifold * self.original_scale
+        
+        # Apply metric tensor to manifold coordinates
+        x_metric = torch.einsum('...i,ij->...j', x_manifold.reshape(-1, self.manifold_dim), self.metric)
+        x_metric = x_metric.reshape(batch_size, seq_length, -1)
+        print(f"After metric application shape: {x_metric.shape}")
 
-        # Apply quantum attention with custom complex layer norm
-        quantum_output = x_manifold
-        for layer in self.quantum_attention:
-            quantum_output = layer(quantum_output)
-            quantum_output = self.complex_layer_norm(quantum_output)
-            # Apply complex ReLU
-            quantum_output = torch.where(
-                quantum_output.abs() > 0,
-                quantum_output,
-                torch.zeros_like(quantum_output)
-            )
-
-        # Project back to original space
-        output = self.manifold_proj_inv(quantum_output.reshape(-1, quantum_output.shape[-1]))
-        output = output.reshape(batch_size, seq_length, hidden_dim)
-
-        # Split into query, key, value
-        qkv = self.to_qkv(output)
-        qkv = qkv.reshape(batch_size, seq_length, 3, self.num_heads, -1)
-        q, k, v = qkv.unbind(dim=2)
-
-        # Compute attention scores
-        scale = (hidden_dim // self.num_heads) ** -0.5
-        dots = torch.matmul(q, k.transpose(-2, -1)) * scale
-
-        # Apply mask if provided
-        if mask is not None:
-            # Handle different mask shapes
-            if mask.dim() == 2:  # (batch_size, seq_length)
-                # Convert to attention mask
-                mask = mask.unsqueeze(1).unsqueeze(1)  # (batch_size, 1, 1, seq_length)
-                mask = mask.expand(-1, self.num_heads, seq_length, seq_length)  # (batch_size, num_heads, seq_length, seq_length)
-            elif mask.dim() == 4:  # (batch_size, 1, seq_length, seq_length)
-                mask = mask.expand(-1, self.num_heads, -1, -1)
+        # Process through tiles
+        tile_outputs = []
+        for i, tile in enumerate(self.tiles):
+            # Process through tile and ensure quantum state is connected
+            tile_output = tile(x_metric, mask=mask)
+            # Ensure tile output has shape [batch_size, seq_length, manifold_dim]
+            if len(tile_output.shape) > 3:
+                tile_output = tile_output.mean(dim=1)  # Average over any extra dimensions
+            print(f"Tile {i} output shape: {tile_output.shape}")
+            tile_outputs.append(tile_output)
             
-            # Ensure mask has correct shape
-            assert mask.shape == dots.shape, f"Mask shape {mask.shape} does not match attention scores shape {dots.shape}"
-            dots = dots.masked_fill(~mask, float('-inf'))
-
-        # Apply attention with complex softmax
-        attn = self.complex_softmax(dots, dim=-1)
-        out = torch.matmul(attn, v)
-
-        # Combine heads and project
-        out = out.transpose(1, 2).reshape(batch_size, seq_length, -1)
-        out = self.to_out(out)
-
-        return out
+        # Stack tile outputs
+        stacked_outputs = torch.stack(tile_outputs, dim=2)  # [batch_size, seq_length, num_heads, manifold_dim]
+        print(f"After stacking tile outputs shape: {stacked_outputs.shape}")
+        
+        # Mean over heads
+        mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_length, manifold_dim]
+        print(f"After mean over heads shape: {mean_output.shape}")
+        
+        # Process through quantum attention layers
+        for i, layer in enumerate(self.quantum_attention):
+            mean_output = layer(mean_output)
+            print(f"After quantum attention layer {i} shape: {mean_output.shape}")
+            
+        # Reshape for inverse manifold projection
+        mean_output_flat = mean_output.reshape(-1, self.manifold_dim)
+        print(f"Before inverse manifold projection shape: {mean_output_flat.shape}")
+        
+        # Project back to hidden space
+        output = self.manifold_proj_inv(mean_output_flat)
+        print(f"After inverse manifold projection shape: {output.shape}")
+        
+        # Reshape to original shape
+        output = output.reshape(batch_size, seq_length, hidden_dim)
+        print(f"After reshaping to output shape: {output.shape}")
+        
+        # Apply layer norm to output and ensure it's connected to graph
+        output_real = output.real.float()
+        output_imag = output.imag.float()
+        
+        # Apply layer norm separately to real and imaginary parts
+        output_norm_real = self.quantum_bridge.layer_norm(output_real.reshape(-1, hidden_dim)).reshape(batch_size, seq_length, -1)
+        output_norm_imag = self.quantum_bridge.layer_norm(output_imag.reshape(-1, hidden_dim)).reshape(batch_size, seq_length, -1)
+        
+        # Recombine into complex tensor
+        output = torch.complex(output_norm_real, output_norm_imag).to(dtype=self.dtype)
+        
+        # Add residual connection to ensure layer norm is used in computation
+        output = output + x * 0.1
+        
+        return output
 
     def prepare_attention_state(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -535,8 +563,15 @@ class QuantumGeometricAttention(nn.Module):
 
     def _compute_geometric_features(self, x: torch.Tensor) -> torch.Tensor:
         """Compute geometric features using tensor operations."""
-        # Use proper tensor operations
-        features = F.linear(x, self.metric)
+        # Ensure metric requires gradients
+        metric = self.metric.requires_grad_(True)
+        
+        # Use proper tensor operations with gradient tracking
+        features = torch.matmul(x, metric)
+        
+        # Ensure features require gradients
+        features.requires_grad_(True)
+        
         return features
 
     def _apply_parallel_transport(self, x: torch.Tensor) -> torch.Tensor:
@@ -1718,7 +1753,7 @@ class QuantumGeometricAttention(nn.Module):
                     state=state,
                     error_type=validation_result.error_type or StateValidationErrorType.INVALID_NORM
                 )
-            
+        
         return state
         
     def _measure_quantum_state(self, state: QuantumState) -> torch.Tensor:

@@ -129,54 +129,45 @@ def compute_ricci_tensor(metric: torch.Tensor) -> torch.Tensor:
         batch_size, dim, _ = orig_shape
         seq_len = None
 
-    # Initialize Christoffel symbols
-    christoffel = torch.zeros(batch_size if seq_len is None else batch_size * seq_len,
-                            dim, dim, dim, dtype=metric.dtype, device=metric.device)
-
     # Compute inverse metric
     ginv = torch.inverse(metric)
 
-    # Compute metric derivatives (approximated)
-    eps = 1e-6
+    # Compute metric derivatives using autograd
+    metric.requires_grad_(True)
+    dg = []
     for k in range(dim):
-        # Create perturbation in k direction
-        h = torch.zeros_like(metric)
-        h[..., k, :] = eps
+        # Create basis vector
+        e_k = torch.zeros(dim, device=metric.device, dtype=metric.dtype)
+        e_k[k] = 1.0
 
-        # Compute finite difference approximation
-        dg_k = (metric + h - metric) / eps
+        # Compute directional derivative
+        grad_k = torch.autograd.grad(
+            metric,
+            metric,
+            grad_outputs=e_k.expand_as(metric),
+            create_graph=True,
+            retain_graph=True
+        )[0]
+        dg.append(grad_k)
 
-        # Store in Christoffel symbols
-        for i in range(dim):
-            for j in range(dim):
-                # Γ^i_jk = 1/2 g^il (∂_j g_kl + ∂_k g_jl - ∂_l g_jk)
-                christoffel[:, i, j, k] = 0.5 * torch.sum(
-                    ginv[:, i, :] * (
-                        dg_k[:, j, :] +
-                        dg_k[:, j, :] -
-                        dg_k[:, j, :]
-                    ),
-                    dim=-1
-                )
+    # Stack derivatives
+    dg = torch.stack(dg, dim=1)  # [batch_size, dim, dim, dim]
 
-    # Compute Riemann tensor
-    riemann = torch.zeros_like(christoffel)
-    for i in range(dim):
-        for j in range(dim):
-            for k in range(dim):
-                for l in range(dim):
-                    # R^i_jkl = ∂_k Γ^i_jl - ∂_l Γ^i_jk + Γ^i_mk Γ^m_jl - Γ^i_ml Γ^m_jk
-                    riemann[:, i, j, k] += (
-                        christoffel[:, i, j, l] * christoffel[:, l, k, k] -
-                        christoffel[:, i, j, k] * christoffel[:, l, l, k]
-                    )
+    # Compute Christoffel symbols using vectorized operations
+    christoffel = 0.5 * torch.einsum(
+        'bi,bjk->bijk',
+        ginv,
+        dg + dg.transpose(-2, -1) - dg.transpose(-1, -2)
+    )
+
+    # Compute Riemann tensor using vectorized operations
+    riemann = (
+        torch.einsum('bimk,bmjl->bijkl', christoffel, christoffel) -
+        torch.einsum('biml,bmjk->bijkl', christoffel, christoffel)
+    )
 
     # Contract to get Ricci tensor
-    ricci = torch.zeros_like(metric)
-    for i in range(dim):
-        for j in range(dim):
-            # Contract k index: R^k_ikj -> R_ij
-            ricci[:, i, j] = torch.sum(riemann[:, :, i, j], dim=1)
+    ricci = torch.einsum('bijij->bij', riemann)
 
     # Reshape back to original shape if needed
     if seq_len is not None:
@@ -215,19 +206,17 @@ def compute_parallel_transport(
         # Expand metric to include sequence dimension
         metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
 
-    # Initialize transport tensor
-    transport = torch.zeros_like(metric)
-
-    # Compute transport components
-    for i in range(manifold_dim):
-        for j in range(manifold_dim):
-            # Use broadcasting for batch and sequence dimensions
-            path_i = path[..., i].unsqueeze(-1).unsqueeze(-1)  # [batch_size, seq_len, 1, 1]
-            path_j = path[..., j].unsqueeze(-1).unsqueeze(-1)  # [batch_size, seq_len, 1, 1]
-            transport[..., i, j] = (path_i * path_j).squeeze(-1).squeeze(-1)
+    # Compute transport using vectorized operations
+    # First compute path outer product
+    path_expanded = path.unsqueeze(-1)  # [batch_size, seq_len, manifold_dim, 1]
+    path_expanded_t = path.unsqueeze(-2)  # [batch_size, seq_len, 1, manifold_dim]
+    transport = torch.matmul(path_expanded, path_expanded_t)  # [batch_size, seq_len, manifold_dim, manifold_dim]
 
     # Apply metric compatibility
     transport = torch.einsum('...ij,...jk->...ik', transport, metric)
+
+    # Ensure transport preserves inner products
+    transport = 0.5 * (transport + transport.transpose(-2, -1))
 
     return transport
 

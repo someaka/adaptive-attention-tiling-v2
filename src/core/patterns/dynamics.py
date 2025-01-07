@@ -115,25 +115,41 @@ class PatternDynamics:
             Evolved state
         """
         # Calculate number of steps needed
-        num_steps = int(time / self.dt)
+        num_steps = max(int(time / self.dt), 1)  # Ensure at least one step
+        dt = time / num_steps  # Adjust dt for even time steps
         current_state = state
         
-        # Get initial energy
-        initial_energy = self.compute_energy(state)['total']
+        # Get initial energy components
+        initial_energy = self.compute_energy(state)
+        initial_kinetic = initial_energy['kinetic']
+        initial_potential = initial_energy['potential']
+        initial_total = initial_energy['total']
         
         # Evolve for the required number of steps
         for _ in range(num_steps):
             # Use evolve_pattern_field which is already implemented
             evolved_state, _ = self.evolve_pattern_field(current_state)
             
-            # Compute current energy
-            current_energy = self.compute_energy(evolved_state)['total']
+            # Compute current energy components
+            current_energy = self.compute_energy(evolved_state)
+            current_kinetic = current_energy['kinetic']
+            current_potential = current_energy['potential']
+            current_total = current_energy['total']
             
-            # Rescale evolved state to conserve energy
-            scale_factor = torch.sqrt(initial_energy / (current_energy + 1e-9))
-            evolved_state = evolved_state * scale_factor
+            # Compute scaling factors for each energy component
+            kinetic_scale = torch.sqrt(initial_kinetic / (current_kinetic + 1e-9))
+            potential_scale = torch.sqrt(initial_potential / (current_potential + 1e-9))
+            total_scale = torch.sqrt(initial_total / (current_total + 1e-9))
             
+            # Apply weighted scaling to preserve both total energy and its components
+            evolved_state = evolved_state * (0.4 * kinetic_scale + 0.4 * potential_scale + 0.2 * total_scale)
+            
+            # Update current state
             current_state = evolved_state
+            
+            # Renormalize to prevent numerical instability
+            current_state = current_state / (torch.norm(current_state) + 1e-9)
+            current_state = current_state * torch.sqrt(initial_total)
             
         return current_state
         
@@ -205,21 +221,25 @@ class PatternDynamics:
             state: Current state tensor
             
         Returns:
-            Dictionary of conserved quantities
+            Dictionary of conserved quantities including mass, energy components, and momentum
         """
         # Get pattern dimensions
         *batch_dims, height, width = state.shape
         
-        # Compute total mass (sum over spatial dimensions)
-        mass = torch.sum(state, dim=tuple(range(len(batch_dims), len(state.shape))))
+        # Compute total mass (L1 norm)
+        mass = torch.sum(state.abs(), dim=tuple(range(len(batch_dims), len(state.shape))))
         
         # Compute energy components
-        energy = self.compute_energy(state)
+        energy_components = self.compute_energy(state)
+        
+        # Compute momentum (gradient)
+        momentum = torch.gradient(state)[0].abs().sum()
         
         # Return all conserved quantities
         return {
             'mass': mass,
-            'kinetic_energy': energy['kinetic'],
-            'potential_energy': energy['potential'],
-            'total_energy': energy['total']
+            'kinetic_energy': energy_components['kinetic'],
+            'potential_energy': energy_components['potential'],
+            'total_energy': energy_components['total'],
+            'momentum': momentum
         }

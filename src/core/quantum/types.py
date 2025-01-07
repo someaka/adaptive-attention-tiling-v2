@@ -20,16 +20,13 @@ class QuantumState:
 
     def __post_init__(self):
         """Ensure state normalization and proper tensor types."""
-        # Convert to complex128 if not already
+        # Convert to complex while preserving input dtype
         if not torch.is_complex(self.amplitudes):
-            self.amplitudes = self.amplitudes.to(torch.complex128)
-        elif self.amplitudes.dtype != torch.complex128:
-            self.amplitudes = self.amplitudes.to(torch.complex128)
-            
+            dtype = torch.complex64 if self.amplitudes.dtype == torch.float32 else torch.complex128
+            self.amplitudes = torch.complex(self.amplitudes, torch.zeros_like(self.amplitudes)).to(dtype)
         if not torch.is_complex(self.phase):
-            self.phase = self.phase.to(torch.complex128)
-        elif self.phase.dtype != torch.complex128:
-            self.phase = self.phase.to(torch.complex128)
+            dtype = torch.complex64 if self.phase.dtype == torch.float32 else torch.complex128
+            self.phase = torch.complex(self.phase, torch.zeros_like(self.phase)).to(dtype)
 
         # Store original norm before normalization
         if len(self.amplitudes.shape) == 1:
@@ -41,12 +38,56 @@ class QuantumState:
         
         # Store original norm if not provided
         if self.original_norm is None:
-            self.original_norm = norm.to(torch.float64)
-        else:
-            self.original_norm = self.original_norm.to(torch.float64)
-            
+            self.original_norm = norm.real
+        
         # Normalize state vector globally
         self.amplitudes = self.amplitudes / (norm + 1e-8)
+
+    # Add PyTorch tensor compatibility properties
+    @property
+    def layout(self) -> torch.layout:
+        """Get the memory layout of the amplitudes tensor."""
+        return self.amplitudes.layout
+
+    @property
+    def device(self) -> torch.device:
+        """Get the device of the amplitudes tensor."""
+        return self.amplitudes.device
+
+    @property
+    def requires_grad(self) -> bool:
+        """Get the requires_grad flag of the amplitudes tensor."""
+        return self.amplitudes.requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, value: bool) -> None:
+        """Set the requires_grad flag of the amplitudes tensor."""
+        self.amplitudes.requires_grad = value
+
+    def to(self, *args, **kwargs) -> 'QuantumState':
+        """Move the quantum state to a device or change its dtype."""
+        new_amplitudes = self.amplitudes.to(*args, **kwargs)
+        new_phase = self.phase.to(*args, **kwargs)
+        new_original_norm = self.original_norm.to(*args, **kwargs) if self.original_norm is not None else None
+        return QuantumState(
+            amplitudes=new_amplitudes,
+            basis_labels=self.basis_labels,
+            phase=new_phase,
+            original_norm=new_original_norm
+        )
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        """Enable PyTorch function compatibility."""
+        if kwargs is None:
+            kwargs = {}
+        # Convert QuantumState instances to their amplitude tensors
+        processed_args = []
+        for arg in args:
+            if isinstance(arg, QuantumState):
+                processed_args.append(arg.amplitudes)
+            else:
+                processed_args.append(arg)
+        return func(*processed_args, **kwargs)
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -58,41 +99,24 @@ class QuantumState:
         """Get state data."""
         return self.amplitudes
 
+    @property
+    def dtype(self) -> torch.dtype:
+        """Get the dtype of the state amplitudes."""
+        return self.amplitudes.dtype
+
     def norm(self) -> torch.Tensor:
         """Compute the norm of the quantum state."""
         if len(self.amplitudes.shape) == 1:
-            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2)).to(torch.float64)
+            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
         # For multi-dimensional tensors, compute norm across all dimensions except batch
-        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape))))).to(torch.float64)
+        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape)))))
 
     def density_matrix(self) -> torch.Tensor:
-        """Compute the density matrix representation of the state."""
-        # For a pure state, density matrix is |ψ⟩⟨ψ|
-        if len(self.amplitudes.shape) == 1:
-            return torch.outer(self.amplitudes, self.amplitudes.conj())
-        
-        # For batched states
-        batch_size = self.amplitudes.shape[0]
-        if len(self.amplitudes.shape) == 3:
-            # Handle case where amplitudes have sequence dimension
-            seq_len = self.amplitudes.shape[1]
-            state_dim = self.amplitudes.shape[2]
-            rho = torch.zeros((batch_size, seq_len, state_dim, state_dim), 
-                             dtype=torch.complex128, 
-                             device=self.amplitudes.device)
-            for i in range(batch_size):
-                for j in range(seq_len):
-                    rho[i, j] = torch.outer(self.amplitudes[i, j], self.amplitudes[i, j].conj())
-            return rho
-        else:
-            # Regular batch case
-            state_dim = self.amplitudes.shape[1]
-            rho = torch.zeros((batch_size, state_dim, state_dim), 
-                             dtype=torch.complex128, 
-                             device=self.amplitudes.device)
-            for i in range(batch_size):
-                rho[i] = torch.outer(self.amplitudes[i], self.amplitudes[i].conj())
-            return rho
+        """Compute the density matrix representation of the quantum state."""
+        # Compute outer product while preserving dtype
+        density = torch.outer(self.amplitudes, self.amplitudes.conj())
+        # Apply phase factor
+        return density * self.phase
 
     def inner_product(self, other: 'QuantumState') -> torch.Tensor:
         """Compute inner product with another state."""
@@ -215,3 +239,11 @@ class QuantumState:
         if not self.is_pure():
             raise ValueError("Cannot get state vector for mixed state")
         return self.amplitudes
+
+    def abs(self) -> torch.Tensor:
+        """Compute absolute value of quantum state amplitudes.
+        
+        Returns:
+            Tensor containing absolute values of amplitudes
+        """
+        return torch.abs(self.amplitudes)

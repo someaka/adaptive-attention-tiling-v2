@@ -315,28 +315,57 @@ class QuantumMotivicTile(nn.Module):
         # Project input to hidden dimension
         x = self.input_proj(x)  # [batch_size, seq_len, hidden_dim]
         
-        # Project to cohomology space
-        x_cohom = self.cohomology_proj(x)  # [batch_size, seq_len, cohomology_dim]
+        # Project to cohomology space using cohomology basis
+        x_cohom_raw = self.cohomology_proj(x)  # [batch_size, seq_len, cohomology_dim]
+        x_cohom = torch.matmul(
+            torch.matmul(x_cohom_raw, self.cohomology_basis.T),
+            self.cohomology_basis
+        )  # [batch_size, seq_len, cohomology_dim]
         
-        # Project to motive space and reshape for multi-head
-        x_motive = self.motive_proj(x_cohom)  # [batch_size, seq_len, motive_rank]
-        x_motive = x_motive.view(batch_size, seq_len, self.num_heads, -1)
-        x_motive = x_motive.permute(0, 2, 1, 3)  # [batch_size, num_heads, seq_len, head_dim]
+        # Project to motive space using motive basis
+        x_motive_raw = self.motive_proj(x_cohom)  # [batch_size, seq_len, motive_rank]
+        x_motive = torch.matmul(
+            torch.matmul(x_motive_raw, self.motive_basis.T),
+            self.motive_basis
+        )  # [batch_size, seq_len, motive_rank]
         
-        # Compute QKV
-        q = self.query(x_motive)  # [batch_size, num_heads, seq_len, head_dim]
-        k = self.key(x_motive)    # [batch_size, num_heads, seq_len, head_dim]
-        v = self.value(x_motive)  # [batch_size, num_heads, seq_len, head_dim]
+        # Ensure quantum state is properly connected to computation graph
+        quantum_state = self.quantum_state.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, size, hidden_dim]
+        
+        # Project quantum state to motive space through cohomology space
+        quantum_cohom_raw = self.cohomology_proj(quantum_state)  # [batch_size, size, cohomology_dim]
+        quantum_cohom = torch.matmul(
+            torch.matmul(quantum_cohom_raw, self.cohomology_basis.T),
+            self.cohomology_basis
+        )  # [batch_size, size, cohomology_dim]
+        
+        quantum_motive_raw = self.motive_proj(quantum_cohom)  # [batch_size, size, motive_rank]
+        quantum_motive = torch.matmul(
+            torch.matmul(quantum_motive_raw, self.motive_basis.T),
+            self.motive_basis
+        )  # [batch_size, size, motive_rank]
+        
+        # Compute quantum attention in motive space
+        q = self.query(x_motive)  # [batch_size, seq_len, motive_rank]
+        k = self.key(quantum_motive)  # [batch_size, size, motive_rank]
+        v = self.value(quantum_motive)  # [batch_size, size, motive_rank]
         
         # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.motive_rank)
         
         # Handle complex attention scores by using magnitude for softmax
         scores_magnitude = scores.abs()
         
         # Apply mask if provided
         if mask is not None:
-            mask = mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
+            # Ensure mask has the correct shape [batch_size, 1, seq_len, seq_len]
+            if mask.dim() == 4:
+                mask = mask.squeeze(1)  # Remove head dimension if present
+            elif mask.dim() == 2:
+                mask = mask.unsqueeze(1).unsqueeze(2)  # Add attention dimensions
+            
+            # Ensure mask matches the scores shape by repeating the sequence length dimension
+            mask = mask.repeat(1, 1, 1, scores_magnitude.size(-1) // mask.size(-1))
             scores_magnitude = scores_magnitude.masked_fill(~mask, float('-inf'))
         
         # Apply softmax to magnitudes and preserve phases
@@ -345,19 +374,25 @@ class QuantumMotivicTile(nn.Module):
         attn = attn_weights * torch.exp(1j * scores_phase)
         attn = self.dropout_layer(attn)
         
-        # Compute output
-        out = torch.matmul(attn, v)  # [batch_size, num_heads, seq_len, head_dim]
+        # Compute output in motive space
+        out = torch.matmul(attn, v)  # [batch_size, seq_len, motive_rank]
         
-        # Reshape and project back
-        out = out.permute(0, 2, 1, 3).contiguous()  # [batch_size, seq_len, num_heads, head_dim]
-        out = out.view(batch_size, seq_len, -1)     # [batch_size, seq_len, motive_rank]
+        # Project back through cohomology space using bases
+        out_motive = torch.matmul(
+            torch.matmul(out, self.motive_basis.T),
+            self.motive_basis
+        )  # [batch_size, seq_len, motive_rank]
         
-        # Project back through cohomology space
-        out = self.motive_proj_inv(out)             # [batch_size, seq_len, cohomology_dim]
-        out = self.cohomology_proj_inv(out)         # [batch_size, seq_len, hidden_dim]
+        out_cohom = self.motive_proj_inv(out_motive)  # [batch_size, seq_len, cohomology_dim]
+        out_cohom = torch.matmul(
+            torch.matmul(out_cohom, self.cohomology_basis.T),
+            self.cohomology_basis
+        )  # [batch_size, seq_len, cohomology_dim]
+        
+        out = self.cohomology_proj_inv(out_cohom)  # [batch_size, seq_len, hidden_dim]
         
         # Final output projection
-        out = self.output_proj(out)                 # [batch_size, seq_len, hidden_dim]
+        out = self.output_proj(out)  # [batch_size, seq_len, hidden_dim]
         
         return out
 

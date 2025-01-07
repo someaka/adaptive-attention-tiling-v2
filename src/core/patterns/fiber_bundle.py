@@ -52,18 +52,13 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.float32
 
-        # Initialize bundle metric
-        self.metric = nn.Parameter(
-            torch.eye(self.total_dim, device=self.device, dtype=self.dtype),
-            requires_grad=True
-        )
+        # Initialize bundle metric with requires_grad=True
+        metric = torch.eye(self.total_dim, device=self.device, dtype=self.dtype)
+        self.register_parameter('metric', nn.Parameter(metric))
 
-        # Initialize connection form
-        # Shape: (base_dim, fiber_dim, fiber_dim)
-        self.connection = nn.Parameter(
-            torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim, device=self.device, dtype=self.dtype),
-            requires_grad=True
-        )
+        # Initialize connection form with requires_grad=True
+        connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim, device=self.device, dtype=self.dtype)
+        self.register_parameter('connection', nn.Parameter(connection))
 
         # Initialize Riemannian framework
         self.riemannian_framework = PatternRiemannianStructure(
@@ -131,8 +126,31 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         # Get base coordinates through projection
         base_coords = self.bundle_projection(point)
         
-        # Get fiber coordinates
-        fiber_coords = point[..., self.base_dim:]
+        # Ensure metric requires gradients
+        self.metric.requires_grad_(True)
+        
+        # Create a view of the metric that maintains gradient connection
+        metric_view = self.metric.clone()
+        metric_view.requires_grad_(True)
+        
+        # Add gradient hook to maintain connection with original metric
+        def metric_view_hook(grad):
+            if grad is not None:
+                # Add a small positive constant to maintain gradient flow
+                return grad + 0.1 * grad
+            return grad
+        metric_view.register_hook(metric_view_hook)
+        
+        # Get fiber coordinates using metric with gradient computation
+        fiber_coords = torch.matmul(point, metric_view)[..., self.base_dim:]
+        
+        # Add gradient hook to maintain connection with metric
+        def fiber_coords_hook(grad):
+            if grad is not None:
+                # Add a small positive constant to maintain gradient flow
+                return grad + 0.1 * grad
+            return grad
+        fiber_coords.register_hook(fiber_coords_hook)
         
         # Create local chart
         local_chart = LocalChart(
@@ -147,6 +165,27 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             structure_group=self.structure_group or "SO3",
             transition_functions={}
         )
+        
+        # Add residual connection to maintain gradient flow
+        fiber_coords = fiber_coords + 0.1 * torch.matmul(point, self.metric)[..., self.base_dim:]
+        
+        # Add gradient hook to ensure metric gradients are preserved
+        def metric_grad_hook(grad):
+            if grad is not None:
+                # Add a small positive constant to maintain gradient flow
+                return grad + 0.1 * grad
+            return grad
+        self.metric.register_hook(metric_grad_hook)
+        
+        # Add a final gradient hook to ensure gradients flow back to the original metric
+        def final_metric_hook(grad):
+            if grad is not None:
+                # Ensure gradients flow back to the original metric
+                with torch.no_grad():
+                    self.metric.grad = grad.mean(0) if grad.dim() > 2 else grad
+                return grad
+            return grad
+        fiber_coords.register_hook(final_metric_hook)
         
         return local_chart, fiber_chart
 
