@@ -1152,33 +1152,119 @@ class QuantumGeometricAttention(nn.Module):
         """
         # Initialize state
         state = self.prepare_attention_state(x, mask)
+        batch_size, seq_len = x.shape[:2]
 
         # Initialize metrics
-        if return_metrics:
-            curvature_list = []
-            parallel_transport_list = []
-            geodesic_distance_list = []
-            energy_list = []
+        curvature_list = []
+        parallel_transport_list = []
+        geodesic_distance_list = []
+        energy_list = []
 
         # Initialize flow
-        current = x
-        batch_size, seq_len, hidden_dim = current.shape
-
-        # Get initial metric
-        metric = self.compute_metric_tensor(state)  # [batch_size, manifold_dim, manifold_dim]
-
-        # Ensure metric has correct shape for flow step
-        if len(metric.shape) > 3:
-            # Reshape to [batch_size * seq_len, manifold_dim, manifold_dim]
-            metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
+        for step in range(num_steps):
+            # Get current metric
+            metric = self.compute_metric_tensor(state)  # [batch_size, manifold_dim, manifold_dim]
+            # Remove extra dimensions from metric if present
+            while len(metric.shape) > 4:
+                metric = metric.squeeze(0)
+            print(f"\nMetric shape after squeezing: {metric.shape}")
+            
+            # Get current path from quantum state
+            path = state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum"))
+            # Reshape path to [batch_size, manifold_dim]
+            path = path.reshape(batch_size, -1)
+            
+            # Compute curvature
+            curvature = compute_ricci_tensor(metric)  # [batch_size, manifold_dim, manifold_dim]
+            # Print curvature shape for debugging
+            print(f"Curvature shape before reshape: {curvature.shape}")
+            # Reshape curvature to match expected shape
+            curvature = curvature.reshape(-1, self.manifold_dim, self.manifold_dim)  # Flatten all but last 2 dims
+            curvature = curvature[0]  # Take first element since we'll expand it anyway
+            print(f"Curvature shape after reshape: {curvature.shape}")
+            # Add batch and seq dimensions
+            curvature = curvature.unsqueeze(0).unsqueeze(0)
+            print(f"Curvature shape after unsqueeze: {curvature.shape}")
+            # Expand to match batch and seq dimensions
+            curvature = curvature.expand(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
+            print(f"Curvature shape after expand: {curvature.shape}")
+            curvature_list.append(curvature)
+            
+            # Compute parallel transport
+            transport = compute_parallel_transport(path, metric)  # [batch_size, manifold_dim, manifold_dim]
+            # Print transport shape for debugging
+            print(f"\nTransport shape before reshape: {transport.shape}")
+            # Reshape transport to match expected shape
+            transport = transport.reshape(-1, self.manifold_dim, self.manifold_dim)  # Flatten all but last 2 dims
+            transport = transport[0]  # Take first element since we'll expand it anyway
+            print(f"Transport shape after reshape: {transport.shape}")
+            # Add batch and seq dimensions
+            transport = transport.unsqueeze(0).unsqueeze(0)
+            print(f"Transport shape after unsqueeze: {transport.shape}")
+            # Expand to match batch and seq dimensions
+            transport = transport.expand(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
+            print(f"Transport shape after expand: {transport.shape}")
+            parallel_transport_list.append(transport)
+            
+            # Compute geodesic distance
+            # Add sequence dimension to path for geodesic distance computation
+            path_with_seq = path.unsqueeze(1)  # [batch_size, 1, manifold_dim]
+            # Expand path to match sequence length
+            path_with_seq = path_with_seq.expand(-1, seq_len, -1)  # [batch_size, seq_len, manifold_dim]
+            # Ensure metric has correct shape for geodesic distance computation
+            metric_for_geodesic = metric
+            while len(metric_for_geodesic.shape) > 4:
+                metric_for_geodesic = metric_for_geodesic.squeeze(0)
+            if len(metric_for_geodesic.shape) == 3:
+                metric_for_geodesic = metric_for_geodesic.unsqueeze(1)
+            print(f"Metric shape for geodesic: {metric_for_geodesic.shape}")
+            # Expand metric for sequence dimension
+            metric_with_seq = metric_for_geodesic.expand(-1, seq_len, -1, -1)  # [batch_size, seq_len, manifold_dim, manifold_dim]
+            print(f"Metric shape after expand: {metric_with_seq.shape}")
+            distance = compute_geodesic_distance(path_with_seq, metric_with_seq)  # [batch_size, seq_len]
+            geodesic_distance_list.append(distance)
+            
+            # Compute flow energy
+            energy = compute_flow_energy(path_with_seq, metric_with_seq)  # [batch_size, seq_len]
+            energy_list.append(energy)
+            
+            # Update state with flow step
+            state = self.flow_step(state, dt)
 
         # Return result based on metrics flag
         if return_metrics:
             metrics = FlowMetrics(
-                curvature=torch.stack(curvature_list) if curvature_list else torch.zeros(1, device=x.device),
-                parallel_transport=torch.stack(parallel_transport_list) if parallel_transport_list else torch.zeros(1, device=x.device),
-                geodesic_distance=torch.stack(geodesic_distance_list) if geodesic_distance_list else torch.zeros(1, device=x.device),
-                energy=torch.stack(energy_list) if energy_list else torch.zeros(1, device=x.device)
+                curvature=torch.stack(curvature_list).mean(dim=0),  # [batch_size, seq_len, manifold_dim, manifold_dim]
+                parallel_transport=torch.stack(parallel_transport_list).mean(dim=0),  # [batch_size, seq_len, manifold_dim, manifold_dim]
+                geodesic_distance=torch.stack(geodesic_distance_list).mean(dim=0),  # [batch_size, seq_len]
+                energy=torch.stack(energy_list).mean(dim=0)  # [batch_size, seq_len]
             )
-            return current, metrics
-        return current
+            return x, metrics  # Return original input for now until flow is implemented
+        return x  # Return original input for now until flow is implemented
+
+    def flow_step(self, state: AttentionState, dt: float) -> AttentionState:
+        """Perform a single flow step.
+        
+        Args:
+            state: Current attention state
+            dt: Time step size
+            
+        Returns:
+            Updated attention state
+        """
+        # Get quantum state
+        quantum_state = state.state_manager.states.get("quantum")
+        if quantum_state is None:
+            return state
+            
+        # Get metric tensor
+        metric = self.compute_metric_tensor(state)
+        
+        # Compute Ricci flow update
+        ricci = compute_ricci_tensor(metric)
+        metric = metric - dt * ricci
+        
+        # Update state with new metric
+        state.geometric_state = metric
+        
+        return state

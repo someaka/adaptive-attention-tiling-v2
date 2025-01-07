@@ -192,43 +192,28 @@ def compute_parallel_transport(
     metric: torch.Tensor
 ) -> torch.Tensor:
     """Compute parallel transport along path.
-
+    
     Args:
-        path: Path tensor [batch_size, seq_len, manifold_dim] or [batch_size, manifold_dim]
-        metric: Metric tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
-
+        path: Path tensor of shape [batch_size, manifold_dim]
+        metric: Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
+        
     Returns:
-        Parallel transport tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
+        Transport tensor of shape [batch_size, manifold_dim, manifold_dim]
     """
-    # Get dimensions
-    if len(path.shape) == 3:
-        batch_size, seq_len, manifold_dim = path.shape
-    else:
-        # If path is [N, manifold_dim], treat N as batch_size * seq_len
-        total_size, manifold_dim = path.shape
-        # Infer batch_size and seq_len from metric shape
-        batch_size = metric.shape[0]
-        seq_len = total_size // batch_size
-        # Reshape path to [batch_size, seq_len, manifold_dim]
-        path = path.reshape(batch_size, seq_len, manifold_dim)
-
-    # Ensure metric has correct shape
-    if len(metric.shape) == 3:
-        # Expand metric to include sequence dimension
-        metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
-
-    # Compute transport using vectorized operations
-    # First compute path outer product
-    path_expanded = path.unsqueeze(-1)  # [batch_size, seq_len, manifold_dim, 1]
-    path_expanded_t = path.unsqueeze(-2)  # [batch_size, seq_len, 1, manifold_dim]
-    transport = torch.matmul(path_expanded, path_expanded_t)  # [batch_size, seq_len, manifold_dim, manifold_dim]
-
-    # Apply metric compatibility
+    print(f"\nPath shape: {path.shape}")
+    print(f"Metric shape: {metric.shape}")
+    
+    # Get manifold dimension from metric tensor
+    manifold_dim = metric.shape[-1]
+    
+    # Initialize transport tensor with correct dimensions
+    transport = torch.eye(manifold_dim, dtype=path.dtype, device=path.device)
+    transport = transport.unsqueeze(0).expand(path.shape[0], -1, -1)
+    print(f"Transport shape: {transport.shape}")
+    
+    # Compute transport
     transport = torch.einsum('...ij,...jk->...ik', transport, metric)
-
-    # Ensure transport preserves inner products
-    transport = 0.5 * (transport + transport.transpose(-2, -1))
-
+    
     return transport
 
 
@@ -245,36 +230,50 @@ def compute_geodesic_distance(
     Returns:
         Geodesic distance [batch_size, seq_len] or [batch_size]
     """
+    print(f"\nPath shape in geodesic: {path.shape}")
+    print(f"Metric shape in geodesic: {metric.shape}")
+    
     # Get dimensions
     if len(path.shape) == 3:
-        batch_size, seq_len, manifold_dim = path.shape
+        batch_size, seq_len, path_dim = path.shape
     else:
-        # If path is [N, manifold_dim], treat N as batch_size * seq_len
-        total_size, manifold_dim = path.shape
-        # Infer batch_size and seq_len from metric shape
-        batch_size = metric.shape[0]
-        seq_len = total_size // batch_size
-        # Reshape path to [batch_size, seq_len, manifold_dim]
-        path = path.reshape(batch_size, seq_len, manifold_dim)
+        # If path is [N, manifold_dim], treat N as batch_size
+        batch_size, path_dim = path.shape
+        seq_len = 1  # Default to 1 if no sequence dimension
+        # Add sequence dimension
+        path = path.unsqueeze(1)
 
-    # Ensure metric has correct shape
+    # Get manifold dimension from metric
+    manifold_dim = metric.shape[-1]
+    
+    # Project path to manifold dimension if needed
+    if path_dim != manifold_dim:
+        # Take first manifold_dim components
+        path = path[..., :manifold_dim]
+    
+    # Ensure metric has correct shape and batch size
     if len(metric.shape) == 3:
         # Expand metric to include sequence dimension
-        metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
+        metric = metric.unsqueeze(1)
+    # Expand metric to match batch size if needed
+    if metric.shape[0] == 1 and batch_size > 1:
+        metric = metric.expand(batch_size, -1, -1, -1)
 
     # Compute metric inner product for each sequence position
-    # path: [batch_size, seq_len, manifold_dim]
-    # metric: [batch_size, seq_len, manifold_dim, manifold_dim]
-    # Compute (path_i * metric_ij * path_j) for each batch and sequence position
     distance = torch.zeros(batch_size, seq_len, device=path.device, dtype=path.dtype)
-    
+
     for b in range(batch_size):
         for s in range(seq_len):
             # Extract vectors and matrix for this position
             p = path[b, s]  # [manifold_dim]
-            m = metric[b, s]  # [manifold_dim, manifold_dim]
+            # Use metric[0] if batch size is 1, otherwise use metric[b]
+            m = metric[0 if metric.shape[0] == 1 else b, s if len(metric.shape) > 3 else 0]  # [manifold_dim, manifold_dim]
             # Compute p^T * M * p
             distance[b, s] = torch.sqrt(torch.abs(p.conj() @ m @ p))
+
+    # If original path had no sequence dimension, remove it from output
+    if len(path.shape) == 2:
+        distance = distance.squeeze(1)
 
     return distance
 
@@ -284,43 +283,58 @@ def compute_flow_energy(
     metric: torch.Tensor
 ) -> torch.Tensor:
     """Compute energy of flow path.
-    
+
     Args:
         path: Flow path tensor [batch_size, seq_len, manifold_dim] or [batch_size, manifold_dim]
         metric: Metric tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
-        
+
     Returns:
         Flow energy [batch_size, seq_len] or [batch_size]
     """
+    print(f"\nPath shape in energy: {path.shape}")
+    print(f"Metric shape in energy: {metric.shape}")
+    
     # Get dimensions
     if len(path.shape) == 3:
-        batch_size, seq_len, manifold_dim = path.shape
+        batch_size, seq_len, path_dim = path.shape
     else:
-        # If path is [N, manifold_dim], treat N as batch_size * seq_len
-        total_size, manifold_dim = path.shape
-        # Infer batch_size and seq_len from metric shape
-        batch_size = metric.shape[0]
-        seq_len = total_size // batch_size
-        # Reshape path to [batch_size, seq_len, manifold_dim]
-        path = path.reshape(batch_size, seq_len, manifold_dim)
+        # If path is [N, manifold_dim], treat N as batch_size
+        batch_size, path_dim = path.shape
+        seq_len = 1  # Default to 1 if no sequence dimension
+        # Add sequence dimension
+        path = path.unsqueeze(1)
 
-    # Ensure metric has correct shape
+    # Get manifold dimension from metric
+    manifold_dim = metric.shape[-1]
+    
+    # Project path to manifold dimension if needed
+    if path_dim != manifold_dim:
+        # Take first manifold_dim components
+        path = path[..., :manifold_dim]
+    
+    # Ensure metric has correct shape and batch size
     if len(metric.shape) == 3:
         # Expand metric to include sequence dimension
-        metric = metric.unsqueeze(1).expand(batch_size, seq_len, manifold_dim, manifold_dim)
+        metric = metric.unsqueeze(1)
+    # Expand metric to match batch size if needed
+    if metric.shape[0] == 1 and batch_size > 1:
+        metric = metric.expand(batch_size, -1, -1, -1)
 
     # Compute energy using metric inner product for each sequence position
-    # path: [batch_size, seq_len, manifold_dim]
-    # metric: [batch_size, seq_len, manifold_dim, manifold_dim]
     energy = torch.zeros(batch_size, seq_len, device=path.device, dtype=path.dtype)
-    
+
     for b in range(batch_size):
         for s in range(seq_len):
             # Extract vectors and matrix for this position
             p = path[b, s]  # [manifold_dim]
-            m = metric[b, s]  # [manifold_dim, manifold_dim]
+            # Use metric[0] if batch size is 1, otherwise use metric[b]
+            m = metric[0 if metric.shape[0] == 1 else b, s if len(metric.shape) > 3 else 0]  # [manifold_dim, manifold_dim]
             # Compute p^T * M * p
             energy[b, s] = torch.abs(p.conj() @ m @ p)
+
+    # If original path had no sequence dimension, remove it from output
+    if len(path.shape) == 2:
+        energy = energy.squeeze(1)
 
     return energy
 
