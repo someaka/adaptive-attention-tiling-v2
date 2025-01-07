@@ -152,9 +152,24 @@ class QuantumGeometricAttention(nn.Module):
             for _ in range(num_layers)
         ])
         
-        # Initialize metric tensor with float dtype
-        metric = torch.eye(self.manifold_dim, dtype=dtype, device=device)
-        self.metric = nn.Parameter(metric, requires_grad=True)
+        # Initialize metric tensors with proper dimensions and dtype
+        self.base_metric = nn.Parameter(
+            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            requires_grad=True
+        )
+        self.metric = nn.Parameter(
+            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            requires_grad=True
+        )
+        self.pattern_metric = nn.Parameter(
+            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            requires_grad=True
+        )
+        # Initialize combined metric
+        self.combined_metric = nn.Parameter(
+            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            requires_grad=True
+        )
         
         # Initialize flow with float dtype
         self.flow = GeometricFlow(
@@ -387,11 +402,37 @@ class QuantumGeometricAttention(nn.Module):
         print(f"After manifold projection shape: {x_manifold.shape}")
         print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
         
-        # Apply metric tensor
-        metric = self.metric.to(dtype=x_manifold.dtype)
-        metric.requires_grad_(True)  # Ensure metric requires gradients
-        print(f"metric requires_grad: {metric.requires_grad}")
-        x_metric = torch.einsum('bsi,ij->bsj', x_manifold, metric)
+        # Initialize base metric tensor
+        base_metric = self.base_metric
+        base_metric.requires_grad_(True)
+
+        # Use pattern_metric parameter directly
+        pattern_metric = self.pattern_metric
+        pattern_metric.requires_grad_(True)
+        pattern_metric.retain_grad()  # Retain gradients for pattern metric
+
+        # Use metric parameter directly
+        metric = self.metric
+        metric.requires_grad_(True)
+        metric.retain_grad()  # Retain gradients for metric
+
+        # Use combined_metric parameter directly
+        combined_metric = self.combined_metric
+        combined_metric.requires_grad_(True)
+        combined_metric.retain_grad()  # Retain gradients for combined metric
+        
+        # Create metric combination and use it to update combined_metric
+        metric_combination = base_metric + 0.5 * (metric + pattern_metric)
+        combined_metric = combined_metric + metric_combination  # This creates a new tensor with gradient connection
+
+        # Apply metric with gradient stabilization
+        x_metric = torch.matmul(x_manifold, combined_metric)
+        metric_norm = torch.norm(combined_metric)
+        x_metric = x_metric * (1.0 + 1e-6 * metric_norm)
+        x_metric = torch.matmul(x_metric, combined_metric)
+        
+        print(f"metric requires_grad: {combined_metric.requires_grad}")
+        print(f"pattern_metric requires_grad: {pattern_metric.requires_grad}")
         print(f"x_metric requires_grad: {x_metric.requires_grad}")
         
         # Get connection and ensure consistent types

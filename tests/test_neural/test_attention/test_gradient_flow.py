@@ -186,3 +186,108 @@ class TestGradientFlow:
         # Check gradients
         for name, grads in gradients.items():
             assert len(grads) > 0, f"{name} should have received gradients"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_pattern_metric_gradient_flow(self, setup_attention):
+        """Test gradient flow through pattern_metric."""
+        layer, params = setup_attention
+        x = torch.randn(params["batch_size"], params["seq_length"], params["hidden_dim"], requires_grad=True)
+        
+        # Get pattern_metric directly from the layer
+        pattern_metric = layer.pattern_metric
+        pattern_metric.requires_grad_(True)
+        pattern_metric.retain_grad()  # Ensure gradients are retained
+        
+        # Add gradient hook
+        gradients = []
+        def hook(grad):
+            if grad is not None:  # Only append non-None gradients
+                gradients.append(grad.detach().clone())
+                print(f"Pattern metric gradient shape in hook: {grad.shape}")
+                print(f"Pattern metric gradient norm in hook: {grad.norm().item()}")
+            return grad
+        pattern_metric.register_hook(hook)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # For complex tensors, compute loss on both real and imaginary parts
+        if torch.is_complex(output):
+            loss = output.real.abs().mean() + output.imag.abs().mean()
+        else:
+            loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert len(gradients) > 0, "Pattern metric should have received gradients"
+        assert gradients[0].abs().mean() > 0, "Pattern metric gradients should be non-zero"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_base_metric_gradient_flow(self, setup_attention):
+        """Test gradient flow through base_metric."""
+        layer, params = setup_attention
+        x = torch.randn(params["batch_size"], params["seq_length"], params["hidden_dim"], requires_grad=True)
+        
+        # Get base_metric directly from the layer
+        base_metric = layer.base_metric
+        base_metric.requires_grad_(True)
+        base_metric.retain_grad()  # Ensure gradients are retained
+        
+        # Add gradient hook
+        gradients = []
+        def hook(grad):
+            if grad is not None:  # Only append non-None gradients
+                gradients.append(grad.detach().clone())
+                print(f"Base metric gradient shape in hook: {grad.shape}")
+                print(f"Base metric gradient norm in hook: {grad.norm().item()}")
+            return grad
+        base_metric.register_hook(hook)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # For complex tensors, compute loss on both real and imaginary parts
+        if torch.is_complex(output):
+            loss = output.real.abs().mean() + output.imag.abs().mean()
+        else:
+            loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert len(gradients) > 0, "Base metric should have received gradients"
+        assert gradients[0].abs().mean() > 0, "Base metric gradients should be non-zero"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_combined_metric_gradient_flow(self, setup_attention):
+        """Test gradient flow through combined_metric."""
+        layer, params = setup_attention
+        x = torch.randn(params["batch_size"], params["seq_length"], params["hidden_dim"], requires_grad=True)
+        
+        # Get combined_metric directly from the layer
+        combined_metric = layer.combined_metric
+        combined_metric.requires_grad_(True)
+        combined_metric.retain_grad()  # Ensure gradients are retained
+        
+        # Add gradient hook
+        gradients = []
+        def hook(grad):
+            if grad is not None:  # Only append non-None gradients
+                gradients.append(grad.detach().clone())
+                print(f"Combined metric gradient shape in hook: {grad.shape}")
+                print(f"Combined metric gradient norm in hook: {grad.norm().item()}")
+            return grad
+        combined_metric.register_hook(hook)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # For complex tensors, compute loss on both real and imaginary parts
+        if torch.is_complex(output):
+            loss = output.real.abs().mean() + output.imag.abs().mean()
+        else:
+            loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert len(gradients) > 0, "Combined metric should have received gradients"
+        assert gradients[0].abs().mean() > 0, "Combined metric gradients should be non-zero"
