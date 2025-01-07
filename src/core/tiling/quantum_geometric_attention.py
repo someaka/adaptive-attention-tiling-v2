@@ -980,38 +980,29 @@ class QuantumGeometricAttention(nn.Module):
 
     def validate_quantum_state(self, state: torch.Tensor) -> None:
         """Validate quantum state and raise error if invalid.
-        
+
         Args:
             state: Tensor to validate
-            
+
         Raises:
             ValueError: If state is invalid
         """
         # Check complex type
         if not torch.is_complex(state):
             raise ValueError("Quantum state must be complex-valued")
-            
+
         # Check normalization with proper tolerance
         norms = state.abs().norm(dim=-1)
         if not torch.allclose(norms, torch.ones_like(norms), rtol=1e-5, atol=1e-7):
             raise ValueError(f"Quantum state must be normalized, got norms: {norms}")
-            
+
         # Check shape compatibility
         if len(state.shape) not in [3, 4]:  # (batch, seq, dim) or (batch, heads, seq, dim)
             raise ValueError(f"Invalid quantum state shape: {state.shape}")
-            
+
         # Check dimension compatibility
-        if state.shape[-1] != self.hidden_dim:
-            raise ValueError(f"Expected hidden dimension {self.hidden_dim}, got {state.shape[-1]}")
-            
-        # Check phase consistency
-        phases = torch.angle(state)
-        if torch.any(torch.isnan(phases)) or torch.any(torch.isinf(phases)):
-            raise ValueError("Invalid phases in quantum state")
-            
-        # Check numerical stability
-        if torch.any(torch.isnan(state)) or torch.any(torch.isinf(state)):
-            raise ValueError("Quantum state contains NaN or Inf values")
+        if state.shape[-1] != self.manifold_dim:
+            raise ValueError(f"Expected manifold dimension {self.manifold_dim}, got {state.shape[-1]}")
 
     def _is_valid_quantum_state(self, state: torch.Tensor) -> bool:
         """Check if tensor represents a valid quantum state.
@@ -1129,6 +1120,30 @@ class QuantumGeometricAttention(nn.Module):
         
         # Scale tensor while preserving gradients
         return tensor * scale
+
+    def prepare_quantum_state(self, classical_input: torch.Tensor) -> torch.Tensor:
+        """Convert classical input to quantum state.
+
+        Args:
+            classical_input: Classical input tensor of shape (batch_size, seq_length, hidden_dim)
+
+        Returns:
+            Quantum state tensor of shape (batch_size, seq_length, manifold_dim)
+        """
+        # Project to manifold space
+        x_manifold = self.manifold_proj(classical_input)
+        
+        # Convert to complex if not already
+        if not torch.is_complex(x_manifold):
+            x_manifold = torch.complex(x_manifold, torch.zeros_like(x_manifold))
+        
+        # Normalize the quantum state
+        quantum_state = self.normalize_complex_tensor(x_manifold)
+        
+        # Validate the quantum state
+        self.validate_quantum_state(quantum_state)
+        
+        return quantum_state
 
     def geometric_attention_flow(
         self,
