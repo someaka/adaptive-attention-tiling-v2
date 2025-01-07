@@ -846,8 +846,10 @@ class PatternFiberBundle(BaseFiberBundle):
         def final_metric_hook(grad):
             if grad is not None:
                 # Ensure gradients flow back to the original metric
-                with torch.no_grad():
+                if metric.grad is None:
                     metric.grad = grad.mean(0) if grad.dim() > 2 else grad
+                else:
+                    metric.grad = metric.grad + (grad.mean(0) if grad.dim() > 2 else grad)
                 return grad
             return grad
         
@@ -1009,7 +1011,10 @@ class PatternFiberBundle(BaseFiberBundle):
                 if grad is not None:
                     # Ensure gradients flow back to the original metric
                     with torch.no_grad():
-                        self.metric.grad = grad.mean(0) if grad.dim() > 2 else grad
+                        if self.metric.grad is None:
+                            self.metric.grad = grad.mean(0) if grad.dim() > 2 else grad
+                        else:
+                            self.metric.grad = self.metric.grad + (grad.mean(0) if grad.dim() > 2 else grad)
                     return grad
                 return grad
             values.register_hook(final_metric_hook)

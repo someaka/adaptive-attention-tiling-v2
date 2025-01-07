@@ -403,6 +403,11 @@ class QuantumGeometricAttention(nn.Module):
         connection.retain_grad()  # Retain gradients for connection
         print(f"connection requires_grad: {connection.requires_grad}")
         
+        # Ensure pattern bundle metric requires gradients
+        pattern_metric = self.quantum_bridge.pattern_bundle.metric
+        pattern_metric.requires_grad_(True)
+        pattern_metric.retain_grad()  # Retain gradients for pattern metric
+        
         # Convert x_metric to complex if connection is complex
         if torch.is_complex(connection):
             x_metric = x_metric.to(dtype=torch.complex64)
@@ -443,6 +448,36 @@ class QuantumGeometricAttention(nn.Module):
             print(f"After quantum attention layer {i} shape: {quantum_output.shape}")
             print(f"quantum_output layer {i} requires_grad: {quantum_output.requires_grad}")
         
+        # Ensure layer norm parameters require gradients
+        layer_norm = self.quantum_bridge.layer_norm
+        layer_norm.weight.requires_grad_(True)
+        layer_norm.bias.requires_grad_(True)
+        
+        # Reshape quantum output for layer norm
+        quantum_output_flat = quantum_output.reshape(-1, self.hidden_dim)
+        
+        # Handle complex tensor for layer norm
+        if torch.is_complex(quantum_output_flat):
+            # Apply layer norm to real and imaginary parts separately
+            real_part = quantum_output_flat.real.float()
+            imag_part = quantum_output_flat.imag.float()
+            
+            # Apply layer norm
+            real_norm = layer_norm(real_part)
+            imag_norm = layer_norm(imag_part)
+            
+            # Combine back to complex
+            quantum_output_norm = torch.complex(real_norm, imag_norm)
+        else:
+            # If real tensor, apply layer norm directly
+            quantum_output_norm = layer_norm(quantum_output_flat.float())
+        
+        # Add residual connection for gradient stability
+        quantum_output_norm = quantum_output_norm + 0.1 * quantum_output_flat
+        
+        # Reshape back
+        quantum_output = quantum_output_norm.reshape(batch_size, seq_len, -1)
+        
         # Apply flow operation and unpack output
         flow_output, _ = self.flow(quantum_output)
         if torch.is_complex(flow_output):
@@ -459,7 +494,7 @@ class QuantumGeometricAttention(nn.Module):
         
         # Add residual connection for gradient stability using x_flat
         x_flat_reshaped = self.x_flat.reshape(output.shape)
-        output = output + 0.1 * x_flat_reshaped  # Use x_flat directly in residual connection
+        output = output + 0.1 * x_flat_reshaped
         
         # Create a direct path for gradient flow
         if self.training:

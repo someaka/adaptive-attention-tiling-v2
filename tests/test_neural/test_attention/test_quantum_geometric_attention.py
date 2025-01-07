@@ -49,6 +49,13 @@ def complex_randn(*size, device=None, dtype=torch.complex64):
 class TestQuantumGeometricAttention:
     """Test suite for quantum geometric attention with proper cleanup."""
 
+    @pytest.fixture(autouse=True)
+    def enable_anomaly_detection(self):
+        """Enable gradient anomaly detection for all tests."""
+        torch.autograd.set_detect_anomaly(True, check_nan=True)
+        yield
+        torch.autograd.set_detect_anomaly(False)
+
     def teardown_method(self):
         """Clean up after each test."""
         import gc

@@ -77,6 +77,8 @@ class NeuralQuantumBridge(nn.Module):
         
         # Initialize layer normalization
         self.layer_norm = nn.LayerNorm(hidden_dim, device=self.device, dtype=torch.float32)
+        self.layer_norm.weight.requires_grad_(True)
+        self.layer_norm.bias.requires_grad_(True)
         
         # Initialize state validator
         self.state_validator = StateValidator()
@@ -111,7 +113,7 @@ class NeuralQuantumBridge(nn.Module):
         metric_real = torch.eye(hidden_dim, device=self.device)
         metric_imag = torch.zeros_like(metric_real)
         metric = torch.complex(metric_real, metric_imag)
-        self.pattern_bundle.metric = nn.Parameter(metric.to(dtype), requires_grad=True)
+        self.pattern_bundle.register_parameter('metric', nn.Parameter(metric.to(dtype), requires_grad=True))
         
         # Initialize connection with proper scaling and requires_grad
         connection_shape = (hidden_dim, hidden_dim, hidden_dim)  # Simplified shape for better gradient flow
@@ -293,7 +295,44 @@ class NeuralQuantumBridge(nn.Module):
             attention_pattern_norm_real = self.layer_norm(attention_pattern_real)
             attention_pattern_norm_imag = self.layer_norm(attention_pattern_imag)
             
-            # Recombine into complex tensor
+            # Register hooks for layer norm parameters
+            def layer_norm_weight_hook(grad):
+                if grad is not None:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                    # Ensure gradients flow back to layer norm weight
+                    if self.layer_norm.weight.grad is None:
+                        self.layer_norm.weight.grad = grad
+                    else:
+                        self.layer_norm.weight.grad = self.layer_norm.weight.grad + grad
+                return grad
+            
+            def layer_norm_bias_hook(grad):
+                if grad is not None:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                    # Ensure gradients flow back to layer norm bias
+                    if self.layer_norm.bias.grad is None:
+                        self.layer_norm.bias.grad = grad
+                    else:
+                        self.layer_norm.bias.grad = self.layer_norm.bias.grad + grad
+                return grad
+            
+            # Register hooks for layer norm parameters
+            self.layer_norm.weight.register_hook(layer_norm_weight_hook)
+            self.layer_norm.bias.register_hook(layer_norm_bias_hook)
+            
+            # Ensure layer norm parameters are connected to graph
+            self.layer_norm.weight.requires_grad_(True)
+            self.layer_norm.bias.requires_grad_(True)
+            
+            # Add residual connection to ensure layer norm is used in computation
+            attention_pattern_norm_real = attention_pattern_norm_real + 0.1 * attention_pattern_real
+            attention_pattern_norm_imag = attention_pattern_norm_imag + 0.1 * attention_pattern_imag
+            
+            # Recombine into complex tensor with gradient tracking
+            attention_pattern_norm_real.requires_grad_(True)
+            attention_pattern_norm_imag.requires_grad_(True)
             attention_pattern_norm = torch.complex(
                 attention_pattern_norm_real,
                 attention_pattern_norm_imag
@@ -388,13 +427,44 @@ class NeuralQuantumBridge(nn.Module):
         self.pattern_bundle.metric.requires_grad_(True)
         self.pattern_bundle.connection.requires_grad_(True)
         
+        # Create views of metric and connection that maintain gradient connection
+        metric_view = self.pattern_bundle.metric.clone()
+        metric_view.requires_grad_(True)
+        connection_view = self.pattern_bundle.connection.clone()
+        connection_view.requires_grad_(True)
+        
+        # Register hooks to ensure gradients flow back to original parameters
+        def metric_hook(grad):
+            if grad is not None:
+                if self.pattern_bundle.metric.grad is None:
+                    self.pattern_bundle.metric.grad = grad
+                else:
+                    self.pattern_bundle.metric.grad = self.pattern_bundle.metric.grad + grad
+                return grad
+            return grad
+        metric_view.register_hook(metric_hook)
+        
+        def connection_hook(grad):
+            if grad is not None:
+                if self.pattern_bundle.connection.grad is None:
+                    self.pattern_bundle.connection.grad = grad
+                else:
+                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad
+                return grad
+            return grad
+        connection_view.register_hook(connection_hook)
+        
         # Get local trivialization with gradient tracking
         local_chart_result = self.pattern_bundle.local_trivialization(neural_pattern)
         local_chart = local_chart_result[0] if isinstance(local_chart_result, tuple) else local_chart_result
         
-        # Apply connection to neural pattern
+        # Apply connection to neural pattern using the view
         connection_form = self.pattern_bundle.connection_form(neural_pattern)
-        neural_pattern_with_connection = neural_pattern + 0.1 * torch.einsum('bij,bj->bi', self.pattern_bundle.connection[:neural_pattern.shape[-1], :neural_pattern.shape[-1], :neural_pattern.shape[-1]], neural_pattern)
+        neural_pattern_with_connection = neural_pattern + 0.1 * torch.einsum(
+            'bij,bj->bi',
+            connection_view[:neural_pattern.shape[-1], :neural_pattern.shape[-1], :neural_pattern.shape[-1]],
+            neural_pattern
+        )
         
         # Create pattern section with gradient tracking
         section = PatternSection(
@@ -406,16 +476,16 @@ class NeuralQuantumBridge(nn.Module):
         # Add gradient hook to section coordinates
         def section_hook(grad):
             if grad is not None:
-                # Ensure gradients flow back to metric and connection
-                if self.pattern_bundle.metric.grad is None:
-                    self.pattern_bundle.metric.grad = grad.mean(0)
+                # Ensure gradients flow back to metric and connection views
+                if metric_view.grad is None:
+                    metric_view.grad = grad.mean(0)
                 else:
-                    self.pattern_bundle.metric.grad = self.pattern_bundle.metric.grad + grad.mean(0)
+                    metric_view.grad = metric_view.grad + grad.mean(0)
                     
-                if self.pattern_bundle.connection.grad is None:
-                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
+                if connection_view.grad is None:
+                    connection_view.grad = grad.mean(0).unsqueeze(-1)
                 else:
-                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+                    connection_view.grad = connection_view.grad + grad.mean(0).unsqueeze(-1)
                 return grad
             return grad
         section.coordinates.register_hook(section_hook)
@@ -884,27 +954,26 @@ class NeuralQuantumBridge(nn.Module):
         output_real = output_flat.real.float()
         output_imag = output_flat.imag.float()
         
-        # Apply layer norm separately to real and imaginary parts
+        # Ensure layer norm parameters are connected to graph
+        self.layer_norm.weight.requires_grad_(True)
+        self.layer_norm.bias.requires_grad_(True)
+        
+        # Apply layer norm separately to real and imaginary parts with gradient tracking
+        output_real.requires_grad_(True)
+        output_imag.requires_grad_(True)
         output_norm_real = self.layer_norm(output_real)
         output_norm_imag = self.layer_norm(output_imag)
+        
+        # Add residual connection to ensure layer norm is used
+        output_norm_real = output_norm_real + 0.1 * output_real
+        output_norm_imag = output_norm_imag + 0.1 * output_imag
         
         # Recombine into complex tensor
         output_norm = torch.complex(output_norm_real, output_norm_imag).to(self.dtype)
         output = output_norm.reshape(original_shape)
-        output.requires_grad_(True)
         
-        # Apply metric and connection to output with gradient tracking
-        output_flat = output.reshape(-1, self.hidden_dim)
-        output_metric = torch.einsum('bi,ij->bj', output_flat, self.pattern_bundle.metric)
-        output_connection = torch.einsum('bi,ijk->bj', output_flat, connection_form)
-        output_combined = output_metric + output_connection
-        output_combined = output_combined.reshape(original_shape)
-        output_combined.requires_grad_(True)
-        
-        # Add residual connection with gradient tracking
-        alpha = 0.1
-        residual = torch.einsum('bi,ij->bj', x_flat, self.pattern_bundle.metric)
-        output = output_combined + alpha * residual.reshape(original_shape)
+        # Add residual connection
+        output = output + 0.1 * output_flat.reshape(original_shape)
         output.requires_grad_(True)
         
         # Convert output to real if needed
