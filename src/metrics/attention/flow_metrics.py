@@ -112,66 +112,77 @@ def compute_flow_metrics(
 
 def compute_ricci_tensor(metric: torch.Tensor) -> torch.Tensor:
     """Compute Ricci tensor from metric tensor.
-
+    
     Args:
         metric: Metric tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
-
+        
     Returns:
-        Ricci tensor with same shape as input
+        Ricci tensor [batch_size, seq_len, manifold_dim, manifold_dim] or [batch_size, manifold_dim, manifold_dim]
     """
-    # Handle both 3D and 4D inputs
+    # Handle both 2D and 3D inputs
     orig_shape = metric.shape
+    print(f"Original metric shape: {orig_shape}")
+    
     if len(orig_shape) == 4:
-        batch_size, seq_len, dim, _ = orig_shape
+        batch_size, seq_len, manifold_dim, _ = orig_shape
         # Reshape to [batch_size * seq_len, manifold_dim, manifold_dim]
-        metric = metric.reshape(-1, dim, dim)
+        metric = metric.reshape(-1, manifold_dim, manifold_dim)
     else:
-        batch_size, dim, _ = orig_shape
+        batch_size, manifold_dim, _ = orig_shape
         seq_len = None
-
+    
     # Compute inverse metric
-    ginv = torch.inverse(metric)
-
-    # Compute metric derivatives using autograd
-    metric.requires_grad_(True)
+    ginv = torch.inverse(metric)  # [batch_size (* seq_len), manifold_dim, manifold_dim]
+    print(f"Inverse metric shape: {ginv.shape}")
+    
+    # Compute metric derivatives (approximated)
+    eps = 1e-6
     dg = []
-    for k in range(dim):
-        # Create basis vector
-        e_k = torch.zeros(dim, device=metric.device, dtype=metric.dtype)
-        e_k[k] = 1.0
-
-        # Compute directional derivative
-        grad_k = torch.autograd.grad(
-            metric,
-            metric,
-            grad_outputs=e_k.expand_as(metric),
-            create_graph=True,
-            retain_graph=True
-        )[0]
+    batch_size_seq = metric.shape[0]  # This is batch_size * seq_len if seq_len exists
+    
+    for k in range(manifold_dim):
+        # Initialize gradient tensor with correct shape
+        grad_k = torch.zeros_like(metric)
+        
+        # Compute finite difference for each batch element
+        for b in range(batch_size_seq):
+            if k < manifold_dim - 1:
+                # Forward difference for non-last components
+                grad_k[b] = (metric[b, k+1:] - metric[b, k:-1]) / eps
+            else:
+                # Backward difference for last component
+                grad_k[b] = (metric[b, :1] - metric[b, -1:]) / eps
+        
+        print(f"Gradient {k} shape: {grad_k.shape}")
         dg.append(grad_k)
 
     # Stack derivatives
     dg = torch.stack(dg, dim=1)  # [batch_size, dim, dim, dim]
+    print(f"Stacked derivatives shape: {dg.shape}")
 
     # Compute Christoffel symbols using vectorized operations
     christoffel = 0.5 * torch.einsum(
-        'bi,bjk->bijk',
+        'bim,bnjk->binjk',  # Fixed einsum equation to match tensor dimensions
         ginv,
         dg + dg.transpose(-2, -1) - dg.transpose(-1, -2)
     )
+    print(f"Christoffel symbols shape: {christoffel.shape}")
 
     # Compute Riemann tensor using vectorized operations
     riemann = (
-        torch.einsum('bimk,bmjl->bijkl', christoffel, christoffel) -
-        torch.einsum('biml,bmjk->bijkl', christoffel, christoffel)
+        torch.einsum('bimjk,bmnlp->binjlp', christoffel, christoffel) -  # Fixed einsum equation
+        torch.einsum('bimlk,bmnjp->binjlp', christoffel, christoffel)    # Fixed einsum equation
     )
+    print(f"Riemann tensor shape: {riemann.shape}")
 
     # Contract to get Ricci tensor
-    ricci = torch.einsum('bijij->bij', riemann)
+    ricci = torch.einsum('binjnj->bij', riemann)  # Fixed einsum equation
+    print(f"Ricci tensor shape: {ricci.shape}")
 
     # Reshape back to original shape if needed
     if seq_len is not None:
-        ricci = ricci.reshape(batch_size, seq_len, dim, dim)
+        ricci = ricci.reshape(batch_size, seq_len, manifold_dim, manifold_dim)
+        print(f"Final reshaped Ricci tensor shape: {ricci.shape}")
 
     return ricci
 

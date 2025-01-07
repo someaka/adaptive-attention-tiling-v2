@@ -178,6 +178,22 @@ class QuantumGeometricAttention(nn.Module):
         # Initialize complex weights
         self._init_complex_weights()
 
+    def normalize_complex_tensor(self, tensor: torch.Tensor, target_norm: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Normalize complex tensor while preserving phase.
+        
+        Args:
+            tensor: Complex tensor to normalize
+            target_norm: Optional target norm to scale to
+            
+        Returns:
+            Normalized complex tensor
+        """
+        current_norm = torch.sqrt(torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True))
+        if target_norm is None:
+            target_norm = torch.ones_like(current_norm)
+        scale = target_norm / (current_norm + 1e-8)
+        return tensor * scale
+
     def _init_complex_weights(self):
         """Initialize weights with proper complex values."""
         def init_complex_linear(layer):
