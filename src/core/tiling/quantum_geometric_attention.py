@@ -416,14 +416,25 @@ class QuantumGeometricAttention(nn.Module):
         metric.requires_grad_(True)
         metric.retain_grad()  # Retain gradients for metric
 
+        # Get metric_factors from riemannian_framework and ensure gradient tracking
+        metric_factors = self.quantum_bridge.pattern_bundle.riemannian_framework.metric_factors
+        metric_factors.requires_grad_(True)
+        metric_factors.retain_grad()  # Ensure gradients are retained
+
         # Create metric combination with gradient tracking
         metric_combination = base_metric + 0.5 * (metric + pattern_metric)
         metric_combination.requires_grad_(True)
-        
+
+        # Add metric_factors contribution while preserving dimensions
+        metric_factors_reshaped = metric_factors.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+        metric_factors_contribution = torch.matmul(metric_factors_reshaped, metric_factors_reshaped.t())
+        metric_combination = metric_combination + 0.1 * metric_factors_contribution
+        metric_combination.requires_grad_(True)
+
         # Add gradient hook to metric combination
         def metric_combination_hook(grad):
             if grad is not None:
-                # Create full-size gradient
+                # Create full-size gradient for pattern_metric
                 full_grad = torch.zeros_like(self.pattern_metric)
                 full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
                 # Ensure gradients flow back to pattern_metric
@@ -431,6 +442,17 @@ class QuantumGeometricAttention(nn.Module):
                     self.pattern_metric.grad = full_grad
                 else:
                     self.pattern_metric.grad = self.pattern_metric.grad + full_grad
+
+                # Create full-size gradient for metric_factors
+                metric_factors_grad = torch.zeros_like(metric_factors)
+                # Compute the contribution for the top-left block
+                top_left_grad = 0.1 * grad @ metric_factors_reshaped
+                metric_factors_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(top_left_grad)
+                # Ensure gradients flow back to metric_factors
+                if metric_factors.grad is None:
+                    metric_factors.grad = metric_factors_grad
+                else:
+                    metric_factors.grad = metric_factors.grad + metric_factors_grad
                 return grad
             return grad
         metric_combination.register_hook(metric_combination_hook)

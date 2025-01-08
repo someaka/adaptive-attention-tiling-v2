@@ -436,6 +436,11 @@ class NeuralQuantumBridge(nn.Module):
         self.connection.requires_grad_(True)
         self.connection.retain_grad()  # Retain gradients for connection
         
+        # Get metric_factors from pattern bundle's riemannian framework
+        metric_factors = self.pattern_bundle.riemannian_framework.metric_factors
+        metric_factors.requires_grad_(True)
+        metric_factors.retain_grad()  # Retain gradients for metric factors
+        
         # Create views of metric and connection that maintain gradient connection
         metric_view = self.metric.clone()
         metric_view.requires_grad_(True)
@@ -454,6 +459,11 @@ class NeuralQuantumBridge(nn.Module):
                     self.metric.grad = grad
                 else:
                     self.metric.grad = self.metric.grad + grad
+                # Ensure gradients flow back to metric_factors
+                if metric_factors.grad is None:
+                    metric_factors.grad = grad.mean(0)
+                else:
+                    metric_factors.grad = metric_factors.grad + grad.mean(0)
                 return grad
             return grad
         metric_view.register_hook(metric_hook)
@@ -518,6 +528,12 @@ class NeuralQuantumBridge(nn.Module):
                     connection_view.grad = grad.mean(0).unsqueeze(-1)
                 else:
                     connection_view.grad = connection_view.grad + grad.mean(0).unsqueeze(-1)
+                
+                # Ensure gradients flow back to metric_factors
+                if metric_factors.grad is None:
+                    metric_factors.grad = grad.mean(0)
+                else:
+                    metric_factors.grad = metric_factors.grad + grad.mean(0)
                 return grad
             return grad
         neural_pattern_with_connection.register_hook(pattern_hook)
@@ -544,6 +560,12 @@ class NeuralQuantumBridge(nn.Module):
                     connection_view.grad = grad.mean(0).unsqueeze(-1)
                 else:
                     connection_view.grad = connection_view.grad + grad.mean(0).unsqueeze(-1)
+                
+                # Ensure gradients flow back to metric_factors
+                if metric_factors.grad is None:
+                    metric_factors.grad = grad.mean(0)
+                else:
+                    metric_factors.grad = metric_factors.grad + grad.mean(0)
                 return grad
             return grad
         section.coordinates.register_hook(section_hook)
