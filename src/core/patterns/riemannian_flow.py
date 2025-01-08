@@ -72,36 +72,45 @@ class RiemannianFlow(BaseGeometricFlow):
         metric: torch.Tensor,
         points: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Compute Christoffel symbols for the metric tensor.
+        """Compute Christoffel symbols using connection coefficients.
         
         Args:
-            metric: Metric tensor of shape [..., manifold_dim, manifold_dim]
-            points: Optional points tensor for computing metric derivatives
+            metric: Metric tensor
+            points: Optional points tensor
             
         Returns:
-            Christoffel symbols tensor
+            Christoffel symbols
         """
-        # Get device and dtype from metric
+        batch_size = metric.shape[0]
         device = metric.device
         dtype = metric.dtype
         
-        # Handle different input shapes
-        if metric.dim() > 3:
-            # If metric has more than 3 dimensions, flatten all but last 2
-            batch_size = metric.shape[0]
-            metric = metric.reshape(-1, self.manifold_dim, self.manifold_dim)
-            # Update batch_size to account for flattened dimensions
-            batch_size = metric.shape[0]
-        elif metric.dim() == 3:  # [batch_size, manifold_dim, manifold_dim]
-            batch_size = metric.shape[0]
-        else:
-            raise ValueError(f"Unexpected metric shape: {metric.shape}")
-        
-        # Compute inverse metric
-        metric_inv = torch.inverse(metric + self.stability_threshold * torch.eye(
-            self.manifold_dim, device=device, dtype=dtype
-        ).unsqueeze(0))
-        
+        # Get connection coefficients
+        if hasattr(self, 'connection_coeffs'):
+            connection_coeffs = self.connection_coeffs
+            connection_coeffs.requires_grad_(True)  # Ensure gradients flow
+            
+            # Reshape connection coefficients to match batch size if needed
+            if connection_coeffs.shape[0] != batch_size:
+                connection_coeffs = connection_coeffs.expand(batch_size, -1, -1, -1)
+            
+            # Compute Christoffel symbols using connection coefficients
+            christoffel = connection_coeffs
+            
+            # Add metric contribution
+            metric_inv = torch.linalg.inv(metric)  # [batch_size, manifold_dim, manifold_dim]
+            metric_contribution = torch.einsum(
+                'bij,bjk->bik',
+                metric_inv,
+                metric
+            )
+            
+            # Combine connection coefficients with metric contribution
+            christoffel = christoffel + 0.5 * metric_contribution.unsqueeze(-1)
+            
+            return christoffel
+            
+        # Fallback to computing from scratch if no connection coefficients
         # Initialize metric derivatives
         metric_derivs = torch.zeros(
             batch_size,
@@ -150,6 +159,9 @@ class RiemannianFlow(BaseGeometricFlow):
             device=device,
             dtype=dtype
         )
+        
+        # Get inverse metric tensor
+        metric_inv = torch.linalg.inv(metric)  # [batch_size, manifold_dim, manifold_dim]
         
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):

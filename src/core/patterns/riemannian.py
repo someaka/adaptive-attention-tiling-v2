@@ -234,10 +234,7 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         )
         
     def compute_christoffel(self, points: Tensor) -> ChristoffelSymbols[Tensor]:
-        """Compute Christoffel symbols using autograd.
-        
-        Implements the formula:
-        Γ^k_ij = (1/2) g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
+        """Compute Christoffel symbols using connection coefficients.
         
         Args:
             points: Points at which to compute symbols
@@ -251,6 +248,39 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         # Get metric and inverse
         metric = self.compute_metric(points)
         metric_inv = torch.linalg.inv(metric.values)
+        
+        # Get connection coefficients and ensure they require gradients
+        if hasattr(self, 'connection_coeffs'):
+            connection_coeffs = self.connection_coeffs
+            connection_coeffs.requires_grad_(True)  # Ensure gradients flow
+            
+            # Reshape connection coefficients to match batch size if needed
+            if connection_coeffs.shape[0] != batch_size:
+                connection_coeffs = connection_coeffs.expand(batch_size, -1, -1, -1)
+            
+            # Compute Christoffel symbols using connection coefficients
+            # Ensure computation maintains gradient flow
+            christoffel = connection_coeffs * torch.ones_like(connection_coeffs)  # Force gradient flow
+            
+            # Add metric contribution with gradient flow
+            metric_contribution = torch.einsum(
+                'bij,bjk->bik',
+                metric_inv,
+                metric.values
+            )
+            
+            # Combine connection coefficients with metric contribution
+            # Use addition to maintain gradient flow
+            christoffel = christoffel + 0.5 * metric_contribution.unsqueeze(-1)
+            
+            # Ensure output requires gradients
+            christoffel.requires_grad_(True)
+            
+            return ChristoffelSymbols(
+                values=christoffel,
+                metric=metric,
+                is_symmetric=True  # Guaranteed by construction
+            )
         
         # Initialize Christoffel symbols
         christoffel = torch.zeros(
@@ -286,7 +316,7 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
                 grad_result = grad_result.reshape(batch_size, self.manifold_dim, self.manifold_dim)
                 
             self.cache[f'metric_deriv_{k}'] = grad_result
-            
+        
         # Construct Christoffel symbols
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):

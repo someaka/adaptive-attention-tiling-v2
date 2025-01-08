@@ -335,7 +335,7 @@ class TestQuantumGeometricAttention:
         def save_tensor(name: str, tensor: torch.Tensor, step_info: str = ""):
             """Enhanced tensor tracking with computation step info."""
             if tensor.requires_grad:
-                tensor.retain_grad()
+                tensor.retain_grad()  # Ensure gradient is retained
                 intermediate_tensors[name] = tensor
                 computation_steps.append(f"Step: {step_info}")
                 
@@ -368,24 +368,64 @@ class TestQuantumGeometricAttention:
                             print(f"    Mean: {grad.mean().item():.6f}")
                             print(f"    Max: {grad.max().item():.6f}")
                             print(f"    Min: {grad.min().item():.6f}")
-                        return grad
                     return grad
                 
                 tensor.register_hook(hook)
-
+        
         # Track initial tensors
         quantum_bridge = attention_layer.quantum_bridge
         save_tensor("input", x, "Initial input tensor")
-        save_tensor("pattern_bundle.metric", quantum_bridge.pattern_bundle.metric, "Pattern bundle metric parameter")
-        save_tensor("pattern_bundle.connection", quantum_bridge.pattern_bundle.connection, "Pattern bundle connection parameter")
         
-        # Track metric and connection views
-        metric_view = quantum_bridge.pattern_bundle.metric.clone()
-        connection_view = quantum_bridge.pattern_bundle.connection.clone()
-        save_tensor("metric_view", metric_view, "Cloned metric view")
-        save_tensor("connection_view", connection_view, "Cloned connection view")
+        # Get pattern bundle parameters
+        pattern_bundle = quantum_bridge.pattern_bundle
+        metric = pattern_bundle.metric
+        connection = pattern_bundle.connection
         
-        # Track connection usage in forward pass
+        # Get Riemannian framework parameters
+        riemannian_framework = pattern_bundle.riemannian_framework
+        connection_coeffs = riemannian_framework.connection_coeffs
+        
+        # Ensure all parameters require gradients and retain them
+        metric.requires_grad = True
+        connection.requires_grad = True
+        connection_coeffs.requires_grad = True
+        metric.retain_grad()
+        connection.retain_grad()
+        connection_coeffs.retain_grad()
+        
+        # Register hooks for all parameters
+        def parameter_hook(name):
+            def hook(grad):
+                if grad is not None:
+                    print(f"\n{name} gradient stats:")
+                    print(f"Shape: {grad.shape}")
+                    if grad.is_complex():
+                        grad_abs = grad.abs()
+                        print(f"Complex gradient stats:")
+                        print(f"  Magnitude norm: {torch.norm(grad_abs).item():.6f}")
+                        print(f"  Real mean: {grad.real.mean().item():.6f}")
+                        print(f"  Imag mean: {grad.imag.mean().item():.6f}")
+                        print(f"  Max magnitude: {grad_abs.max().item():.6f}")
+                        print(f"  Min magnitude: {grad_abs.min().item():.6f}")
+                    else:
+                        print(f"Real gradient stats:")
+                        print(f"  Norm: {torch.norm(grad).item():.6f}")
+                        print(f"  Mean: {grad.mean().item():.6f}")
+                        print(f"  Max: {grad.max().item():.6f}")
+                        print(f"  Min: {grad.min().item():.6f}")
+                return grad
+            return hook
+        
+        metric.register_hook(parameter_hook("Metric"))
+        connection.register_hook(parameter_hook("Connection"))
+        connection_coeffs.register_hook(parameter_hook("Connection Coefficients"))
+        
+        # Save parameters for tracking
+        save_tensor("pattern_bundle.metric", metric, "Pattern bundle metric parameter")
+        save_tensor("pattern_bundle.connection", connection, "Pattern bundle connection parameter")
+        save_tensor("riemannian_framework.connection_coeffs", connection_coeffs, "Riemannian framework connection coefficients")
+        
+        # Track input flattening
         x_flat = x.reshape(-1, hidden_dim)
         save_tensor("x_flat", x_flat, "Flattened input")
 
@@ -434,9 +474,16 @@ class TestQuantumGeometricAttention:
             print(f"{i+1}. {step}")
         
         # Final assertions with detailed error messages
-        metric_grad = quantum_bridge.pattern_bundle.metric.grad
+        metric_grad = pattern_bundle.metric.grad
+        connection_grad = pattern_bundle.connection.grad
+        connection_coeffs_grad = riemannian_framework.connection_coeffs.grad
+        
         assert metric_grad is not None, \
             "No gradients in pattern_bundle.metric - gradient flow is blocked"
+        assert connection_grad is not None, \
+            "No gradients in pattern_bundle.connection - gradient flow is blocked"
+        assert connection_coeffs_grad is not None, \
+            "No gradients in riemannian_framework.connection_coeffs - gradient flow is blocked"
         
         # Additional assertions to verify gradient quality
         if metric_grad is not None:
@@ -445,10 +492,26 @@ class TestQuantumGeometricAttention:
                 "Metric gradients contain inf/nan values"
             assert grad_abs.mean() > 0, \
                 f"Metric gradients are zero (mean magnitude: {grad_abs.mean().item():.6f})"
+        
+        if connection_grad is not None:
+            grad_abs = connection_grad.abs()
+            assert torch.isfinite(grad_abs).all(), \
+                "Connection gradients contain inf/nan values"
+            assert grad_abs.mean() > 0, \
+                f"Connection gradients are zero (mean magnitude: {grad_abs.mean().item():.6f})"
+                
+        if connection_coeffs_grad is not None:
+            grad_abs = connection_coeffs_grad.abs()
+            assert torch.isfinite(grad_abs).all(), \
+                "Connection coefficients gradients contain inf/nan values"
+            assert grad_abs.mean() > 0, \
+                f"Connection coefficients gradients are zero (mean magnitude: {grad_abs.mean().item():.6f})"
 
         # Verify gradients exist for all parameters
         for name, param in attention_layer.named_parameters():
             assert param.grad is not None, f"Parameter {name} should have gradients"
+            assert torch.isfinite(param.grad).all(), f"Parameter {name} has inf/nan gradients"
+            assert param.grad.abs().mean() > 0, f"Parameter {name} has zero gradients"
 
     def test_geometric_phases(
         self, attention_layer, batch_size, seq_length, hidden_dim
@@ -821,3 +884,314 @@ class TestQuantumGeometricAttention:
                 "Connection gradients contain inf/nan values"
             assert grad_abs.mean() > 0, \
                 f"Connection gradients are zero (mean magnitude: {grad_abs.mean().item():.6f})"
+
+    def test_energy_conservation_in_forward_pass(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test energy conservation during forward pass."""
+        # Create input tensor
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Store initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Compute final energy
+        final_energy = torch.sum(output.abs() ** 2)
+        
+        # Check energy conservation with tolerance
+        assert torch.allclose(
+            initial_energy, final_energy,
+            rtol=1e-2,  # 1% relative tolerance
+            atol=1e-2   # Small absolute tolerance
+        ), f"Energy not conserved: initial={initial_energy.item():.4f}, final={final_energy.item():.4f}"
+        
+        # Test gradient flow
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert x.grad is not None, "Input should receive gradients"
+        assert not torch.isnan(x.grad).any(), "Input gradients contain NaN"
+        assert not torch.isinf(x.grad).any(), "Input gradients contain Inf"
+
+    def test_metric_combination(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test metric combination and gradient flow."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Get initial metrics
+        base_metric = attention_layer.base_metric
+        pattern_metric = attention_layer.pattern_metric
+        metric = attention_layer.metric
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Check metric properties
+        assert base_metric.requires_grad, "Base metric should require gradients"
+        assert pattern_metric.requires_grad, "Pattern metric should require gradients"
+        assert metric.requires_grad, "Metric should require gradients"
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check metric gradients
+        assert base_metric.grad is not None, "Base metric should receive gradients"
+        assert pattern_metric.grad is not None, "Pattern metric should receive gradients"
+        assert metric.grad is not None, "Metric should receive gradients"
+
+    def test_connection_gradient_flow(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test gradient flow through connection coefficients."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Get connection from quantum bridge
+        connection = attention_layer.quantum_bridge.pattern_bundle.connection
+        connection.requires_grad_(True)
+        connection.retain_grad()
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check connection gradients
+        assert connection.grad is not None, "Connection should receive gradients"
+        assert not torch.isnan(connection.grad).any(), "Connection gradients contain NaN"
+        assert not torch.isinf(connection.grad).any(), "Connection gradients contain Inf"
+        assert connection.grad.abs().mean() > 0, "Connection gradients should be non-zero"
+
+    def test_layer_normalization(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test layer normalization with proper shape handling."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Check output properties
+        assert output.shape == x.shape, "Output shape should match input shape"
+        assert output.dtype == x.dtype, "Output dtype should match input dtype"
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert x.grad is not None, "Input should receive gradients"
+        assert not torch.isnan(x.grad).any(), "Input gradients contain NaN"
+        assert not torch.isinf(x.grad).any(), "Input gradients contain Inf"
+
+    def test_energy_conservation_during_normalization(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test energy conservation during normalization steps."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Store initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Project to manifold space
+        x_manifold = attention_layer.manifold_proj(x)
+        manifold_energy = torch.sum(x_manifold.abs() ** 2)
+        
+        # Check energy after manifold projection
+        assert torch.allclose(
+            initial_energy, manifold_energy,
+            rtol=1e-2, atol=1e-2
+        ), f"Energy not conserved after manifold projection: initial={initial_energy.item():.4f}, manifold={manifold_energy.item():.4f}"
+        
+        # Forward pass
+        output = attention_layer(x)
+        final_energy = torch.sum(output.abs() ** 2)
+        
+        # Check energy conservation through entire forward pass
+        assert torch.allclose(
+            initial_energy, final_energy,
+            rtol=1e-2, atol=1e-2
+        ), f"Energy not conserved through forward pass: initial={initial_energy.item():.4f}, final={final_energy.item():.4f}"
+
+    def test_residual_connection_energy(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test energy conservation with residual connections."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Store initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Check output properties
+        assert output.shape == x.shape, "Output shape should match input shape"
+        assert output.dtype == x.dtype, "Output dtype should match input dtype"
+        
+        # Compute final energy
+        final_energy = torch.sum(output.abs() ** 2)
+        
+        # Check energy conservation
+        assert torch.allclose(
+            initial_energy, final_energy,
+            rtol=1e-2, atol=1e-2
+        ), f"Energy not conserved with residual connections: initial={initial_energy.item():.4f}, final={final_energy.item():.4f}"
+        
+        # Test gradient flow
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert x.grad is not None, "Input should receive gradients"
+        assert not torch.isnan(x.grad).any(), "Input gradients contain NaN"
+        assert not torch.isinf(x.grad).any(), "Input gradients contain Inf"
+
+    def test_quantum_bridge_energy_conservation(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test energy conservation through quantum bridge."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Store initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Get quantum bridge
+        quantum_bridge = attention_layer.quantum_bridge
+        
+        # Project to quantum state
+        quantum_state = quantum_bridge.neural_to_quantum(x)
+        quantum_energy = torch.sum(quantum_state.abs() ** 2)
+        
+        # Check energy conservation in quantum state
+        assert torch.allclose(
+            initial_energy, quantum_energy,
+            rtol=1e-2, atol=1e-2
+        ), f"Energy not conserved in quantum state: initial={initial_energy.item():.4f}, quantum={quantum_energy.item():.4f}"
+        
+        # Project back to neural state
+        neural_state = quantum_bridge.quantum_to_neural(quantum_state)
+        final_energy = torch.sum(neural_state.abs() ** 2)
+        
+        # Check energy conservation after round trip
+        assert torch.allclose(
+            initial_energy, final_energy,
+            rtol=1e-2, atol=1e-2
+        ), f"Energy not conserved after quantum-neural round trip: initial={initial_energy.item():.4f}, final={final_energy.item():.4f}"
+
+    def test_metric_factors_gradient_flow(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test gradient flow through metric factors."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Get metric factors
+        metric_factors = attention_layer.quantum_bridge.pattern_bundle.riemannian_framework.metric_factors
+        metric_factors.requires_grad_(True)
+        metric_factors.retain_grad()
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check metric factors gradients
+        assert metric_factors.grad is not None, "Metric factors should receive gradients"
+        assert not torch.isnan(metric_factors.grad).any(), "Metric factors gradients contain NaN"
+        assert not torch.isinf(metric_factors.grad).any(), "Metric factors gradients contain Inf"
+        assert metric_factors.grad.abs().mean() > 0, "Metric factors gradients should be non-zero"
+
+    def test_combined_metric_gradient_flow(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test gradient flow through combined metric tensor."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Get combined metric
+        combined_metric = attention_layer.combined_metric
+        combined_metric.requires_grad_(True)
+        combined_metric.retain_grad()
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check combined metric gradients
+        assert combined_metric.grad is not None, "Combined metric should receive gradients"
+        assert not torch.isnan(combined_metric.grad).any(), "Combined metric gradients contain NaN"
+        assert not torch.isinf(combined_metric.grad).any(), "Combined metric gradients contain Inf"
+        assert combined_metric.grad.abs().mean() > 0, "Combined metric gradients should be non-zero"
+
+    def test_layer_norm_with_energy_conservation(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test layer normalization with energy conservation."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Store initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Get layer norm parameters
+        layer_norm = attention_layer.quantum_bridge.layer_norm
+        assert layer_norm.weight.shape[0] >= attention_layer.manifold_dim, "Layer norm weight shape mismatch"
+        assert layer_norm.bias.shape[0] >= attention_layer.manifold_dim, "Layer norm bias shape mismatch"
+        
+        # Check energy conservation
+        final_energy = torch.sum(output.abs() ** 2)
+        assert torch.allclose(
+            initial_energy, final_energy,
+            rtol=1e-2, atol=1e-2
+        ), f"Energy not conserved through layer norm: initial={initial_energy.item():.4f}, final={final_energy.item():.4f}"
+        
+        # Test gradient flow
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check layer norm parameter gradients
+        assert layer_norm.weight.grad is not None, "Layer norm weight should receive gradients"
+        assert layer_norm.bias.grad is not None, "Layer norm bias should receive gradients"
+        assert not torch.isnan(layer_norm.weight.grad).any(), "Layer norm weight gradients contain NaN"
+        assert not torch.isnan(layer_norm.bias.grad).any(), "Layer norm bias gradients contain NaN"
+
+    def test_complex_dropout_with_energy_conservation(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test complex dropout with energy conservation."""
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        x.requires_grad_(True)
+        
+        # Store initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Enable training mode
+        attention_layer.train()
+        
+        # Forward pass
+        output = attention_layer(x)
+        
+        # Check energy conservation (approximately, due to dropout)
+        final_energy = torch.sum(output.abs() ** 2)
+        energy_ratio = final_energy / initial_energy
+        assert 0.5 < energy_ratio < 1.5, f"Energy ratio out of bounds: {energy_ratio.item():.4f}"
+        
+        # Test gradient flow
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert x.grad is not None, "Input should receive gradients"
+        assert not torch.isnan(x.grad).any(), "Input gradients contain NaN"
+        assert not torch.isinf(x.grad).any(), "Input gradients contain Inf"
+        
+        # Test in eval mode (no dropout)
+        attention_layer.eval()
+        with torch.no_grad():
+            eval_output = attention_layer(x)
+            eval_energy = torch.sum(eval_output.abs() ** 2)
+            assert torch.allclose(
+                initial_energy, eval_energy,
+                rtol=1e-2, atol=1e-2
+            ), f"Energy not conserved in eval mode: initial={initial_energy.item():.4f}, final={eval_energy.item():.4f}"

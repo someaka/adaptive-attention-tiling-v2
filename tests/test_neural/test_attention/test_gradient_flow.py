@@ -661,61 +661,41 @@ class TestGradientFlow:
         x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
         x.requires_grad_(True)
         
-        # Get connection coefficients through computation
-        tangent_vector = x.view(-1, x.shape[-1])  # Flatten for computation
-        connection_coeffs = layer.quantum_bridge.pattern_bundle.compute_connection(tangent_vector)
-        assert connection_coeffs is not None, "Connection coeffs computation failed"
+        # Get the original connection parameter
+        connection = layer.quantum_bridge.pattern_bundle.connection
+        connection.requires_grad_(True)
+        connection.retain_grad()
         
-        # Print shape information
-        print(f"\nConnection coefficients shape: {connection_coeffs.shape}")
-        print(f"Expected manifold dim: {params['manifold_dim']}")
-        
-        # Get the original connection shape for reference
-        original_shape = layer.quantum_bridge.pattern_bundle.connection.shape
-        print(f"Original connection shape: {original_shape}")
-        
-        # Take the first batch and appropriate slices to match manifold dimension
-        connection_coeffs = connection_coeffs[0, :params["manifold_dim"], :params["manifold_dim"], :params["manifold_dim"]]
-        print(f"Reshaped connection coefficients shape: {connection_coeffs.shape}")
-        
-        # Ensure connection coefficients require gradients and wrap in Parameter
-        connection_coeffs = nn.Parameter(connection_coeffs)
-        connection_coeffs.requires_grad_(True)
-        connection_coeffs.retain_grad()
-        
-        # Add gradient hook
-        gradients = []
-        def hook(grad):
-            if grad is not None:  # Only append non-None gradients
-                gradients.append(grad.detach().clone())
-                print(f"Connection coeffs gradient shape in hook: {grad.shape}")
-                print(f"Connection coeffs gradient norm in hook: {grad.norm().item()}")
+        # Track gradients for the connection parameter
+        connection_grads = []
+        def connection_hook(grad):
+            if grad is not None:
+                connection_grads.append(grad.detach().clone())
+                print(f"\nConnection gradient stats:")
+                print(f"Shape: {grad.shape}")
+                print(f"Norm: {grad.norm().item():.6f}")
+                print(f"Mean: {grad.mean().item():.6f}")
             return grad
-        connection_coeffs.register_hook(hook)
+        connection.register_hook(connection_hook)
         
-        # Store original connection for restoration
-        original_connection = layer.quantum_bridge.pattern_bundle.connection
+        # Forward pass
+        output = layer(x)
         
-        # Replace the connection with our computed coefficients
-        layer.quantum_bridge.pattern_bundle.connection = connection_coeffs
+        # Compute loss that ensures connection is used
+        loss = output.abs().pow(2).sum()  # Use squared loss for stronger gradients
+        print(f"\nLoss value: {loss.item():.6f}")
+        loss.backward()
         
-        try:
-            # Forward pass
-            output = layer(x)
-            
-            # For complex tensors, compute loss on both real and imaginary parts
-            if torch.is_complex(output):
-                loss = output.real.abs().mean() + output.imag.abs().mean()
-            else:
-                loss = output.abs().mean()
-            loss.backward()
-            
-            # Check gradients
-            assert len(gradients) > 0, "Connection coeffs should have received gradients"
-            assert gradients[0].abs().mean() > 0, "Connection coeffs gradients should be non-zero"
-        finally:
-            # Restore original connection
-            layer.quantum_bridge.pattern_bundle.connection = original_connection
+        # Check connection gradients
+        assert len(connection_grads) > 0, "Connection should have received gradients"
+        grad = connection_grads[0]
+        grad_norm = grad.abs().mean().item()
+        print(f"\nConnection gradient norm: {grad_norm:.6f}")
+        assert grad_norm > 0, f"Connection gradients are zero (norm: {grad_norm:.6f})"
+        
+        # Verify gradient properties
+        assert torch.isfinite(grad).all(), "Connection gradients contain inf/nan values"
+        assert grad.shape == connection.shape, f"Gradient shape {grad.shape} doesn't match parameter shape {connection.shape}"
 
     @pytest.mark.timeout(30)  # 30 second timeout
     def test_energy_conservation(self, setup_attention):
