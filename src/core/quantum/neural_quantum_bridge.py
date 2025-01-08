@@ -63,10 +63,11 @@ class NeuralQuantumBridge(nn.Module):
         """
         super().__init__()
         
-        # Store parameters
+        # Store configuration
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
+        self.dropout = dropout
         self.manifold_type = manifold_type
         self.curvature = curvature
         self.dtype = dtype
@@ -113,14 +114,20 @@ class NeuralQuantumBridge(nn.Module):
         metric_real = torch.eye(hidden_dim, device=self.device)
         metric_imag = torch.zeros_like(metric_real)
         metric = torch.complex(metric_real, metric_imag)
-        self.pattern_bundle.register_parameter('metric', nn.Parameter(metric.to(dtype), requires_grad=True))
+        self.metric = nn.Parameter(metric.to(dtype), requires_grad=True)  # Register as module parameter
         
         # Initialize connection with proper scaling and requires_grad
         connection_shape = (hidden_dim, hidden_dim, hidden_dim)  # Simplified shape for better gradient flow
-        connection_real = torch.randn(connection_shape, device=self.device) * 0.02  # Small random initialization
+        connection_real = torch.randn(connection_shape, device=self.device) * 0.02
         connection_imag = torch.randn_like(connection_real) * 0.02
         connection = torch.complex(connection_real, connection_imag)
-        self.pattern_bundle.connection = nn.Parameter(connection.to(dtype), requires_grad=True)
+        self.connection = nn.Parameter(connection.to(dtype), requires_grad=True)  # Register as module parameter
+        
+        # Register metric and connection with pattern bundle
+        self.register_parameter('pattern_bundle_metric', self.metric)
+        self.register_parameter('pattern_bundle_connection', self.connection)
+        self.pattern_bundle.metric = self.metric  # Link to pattern bundle
+        self.pattern_bundle.connection = self.connection  # Link to pattern bundle
         
         # Initialize inverse projection
         self.inverse_projection = nn.Linear(
@@ -424,32 +431,42 @@ class NeuralQuantumBridge(nn.Module):
             Pattern section or tuple of (section, metrics)
         """
         # Ensure metric and connection require gradients
-        self.pattern_bundle.metric.requires_grad_(True)
-        self.pattern_bundle.connection.requires_grad_(True)
+        self.metric.requires_grad_(True)
+        self.metric.retain_grad()  # Retain gradients for metric
+        self.connection.requires_grad_(True)
+        self.connection.retain_grad()  # Retain gradients for connection
         
         # Create views of metric and connection that maintain gradient connection
-        metric_view = self.pattern_bundle.metric.clone()
+        metric_view = self.metric.clone()
         metric_view.requires_grad_(True)
-        connection_view = self.pattern_bundle.connection.clone()
+        metric_view.retain_grad()  # Retain gradients for metric view
+        connection_view = self.connection.clone()
         connection_view.requires_grad_(True)
+        connection_view.retain_grad()  # Retain gradients for connection view
         
         # Register hooks to ensure gradients flow back to original parameters
         def metric_hook(grad):
             if grad is not None:
-                if self.pattern_bundle.metric.grad is None:
-                    self.pattern_bundle.metric.grad = grad
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to original metric
+                if self.metric.grad is None:
+                    self.metric.grad = grad
                 else:
-                    self.pattern_bundle.metric.grad = self.pattern_bundle.metric.grad + grad
+                    self.metric.grad = self.metric.grad + grad
                 return grad
             return grad
         metric_view.register_hook(metric_hook)
         
         def connection_hook(grad):
             if grad is not None:
-                if self.pattern_bundle.connection.grad is None:
-                    self.pattern_bundle.connection.grad = grad
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to original connection
+                if self.connection.grad is None:
+                    self.connection.grad = grad
                 else:
-                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad
+                    self.connection.grad = self.connection.grad + grad
                 return grad
             return grad
         connection_view.register_hook(connection_hook)
@@ -458,13 +475,52 @@ class NeuralQuantumBridge(nn.Module):
         local_chart_result = self.pattern_bundle.local_trivialization(neural_pattern)
         local_chart = local_chart_result[0] if isinstance(local_chart_result, tuple) else local_chart_result
         
-        # Apply connection to neural pattern using the view
+        # Apply connection to neural pattern using the view with gradient tracking
         connection_form = self.pattern_bundle.connection_form(neural_pattern)
+        connection_form.requires_grad_(True)
+        connection_form.retain_grad()  # Retain gradients for connection form
+        
+        # Add gradient hook to connection form
+        def connection_form_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to connection view
+                if connection_view.grad is None:
+                    connection_view.grad = grad
+                else:
+                    connection_view.grad = connection_view.grad + grad
+                return grad
+            return grad
+        connection_form.register_hook(connection_form_hook)
+        
+        # Apply connection with gradient tracking
         neural_pattern_with_connection = neural_pattern + 0.1 * torch.einsum(
             'bij,bj->bi',
             connection_view[:neural_pattern.shape[-1], :neural_pattern.shape[-1], :neural_pattern.shape[-1]],
             neural_pattern
         )
+        neural_pattern_with_connection.requires_grad_(True)
+        neural_pattern_with_connection.retain_grad()  # Retain gradients for pattern with connection
+        
+        # Add gradient hook to pattern with connection
+        def pattern_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to metric and connection views
+                if metric_view.grad is None:
+                    metric_view.grad = grad.mean(0)
+                else:
+                    metric_view.grad = metric_view.grad + grad.mean(0)
+                    
+                if connection_view.grad is None:
+                    connection_view.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    connection_view.grad = connection_view.grad + grad.mean(0).unsqueeze(-1)
+                return grad
+            return grad
+        neural_pattern_with_connection.register_hook(pattern_hook)
         
         # Create pattern section with gradient tracking
         section = PatternSection(
@@ -476,6 +532,8 @@ class NeuralQuantumBridge(nn.Module):
         # Add gradient hook to section coordinates
         def section_hook(grad):
             if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
                 # Ensure gradients flow back to metric and connection views
                 if metric_view.grad is None:
                     metric_view.grad = grad.mean(0)
@@ -497,8 +555,7 @@ class NeuralQuantumBridge(nn.Module):
         metrics = {
             "local_chart": local_chart,
             "connection": connection_form,
-            "transition": self.pattern_bundle.transition_functions(local_chart, local_chart),
-            "projection": self.pattern_bundle.bundle_projection(neural_pattern_with_connection)
+            "transition": self.pattern_bundle.transition_maps
         }
         
         return section, metrics
@@ -883,7 +940,7 @@ class NeuralQuantumBridge(nn.Module):
         
         # Apply metric tensor to input with gradient tracking
         x_flat = x.reshape(-1, self.hidden_dim)
-        x_metric = torch.einsum('bi,ij->bj', x_flat, self.pattern_bundle.metric)
+        x_metric = torch.einsum('bi,ij->bj', x_flat, self.metric)  # Use self.metric directly
         x_metric = x_metric.reshape(original_shape)
         x_metric.requires_grad_(True)
         
@@ -891,16 +948,16 @@ class NeuralQuantumBridge(nn.Module):
         def metric_hook(grad):
             if grad is not None:
                 # Ensure gradients flow back to metric
-                if self.pattern_bundle.metric.grad is None:
-                    self.pattern_bundle.metric.grad = grad.mean(0)
+                if self.metric.grad is None:
+                    self.metric.grad = grad.mean(0)
                 else:
-                    self.pattern_bundle.metric.grad = self.pattern_bundle.metric.grad + grad.mean(0)
+                    self.metric.grad = self.metric.grad + grad.mean(0)
             return grad
         x_metric.register_hook(metric_hook)
         
         # Apply connection form to input tensor with gradient tracking
         x_flat = x.reshape(-1, self.hidden_dim)
-        connection_form = self.pattern_bundle.connection
+        connection_form = self.connection  # Use self.connection directly
         x_connection = torch.einsum('bi,ijk->bj', x_flat, connection_form)
         x_connection = x_connection.reshape(original_shape)
         x_connection.requires_grad_(True)
@@ -909,10 +966,10 @@ class NeuralQuantumBridge(nn.Module):
         def connection_hook(grad):
             if grad is not None:
                 # Ensure gradients flow back to connection
-                if self.pattern_bundle.connection.grad is None:
-                    self.pattern_bundle.connection.grad = grad.mean(0).unsqueeze(-1)
+                if self.connection.grad is None:
+                    self.connection.grad = grad.mean(0).unsqueeze(-1)
                 else:
-                    self.pattern_bundle.connection.grad = self.pattern_bundle.connection.grad + grad.mean(0).unsqueeze(-1)
+                    self.connection.grad = self.connection.grad + grad.mean(0).unsqueeze(-1)
             return grad
         x_connection.register_hook(connection_hook)
         

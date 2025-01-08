@@ -21,7 +21,7 @@
     "reportInvalidTypeForm": "none",
     "reportGeneralTypeIssues": "warning",
     "reportPrivateUsage": "none",
-    "reportInternalTypeErrors": "none",
+    // "reportInternalTypeErrors": "none",
     "typeCheckingMode": "basic",
     "useLibraryCodeForTypes": true,
     "strictListInference": true,

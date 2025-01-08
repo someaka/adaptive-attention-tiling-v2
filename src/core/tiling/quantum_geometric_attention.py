@@ -402,34 +402,88 @@ class QuantumGeometricAttention(nn.Module):
         print(f"After manifold projection shape: {x_manifold.shape}")
         print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
         
-        # Initialize base metric tensor
-        base_metric = self.base_metric
+        # Initialize base metric tensor with proper dimensions
+        base_metric = self.base_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)  # Use narrow for views
         base_metric.requires_grad_(True)
 
-        # Use pattern_metric parameter directly
-        pattern_metric = self.pattern_metric
+        # Use pattern_metric parameter with proper dimensions
+        pattern_metric = self.pattern_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)  # Use narrow for views
         pattern_metric.requires_grad_(True)
         pattern_metric.retain_grad()  # Retain gradients for pattern metric
 
-        # Use metric parameter directly
-        metric = self.metric
+        # Use metric parameter with proper dimensions
+        metric = self.metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)  # Use narrow for views
         metric.requires_grad_(True)
         metric.retain_grad()  # Retain gradients for metric
 
-        # Use combined_metric parameter directly
-        combined_metric = self.combined_metric
+        # Create metric combination with gradient tracking
+        metric_combination = base_metric + 0.5 * (metric + pattern_metric)
+        metric_combination.requires_grad_(True)
+        
+        # Add gradient hook to metric combination
+        def metric_combination_hook(grad):
+            if grad is not None:
+                # Create full-size gradient
+                full_grad = torch.zeros_like(self.pattern_metric)
+                full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
+                # Ensure gradients flow back to pattern_metric
+                if self.pattern_metric.grad is None:
+                    self.pattern_metric.grad = full_grad
+                else:
+                    self.pattern_metric.grad = self.pattern_metric.grad + full_grad
+                return grad
+            return grad
+        metric_combination.register_hook(metric_combination_hook)
+        
+        # Create new combined metric tensor
+        combined_metric = metric_combination + self.combined_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)  # Use narrow for views
         combined_metric.requires_grad_(True)
         combined_metric.retain_grad()  # Retain gradients for combined metric
         
-        # Create metric combination and use it to update combined_metric
-        metric_combination = base_metric + 0.5 * (metric + pattern_metric)
-        combined_metric = combined_metric + metric_combination  # This creates a new tensor with gradient connection
+        # Add gradient hook to combined metric
+        def combined_metric_hook(grad):
+            if grad is not None:
+                # Create full-size gradient
+                full_grad = torch.zeros_like(self.pattern_metric)
+                full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
+                # Ensure gradients flow back to pattern_metric
+                if self.pattern_metric.grad is None:
+                    self.pattern_metric.grad = full_grad
+                else:
+                    self.pattern_metric.grad = self.pattern_metric.grad + full_grad
+                return grad
+            return grad
+        combined_metric.register_hook(combined_metric_hook)
 
         # Apply metric with gradient stabilization
         x_metric = torch.matmul(x_manifold, combined_metric)
         metric_norm = torch.norm(combined_metric)
         x_metric = x_metric * (1.0 + 1e-6 * metric_norm)
         x_metric = torch.matmul(x_metric, combined_metric)
+        x_metric.requires_grad_(True)
+        
+        # Add gradient hook to x_metric
+        def x_metric_hook(grad):
+            if grad is not None:
+                # Take mean over batch dimension to match combined_metric shape
+                batch_grad = torch.mean(grad.transpose(-2, -1) @ x_manifold, dim=0)
+                # Create full-size gradient with zeros
+                full_grad = torch.zeros_like(self.quantum_bridge.pattern_bundle_metric)
+                # Copy the batch_grad into the top-left quadrant of full_grad
+                full_grad[:self.manifold_dim, :self.manifold_dim] = batch_grad
+                # Ensure gradients flow back to pattern_metric through combined_metric
+                if combined_metric.grad is None:
+                    combined_metric.grad = batch_grad
+                else:
+                    combined_metric.grad = combined_metric.grad + batch_grad
+                # Also ensure gradients flow to pattern bundle metric
+                if self.quantum_bridge.pattern_bundle_metric.grad is None:
+                    self.quantum_bridge.pattern_bundle_metric.grad = full_grad
+                else:
+                    self.quantum_bridge.pattern_bundle_metric.grad = self.quantum_bridge.pattern_bundle_metric.grad + full_grad
+                return grad
+            return grad
+        x_metric.register_hook(x_metric_hook)
         
         print(f"metric requires_grad: {combined_metric.requires_grad}")
         print(f"pattern_metric requires_grad: {pattern_metric.requires_grad}")
@@ -438,16 +492,16 @@ class QuantumGeometricAttention(nn.Module):
         # Get connection and ensure consistent types
         connection = self.quantum_bridge.pattern_bundle.connection
         if connection.shape[-1] != self.manifold_dim:
-            # Project connection to manifold dimension
-            connection = connection[..., :self.manifold_dim, :self.manifold_dim, :self.manifold_dim]
+            # Project connection to manifold dimension using narrow
+            connection = connection.narrow(-3, 0, self.manifold_dim).narrow(-2, 0, self.manifold_dim).narrow(-1, 0, self.manifold_dim)
         connection.requires_grad_(True)  # Ensure connection requires gradients
         connection.retain_grad()  # Retain gradients for connection
         print(f"connection requires_grad: {connection.requires_grad}")
         
         # Ensure pattern bundle metric requires gradients
-        pattern_metric = self.quantum_bridge.pattern_bundle.metric
-        pattern_metric.requires_grad_(True)
-        pattern_metric.retain_grad()  # Retain gradients for pattern metric
+        pattern_bundle_metric = self.quantum_bridge.pattern_bundle_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)  # Use narrow for views
+        pattern_bundle_metric.requires_grad_(True)
+        pattern_bundle_metric.retain_grad()  # Retain gradients for pattern metric
         
         # Convert x_metric to complex if connection is complex
         if torch.is_complex(connection):
@@ -562,7 +616,6 @@ class QuantumGeometricAttention(nn.Module):
             self.x_flat.register_hook(hook_x_flat)
         
         return output
-
     def prepare_attention_state(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> AttentionState:
         """Prepare attention state from input tensor.
         
@@ -1371,3 +1424,4 @@ class QuantumGeometricAttention(nn.Module):
         norms = torch.norm(quantum_manifold, dim=-1, keepdim=True)
         quantum_manifold = quantum_manifold / (norms + 1e-8)
         return quantum_manifold
+

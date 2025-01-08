@@ -498,3 +498,157 @@ class TestGradientFlow:
             logger.info(f"  Imag mean: {grad.imag.mean().item():.6f}")
             logger.info(f"  Real std: {grad.real.std().item():.6f}")
             logger.info(f"  Imag std: {grad.imag.std().item():.6f}")
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_quantum_bridge_pattern_bundle_metric_flow(self, setup_attention):
+        """Test gradient flow through quantum_bridge.pattern_bundle.metric."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get pattern bundle metric directly from the registered parameter
+        pattern_bundle_metric = layer.quantum_bridge.pattern_bundle_metric  # Access registered parameter
+        assert pattern_bundle_metric is not None, "Pattern bundle metric parameter not found"
+        pattern_bundle_metric.requires_grad_(True)
+        pattern_bundle_metric.retain_grad()  # Ensure gradients are retained
+        
+        # Track intermediate tensors
+        intermediate_tensors = {}
+        computation_steps = []
+        
+        def save_tensor(name, tensor, step_info=""):
+            """Enhanced tensor tracking with computation step info."""
+            if tensor.requires_grad:
+                tensor.retain_grad()
+                intermediate_tensors[name] = tensor
+                computation_steps.append(f"Step: {step_info}")
+                
+                print(f"\nTracking tensor: {name}")
+                print(f"Step info: {step_info}")
+                print(f"Shape: {tensor.shape}")
+                print(f"Requires grad: {tensor.requires_grad}")
+                print(f"Is complex: {tensor.is_complex()}")
+                if tensor.is_complex():
+                    print(f"Complex stats:")
+                    print(f"  Magnitude mean: {tensor.abs().mean().item():.6f}")
+                    print(f"  Real mean: {tensor.real.mean().item():.6f}")
+                    print(f"  Imag mean: {tensor.imag.mean().item():.6f}")
+                
+                def hook(grad):
+                    if grad is not None:
+                        print(f"\nGradient for {name} (Step: {step_info}):")
+                        print(f"  Shape: {grad.shape}")
+                        if grad.is_complex():
+                            grad_abs = grad.abs()
+                            print(f"  Complex Gradient stats:")
+                            print(f"    Magnitude norm: {torch.norm(grad_abs).item():.6f}")
+                            print(f"    Real mean: {grad.real.mean().item():.6f}")
+                            print(f"    Imag mean: {grad.imag.mean().item():.6f}")
+                            print(f"    Max magnitude: {grad_abs.max().item():.6f}")
+                            print(f"    Min magnitude: {grad_abs.min().item():.6f}")
+                        else:
+                            print(f"  Gradient stats:")
+                            print(f"    Norm: {torch.norm(grad).item():.6f}")
+                            print(f"    Mean: {grad.mean().item():.6f}")
+                            print(f"    Max: {grad.max().item():.6f}")
+                            print(f"    Min: {grad.min().item():.6f}")
+                        return grad
+                    return grad
+                
+                tensor.register_hook(hook)
+        
+        # Track initial tensors
+        save_tensor("input", x, "Initial input tensor")
+        save_tensor("pattern_bundle.metric", pattern_bundle_metric, "Pattern bundle metric parameter")
+        
+        # Forward pass
+        output = layer(x)
+        save_tensor("output", output, "Final output")
+        
+        # Use the same loss computation as the integration test
+        loss = output.abs().pow(2).sum()
+        print(f"\nLoss value: {loss.item():.6f}")
+        loss.backward()
+        
+        # Log gradient flow analysis
+        print("\n=== Gradient Flow Analysis ===")
+        print("=" * 50)
+        
+        # Check each tracked tensor
+        for name, tensor in intermediate_tensors.items():
+            print(f"\nAnalyzing tensor: {name}")
+            print(f"  Shape: {tensor.shape}")
+            print(f"  Requires grad: {tensor.requires_grad}")
+            if hasattr(tensor, 'grad') and tensor.grad is not None:
+                grad = tensor.grad
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    print(f"  Complex Gradient stats:")
+                    print(f"    Magnitude norm: {torch.norm(grad_abs).item():.6f}")
+                    print(f"    Real mean: {grad.real.mean().item():.6f}")
+                    print(f"    Imag mean: {grad.imag.mean().item():.6f}")
+                    print(f"    Max magnitude: {grad_abs.max().item():.6f}")
+                    print(f"    Min magnitude: {grad_abs.min().item():.6f}")
+                else:
+                    print(f"  Gradient stats:")
+                    print(f"    Norm: {torch.norm(grad).item():.6f}")
+                    print(f"    Mean: {grad.mean().item():.6f}")
+                    print(f"    Max: {grad.max().item():.6f}")
+                    print(f"    Min: {grad.min().item():.6f}")
+            else:
+                print("  No gradients")
+        
+        # Log computation steps
+        print("\n=== Computation Steps ===")
+        for i, step in enumerate(computation_steps):
+            print(f"{i+1}. {step}")
+        
+        # Final assertions with detailed error messages
+        metric_grad = pattern_bundle_metric.grad
+        assert metric_grad is not None, \
+            "No gradients in pattern_bundle.metric - gradient flow is blocked"
+        
+        # Additional assertions to verify gradient quality
+        if metric_grad is not None:
+            grad_abs = metric_grad.abs()
+            assert torch.isfinite(grad_abs).all(), \
+                "Metric gradients contain inf/nan values"
+            assert grad_abs.mean() > 0, \
+                f"Metric gradients are zero (mean magnitude: {grad_abs.mean().item():.6f})"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_metric_factors_gradient_flow(self, setup_attention):
+        """Test gradient flow through quantum_bridge.pattern_bundle.riemannian_framework.metric_factors."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get metric_factors directly from the riemannian framework
+        metric_factors = layer.quantum_bridge.pattern_bundle.riemannian_framework.metric_factors
+        assert metric_factors is not None, "Metric factors parameter not found"
+        metric_factors.requires_grad_(True)
+        metric_factors.retain_grad()  # Ensure gradients are retained
+        
+        # Add gradient hook
+        gradients = []
+        def hook(grad):
+            if grad is not None:  # Only append non-None gradients
+                gradients.append(grad.detach().clone())
+                print(f"Metric factors gradient shape in hook: {grad.shape}")
+                print(f"Metric factors gradient norm in hook: {grad.norm().item()}")
+            return grad
+        metric_factors.register_hook(hook)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # For complex tensors, compute loss on both real and imaginary parts
+        if torch.is_complex(output):
+            loss = output.real.abs().mean() + output.imag.abs().mean()
+        else:
+            loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert len(gradients) > 0, "Metric factors should have received gradients"
+        assert gradients[0].abs().mean() > 0, "Metric factors gradients should be non-zero"
