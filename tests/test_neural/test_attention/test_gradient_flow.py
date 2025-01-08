@@ -652,3 +652,113 @@ class TestGradientFlow:
         # Check gradients
         assert len(gradients) > 0, "Metric factors should have received gradients"
         assert gradients[0].abs().mean() > 0, "Metric factors gradients should be non-zero"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_connection_coeffs_gradient_flow(self, setup_attention):
+        """Test gradient flow through connection coefficients."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get connection coefficients through computation
+        tangent_vector = x.view(-1, x.shape[-1])  # Flatten for computation
+        connection_coeffs = layer.quantum_bridge.pattern_bundle.compute_connection(tangent_vector)
+        assert connection_coeffs is not None, "Connection coeffs computation failed"
+        
+        # Add gradient hook
+        gradients = []
+        def hook(grad):
+            if grad is not None:  # Only append non-None gradients
+                gradients.append(grad.detach().clone())
+                print(f"Connection coeffs gradient shape in hook: {grad.shape}")
+                print(f"Connection coeffs gradient norm in hook: {grad.norm().item()}")
+            return grad
+        connection_coeffs.register_hook(hook)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # For complex tensors, compute loss on both real and imaginary parts
+        if torch.is_complex(output):
+            loss = output.real.abs().mean() + output.imag.abs().mean()
+        else:
+            loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradients
+        assert len(gradients) > 0, "Connection coeffs should have received gradients"
+        assert gradients[0].abs().mean() > 0, "Connection coeffs gradients should be non-zero"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_energy_conservation(self, setup_attention):
+        """Test energy conservation during gradient flow."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # Compute initial energy
+        def compute_energy(tensor):
+            """Compute energy of a complex tensor."""
+            return torch.sum(tensor.real ** 2 + tensor.imag ** 2)
+        
+        initial_energy = compute_energy(x)
+        final_energy = compute_energy(output)
+        
+        # Check energy conservation with tolerance
+        assert torch.allclose(
+            initial_energy, final_energy,
+            rtol=1e-2,  # 1% relative tolerance
+            atol=1e-2   # Small absolute tolerance
+        ), "Energy should be approximately conserved"
+        
+        # Backward pass should also conserve energy
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradient energy conservation
+        if x.grad is not None:
+            grad_energy = compute_energy(x.grad)
+            assert torch.isfinite(grad_energy), "Gradient energy should be finite"
+            assert grad_energy > 0, "Gradient energy should be positive"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_dtype_consistency(self, setup_attention):
+        """Test dtype consistency throughout the network."""
+        layer, params = setup_attention
+        
+        # Test with both real and complex inputs
+        real_input = torch.randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        complex_input = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        
+        # Check real input
+        real_input.requires_grad_(True)
+        try:
+            output_real = layer(real_input)
+            assert output_real.dtype == torch.complex64, "Output should be complex64 regardless of input type"
+        except RuntimeError as e:
+            if "must have the same dtype" in str(e):
+                print("Layer requires complex input")
+            else:
+                raise e
+        
+        # Check complex input
+        complex_input.requires_grad_(True)
+        output_complex = layer(complex_input)
+        assert output_complex.dtype == torch.complex64, "Output should be complex64"
+        
+        # Check parameter dtypes
+        for name, param in layer.named_parameters():
+            assert param.dtype in [torch.complex64, torch.float32], \
+                f"Parameter {name} has unexpected dtype {param.dtype}"
+            
+        # Test gradient dtypes
+        loss = output_complex.abs().mean()
+        loss.backward()
+        
+        for name, param in layer.named_parameters():
+            if param.grad is not None:
+                assert param.grad.dtype == param.dtype, \
+                    f"Gradient dtype mismatch for {name}: param {param.dtype} vs grad {param.grad.dtype}"

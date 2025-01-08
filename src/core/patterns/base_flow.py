@@ -30,7 +30,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         """Initialize base geometric flow.
         
         Args:
-            manifold_dim: Dimension of the base manifold
+            manifold_dim: Dimension of the manifold
             hidden_dim: Hidden dimension for flow computations
             num_layers: Number of layers in flow network
             dt: Time step for flow integration
@@ -40,25 +40,49 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         super().__init__()
         
         self.manifold_dim = manifold_dim
-        self.hidden_dim = hidden_dim or manifold_dim
+        self.hidden_dim = hidden_dim or manifold_dim * 4
         self.num_layers = num_layers
         self.dt = dt
         self.stability_threshold = stability_threshold
         self.dtype = dtype
         
+        # Initialize metric network for real and imaginary parts separately
+        metric_output_dim = manifold_dim * manifold_dim
+        
+        # Real part network
+        real_layers = []
+        real_layers.append(nn.Linear(manifold_dim, self.hidden_dim, dtype=torch.float32))
+        real_layers.append(nn.Tanh())
+        for _ in range(num_layers - 2):
+            real_layers.append(nn.Linear(self.hidden_dim, self.hidden_dim, dtype=torch.float32))
+            real_layers.append(nn.Tanh())
+        real_layers.append(nn.Linear(self.hidden_dim, metric_output_dim, dtype=torch.float32))
+        self.real_metric_net = nn.Sequential(*real_layers)
+        
+        # Imaginary part network
+        imag_layers = []
+        imag_layers.append(nn.Linear(manifold_dim, self.hidden_dim, dtype=torch.float32))
+        imag_layers.append(nn.Tanh())
+        for _ in range(num_layers - 2):
+            imag_layers.append(nn.Linear(self.hidden_dim, self.hidden_dim, dtype=torch.float32))
+            imag_layers.append(nn.Tanh())
+        imag_layers.append(nn.Linear(self.hidden_dim, metric_output_dim, dtype=torch.float32))
+        self.imag_metric_net = nn.Sequential(*imag_layers)
+        
+        # Initialize weights
+        for net in [self.real_metric_net, self.imag_metric_net]:
+            for layer in net:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+        
         # Initialize basic flow network
         self.flow_layers = nn.ModuleList([
-            nn.Linear(manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Linear(manifold_dim, self.hidden_dim, dtype=torch.float32),
             nn.Tanh(),
-            nn.Linear(self.hidden_dim, manifold_dim, dtype=self.dtype)
+            nn.Linear(self.hidden_dim, manifold_dim, dtype=torch.float32)
         ])
-        
-        # Initialize metric computation
-        self.metric_net = nn.Sequential(
-            nn.Linear(manifold_dim, self.hidden_dim),
-            nn.Tanh(),
-            nn.Linear(self.hidden_dim, manifold_dim * manifold_dim)
-        )
     
     def compute_ricci_tensor(
         self,
@@ -274,31 +298,63 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         return current, metrics
     
     def compute_metric(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor at point x.
+        """Compute metric tensor for given points.
         
         Args:
-            x: Input tensor
+            x: Input points tensor
             
         Returns:
             Metric tensor
         """
-        # Add batch dimension if needed
-        if len(x.shape) == 1:
-            x = x.unsqueeze(0)
+        # Ensure input has correct shape
+        if x.dim() == 3:  # [batch, seq_len, dim]
+            batch_size, seq_len, dim = x.shape
+            x = x.reshape(-1, dim)  # Flatten batch and seq_len dimensions
+        elif x.dim() == 2:  # [batch, dim]
+            batch_size = x.shape[0]
+            seq_len = 1
+        else:
+            raise ValueError(f"Unexpected input shape: {x.shape}")
+
+        # Ensure input dimension matches manifold dimension
+        if x.shape[-1] != self.manifold_dim:
+            # Project input to manifold dimension if needed
+            proj = nn.Linear(x.shape[-1], self.manifold_dim, device=x.device, dtype=x.dtype)
+            x = proj(x)
         
-        # Compute metric components
-        metric_components = self.metric_net(x)
-        
-        # Reshape to metric tensor
-        batch_size = x.shape[0]
-        metric = metric_components.view(batch_size, self.manifold_dim, self.manifold_dim)
-        
-        # Make symmetric and positive definite
+        # If input is complex, compute metric on real and imaginary parts separately
+        if torch.is_complex(x):
+            x_real = x.real
+            x_imag = x.imag
+            
+            # Compute metric components for real and imaginary parts
+            metric_real = self.real_metric_net(x_real)
+            metric_imag = self.imag_metric_net(x_imag)
+            
+            # Combine into complex metric
+            metric = torch.complex(metric_real, metric_imag)
+            
+            # Reshape to proper dimensions
+            metric = metric.view(-1, self.manifold_dim, self.manifold_dim)
+            
+            # Make symmetric and positive definite
+            metric = 0.5 * (metric + metric.transpose(-2, -1).conj())
+            metric = metric + torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype).unsqueeze(0) * 1e-6
+            
+            # Restore original batch dimensions if needed
+            if seq_len > 1:
+                metric = metric.view(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
+            
+            return metric
+            
+        # For real inputs, use original behavior
+        metric_components = self.real_metric_net(x)
+        metric = metric_components.view(-1, self.manifold_dim, self.manifold_dim)
         metric = 0.5 * (metric + metric.transpose(-2, -1))
-        metric = metric + torch.eye(self.manifold_dim, device=x.device).unsqueeze(0) * 1e-6
+        metric = metric + torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype).unsqueeze(0) * 1e-6
         
-        # Remove batch dimension if input was unbatched
-        if len(x.shape) == 1:
-            metric = metric.squeeze(0)
+        # Restore original batch dimensions if needed
+        if seq_len > 1:
+            metric = metric.view(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
         
         return metric 

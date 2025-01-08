@@ -391,14 +391,18 @@ class QuantumGeometricAttention(nn.Module):
         print(f"\nInput shape: {x.shape}")
         batch_size, seq_len, _ = x.shape
         
-        # Store original input shape for gradient flow
+        # Store original input shape and energy for gradient flow
         self.x_flat = x.reshape(-1, x.shape[-1])  # Store x_flat as class attribute
         self.x_flat.requires_grad_(True)  # Ensure requires_grad is True
         self.x_flat.retain_grad()  # Retain gradients for x_flat
+        initial_energy = torch.sum(self.x_flat.abs() ** 2)
         print(f"x_flat requires_grad: {self.x_flat.requires_grad}")
         
         # Project input to manifold space using x_flat
         x_manifold = self.manifold_proj(self.x_flat.reshape(batch_size, seq_len, -1))  # [batch_size, seq_len, manifold_dim]
+        # Normalize to preserve energy
+        x_manifold_norm = torch.sqrt(torch.sum(x_manifold.abs() ** 2))
+        x_manifold = x_manifold * torch.sqrt(initial_energy) / (x_manifold_norm + 1e-8)
         print(f"After manifold projection shape: {x_manifold.shape}")
         print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
         
@@ -531,6 +535,9 @@ class QuantumGeometricAttention(nn.Module):
         
         # Apply connection to input with gradient tracking
         x_with_connection = x_metric + torch.einsum('bsi,ijk->bsj', x_metric, connection)
+        # Normalize to preserve energy
+        x_with_connection_norm = torch.sqrt(torch.sum(x_with_connection.abs() ** 2))
+        x_with_connection = x_with_connection * torch.sqrt(initial_energy) / (x_with_connection_norm + 1e-8)
         print(f"x_with_connection requires_grad: {x_with_connection.requires_grad}")
         
         # Process through tiles
@@ -555,13 +562,19 @@ class QuantumGeometricAttention(nn.Module):
         
         # Mean over heads
         mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_len, manifold_dim]
+        # Normalize to preserve energy
+        mean_output_norm = torch.sqrt(torch.sum(mean_output.abs() ** 2))
+        mean_output = mean_output * torch.sqrt(initial_energy) / (mean_output_norm + 1e-8)
         print(f"After mean over heads shape: {mean_output.shape}")
         print(f"mean_output requires_grad: {mean_output.requires_grad}")
-        
+
         # Apply quantum attention layers
         quantum_output = mean_output
         for i, layer in enumerate(self.attention_layers):
             quantum_output = layer(quantum_output)
+            # Normalize after each layer to preserve energy
+            quantum_output_norm = torch.sqrt(torch.sum(quantum_output.abs() ** 2))
+            quantum_output = quantum_output * torch.sqrt(initial_energy) / (quantum_output_norm + 1e-8)
             print(f"After quantum attention layer {i} shape: {quantum_output.shape}")
             print(f"quantum_output layer {i} requires_grad: {quantum_output.requires_grad}")
         
@@ -588,7 +601,7 @@ class QuantumGeometricAttention(nn.Module):
         else:
             # If real tensor, apply layer norm directly
             quantum_output_norm = layer_norm(quantum_output_flat.float())
-        
+
         # Add residual connection for gradient stability
         quantum_output_norm = quantum_output_norm + 0.1 * quantum_output_flat
         
@@ -606,6 +619,9 @@ class QuantumGeometricAttention(nn.Module):
         
         # Inverse manifold projection
         output = self.manifold_proj_inv(flow_output)
+        # Normalize to match input energy
+        output_norm = torch.sqrt(torch.sum(output.abs() ** 2))
+        output = output * torch.sqrt(initial_energy) / (output_norm + 1e-8)
         print(f"After inverse manifold projection shape: {output.shape}")
         print(f"output requires_grad: {output.requires_grad}")
         

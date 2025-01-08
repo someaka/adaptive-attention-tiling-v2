@@ -946,8 +946,9 @@ class NeuralQuantumBridge(nn.Module):
             Output tensor of shape [batch_size, seq_len, hidden_dim]
             Optional dict of intermediate results if return_intermediates is True
         """
-        # Store original shape for reshaping
+        # Store original shape and norm for later
         original_shape = x.shape
+        input_norm = torch.sqrt(torch.sum(x.real ** 2 + x.imag ** 2, dim=-1, keepdim=True))
         
         # Add gradient hook to input tensor
         def input_hook(grad):
@@ -964,6 +965,8 @@ class NeuralQuantumBridge(nn.Module):
         x_flat = x.reshape(-1, self.hidden_dim)
         x_metric = torch.einsum('bi,ij->bj', x_flat, self.metric)  # Use self.metric directly
         x_metric = x_metric.reshape(original_shape)
+        # Normalize after metric operation while preserving input norm
+        x_metric = x_metric * (input_norm / (torch.sqrt(torch.sum(x_metric.real ** 2 + x_metric.imag ** 2, dim=-1, keepdim=True)) + 1e-8))
         x_metric.requires_grad_(True)
         
         # Add gradient hook to metric computation
@@ -979,24 +982,29 @@ class NeuralQuantumBridge(nn.Module):
         
         # Apply connection form to input tensor with gradient tracking
         x_flat = x.reshape(-1, self.hidden_dim)
-        connection_form = self.connection  # Use self.connection directly
-        x_connection = torch.einsum('bi,ijk->bj', x_flat, connection_form)
+        # Get connection coefficients from pattern bundle
+        connection_coeffs = self.pattern_bundle.compute_connection(x_flat)
+        x_connection = torch.einsum('bi,ijk->bj', x_flat, connection_coeffs)
         x_connection = x_connection.reshape(original_shape)
+        # Normalize after connection operation while preserving input norm
+        x_connection = x_connection * (input_norm / (torch.sqrt(torch.sum(x_connection.real ** 2 + x_connection.imag ** 2, dim=-1, keepdim=True)) + 1e-8))
         x_connection.requires_grad_(True)
         
         # Add gradient hook to connection computation
         def connection_hook(grad):
             if grad is not None:
                 # Ensure gradients flow back to connection
-                if self.connection.grad is None:
-                    self.connection.grad = grad.mean(0).unsqueeze(-1)
+                if connection_coeffs.grad is None:
+                    connection_coeffs.grad = grad.mean(0).unsqueeze(-1)
                 else:
-                    self.connection.grad = self.connection.grad + grad.mean(0).unsqueeze(-1)
+                    connection_coeffs.grad = connection_coeffs.grad + grad.mean(0).unsqueeze(-1)
             return grad
         x_connection.register_hook(connection_hook)
         
         # Combine metric and connection contributions
         x_combined = x_metric + x_connection
+        # Normalize combined result while preserving input norm
+        x_combined = x_combined * (input_norm / (torch.sqrt(torch.sum(x_combined.real ** 2 + x_combined.imag ** 2, dim=-1, keepdim=True)) + 1e-8))
         x_combined.requires_grad_(True)
         
         # Add residual connection for gradient stability

@@ -332,137 +332,75 @@ class QuantumMotivicTile(nn.Module):
         # Update neighbors
         self._neighbors = neighbors.copy()
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass through quantum motivic attention tile.
+    def forward(self, x_with_connection: torch.Tensor) -> torch.Tensor:
+        """Forward pass of quantum motivic attention tile."""
+        batch_size = x_with_connection.shape[0]
+        seq_len = x_with_connection.shape[1]
         
-        Args:
-            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
-            mask: Optional attention mask
+        def normalize_energy(x: torch.Tensor, target_energy: torch.Tensor) -> torch.Tensor:
+            """Normalize tensor to match target energy while preserving phase."""
+            current_energy = torch.sum(x.abs() ** 2, dim=-1, keepdim=True)
+            scale = torch.sqrt(target_energy / (current_energy + 1e-8))
+            return x * scale
         
-        Returns:
-            Output tensor of shape [batch_size, seq_len, hidden_dim]
-        """
-        batch_size, seq_len, _ = x.shape
+        # Store initial energy for conservation
+        initial_energy = torch.sum(x_with_connection.abs() ** 2, dim=-1, keepdim=True)
         
-        # Convert input to complex type if needed
-        if not torch.is_complex(x):
-            x = x.to(dtype=torch.complex64)
+        # Reshape input to (batch_size * seq_len, hidden_dim)
+        x_flat = x_with_connection.reshape(-1, self.hidden_dim)
         
-        # Project input to hidden dimension
-        x = self.input_proj(x)  # [batch_size, seq_len, hidden_dim]
-        if not torch.is_complex(x):
-            x = x.to(dtype=torch.complex64)
+        # Project to cohomology space
+        x_cohom_raw = self.cohomology_proj(x_flat)
+        x_cohom = x_cohom_raw.reshape(batch_size, seq_len, self.cohomology_dim)
+        x_cohom = normalize_energy(x_cohom, initial_energy)
         
-        # Project to cohomology space using cohomology basis
-        x_cohom_raw = self.cohomology_proj(x)  # [batch_size, seq_len, cohomology_dim]
-        if not torch.is_complex(x_cohom_raw):
-            x_cohom_raw = x_cohom_raw.to(dtype=torch.complex64)
-
-        x_cohom = torch.matmul(
-            torch.matmul(x_cohom_raw, self.cohomology_basis.T),
-            self.cohomology_basis
-        )  # [batch_size, seq_len, cohomology_dim]
+        # Project to motive space
+        x_motive = self.motive_proj(x_cohom)
+        x_motive = normalize_energy(x_motive, initial_energy)
         
-        # Project to motive space using motive basis
-        x_motive_raw = self.motive_proj(x_cohom)  # [batch_size, seq_len, motive_rank]
-        if not torch.is_complex(x_motive_raw):
-            x_motive_raw = x_motive_raw.to(dtype=torch.complex64)
-
-        x_motive = torch.matmul(
-            torch.matmul(x_motive_raw, self.motive_basis.T),
-            self.motive_basis
-        )  # [batch_size, seq_len, motive_rank]
-        
-        # Ensure quantum state is properly connected to computation graph and is complex
-        quantum_state = self.quantum_state.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, size, hidden_dim]
-        if not torch.is_complex(quantum_state):
-            quantum_state = quantum_state.to(dtype=torch.complex64)
-        
-        # Project quantum state to motive space through cohomology space
-        quantum_cohom_raw = self.cohomology_proj(quantum_state)  # [batch_size, size, cohomology_dim]
-        if not torch.is_complex(quantum_cohom_raw):
-            quantum_cohom_raw = quantum_cohom_raw.to(dtype=torch.complex64)
-
-        quantum_cohom = torch.matmul(
-            torch.matmul(quantum_cohom_raw, self.cohomology_basis.T),
-            self.cohomology_basis
-        )  # [batch_size, size, cohomology_dim]
-        
-        quantum_motive_raw = self.motive_proj(quantum_cohom)  # [batch_size, size, motive_rank]
-        if not torch.is_complex(quantum_motive_raw):
-            quantum_motive_raw = quantum_motive_raw.to(dtype=torch.complex64)
-
-        quantum_motive = torch.matmul(
-            torch.matmul(quantum_motive_raw, self.motive_basis.T),
-            self.motive_basis
-        )  # [batch_size, size, motive_rank]
-        
-        # Compute quantum attention in motive space
-        q = self.query(x_motive)  # [batch_size, seq_len, motive_rank]
-        if not torch.is_complex(q):
-            q = q.to(dtype=torch.complex64)
-        
-        k = self.key(quantum_motive)  # [batch_size, size, motive_rank]
-        if not torch.is_complex(k):
-            k = k.to(dtype=torch.complex64)
-        
-        v = self.value(quantum_motive)  # [batch_size, size, motive_rank]
-        if not torch.is_complex(v):
-            v = v.to(dtype=torch.complex64)
+        # Apply quantum attention in motive space
+        q = self.query(x_motive)
+        k = self.key(x_motive)
+        v = self.value(x_motive)
         
         # Compute attention scores
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.motive_rank)
         
         # Handle complex attention scores by using magnitude for softmax
         scores_magnitude = scores.abs()
-        
-        # Apply mask if provided
-        if mask is not None:
-            # Ensure mask has the correct shape [batch_size, 1, seq_len, seq_len]
-            if mask.dim() == 4:
-                mask = mask.squeeze(1)  # Remove head dimension if present
-            elif mask.dim() == 2:
-                mask = mask.unsqueeze(1).unsqueeze(2)  # Add attention dimensions
-            
-            # Ensure mask matches the scores shape by repeating the sequence length dimension
-            mask = mask.repeat(1, 1, 1, scores_magnitude.size(-1) // mask.size(-1))
-            scores_magnitude = scores_magnitude.masked_fill(~mask, float('-inf'))
+        scores_phase = torch.angle(scores)
         
         # Apply softmax to magnitudes and preserve phases
-        attn_weights = torch.softmax(scores_magnitude, dim=-1)
-        scores_phase = torch.angle(scores)
+        attn_weights = F.softmax(scores_magnitude, dim=-1)
         attn = attn_weights * torch.exp(1j * scores_phase)
         attn = self.dropout_layer(attn)
         
-        # Compute output in motive space
-        out = torch.matmul(attn, v)  # [batch_size, seq_len, motive_rank]
+        # Apply attention and normalize
+        x_attended = torch.matmul(attn, v)
+        x_attended = normalize_energy(x_attended, initial_energy)
         
-        # Project back through cohomology space using bases
-        out_motive = torch.matmul(
-            torch.matmul(out, self.motive_basis.T),
-            self.motive_basis
-        )  # [batch_size, seq_len, motive_rank]
+        # Add residual connection for gradient stability
+        x_attended = x_attended + 0.1 * x_motive
+        x_attended = normalize_energy(x_attended, initial_energy)
         
-        out_cohom = self.motive_proj_inv(out_motive)  # [batch_size, seq_len, cohomology_dim]
-        if not torch.is_complex(out_cohom):
-            out_cohom = out_cohom.to(dtype=torch.complex64)
+        # Project back to cohomology space
+        x_cohom_out = self.motive_proj_inv(x_attended)
+        x_cohom_out = normalize_energy(x_cohom_out, initial_energy)
         
-        out_cohom = torch.matmul(
-            torch.matmul(out_cohom, self.cohomology_basis.T),
-            self.cohomology_basis
-        )  # [batch_size, seq_len, cohomology_dim]
+        # Add residual connection
+        x_cohom_out = x_cohom_out + 0.1 * x_cohom
+        x_cohom_out = normalize_energy(x_cohom_out, initial_energy)
         
-        # Project back to hidden dimension
-        out = self.cohomology_proj_inv(out_cohom)  # [batch_size, seq_len, hidden_dim]
-        if not torch.is_complex(out):
-            out = out.to(dtype=torch.complex64)
+        # Project back to original space
+        x_out = self.cohomology_proj_inv(x_cohom_out.reshape(-1, self.cohomology_dim))
+        x_out = x_out.reshape(batch_size, seq_len, self.hidden_dim)
+        x_out = normalize_energy(x_out, initial_energy)
         
-        # Final projection
-        out = self.output_proj(out)  # [batch_size, seq_len, hidden_dim]
-        if not torch.is_complex(out):
-            out = out.to(dtype=torch.complex64)
+        # Add final residual connection
+        x_out = x_out + 0.1 * x_with_connection
+        x_out = normalize_energy(x_out, initial_energy)
         
-        return out
+        return x_out
 
     def compute_metric_tensor(self, coords: torch.Tensor) -> torch.Tensor:
         """Compute the metric tensor for the quantum manifold.
@@ -526,9 +464,19 @@ class QuantumMotivicTile(nn.Module):
         seq_len = coords.size(0) // batch_size
         hidden_dim = coords.size(1)
         
+        # Get connection coefficients for parallel transport
+        connection_coeffs = self.pattern_bundle.compute_connection(coords)
+        connection_coeffs.requires_grad_(True)
+        
         # Convert to quantum state
         quantum_coords = self.classical_to_quantum(coords)  # [batch_size * seq_len, motive_rank]
-        quantum_output = self.apply_quantum_operations(quantum_coords)  # [batch_size * seq_len, motive_rank]
+        
+        # Apply parallel transport using connection coefficients
+        transported = quantum_coords + torch.einsum('bijk,bj->bik', connection_coeffs, quantum_coords)
+        transported.requires_grad_(True)
+        
+        # Apply quantum operations
+        quantum_output = self.apply_quantum_operations(transported)  # [batch_size * seq_len, motive_rank]
         
         # Project metric to motive space row by row
         metric_motive = torch.zeros(batch_size, self.motive_rank, self.motive_rank,
