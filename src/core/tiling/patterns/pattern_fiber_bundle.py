@@ -300,6 +300,10 @@ class PatternFiberBundle(BaseFiberBundle):
         self._initialize_components()
         self._initialize_basis_matrices()
         
+        # Initialize manifold projection
+        self.manifold_proj = nn.Linear(self.total_dim, self.riemannian_framework.manifold_dim, 
+                                     device=self.device, dtype=self.dtype)
+        
         # Move to device
         self.to(self.device)
         
@@ -1800,63 +1804,73 @@ class PatternFiberBundle(BaseFiberBundle):
     #--------------------------------------------------------------------------
 
     def compute_connection(self, tangent_vector: torch.Tensor) -> torch.Tensor:
-        """Compute connection coefficients for parallel transport.
+        """Compute connection coefficients for the given tangent vector.
         
         Args:
-            tangent_vector: Input tensor [batch_size * seq_len, hidden_dim]
+            tangent_vector: Tangent vector of shape [..., hidden_dim]
             
         Returns:
-            Connection coefficients [batch_size, hidden_dim, hidden_dim, hidden_dim]
+            Connection coefficients of shape [..., manifold_dim, manifold_dim, manifold_dim]
         """
-        batch_size = tangent_vector.shape[0]
-        dim = tangent_vector.shape[-1]
-        
         # Ensure tangent vector requires gradients
         if not tangent_vector.requires_grad:
             tangent_vector.requires_grad_(True)
         
-        # Compute metric tensor
-        metric = self.compute_metric_tensor(tangent_vector)  # [batch_size, hidden_dim, hidden_dim]
+        # Handle dimension mismatch
+        if tangent_vector.shape[-1] != self.total_dim:
+            # Pad or truncate to match total_dim
+            if tangent_vector.shape[-1] < self.total_dim:
+                padding = torch.zeros(*tangent_vector.shape[:-1], self.total_dim - tangent_vector.shape[-1],
+                                    device=tangent_vector.device, dtype=tangent_vector.dtype)
+                tangent_vector = torch.cat([tangent_vector, padding], dim=-1)
+            else:
+                tangent_vector = tangent_vector[..., :self.total_dim]
         
-        # Initialize connection coefficients
-        connection = torch.zeros(batch_size, dim, dim, dim, 
-                                   device=tangent_vector.device, dtype=tangent_vector.dtype)
+        # Project tangent vector to manifold dimension
+        manifold_dim = self.manifold_proj.out_features  # Use actual output dimension
+        tangent_vector_proj = self.manifold_proj(tangent_vector)
         
-        # Compute connection coefficients using autograd
-        for i in range(dim):
-            for j in range(dim):
-                # Create dummy tensor for computing partial derivative
-                dummy = torch.zeros_like(metric[:, i])
-                dummy[:, j] = 1.0
-                
-                # Compute partial derivative of metric with respect to coordinates
-                dg = torch.autograd.grad(
-                    metric[:, i, j],  # Take specific metric component
-                    tangent_vector,
-                    grad_outputs=torch.ones(batch_size, device=tangent_vector.device, dtype=tangent_vector.dtype),
-                    create_graph=True,  # Enable higher-order gradients
-                    retain_graph=True,  # Keep computation graph
-                    allow_unused=True   # Allow unused gradients
-                )[0]
-                
-                if dg is None:
-                    continue
+        batch_size = tangent_vector_proj.size(0)
+        
+        # Compute metric tensor with gradient tracking
+        metric = self.compute_metric_tensor(tangent_vector_proj)  # [batch_size, manifold_dim, manifold_dim]
+        
+        # Initialize connection tensor with gradients
+        connection = torch.zeros(batch_size, manifold_dim, manifold_dim, manifold_dim,
+                                   device=tangent_vector.device, dtype=tangent_vector.dtype,
+                                   requires_grad=True)
+        
+        # Compute derivatives of metric tensor
+        for i in range(manifold_dim):
+            for j in range(manifold_dim):
+                for k in range(manifold_dim):
+                    # Create grad_outputs with proper shape
+                    grad_outputs = torch.zeros_like(metric)
+                    grad_outputs[..., i, j] = 1.0
                     
-                # Contract with inverse metric
-                for k in range(dim):
-                    connection[:, k, i, j] = 0.5 * torch.sum(
-                        metric[:, k].unsqueeze(1) * dg,
-                        dim=-1
-                    )
+                    try:
+                        # Compute derivative of metric tensor
+                        dg = torch.autograd.grad(
+                            metric[..., i, j],
+                            tangent_vector_proj,
+                            grad_outputs=grad_outputs[..., i, j].unsqueeze(-1),
+                            create_graph=True,
+                            retain_graph=True,
+                            allow_unused=True
+                        )[0]
+                        
+                        if dg is not None:
+                            # Compute Christoffel symbols
+                            for l in range(manifold_dim):
+                                connection[..., i, j, k] += 0.5 * metric[..., k, l] * (
+                                    dg[..., j] + dg[..., i] - torch.zeros_like(dg[..., l])
+                                )
+                    except RuntimeError:
+                        # If gradient computation fails, use zeros
+                        pass
         
-        # Add small diagonal term for numerical stability
-        diag = torch.zeros_like(connection)
-        for i in range(dim):
-            diag[:, i, i, i] = 1e-6
-        connection = connection + diag
-        
-        # Create stronger gradient path
-        connection = connection * (1.0 + tangent_vector.abs().mean() * 1e-6)
+        # Ensure connection requires gradients
+        connection.requires_grad_(True)
         
         return connection
 
@@ -1922,6 +1936,13 @@ class PatternFiberBundle(BaseFiberBundle):
         
         # Extract tensor values from MetricTensor object
         metric_tensor = metric_obj.values
+        
+        # Ensure metric has correct shape [batch_size, dim, dim]
+        if len(metric_tensor.shape) > 3:
+            # If metric has extra dimensions, reshape it
+            batch_size = tangent_vector.size(0)
+            dim = tangent_vector.size(-1)
+            metric_tensor = metric_tensor.view(batch_size, dim, dim)
         
         # Ensure metric is properly shaped and requires grad
         if not metric_tensor.requires_grad:

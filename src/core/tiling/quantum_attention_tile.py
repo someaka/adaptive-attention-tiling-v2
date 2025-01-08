@@ -332,75 +332,40 @@ class QuantumMotivicTile(nn.Module):
         # Update neighbors
         self._neighbors = neighbors.copy()
 
+    def complex_softmax(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        """Apply softmax to complex tensor by using the absolute values."""
+        abs_x = x.abs()
+        max_val = torch.max(abs_x, dim=dim, keepdim=True)[0]
+        exp_x = torch.exp(abs_x - max_val)
+        sum_exp_x = torch.sum(exp_x, dim=dim, keepdim=True)
+        softmax_abs = exp_x / (sum_exp_x + 1e-8)
+        return x * (softmax_abs / (abs_x + 1e-8))
+
     def forward(self, x_with_connection: torch.Tensor) -> torch.Tensor:
-        """Forward pass of quantum motivic attention tile."""
-        batch_size = x_with_connection.shape[0]
-        seq_len = x_with_connection.shape[1]
-        
-        def normalize_energy(x: torch.Tensor, target_energy: torch.Tensor) -> torch.Tensor:
-            """Normalize tensor to match target energy while preserving phase."""
-            current_energy = torch.sum(x.abs() ** 2, dim=-1, keepdim=True)
-            scale = torch.sqrt(target_energy / (current_energy + 1e-8))
-            return x * scale
-        
-        # Store initial energy for conservation
-        initial_energy = torch.sum(x_with_connection.abs() ** 2, dim=-1, keepdim=True)
-        
-        # Reshape input to (batch_size * seq_len, hidden_dim)
-        x_flat = x_with_connection.reshape(-1, self.hidden_dim)
+        """Forward pass through quantum motivic tile."""
+        batch_size, seq_len, hidden_dim = x_with_connection.shape
         
         # Project to cohomology space
-        x_cohom_raw = self.cohomology_proj(x_flat)
-        x_cohom = x_cohom_raw.reshape(batch_size, seq_len, self.cohomology_dim)
-        x_cohom = normalize_energy(x_cohom, initial_energy)
+        x_cohom = self.cohomology_proj(x_with_connection.reshape(-1, hidden_dim))
+        x_cohom = x_cohom.reshape(batch_size, seq_len, -1)
         
-        # Project to motive space
-        x_motive = self.motive_proj(x_cohom)
-        x_motive = normalize_energy(x_motive, initial_energy)
+        # Apply quantum operations
+        x_quantum = self.classical_to_quantum(x_with_connection)  # Convert to quantum state
+        x_quantum_flat = x_quantum.reshape(-1, self.motive_rank)  # Flatten for quantum operations
         
-        # Apply quantum attention in motive space
-        q = self.query(x_motive)
-        k = self.key(x_motive)
-        v = self.value(x_motive)
+        # Apply quantum operations (this uses query, key, value projections)
+        attended = self.apply_quantum_operations(x_quantum_flat)
+        attended = attended.reshape(batch_size, seq_len, -1)
         
-        # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.motive_rank)
+        # Convert back to classical state
+        output = self.quantum_to_classical(attended)
         
-        # Handle complex attention scores by using magnitude for softmax
-        scores_magnitude = scores.abs()
-        scores_phase = torch.angle(scores)
+        # Normalize to preserve energy
+        energy = torch.sum(x_with_connection.abs() ** 2)
+        output_norm = torch.sqrt(torch.sum(output.abs() ** 2))
+        output = output * torch.sqrt(energy) / (output_norm + 1e-8)
         
-        # Apply softmax to magnitudes and preserve phases
-        attn_weights = F.softmax(scores_magnitude, dim=-1)
-        attn = attn_weights * torch.exp(1j * scores_phase)
-        attn = self.dropout_layer(attn)
-        
-        # Apply attention and normalize
-        x_attended = torch.matmul(attn, v)
-        x_attended = normalize_energy(x_attended, initial_energy)
-        
-        # Add residual connection for gradient stability
-        x_attended = x_attended + 0.1 * x_motive
-        x_attended = normalize_energy(x_attended, initial_energy)
-        
-        # Project back to cohomology space
-        x_cohom_out = self.motive_proj_inv(x_attended)
-        x_cohom_out = normalize_energy(x_cohom_out, initial_energy)
-        
-        # Add residual connection
-        x_cohom_out = x_cohom_out + 0.1 * x_cohom
-        x_cohom_out = normalize_energy(x_cohom_out, initial_energy)
-        
-        # Project back to original space
-        x_out = self.cohomology_proj_inv(x_cohom_out.reshape(-1, self.cohomology_dim))
-        x_out = x_out.reshape(batch_size, seq_len, self.hidden_dim)
-        x_out = normalize_energy(x_out, initial_energy)
-        
-        # Add final residual connection
-        x_out = x_out + 0.1 * x_with_connection
-        x_out = normalize_energy(x_out, initial_energy)
-        
-        return x_out
+        return output
 
     def compute_metric_tensor(self, coords: torch.Tensor) -> torch.Tensor:
         """Compute the metric tensor for the quantum manifold.
