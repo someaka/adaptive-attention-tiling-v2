@@ -770,3 +770,192 @@ class TestGradientFlow:
             if param.grad is not None:
                 assert param.grad.dtype == param.dtype, \
                     f"Gradient dtype mismatch for {name}: param {param.dtype} vs grad {param.grad.dtype}"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_geometric_phases(self, setup_attention):
+        """Test quantum geometric phases and their gradients."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # Test output properties
+        assert output.dtype == layer.dtype, "Should maintain complex dtype"
+        assert not torch.isnan(output).any(), "Output should not contain NaN values"
+        assert not torch.isinf(output).any(), "Output should not contain Inf values"
+        
+        # For complex gradients, use abs() before sum()
+        loss = output.abs().sum()
+        loss.backward()
+        
+        # Check gradients for all parameters
+        for name, param in layer.named_parameters():
+            assert param.grad is not None, f"Parameter {name} should have gradients"
+            assert not torch.isnan(param.grad).any(), f"Parameter {name} has NaN gradients"
+            assert not torch.isinf(param.grad).any(), f"Parameter {name} has Inf gradients"
+            assert param.grad.abs().mean() > 0, f"Parameter {name} has zero gradients"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_manifold_curvature(self, setup_attention):
+        """Test attention manifold curvature properties."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Prepare attention state
+        state = layer.prepare_attention_state(x)
+        
+        # Compute metric tensor
+        metric = layer.compute_metric_tensor(state)
+        
+        # Test metric tensor properties
+        assert metric.shape[-2:] == (params["manifold_dim"], params["manifold_dim"]), "Metric tensor should have manifold dimensions"
+        assert torch.allclose(
+            metric, metric.transpose(-1, -2).conj()
+        ), "Metric tensor should be Hermitian"
+        assert not torch.isnan(metric).any(), "Metric tensor should not contain NaN values"
+        assert not torch.isinf(metric).any(), "Metric tensor should not contain Inf values"
+        
+        # Test positive definiteness (using real part for eigenvalues)
+        eigenvalues = torch.linalg.eigvalsh(metric.real)
+        assert torch.all(eigenvalues > -1e-6), "Metric tensor should be positive semi-definite"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_metric_combination(self, setup_attention):
+        """Test metric combination and gradient flow."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get initial metrics
+        base_metric = layer.base_metric
+        pattern_metric = layer.pattern_metric
+        metric = layer.metric
+        
+        # Forward pass
+        output = layer(x)
+        
+        # Check metric properties
+        assert base_metric.requires_grad, "Base metric should require gradients"
+        assert pattern_metric.requires_grad, "Pattern metric should require gradients"
+        assert metric.requires_grad, "Metric should require gradients"
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check metric gradients
+        assert base_metric.grad is not None, "Base metric should receive gradients"
+        assert pattern_metric.grad is not None, "Pattern metric should receive gradients"
+        assert metric.grad is not None, "Metric should receive gradients"
+        assert base_metric.grad.abs().mean() > 0, "Base metric gradients should be non-zero"
+        assert pattern_metric.grad.abs().mean() > 0, "Pattern metric gradients should be non-zero"
+        assert metric.grad.abs().mean() > 0, "Metric gradients should be non-zero"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_combined_metric_tensor_flow(self, setup_attention):
+        """Test gradient flow through combined metric tensor."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get combined metric
+        combined_metric = layer.combined_metric
+        combined_metric.requires_grad_(True)
+        combined_metric.retain_grad()
+        
+        # Forward pass
+        output = layer(x)
+        
+        # Compute loss and backward
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check combined metric gradients
+        assert combined_metric.grad is not None, "Combined metric should receive gradients"
+        assert not torch.isnan(combined_metric.grad).any(), "Combined metric gradients contain NaN"
+        assert not torch.isinf(combined_metric.grad).any(), "Combined metric gradients contain Inf"
+        assert combined_metric.grad.abs().mean() > 0, "Combined metric gradients should be non-zero"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_energy_conservation_during_normalization(self, setup_attention):
+        """Test energy conservation during normalization."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Forward pass
+        output = layer(x)
+        
+        # Get final energy
+        final_energy = torch.sum(output.abs() ** 2)
+        
+        # Check energy conservation
+        assert torch.allclose(initial_energy, final_energy, rtol=1e-2), \
+            f"Energy not conserved: initial={initial_energy.item():.6f}, final={final_energy.item():.6f}"
+        
+        # Check gradient flow with energy conservation
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Verify gradients respect energy conservation
+        for name, param in layer.named_parameters():
+            if param.grad is not None:
+                # Gradients should be finite and non-zero
+                assert torch.isfinite(param.grad).all(), f"Parameter {name} has inf/nan gradients"
+                assert param.grad.abs().mean() > 0, f"Parameter {name} has zero gradients"
+
+    @pytest.mark.timeout(30)  # 30 second timeout
+    def test_quantum_bridge_energy_conservation(self, setup_attention):
+        """Test energy conservation in quantum bridge."""
+        layer, params = setup_attention
+        x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
+        x.requires_grad_(True)
+        
+        # Get quantum bridge
+        quantum_bridge = layer.quantum_bridge
+        
+        # Track initial energy
+        initial_energy = torch.sum(x.abs() ** 2)
+        
+        # Forward pass through quantum bridge components
+        x_flat = x.reshape(-1, params["hidden_dim"])
+        x_flat.requires_grad_(True)
+        
+        # Project to manifold space
+        manifold_proj = layer.manifold_proj(x_flat)
+        manifold_energy = torch.sum(manifold_proj.abs() ** 2)
+        
+        # Check energy conservation in projection
+        assert torch.allclose(initial_energy, manifold_energy, rtol=1e-2), \
+            "Energy not conserved in manifold projection"
+        
+        # Forward pass through quantum bridge
+        output = layer(x)
+        final_energy = torch.sum(output.abs() ** 2)
+        
+        # Check overall energy conservation
+        assert torch.allclose(initial_energy, final_energy, rtol=1e-2), \
+            "Energy not conserved through quantum bridge"
+        
+        # Check gradient flow with energy conservation
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Verify gradients in quantum bridge components
+        bridge_params = [
+            ('pattern_bundle.metric', quantum_bridge.pattern_bundle.metric),
+            ('pattern_bundle.connection', quantum_bridge.pattern_bundle.connection),
+            ('pattern_bundle.riemannian_framework.metric_factors', 
+             quantum_bridge.pattern_bundle.riemannian_framework.metric_factors)
+        ]
+        
+        for name, param in bridge_params:
+            assert param.grad is not None, f"Parameter {name} should have gradients"
+            assert torch.isfinite(param.grad).all(), f"Parameter {name} has inf/nan gradients"
+            assert param.grad.abs().mean() > 0, f"Parameter {name} has zero gradients"

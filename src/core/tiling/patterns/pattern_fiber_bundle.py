@@ -249,7 +249,8 @@ class PatternFiberBundle(BaseFiberBundle):
         dt: float = 0.1,
         stability_threshold: float = 1e-6,
         learning_rate: float = 0.01,
-        momentum: float = 0.9
+        momentum: float = 0.9,
+        manifold_dim: Optional[int] = None  # Add manifold_dim parameter
     ):
         """Initialize pattern fiber bundle.
         
@@ -266,6 +267,7 @@ class PatternFiberBundle(BaseFiberBundle):
             stability_threshold: Threshold for stability
             learning_rate: Learning rate for evolution
             momentum: Momentum for evolution
+            manifold_dim: Optional manifold dimension (defaults to total_dim)
         """
         super().__init__(base_dim, fiber_dim, structure_group)
         
@@ -273,8 +275,9 @@ class PatternFiberBundle(BaseFiberBundle):
         self.device = device if device is not None else torch.device('cpu')
         self.dtype = dtype if dtype is not None else torch.complex64  # Changed default to complex64
         
-        # Store total dimension
+        # Store total dimension and manifold dimension
         self.total_dim = base_dim + fiber_dim
+        self.manifold_dim = manifold_dim if manifold_dim is not None else self.total_dim
         
         # Create configuration
         self._config = BundleConfig(
@@ -290,7 +293,7 @@ class PatternFiberBundle(BaseFiberBundle):
         )
         
         # Initialize connection as a parameter with proper shape and initialization
-        connection_shape = (self.total_dim, self.total_dim, self.total_dim)
+        connection_shape = (self.manifold_dim, self.manifold_dim, self.manifold_dim)  # Use manifold_dim
         connection_real = torch.randn(connection_shape, device=self.device) * 0.02
         connection_imag = torch.randn_like(connection_real) * 0.02
         connection = torch.complex(connection_real, connection_imag)
@@ -301,7 +304,7 @@ class PatternFiberBundle(BaseFiberBundle):
         self._initialize_basis_matrices()
         
         # Initialize manifold projection
-        self.manifold_proj = nn.Linear(self.total_dim, self.riemannian_framework.manifold_dim, 
+        self.manifold_proj = nn.Linear(self.total_dim, self.manifold_dim,  # Use manifold_dim
                                      device=self.device, dtype=self.dtype)
         
         # Move to device
@@ -315,7 +318,7 @@ class PatternFiberBundle(BaseFiberBundle):
         """Initialize bundle components efficiently."""
         # Initialize geometric components
         self.riemannian_framework = PatternRiemannianStructure(
-            manifold_dim=self.total_dim,
+            manifold_dim=self.manifold_dim,  # Use manifold_dim
             pattern_dim=self.fiber_dim,
             device=self.device,
             dtype=self.dtype
@@ -336,8 +339,8 @@ class PatternFiberBundle(BaseFiberBundle):
         self._fiber_type = "Vector"
         
         # Initialize metric parameter with gradients
-        # Create a block diagonal metric tensor
-        metric = torch.zeros(self.total_dim * 2, self.total_dim * 2, device=self.device, dtype=self.dtype)
+        # Create a block diagonal metric tensor using manifold_dim
+        metric = torch.zeros(self.manifold_dim * 2, self.manifold_dim * 2, device=self.device, dtype=self.dtype)
         metric[:self.base_dim * 2, :self.base_dim * 2] = torch.eye(self.base_dim * 2, device=self.device, dtype=self.dtype)
         metric[self.base_dim * 2:, self.base_dim * 2:] = torch.eye(self.fiber_dim * 2, device=self.device, dtype=self.dtype)
         self.register_parameter('metric', nn.Parameter(metric, requires_grad=True))

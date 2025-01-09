@@ -85,6 +85,9 @@ class RiemannianFlow(BaseGeometricFlow):
         device = metric.device
         dtype = metric.dtype
         
+        # Ensure metric requires gradients
+        metric.requires_grad_(True)
+        
         # Get connection coefficients
         if hasattr(self, 'connection_coeffs'):
             connection_coeffs = self.connection_coeffs
@@ -99,6 +102,8 @@ class RiemannianFlow(BaseGeometricFlow):
             
             # Add metric contribution
             metric_inv = torch.linalg.inv(metric)  # [batch_size, manifold_dim, manifold_dim]
+            metric_inv.requires_grad_(True)  # Ensure gradients flow
+            
             metric_contribution = torch.einsum(
                 'bij,bjk->bik',
                 metric_inv,
@@ -111,15 +116,8 @@ class RiemannianFlow(BaseGeometricFlow):
             return christoffel
             
         # Fallback to computing from scratch if no connection coefficients
-        # Initialize metric derivatives
-        metric_derivs = torch.zeros(
-            batch_size,
-            self.manifold_dim,
-            self.manifold_dim,
-            self.manifold_dim,
-            device=device,
-            dtype=dtype
-        )
+        # Create a list to store metric derivatives
+        metric_derivs_list = []
         
         # Create identity matrix for finite differences
         eye = torch.eye(
@@ -136,33 +134,36 @@ class RiemannianFlow(BaseGeometricFlow):
             points = torch.zeros(
                 batch_size,
                 self.manifold_dim,
-                device=metric.device
+                device=metric.device,
+                requires_grad=True  # Ensure gradients flow
             )
+        else:
+            points.requires_grad_(True)  # Ensure gradients flow
         
         # Compute metric derivatives using finite differences
         for k in range(self.manifold_dim):
             shift = eps * eye[k]
             # Forward difference with stability scaling
-            shifted_metric = self.compute_metric(points + shift.unsqueeze(0))
+            shifted_points = points + shift.unsqueeze(0)
+            shifted_points.requires_grad_(True)  # Ensure gradients flow
+            shifted_metric = self.compute_metric(shifted_points)
             diff = (shifted_metric - metric) / (eps + self.stability_threshold)
             # Ensure diff has the right shape [batch_size, manifold_dim, manifold_dim]
             if diff.dim() > 3:
                 diff = diff.reshape(-1, self.manifold_dim, self.manifold_dim)
-            metric_derivs[..., k] = diff
+            metric_derivs_list.append(diff)
         
-        # Compute Christoffel symbols using einsum for better broadcasting
-        christoffel = torch.zeros(
-            batch_size,
-            self.manifold_dim,
-            self.manifold_dim,
-            self.manifold_dim,
-            device=device,
-            dtype=dtype
-        )
+        # Stack metric derivatives along a new dimension
+        metric_derivs = torch.stack(metric_derivs_list, dim=-1)
         
         # Get inverse metric tensor
         metric_inv = torch.linalg.inv(metric)  # [batch_size, manifold_dim, manifold_dim]
+        metric_inv.requires_grad_(True)  # Ensure gradients flow
         
+        # Initialize Christoffel symbols
+        christoffel_list = []
+        
+        # Compute Christoffel symbols using einsum for better broadcasting
         for i in range(self.manifold_dim):
             for j in range(self.manifold_dim):
                 for k in range(self.manifold_dim):
@@ -173,11 +174,16 @@ class RiemannianFlow(BaseGeometricFlow):
                     
                     # Combine terms using einsum for proper broadcasting
                     combined_terms = partial_k + partial_j - partial_i  # [batch_size]
-                    christoffel[..., i, j, k] = 0.5 * torch.einsum(
+                    christoffel_component = 0.5 * torch.einsum(
                         '...i,...->...',
                         metric_inv[..., i, :],
                         combined_terms
                     )
+                    christoffel_list.append(christoffel_component)
+        
+        # Stack Christoffel components into final tensor
+        christoffel = torch.stack(christoffel_list, dim=-1)
+        christoffel = christoffel.reshape(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
         
         return christoffel
     
@@ -221,6 +227,24 @@ class RiemannianFlow(BaseGeometricFlow):
         # Compute Christoffel symbols if not provided
         if connection is None:
             connection = self.compute_christoffel(metric)
+        else:
+            # Ensure connection requires gradients
+            connection.requires_grad_(True)
+
+        # Add gradient hook to connection
+        def connection_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to connection coefficients
+                if hasattr(self, 'connection_coeffs'):
+                    if self.connection_coeffs.grad is None:
+                        self.connection_coeffs.grad = grad.mean(0)
+                    else:
+                        self.connection_coeffs.grad = self.connection_coeffs.grad + grad.mean(0)
+                return grad
+            return grad
+        connection.register_hook(connection_hook)
 
         # Compute Riemann tensor components
         riemann = torch.zeros(
@@ -325,3 +349,39 @@ class RiemannianFlow(BaseGeometricFlow):
         })
         
         return new_metric, metrics 
+    
+    def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute the Riemannian metric tensor at given points.
+        
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+        """
+        # Ensure points require gradients
+        points = points.requires_grad_(True)
+        
+        # Split into real and imaginary parts
+        real_points = points[..., :self.manifold_dim//2]
+        imag_points = points[..., self.manifold_dim//2:]
+        
+        # Compute metric components with gradient tracking
+        real_metric = self.real_metric_net(real_points)
+        imag_metric = self.imag_metric_net(imag_points)
+        
+        # Reshape metric components
+        batch_size = points.shape[0]
+        real_metric = real_metric.view(batch_size, self.manifold_dim//2, self.manifold_dim//2)
+        imag_metric = imag_metric.view(batch_size, self.manifold_dim//2, self.manifold_dim//2)
+        
+        # Combine into full metric tensor
+        metric = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, 
+                            dtype=points.dtype, device=points.device)
+        metric[..., :self.manifold_dim//2, :self.manifold_dim//2] = real_metric
+        metric[..., self.manifold_dim//2:, self.manifold_dim//2:] = imag_metric
+        
+        # Ensure metric requires gradients
+        metric = metric.requires_grad_(True)
+        
+        return metric 

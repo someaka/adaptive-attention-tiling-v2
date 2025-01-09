@@ -17,6 +17,7 @@ class QuantumState:
     basis_labels: List[str]  # Labels for basis states
     phase: torch.Tensor  # Quantum phase information
     original_norm: Optional[torch.Tensor] = None  # Original norm of the input tensor
+    original_energy: Optional[torch.Tensor] = None  # Original energy of the input tensor
 
     def __post_init__(self):
         """Ensure state normalization and proper tensor types."""

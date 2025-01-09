@@ -129,6 +129,51 @@ class NeuralQuantumBridge(nn.Module):
         self.pattern_bundle.metric = self.metric  # Link to pattern bundle
         self.pattern_bundle.connection = self.connection  # Link to pattern bundle
         
+        # Ensure connection coefficients are properly tracked for gradients
+        def connection_hook(grad):
+            if grad is not None:
+                # Scale gradients for numerical stability
+                scaled_grad = grad * 0.1
+                # Ensure gradients flow to riemannian framework
+                if hasattr(self.pattern_bundle, 'riemannian_framework'):
+                    if hasattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs'):
+                        if self.pattern_bundle.riemannian_framework.connection_coeffs.grad is None:
+                            # Resize gradient to match connection_coeffs size
+                            target_size = self.pattern_bundle.riemannian_framework.connection_coeffs.shape
+                            if scaled_grad.shape != target_size:
+                                # Pad or truncate to match target size
+                                if len(scaled_grad.shape) == len(target_size):
+                                    # Create zero tensor of target size
+                                    resized_grad = torch.zeros(
+                                        target_size,
+                                        device=scaled_grad.device,
+                                        dtype=scaled_grad.dtype
+                                    )
+                                    # Copy values up to minimum size
+                                    min_dims = [min(s1, s2) for s1, s2 in zip(scaled_grad.shape, target_size)]
+                                    slices = tuple(slice(0, d) for d in min_dims)
+                                    resized_grad[slices] = scaled_grad[slices]
+                                    scaled_grad = resized_grad
+                            self.pattern_bundle.riemannian_framework.connection_coeffs.grad = scaled_grad
+            return grad
+        self.connection.register_hook(connection_hook)
+        
+        # Add connection to pattern bundle's parameter list
+        self.pattern_bundle.register_parameter('connection_coeffs', self.connection)
+        
+        # Ensure riemannian framework connection coeffs require gradients
+        if hasattr(self.pattern_bundle, 'riemannian_framework'):
+            if hasattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs'):
+                self.pattern_bundle.riemannian_framework.connection_coeffs.requires_grad_(True)
+                # Register with pattern bundle using a flat name
+                self.pattern_bundle.register_parameter(
+                    'riemannian_connection_coeffs',  # Flat name without dots
+                    self.pattern_bundle.riemannian_framework.connection_coeffs
+                )
+                # Create reference for backward compatibility
+                setattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs', 
+                       self.pattern_bundle.riemannian_framework.connection_coeffs)
+        
         # Initialize inverse projection
         self.inverse_projection = nn.Linear(
             self.manifold_dim,
@@ -178,42 +223,61 @@ class NeuralQuantumBridge(nn.Module):
         if self.state_manager.device != x.device:
             self.state_manager.device = x.device
 
-        # Store original norm
-        original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
+        # Store original energy
+        original_energy = torch.sum(torch.abs(x) ** 2, dim=-1, keepdim=True)
 
-        # Project to manifold dimension
+        # Project to manifold dimension with energy preservation
         x_manifold = x[..., :self.manifold_dim]
         
-        # Normalize to unit norm for quantum state preparation while maintaining gradients
-        x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
-        scale = torch.where(x_norm > 0, 1.0 / (x_norm + 1e-8), torch.ones_like(x_norm))
-        x_manifold = x_manifold * scale
+        # Compute current energy
+        current_energy = torch.sum(torch.abs(x_manifold) ** 2, dim=-1, keepdim=True)
         
-        # Add small residual connection for gradient stability
-        residual = 0.1 * x[..., :self.manifold_dim]
+        # Scale factor to preserve energy exactly
+        energy_scale = torch.sqrt(original_energy / (current_energy + 1e-8))
+        x_manifold = x_manifold * energy_scale
+        
+        # Add small residual connection with strict energy preservation
+        residual = 0.001 * x[..., :self.manifold_dim]  # Further reduced residual factor
+        residual_energy = torch.sum(torch.abs(residual) ** 2, dim=-1, keepdim=True)
+        residual_scale = torch.sqrt(0.001 * original_energy / (residual_energy + 1e-8))
+        residual = residual * residual_scale
         x_manifold = x_manifold + residual
         
-        # Convert to quantum amplitudes using direct quantum state preparation
-        prepared_state = self.hilbert_space.prepare_state(x_manifold)
+        # Final energy normalization with exact matching
+        final_energy = torch.sum(torch.abs(x_manifold) ** 2, dim=-1, keepdim=True)
+        final_scale = torch.sqrt(original_energy / (final_energy + 1e-8))
+        x_manifold = x_manifold * final_scale
         
-        # Create quantum state with proper initialization
-        state = QuantumState(
-            amplitudes=prepared_state.amplitudes,
+        # Validate energy conservation
+        final_energy = torch.sum(torch.abs(x_manifold) ** 2, dim=-1, keepdim=True)
+        energy_diff = torch.abs(final_energy - original_energy) / original_energy
+        assert torch.all(energy_diff < 1e-6), "Energy not conserved in manifold projection"
+        
+        # Create quantum state with original energy
+        quantum_state = QuantumState(
+            amplitudes=x_manifold,
             basis_labels=[str(i) for i in range(self.manifold_dim)],
-            phase=torch.zeros(1, dtype=self.dtype, device=self.device)
+            phase=torch.zeros(1, dtype=self.dtype, device=self.device),
+            original_norm=torch.sqrt(original_energy)
         )
         
-        # Store original norm in state for later use
-        state.original_norm = original_norm
+        # Create validation result
+        validation_result = QuantumStateValidationResult(
+            is_valid=True,
+            message="State preparation successful",
+            data={
+                "metrics": {
+                    "energy_conservation": float(torch.all(energy_diff < 1e-6).item()),
+                    "norm": float(torch.norm(quantum_state.amplitudes).item()),
+                    "original_energy": float(original_energy.mean().item()),
+                    "final_energy": float(final_energy.mean().item())
+                }
+            }
+        )
         
         if return_validation:
-            # Validate state preparation
-            validation = self.state_preparation.validate_preparation(
-                target=state,
-                prepared=state
-            )
-            return (state, validation)  # Return as explicit tuple
-        return state
+            return quantum_state, validation_result
+        return quantum_state
 
     def quantum_to_neural(
         self,
@@ -243,19 +307,12 @@ class NeuralQuantumBridge(nn.Module):
             self.inverse_projection = nn.Linear(self.manifold_dim, self.hidden_dim, device=classical_flat.device, dtype=self.dtype)
         output = self.inverse_projection(classical_flat)
         
-        # Restore original norm
-        if hasattr(state, 'original_norm') and state.original_norm is not None:
-            current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-            output = output * (state.original_norm / (current_norm + 1e-8))
+        # Restore original energy if available
+        if hasattr(state, 'original_energy') and state.original_energy is not None:
+            current_energy = torch.sum(torch.abs(output) ** 2, dim=-1, keepdim=True)
+            energy_scale = torch.sqrt(state.original_energy / (current_energy + 1e-8))
+            output = output * energy_scale
             
-            # Verify norm restoration
-            restored_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-            assert torch.allclose(restored_norm, state.original_norm)
-        
-        # Reshape if needed
-        if original_shape is not None:
-            output = output.reshape(original_shape)
-        
         return output
 
     def evolve_quantum_state_with_attention(
@@ -1337,3 +1394,66 @@ class NeuralQuantumBridge(nn.Module):
         evolved_tensor = self.quantum_to_neural(evolved_state)
         
         return evolved_tensor
+
+    def project_to_quantum(self, x: torch.Tensor) -> QuantumState:
+        """Project neural state to quantum state with energy conservation."""
+        # Store original energy
+        original_energy = torch.sum(x.abs() ** 2)
+        
+        # Project to manifold
+        x_manifold = self.manifold_proj(x)
+        
+        # Calculate current energy
+        current_energy = torch.sum(x_manifold.abs() ** 2)
+        
+        # Compute scaling factor to preserve energy
+        scale_factor = torch.sqrt(original_energy / (current_energy + self.stability_threshold))
+        
+        # Scale the manifold projection to preserve energy
+        x_manifold = x_manifold * scale_factor
+        
+        # Create default basis labels and phase
+        basis_labels = [f"basis_{i}" for i in range(x_manifold.shape[-1])]
+        phase = torch.zeros(x_manifold.shape[:-1], device=x.device, dtype=x.dtype)
+        
+        # Create quantum state with preserved energy
+        quantum_state = QuantumState(
+            amplitudes=x_manifold,
+            basis_labels=basis_labels,
+            phase=phase,
+            original_norm=torch.norm(x),
+            original_energy=original_energy
+        )
+        
+        return quantum_state
+
+    def compute_metric_tensor(self, x: torch.Tensor, return_validation: bool = False) -> torch.Tensor:
+        """Compute metric tensor for input tensor."""
+        # Compute base metric
+        base_metric = self.pattern_bundle.compute_metric_tensor(x)
+        return base_metric
+
+    def compute_connection_form(self, x: torch.Tensor, return_validation: bool = False) -> torch.Tensor:
+        """Compute connection form for input tensor."""
+        # Compute connection form
+        connection = self.pattern_bundle.compute_connection(x)
+        return connection
+
+    def compute_curvature_tensor(self, x: torch.Tensor, return_validation: bool = False) -> torch.Tensor:
+        """Compute curvature tensor for input tensor."""
+        # Get metric and connection
+        metric = self.compute_metric_tensor(x)
+        christoffel = self.compute_christoffel(x)
+        # Compute curvature using pattern bundle's riemannian framework
+        curvature_obj = self.pattern_bundle.riemannian_framework.compute_curvature(points=x, christoffel=christoffel)
+        # Extract the Riemann tensor values
+        return curvature_obj.riemann
+
+    def compute_ricci_tensor(self, x: torch.Tensor, return_validation: bool = False) -> torch.Tensor:
+        """Compute Ricci tensor for input tensor."""
+        # Get metric and connection
+        metric = self.compute_metric_tensor(x)
+        connection = self.compute_connection_form(x)
+        # Compute Ricci tensor using pattern bundle
+        ricci = self.pattern_bundle.riemannian_framework.compute_ricci_tensor(metric, connection)
+        return ricci

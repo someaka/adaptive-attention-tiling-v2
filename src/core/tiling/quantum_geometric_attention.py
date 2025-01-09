@@ -378,9 +378,19 @@ class QuantumGeometricAttention(nn.Module):
         print(f"x_flat requires_grad: {self.x_flat.requires_grad}")
         
         def normalize_with_energy(tensor, target_energy):
-            """Normalize tensor while preserving target energy."""
-            current_energy = torch.sum(tensor.abs() ** 2)
+            """Normalize tensor while preserving target energy and phase information."""
+            # Handle both real and complex tensors
+            if torch.is_complex(tensor):
+                current_energy = torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True)
+            else:
+                current_energy = torch.sum(tensor ** 2, dim=-1, keepdim=True)
+            
+            # Ensure scale is properly broadcast
             scale = torch.sqrt(target_energy / (current_energy + 1e-8))
+            if scale.dim() < tensor.dim():
+                scale = scale.view(*scale.shape, *([1] * (tensor.dim() - scale.dim())))
+            
+            # Scale tensor while preserving phase
             return tensor * scale
 
         # Convert input to complex with proper dtype
@@ -396,6 +406,17 @@ class QuantumGeometricAttention(nn.Module):
 
         # Project input to manifold space using x_flat
         x_manifold = self.manifold_proj(x_complex.reshape(batch_size, seq_len, -1))
+        
+        # Calculate initial energy per sequence position
+        initial_energy = torch.sum(x_complex.reshape(batch_size, seq_len, -1).real ** 2 + 
+                                 x_complex.reshape(batch_size, seq_len, -1).imag ** 2, 
+                                 dim=-1, keepdim=True)
+        
+        # Ensure x_manifold is complex
+        if not torch.is_complex(x_manifold):
+            x_manifold = torch.complex(x_manifold, torch.zeros_like(x_manifold))
+        
+        # Normalize manifold projection to match initial energy
         x_manifold = normalize_with_energy(x_manifold, initial_energy)
         print(f"After manifold projection shape: {x_manifold.shape}")
         print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
@@ -633,30 +654,57 @@ class QuantumGeometricAttention(nn.Module):
         flow_output = normalize_with_energy(flow_output, initial_energy)
         print(f"flow_output requires_grad: {flow_output.requires_grad}")
         
-        # Convert flow_output to float before inverse projection
+        # Convert flow_output to complex before inverse projection
+        if not torch.is_complex(flow_output):
+            flow_output = torch.complex(flow_output, torch.zeros_like(flow_output))
         flow_output = flow_output.to(dtype=self.dtype)
+        
+        # Calculate energy before inverse projection
+        pre_inverse_energy = torch.sum(flow_output.real ** 2 + flow_output.imag ** 2, 
+                                     dim=-1, keepdim=True)
         
         # Inverse manifold projection with energy preservation
         output = self.manifold_proj_inv(flow_output)
-        output = normalize_with_energy(output, initial_energy)
+        
+        # Ensure output is complex
+        if not torch.is_complex(output):
+            output = torch.complex(output, torch.zeros_like(output))
+        output = normalize_with_energy(output, pre_inverse_energy)
         print(f"After inverse manifold projection shape: {output.shape}")
         print(f"output requires_grad: {output.requires_grad}")
         
         # Add final residual connection with energy preservation
         x_flat_reshaped = self.x_flat.reshape(output.shape)
+        
+        # Ensure x_flat_reshaped is complex
+        if not torch.is_complex(x_flat_reshaped):
+            x_flat_reshaped = torch.complex(x_flat_reshaped, torch.zeros_like(x_flat_reshaped))
+        x_flat_reshaped = x_flat_reshaped.to(dtype=self.dtype)
+        
+        # Calculate energies
+        output_energy = torch.sum(output.real ** 2 + output.imag ** 2, dim=-1, keepdim=True)
+        residual_energy = torch.sum(x_flat_reshaped.real ** 2 + x_flat_reshaped.imag ** 2, 
+                                  dim=-1, keepdim=True)
+        
+        # Scale residual to match output energy
         residual_weight = 0.1
-        output = output + residual_weight * x_flat_reshaped
-        output = normalize_with_energy(output, initial_energy)
+        scaled_residual = normalize_with_energy(x_flat_reshaped, output_energy) * residual_weight
+        
+        # Combine and normalize to preserve output energy
+        output = output + scaled_residual
+        output = normalize_with_energy(output, output_energy)
         
         # Create direct path for gradient flow while preserving energy
         if self.training:
-            connection_scale = torch.sum(connection * connection.conj()).real
-            output = output * (1.0 + 1e-6 * connection_scale)
-            output = normalize_with_energy(output, initial_energy)
+            # Calculate connection scale while preserving complex structure
+            connection_scale = torch.sum(connection.real ** 2 + connection.imag ** 2, dim=(-3, -2, -1), keepdim=True)
+            output_with_connection = output * (1.0 + 1e-6 * connection_scale)
+            output_with_connection = normalize_with_energy(output_with_connection, output_energy)
             
-            x_flat_scale = torch.sum(x_flat_reshaped * x_flat_reshaped.conj()).real
-            output = output * (1.0 + 1e-6 * x_flat_scale)
-            output = normalize_with_energy(output, initial_energy)
+            # Calculate input scale while preserving complex structure
+            x_flat_scale = torch.sum(x_flat_reshaped.real ** 2 + x_flat_reshaped.imag ** 2, dim=-1, keepdim=True)
+            output_with_input = output_with_connection * (1.0 + 1e-6 * x_flat_scale)
+            output = normalize_with_energy(output_with_input, output_energy)
         
         return output
 

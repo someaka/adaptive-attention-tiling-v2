@@ -139,18 +139,27 @@ class MotivicRiemannianStructure(
     def __init__(
         self,
         manifold_dim: int,
-        hidden_dim: int,
+        hidden_dim: int = 64,
         motive_rank: int = 4,
         num_primes: int = 8,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None
     ):
-        """Initialize motivic Riemannian structure."""
-        super().__init__(dimension=manifold_dim)
+        """Initialize the pattern Riemannian structure.
         
+        Args:
+            manifold_dim: Dimension of the manifold
+            hidden_dim: Hidden dimension for metric networks
+            motive_rank: Rank of the motive
+            num_primes: Number of prime factors
+            device: Device to place tensors on
+            dtype: Data type for tensors
+        """
+        super().__init__(dimension=manifold_dim)
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
+        self.num_primes = num_primes
         
         # Use device utilities with fallback
         try:
@@ -158,6 +167,38 @@ class MotivicRiemannianStructure(
         except:
             self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.complex64
+        
+        # Initialize connection coefficients with correct size
+        self.connection_coeffs = nn.Parameter(
+            torch.randn(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=self.dtype) / manifold_dim
+        )
+        
+        # Initialize metric networks
+        self.real_metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, self.hidden_dim),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, manifold_dim * manifold_dim)
+        )
+        
+        self.imag_metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, self.hidden_dim),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, manifold_dim * manifold_dim)
+        )
+        
+        # Initialize energy conservation parameters
+        self.energy_scale = nn.Parameter(torch.ones(1, device=self.device))
+        self.energy_bias = nn.Parameter(torch.zeros(1, device=self.device))
+        
+        # Register hooks for gradient tracking
+        def connection_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                return grad
+            return grad
+        
+        self.connection_coeffs.register_hook(connection_hook)
         
         # Initialize fiber and connection maps for RiemannianFiberBundle
         self.fiber_map = nn.Linear(manifold_dim, hidden_dim, device=self.device, dtype=self.dtype)
@@ -185,11 +226,6 @@ class MotivicRiemannianStructure(
         # Initialize metric as identity plus low-rank perturbation
         self.metric_factors = nn.Parameter(
             torch.randn(manifold_dim, manifold_dim, device=self.device, dtype=torch.complex64) * 0.01
-        )
-        
-        # Initialize connection coefficients
-        self.connection_coeffs = nn.Parameter(
-            torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=torch.complex64)
         )
         
         # Cache for intermediate computations
