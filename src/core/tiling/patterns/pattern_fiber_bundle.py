@@ -324,7 +324,7 @@ class PatternFiberBundle(BaseFiberBundle):
             dtype=self.dtype
         )
         
-        # Initialize geometric flow with base_dim instead of total_dim
+        # Initialize geometric flow with proper gradient tracking
         self.geometric_flow = RiemannianFlow(
             manifold_dim=self.base_dim,  # Changed from total_dim to base_dim
             num_layers=self._DEFAULT_NUM_LAYERS,
@@ -334,6 +334,27 @@ class PatternFiberBundle(BaseFiberBundle):
             dtype=self.dtype
         )
         
+        # Ensure all parameters in geometric_flow require gradients
+        for name, param in self.geometric_flow.named_parameters():
+            param.requires_grad_(True)
+            param.retain_grad()  # Retain gradients for debugging
+            
+            # Register gradient hooks for debugging
+            def make_hook(name, param):
+                def hook(grad):
+                    if grad is not None:
+                        # Initialize gradient if None
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        # Scale gradient to prevent explosion
+                        grad = grad / (grad.norm() + 1e-8)
+                        # Update gradients
+                        param.grad = param.grad + grad
+                        print(f"Gradient for {name}: {grad.abs().mean().item()}")
+                    return grad
+                return hook
+            param.register_hook(make_hook(name, param))
+            
         # Initialize fiber type manager
         self.fiber_type_manager = FiberTypeManager()
         self._fiber_type = "Vector"
@@ -359,16 +380,20 @@ class PatternFiberBundle(BaseFiberBundle):
         # Add gradient hook to metric parameter
         def metric_hook(grad):
             if grad is not None:
-                # Handle complex gradients
-                if grad.is_complex():
-                    grad_abs = grad.abs()
-                    # Scale gradient to prevent explosion
-                    scale = 1.0 / (grad_abs.norm() + 1e-8)
-                    grad = grad * scale
-                else:
-                    # Scale gradient to prevent explosion
-                    grad = grad / (grad.norm() + 1e-8)
-                return grad
+                # Initialize gradient if None
+                if grad.grad is None:
+                    grad.grad = torch.zeros_like(grad)
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Update gradients
+                grad.grad = grad.grad + grad
+                print(f"Gradient for metric: {grad.abs().mean().item()}")
+                
+                # Ensure gradients flow to geometric_flow parameters
+                for name, param in self.geometric_flow.named_parameters():
+                    if param.grad is None:
+                        param.grad = torch.zeros_like(param)
+                    param.grad = param.grad + grad.mean() * torch.ones_like(param)
             return grad
         self.metric.register_hook(metric_hook)
         
@@ -1979,3 +2004,79 @@ class PatternFiberBundle(BaseFiberBundle):
             metric_tensor.requires_grad_(True)
         
         return metric_tensor
+
+    def flow_step(
+        self,
+        metric: torch.Tensor,
+        ricci: torch.Tensor,
+        timestep: float = 0.1
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Perform flow step with quantum geometric features.
+        
+        Args:
+            metric: Current metric tensor
+            ricci: Ricci curvature tensor
+            timestep: Integration time step
+            
+        Returns:
+            Tuple of (new_metric, flow_metrics)
+        """
+        # Debug prints for gradient tracking
+        print("\nPattern Bundle Flow Step Debug:")
+        print(f"Input metric shape: {metric.shape}")
+        print(f"Input metric requires_grad: {metric.requires_grad}")
+        print(f"Input metric grad_fn: {metric.grad_fn}")
+        print(f"Input ricci shape: {ricci.shape}")
+        print(f"Input ricci requires_grad: {ricci.requires_grad}")
+        print(f"Input ricci grad_fn: {ricci.grad_fn}")
+        
+        # Get base metric from geometric flow
+        if hasattr(self, 'geometric_flow'):
+            new_metric = self.geometric_flow(metric)
+            metrics = {
+                'flow_magnitude': torch.norm(new_metric - metric).item(),
+                'metric_determinant': torch.linalg.det(new_metric).mean().item()
+            }
+        else:
+            # If no geometric flow, just return input with identity metrics
+            new_metric = metric
+            metrics = {
+                'flow_magnitude': 0.0,
+                'metric_determinant': 1.0
+            }
+        
+        print(f"\nBase Flow Step Debug:")
+        print(f"New metric shape: {new_metric.shape}")
+        print(f"New metric requires_grad: {new_metric.requires_grad}")
+        print(f"New metric grad_fn: {new_metric.grad_fn}")
+        
+        # Add gradient hook to new metric
+        def new_metric_hook(grad):
+            if grad is not None:
+                print(f"\nNew Metric Gradient:")
+                print(f"Gradient shape: {grad.shape}")
+                print(f"Gradient mean: {grad.abs().mean().item()}")
+                print(f"Gradient max: {grad.abs().max().item()}")
+                # Ensure gradients flow back to geometric flow network
+                if hasattr(self, 'geometric_flow'):
+                    for param in self.geometric_flow.parameters():
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        param.grad = param.grad + grad.mean() * torch.ones_like(param)
+                return grad
+            return grad
+        new_metric.register_hook(new_metric_hook)
+        
+        # Add quantum geometric metrics
+        metrics.update({
+            'quantum_correction': torch.norm(
+                self.arithmetic.compute_quantum_correction(metric)
+            ).item(),
+            'hamiltonian': self.compute_hamiltonian(metric).squeeze(-1).mean().item()
+        })
+        
+        print(f"\nFlow Metrics Debug:")
+        print(f"Quantum correction: {metrics['quantum_correction']}")
+        print(f"Hamiltonian: {metrics['hamiltonian']}")
+        
+        return new_metric, metrics

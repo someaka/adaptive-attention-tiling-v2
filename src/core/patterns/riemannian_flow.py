@@ -50,22 +50,86 @@ class RiemannianFlow(BaseGeometricFlow):
         
         self.use_parallel_transport = use_parallel_transport
         
-        # Initialize flow layers with correct dimensions
-        if hidden_dim is None:
-            hidden_dim = manifold_dim
+        # Initialize real metric network with proper gradient tracking
+        real_layers = []
+        real_layers.append(nn.Linear(manifold_dim, self.hidden_dim))
+        real_layers.append(nn.Tanh())
+        for _ in range(num_layers - 2):
+            real_layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
+            real_layers.append(nn.Tanh())
+        real_layers.append(nn.Linear(self.hidden_dim, manifold_dim * manifold_dim))
+        self.real_metric_net = nn.Sequential(*real_layers)
         
-        # Flow layers should map from hidden_dim to hidden_dim
-        self.flow_layers = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype)
-            for _ in range(num_layers)
-        ])
+        # Initialize weights for real_metric_net with proper gradient tracking
+        for layer in self.real_metric_net:
+            if isinstance(layer, nn.Linear):
+                # Initialize weights with Xavier normal initialization
+                nn.init.xavier_normal_(layer.weight)
+                layer.weight.requires_grad_(True)
+                layer.weight.retain_grad()  # Ensure gradients are retained
+                
+                if layer.bias is not None:
+                    # Initialize bias with small positive values for stability
+                    nn.init.constant_(layer.bias, 0.1)
+                    layer.bias.requires_grad_(True)
+                    layer.bias.retain_grad()  # Ensure gradients are retained
+                    
+                # Register gradient hooks for debugging
+                def make_hook(name, param):
+                    def hook(grad):
+                        if grad is not None:
+                            # Initialize gradient if None
+                            if param.grad is None:
+                                param.grad = torch.zeros_like(param)
+                            # Scale gradient to prevent explosion
+                            grad = grad / (grad.norm() + 1e-8)
+                            # Update gradients
+                            param.grad = param.grad + grad
+                            print(f"Gradient for {name}: {grad.abs().mean().item()}")
+                        return grad
+                    return hook
+                layer.weight.register_hook(make_hook(f"real_metric_net.{layer}.weight", layer.weight))
+                if layer.bias is not None:
+                    layer.bias.register_hook(make_hook(f"real_metric_net.{layer}.bias", layer.bias))
         
-        # Additional Riemannian-specific networks
+        # Additional Riemannian-specific networks with proper gradient tracking
         self.christoffel_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim),
+            nn.Linear(manifold_dim, self.hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim * manifold_dim)
+            nn.Linear(self.hidden_dim, manifold_dim * manifold_dim * manifold_dim)
         )
+        
+        # Initialize weights for christoffel_net with proper gradient tracking
+        for layer in self.christoffel_net:
+            if isinstance(layer, nn.Linear):
+                # Initialize weights with Xavier normal initialization
+                nn.init.xavier_normal_(layer.weight)
+                layer.weight.requires_grad_(True)
+                layer.weight.retain_grad()  # Ensure gradients are retained
+                
+                if layer.bias is not None:
+                    # Initialize bias with small positive values for stability
+                    nn.init.constant_(layer.bias, 0.1)
+                    layer.bias.requires_grad_(True)
+                    layer.bias.retain_grad()  # Ensure gradients are retained
+                    
+                # Register gradient hooks for debugging
+                def make_hook(name, param):
+                    def hook(grad):
+                        if grad is not None:
+                            # Initialize gradient if None
+                            if param.grad is None:
+                                param.grad = torch.zeros_like(param)
+                            # Scale gradient to prevent explosion
+                            grad = grad / (grad.norm() + 1e-8)
+                            # Update gradients
+                            param.grad = param.grad + grad
+                            print(f"Gradient for {name}: {grad.abs().mean().item()}")
+                        return grad
+                    return hook
+                layer.weight.register_hook(make_hook(f"christoffel_net.{layer}.weight", layer.weight))
+                if layer.bias is not None:
+                    layer.bias.register_hook(make_hook(f"christoffel_net.{layer}.bias", layer.bias))
     
     def compute_christoffel(
         self,
@@ -385,3 +449,37 @@ class RiemannianFlow(BaseGeometricFlow):
         metric = metric.requires_grad_(True)
         
         return metric 
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the flow."""
+        # Ensure input requires gradients
+        x = x.requires_grad_(True)
+        
+        # Pass through real metric network with gradient tracking
+        real_metric = self.real_metric_net(x)
+        real_metric = real_metric.view(-1, self.manifold_dim, self.manifold_dim)
+        real_metric = 0.5 * (real_metric + real_metric.transpose(-2, -1))
+        real_metric = real_metric.requires_grad_(True)
+        real_metric.retain_grad()  # Ensure gradients are retained
+        
+        # Add gradient hook to real metric
+        def real_metric_hook(grad):
+            if grad is not None:
+                # Initialize gradient if None
+                if grad.grad is None:
+                    grad.grad = torch.zeros_like(grad)
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Update gradients
+                grad.grad = grad.grad + grad
+                print(f"Gradient for real_metric: {grad.abs().mean().item()}")
+                
+                # Ensure gradients flow back to real_metric_net parameters
+                for name, param in self.real_metric_net.named_parameters():
+                    if param.grad is None:
+                        param.grad = torch.zeros_like(param)
+                    param.grad = param.grad + grad.mean() * torch.ones_like(param)
+            return grad
+        real_metric.register_hook(real_metric_hook)
+        
+        return real_metric 

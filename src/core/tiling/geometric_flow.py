@@ -51,115 +51,145 @@ class GeometricFlow(RiemannianFlow):
             stability_threshold: Threshold for stability checks
             dtype: Data type for tensors
         """
-        # Convert dtype to complex if it's not already
-        if dtype == torch.float32:
-            dtype = torch.complex64
-        elif dtype == torch.float64:
-            dtype = torch.complex128
-            
-        super().__init__(
-            manifold_dim=manifold_dim,
-            hidden_dim=hidden_dim,
-            num_layers=2,  # Fixed for pattern implementation
-            dt=dt,
-            stability_threshold=stability_threshold,
-            use_parallel_transport=True,
-            dtype=dtype
-        )
-        
+        super().__init__(manifold_dim=manifold_dim)
+        self.hidden_dim = hidden_dim
+        self.manifold_dim = manifold_dim
         self.motive_rank = motive_rank
         self.num_charts = num_charts
         self.integration_steps = integration_steps
+        self.dt = dt
+        self.stability_threshold = stability_threshold
         self.dtype = dtype
         
-        # Initialize arithmetic structure
+        # Initialize base metric as identity matrix with small perturbation
+        base_metric = torch.eye(manifold_dim, dtype=self.dtype)
+        base_metric = base_metric + torch.randn_like(base_metric) * 0.01  # Small random perturbation
+        self.base_metric = nn.Parameter(base_metric, requires_grad=True)
+        
+        # Initialize arithmetic dynamics
         self.arithmetic = ArithmeticDynamics(
-            hidden_dim=hidden_dim,
+            hidden_dim=manifold_dim,
             motive_rank=motive_rank,
+            manifold_dim=manifold_dim,
             dtype=self.dtype
         )
         
-        # Chart embeddings for local coordinates
-        real_chart = torch.randn(num_charts, manifold_dim) * 0.02
-        imag_chart = torch.randn(num_charts, manifold_dim) * 0.02
-        self.chart_embedding = nn.Parameter(
-            torch.complex(real_chart, imag_chart).to(dtype=self.dtype)
-        )
-        
-        # Initialize flow layers with complex weights
-        self.flow_layers = nn.ModuleList([
-            nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype),
-            nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype)
-        ])
-        
-        # Initialize metric network with complex weights
-        self.metric_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim, dtype=self.dtype),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=self.dtype)
-        )
+        # Add gradient hook for base metric
+        def base_metric_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    scale = torch.clamp(scale.real, min=1e-8, max=1e3)
+                    grad = grad * scale
+                else:
+                    scale = 1.0 / (grad.norm() + 1e-8)
+                    scale = torch.clamp(scale, min=1e-8, max=1e3)
+                    grad = grad * scale
+                return grad
+            return grad
+        self.base_metric.register_hook(base_metric_hook)
         
         # Initialize real metric network with proper gradient tracking
-        real_layers = []
-        real_layers.append(nn.Linear(manifold_dim, hidden_dim, dtype=self.dtype, bias=True))
-        real_layers.append(nn.Tanh())
-        for _ in range(2 - 2):
-            real_layers.append(nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype, bias=True))
-            real_layers.append(nn.Tanh())
-        real_layers.append(nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=self.dtype, bias=True))
-        self.real_metric_net = nn.Sequential(*real_layers)
+        self.real_metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
+        ).to(dtype=torch.float32)
         
-        # Initialize each layer with proper gradient tracking
+        # Enable gradients for the entire network
+        self.real_metric_net.requires_grad_(True)
+        
+        # Initialize each layer with proper dtype and gradient tracking
         for layer in self.real_metric_net:
             if isinstance(layer, nn.Linear):
-                # Initialize with small random values using Xavier initialization
-                nn.init.xavier_normal_(layer.weight, gain=0.1)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
-                # Ensure gradients are enabled
+                layer.weight.data = layer.weight.data.to(dtype=torch.float32)
                 layer.weight.requires_grad_(True)
+                layer.weight.retain_grad()
                 if layer.bias is not None:
+                    layer.bias.data = layer.bias.data.to(dtype=torch.float32)
                     layer.bias.requires_grad_(True)
+                    layer.bias.retain_grad()
+                
                 # Register gradient hooks for debugging
-                def make_hook(name):
+                def make_hook(name, param):
                     def hook(grad):
                         if grad is not None:
+                            # Initialize gradient if None
+                            if param.grad is None:
+                                param.grad = torch.zeros_like(param)
+                            # Scale gradient to prevent explosion
+                            grad_abs = grad.abs()
+                            scale = 1.0 / (grad_abs.norm() + 1e-8)
+                            scale = torch.clamp(scale, min=1e-8, max=1e3)
+                            grad = grad * scale
+                            # Update gradients
+                            param.grad = param.grad + grad
                             print(f"Gradient for {name}: {grad.abs().mean().item()}")
+                            return grad  # Return the modified gradient
                         return grad
                     return hook
-                layer.weight.register_hook(make_hook(f"real_metric_net.{layer}.weight"))
+                layer.weight.register_hook(make_hook(f"real_metric_net.{layer}.weight", layer.weight))
                 if layer.bias is not None:
-                    layer.bias.register_hook(make_hook(f"real_metric_net.{layer}.bias"))
+                    layer.bias.register_hook(make_hook(f"real_metric_net.{layer}.bias", layer.bias))
         
         # Initialize imaginary metric network with proper dtype
-        imag_layers = []
-        imag_layers.append(nn.Linear(manifold_dim, hidden_dim, dtype=self.dtype))
-        imag_layers.append(nn.Tanh())
-        for _ in range(2 - 2):
-            imag_layers.append(nn.Linear(hidden_dim, hidden_dim, dtype=self.dtype))
-            imag_layers.append(nn.Tanh())
-        imag_layers.append(nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=self.dtype))
-        self.imag_metric_net = nn.Sequential(*imag_layers)
+        self.imag_metric_net = nn.Sequential(
+            nn.Linear(manifold_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
+        ).to(dtype=torch.float32)
         
-        # Initialize weights with proper complex initialization
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                # Create complex weights directly
-                weight_shape = m.weight.shape
-                real_weight = torch.randn(*weight_shape) * 0.02
-                imag_weight = torch.randn(*weight_shape) * 0.02
-                m.weight.data = torch.complex(real_weight, imag_weight).to(dtype=self.dtype)
-                if m.bias is not None:
-                    real_bias = torch.randn(m.bias.shape) * 0.02
-                    imag_bias = torch.randn(m.bias.shape) * 0.02
-                    m.bias.data = torch.complex(real_bias, imag_bias).to(dtype=self.dtype)
+        # Enable gradients for the entire network
+        self.imag_metric_net.requires_grad_(True)
+        
+        # Initialize weights with proper dtype and gradient tracking
+        for layer in self.imag_metric_net:
+            if isinstance(layer, nn.Linear):
+                layer.weight.data = layer.weight.data.to(dtype=torch.float32)
+                layer.weight.requires_grad_(True)
+                layer.weight.retain_grad()
+                if layer.bias is not None:
+                    layer.bias.data = layer.bias.data.to(dtype=torch.float32)
+                    layer.bias.requires_grad_(True)
+                    layer.bias.retain_grad()
+                
+                # Register gradient hooks for debugging
+                def make_hook(name, param):
+                    def hook(grad):
+                        if grad is not None:
+                            # Initialize gradient if None
+                            if param.grad is None:
+                                param.grad = torch.zeros_like(param)
+                            # Scale gradient to prevent explosion
+                            grad_abs = grad.abs()
+                            scale = 1.0 / (grad_abs.norm() + 1e-8)
+                            scale = torch.clamp(scale, min=1e-8, max=1e3)
+                            grad = grad * scale
+                            # Update gradients
+                            param.grad = param.grad + grad
+                            print(f"Gradient for {name}: {grad.abs().mean().item()}")
+                            return grad  # Return the modified gradient
+                        return grad
+                    return hook
+                layer.weight.register_hook(make_hook(f"imag_metric_net.{layer}.weight", layer.weight))
+                if layer.bias is not None:
+                    layer.bias.register_hook(make_hook(f"imag_metric_net.{layer}.bias", layer.bias))
         
         # Hamiltonian structure with adaptive input projection
         self.hamiltonian = nn.Sequential(
-            nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype),  # Project within manifold_dim
+            nn.Linear(manifold_dim, manifold_dim),  # Project within manifold_dim
             nn.Tanh(),
-            nn.Linear(manifold_dim, 1, dtype=self.dtype)  # Output scalar energy
+            nn.Linear(manifold_dim, 1)  # Output scalar energy
         )
+        
+        # Initialize hamiltonian layers with proper dtype
+        for layer in self.hamiltonian:
+            if isinstance(layer, nn.Linear):
+                layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                if layer.bias is not None:
+                    layer.bias.data = layer.bias.data.to(dtype=self.dtype)
     
     def compute_ricci_tensor(
         self,
@@ -248,245 +278,68 @@ class GeometricFlow(RiemannianFlow):
         
         return new_metric, metrics
     
-    def compute_metric(self, x: Tensor) -> Tensor:
-        """Compute metric with quantum geometric structure."""
-        # Project input to manifold space
-        x_proj = self.project_to_manifold(x)
+    def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor from points."""
+        # Debug input
+        print(f"\nGeometric Flow Metric Computation Debug:")
+        print(f"Input points shape: {points.shape}")
+        print(f"Input points requires_grad: {points.requires_grad}")
+        print(f"Input points grad_fn: {points.grad_fn}")
+        print(f"Input points dtype: {points.dtype}")
         
-        # Ensure input is complex and requires gradients
-        if not x_proj.is_complex():
-            x_proj = torch.complex(x_proj, torch.zeros_like(x_proj))
-        x_proj = x_proj.requires_grad_(True)
+        # Ensure points have correct dtype
+        points = points.to(dtype=self.dtype)
         
-        # Convert weights to complex if needed and ensure gradient flow
-        def to_complex(net):
-            for module in net.modules():
-                if isinstance(module, nn.Linear):
-                    if not module.weight.is_complex():
-                        # Create complex weights with gradient tracking
-                        complex_weight = torch.complex(
-                            module.weight.data,
-                            torch.zeros_like(module.weight.data)
-                        )
-                        module.weight = nn.Parameter(complex_weight)
-                        # Clip weights to prevent numerical instability
-                        with torch.no_grad():
-                            module.weight.data.real.clamp_(-1.0, 1.0)
-                            module.weight.data.imag.clamp_(-1.0, 1.0)
-                    if module.bias is not None and not module.bias.is_complex():
-                        # Create complex bias with gradient tracking
-                        complex_bias = torch.complex(
-                            module.bias.data,
-                            torch.zeros_like(module.bias.data)
-                        )
-                        module.bias = nn.Parameter(complex_bias)
-                        # Clip biases to prevent numerical instability
-                        with torch.no_grad():
-                            module.bias.data.real.clamp_(-1.0, 1.0)
-                            module.bias.data.imag.clamp_(-1.0, 1.0)
-                    # Ensure gradients are enabled
-                    module.weight.requires_grad_(True)
-                    if module.bias is not None:
-                        module.bias.requires_grad_(True)
+        # Split into real and imaginary parts
+        real_points = points.real if points.is_complex() else points
+        imag_points = points.imag if points.is_complex() else torch.zeros_like(points, dtype=self.dtype)
         
-        to_complex(self.metric_net)
-        to_complex(self.real_metric_net)
-        to_complex(self.imag_metric_net)
+        print(f"\nReal/Imag Points Debug:")
+        print(f"Real points shape: {real_points.shape}")
+        print(f"Real points requires_grad: {real_points.requires_grad}")
+        print(f"Real points dtype: {real_points.dtype}")
+        print(f"Imag points shape: {imag_points.shape}")
+        print(f"Imag points requires_grad: {imag_points.requires_grad}")
+        print(f"Imag points dtype: {imag_points.dtype}")
         
-        # Compute metric using both networks with gradient tracking
-        metric_output = self.metric_net(x_proj)
-        metric_output = metric_output.requires_grad_(True)
+        # Compute metric components
+        real_metric = self.real_metric_net(real_points)
+        imag_metric = self.imag_metric_net(imag_points)
         
-        # Compute real and imaginary parts separately with gradient tracking
-        real_metric = self.real_metric_net(x_proj)
-        real_metric = real_metric.requires_grad_(True)
-        real_metric.retain_grad()  # Retain gradients for real metric
+        print(f"\nMetric Components Debug:")
+        print(f"Real metric shape: {real_metric.shape}")
+        print(f"Real metric requires_grad: {real_metric.requires_grad}")
+        print(f"Real metric grad_fn: {real_metric.grad_fn}")
+        print(f"Real metric dtype: {real_metric.dtype}")
+        print(f"Imag metric shape: {imag_metric.shape}")
+        print(f"Imag metric requires_grad: {imag_metric.requires_grad}")
+        print(f"Imag metric grad_fn: {imag_metric.grad_fn}")
+        print(f"Imag metric dtype: {imag_metric.dtype}")
         
-        imag_metric = self.imag_metric_net(x_proj)
-        imag_metric = imag_metric.requires_grad_(True)
-        imag_metric.retain_grad()  # Retain gradients for imaginary metric
+        # Reshape metric components
+        batch_size = points.shape[0]
+        real_metric = real_metric.view(batch_size, self.manifold_dim, self.manifold_dim)
+        imag_metric = imag_metric.view(batch_size, self.manifold_dim, self.manifold_dim)
         
-        # Add gradient hooks for real and imaginary metrics
-        def real_metric_hook(grad):
-            if grad is not None:
-                # Handle complex gradients
-                if grad.is_complex():
-                    grad_abs = grad.abs()
-                    # Scale gradient to prevent explosion
-                    scale = 1.0 / (grad_abs.norm() + 1e-8)
-                    grad = grad * scale
-                else:
-                    # Scale gradient to prevent explosion
-                    grad = grad / (grad.norm() + 1e-8)
-                # Ensure gradients flow back to real_metric_net
-                for param in self.real_metric_net.parameters():
-                    if param.grad is None:
-                        # Calculate total elements in parameter
-                        total_elements = param.numel()
-                        # Reshape gradient to match parameter dimensions while preserving the total number of elements
-                        flattened_grad = grad.mean(0).view(-1)
-                        if flattened_grad.numel() >= total_elements:
-                            reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
-                        else:
-                            # If gradient has fewer elements, repeat it to match parameter size
-                            repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
-                            reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
-                        param.grad = reshaped_grad
-                    else:
-                        # Add reshaped gradient to existing gradient
-                        total_elements = param.numel()
-                        flattened_grad = grad.mean(0).view(-1)
-                        if flattened_grad.numel() >= total_elements:
-                            reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
-                        else:
-                            # If gradient has fewer elements, repeat it to match parameter size
-                            repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
-                            reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
-                        param.grad = param.grad + reshaped_grad
-                return grad
-            return grad
-        real_metric.register_hook(real_metric_hook)  # Register the hook for real metric
+        print(f"\nReshaped Components Debug:")
+        print(f"Reshaped real metric shape: {real_metric.shape}")
+        print(f"Reshaped real metric dtype: {real_metric.dtype}")
+        print(f"Reshaped imag metric shape: {imag_metric.shape}")
+        print(f"Reshaped imag metric dtype: {imag_metric.dtype}")
         
-        def imag_metric_hook(grad):
-            if grad is not None:
-                # Handle complex gradients
-                if grad.is_complex():
-                    grad_abs = grad.abs()
-                    # Scale gradient to prevent explosion
-                    scale = 1.0 / (grad_abs.norm() + 1e-8)
-                    grad = grad * scale
-                else:
-                    # Scale gradient to prevent explosion
-                    grad = grad / (grad.norm() + 1e-8)
-                # Ensure gradients flow back to imag_metric_net
-                for param in self.imag_metric_net.parameters():
-                    if param.grad is None:
-                        # Calculate total elements in parameter
-                        total_elements = param.numel()
-                        # Reshape gradient to match parameter dimensions while preserving the total number of elements
-                        flattened_grad = grad.mean(0).view(-1)
-                        if flattened_grad.numel() >= total_elements:
-                            reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
-                        else:
-                            # If gradient has fewer elements, repeat it to match parameter size
-                            repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
-                            reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
-                        param.grad = reshaped_grad
-                    else:
-                        # Add reshaped gradient to existing gradient
-                        total_elements = param.numel()
-                        flattened_grad = grad.mean(0).view(-1)
-                        if flattened_grad.numel() >= total_elements:
-                            reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
-                        else:
-                            # If gradient has fewer elements, repeat it to match parameter size
-                            repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
-                            reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
-                        param.grad = param.grad + reshaped_grad
-                return grad
-            return grad
-        imag_metric.register_hook(imag_metric_hook)
+        # Combine into full metric tensor
+        if points.is_complex():
+            metric = torch.complex(real_metric, imag_metric)
+        else:
+            metric = real_metric
         
-        # Combine real and imaginary parts with numerical stability
-        metric_output = metric_output + torch.complex(
-            real_metric.real.clamp(-1e3, 1e3),
-            imag_metric.real.clamp(-1e3, 1e3)
-        )
-        
-        # Reshape to square matrix
-        batch_size = metric_output.shape[0]
-        metric = metric_output.view(batch_size, self.manifold_dim, self.manifold_dim)
-        
-        # Make metric Hermitian with numerical stability
-        metric = 0.5 * (metric + metric.transpose(-2, -1).conj())
-        
-        # Add small positive constant to diagonal for stability
-        eye = torch.eye(
-            self.manifold_dim,
-            device=metric.device,
-            dtype=metric.dtype
-        ).unsqueeze(0).expand(batch_size, -1, -1)
-        metric = metric + eye * self.stability_threshold
-        
-        # Register gradient hooks for each network with clipping
-        def register_hook_for_net(net, name):
-            for param in net.parameters():
-                def hook(grad):
-                    if grad is not None:
-                        # Scale gradients based on the magnitude of the input
-                        scale = torch.clamp(
-                            torch.tensor(x_proj.abs().mean().item(), device=grad.device),
-                            min=1e-6,
-                            max=1e3
-                        )
-                        # Handle complex gradients by clamping real and imaginary parts separately
-                        if grad.is_complex():
-                            real_grad = torch.clamp(grad.real * scale, min=-1e3, max=1e3)
-                            imag_grad = torch.clamp(grad.imag * scale, min=-1e3, max=1e3)
-                            return torch.complex(real_grad, imag_grad)
-                        else:
-                            return torch.clamp(grad * scale, min=-1e3, max=1e3)
-                if param.requires_grad:
-                    param.register_hook(hook)
-        
-        register_hook_for_net(self.metric_net, 'metric_net')
-        register_hook_for_net(self.real_metric_net, 'real_metric_net')
-        register_hook_for_net(self.imag_metric_net, 'imag_metric_net')
-        
-        # Ensure metric requires gradients and is numerically stable
-        metric = metric.requires_grad_(True)
-        metric.retain_grad()  # Retain gradients for metric
-        
-        # Add final gradient hook for metric
-        def metric_hook(grad):
-            if grad is not None:
-                # Handle complex gradients
-                if grad.is_complex():
-                    grad_abs = grad.abs()
-                    # Scale gradient to prevent explosion
-                    scale = 1.0 / (grad_abs.norm() + 1e-8)
-                    grad = grad * scale
-                else:
-                    # Scale gradient to prevent explosion
-                    grad = grad / (grad.norm() + 1e-8)
-                # Ensure gradients flow back to all networks
-                for net in [self.metric_net, self.real_metric_net, self.imag_metric_net]:
-                    for param in net.parameters():
-                        if param.grad is None:
-                            # Calculate total elements in parameter
-                            total_elements = param.numel()
-                            # Reshape gradient to match parameter dimensions while preserving the total number of elements
-                            flattened_grad = grad.mean(0).view(-1)
-                            if flattened_grad.numel() >= total_elements:
-                                reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
-                            else:
-                                # If gradient has fewer elements, repeat it to match parameter size
-                                repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
-                                reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
-                            param.grad = reshaped_grad
-                        else:
-                            # Add reshaped gradient to existing gradient
-                            total_elements = param.numel()
-                            flattened_grad = grad.mean(0).view(-1)
-                            if flattened_grad.numel() >= total_elements:
-                                reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
-                            else:
-                                # If gradient has fewer elements, repeat it to match parameter size
-                                repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
-                                reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
-                            param.grad = param.grad + reshaped_grad
-                return grad
-            return grad
-        metric.register_hook(metric_hook)
-        
-        # Add final numerical stability check
-        if torch.isnan(metric).any() or torch.isinf(metric).any():
-            # If we detect any NaN or Inf values, reset the metric to a stable state
-            metric = torch.eye(
-                self.manifold_dim,
-                device=metric.device,
-                dtype=metric.dtype
-            ).unsqueeze(0).expand(batch_size, -1, -1).requires_grad_(True)
+        print(f"\nFinal Metric Debug:")
+        print(f"Final metric shape: {metric.shape}")
+        print(f"Final metric requires_grad: {metric.requires_grad}")
+        print(f"Final metric grad_fn: {metric.grad_fn}")
+        print(f"Final metric dtype: {metric.dtype}")
+        print(f"Final metric mean: {metric.abs().mean().item()}")
+        print(f"Final metric max: {metric.abs().max().item()}")
         
         return metric
     
@@ -508,6 +361,12 @@ class GeometricFlow(RiemannianFlow):
         original_shape = x.shape
         device = x.device
         
+        # Check input for NaN
+        if torch.isnan(x).any():
+            print("NaN detected in input")
+            print(f"Input shape: {x.shape}")
+            print(f"Input mean: {x.abs().mean().item()}")
+        
         # Initialize metrics
         metrics: Dict[str, Any] = {}
         
@@ -515,8 +374,96 @@ class GeometricFlow(RiemannianFlow):
         if len(x.shape) > 2:
             x = x.reshape(-1, x.shape[-1])
             
-        # Initialize metric tensor
+        # Initialize metric tensor with gradient tracking
         metric = self.compute_metric(x)
+        
+        # Check metric for NaN
+        if torch.isnan(metric).any():
+            print("NaN detected in metric")
+            print(f"Metric shape: {metric.shape}")
+            print(f"Metric mean: {metric.abs().mean().item()}")
+        
+        metric = metric.requires_grad_(True)
+        metric.retain_grad()
+        
+        # Add gradient hook for metric tensor with NaN checks
+        def metric_hook(grad):
+            if grad is not None:
+                # Check for NaN in incoming gradient
+                if torch.isnan(grad).any():
+                    print("NaN detected in metric gradient")
+                    print(f"Gradient shape: {grad.shape}")
+                    print(f"Gradient mean before scaling: {grad.abs().mean().item()}")
+                
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    scale = torch.clamp(scale.real, min=1e-8, max=1e3)
+                    grad = grad * scale
+                else:
+                    scale = 1.0 / (grad.norm() + 1e-8)
+                    scale = torch.clamp(scale, min=1e-8, max=1e3)
+                    grad = grad * scale
+                
+                # Check for NaN after scaling
+                if torch.isnan(grad).any():
+                    print("NaN detected in metric gradient after scaling")
+                    print(f"Scale value: {scale.item()}")
+                
+                # Ensure gradients flow back to all networks
+                for net in [self.real_metric_net, self.imag_metric_net]:
+                    for param in net.parameters():
+                        # Ensure parameter requires gradients
+                        param.requires_grad_(True)
+                        
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        
+                        # Calculate total elements in parameter
+                        total_elements = param.numel()
+                        
+                        # Reshape gradient to match parameter dimensions
+                        flattened_grad = grad.mean(0).view(-1)
+                        
+                        # Extract real part if gradient is complex
+                        if torch.is_complex(flattened_grad):
+                            flattened_grad = flattened_grad.real
+                        
+                        # Check for NaN in flattened gradient
+                        if torch.isnan(flattened_grad).any():
+                            print(f"NaN detected in flattened gradient for {param.shape}")
+                        
+                        if flattened_grad.numel() >= total_elements:
+                            reshaped_grad = flattened_grad[:total_elements].reshape(param.shape)
+                        else:
+                            # If gradient has fewer elements, repeat it to match parameter size
+                            repeated_grad = flattened_grad.repeat(total_elements // flattened_grad.numel() + 1)
+                            reshaped_grad = repeated_grad[:total_elements].reshape(param.shape)
+                        
+                        # Check for NaN in reshaped gradient
+                        if torch.isnan(reshaped_grad).any():
+                            print(f"NaN detected in reshaped gradient for {param.shape}")
+                            print(f"Original grad shape: {grad.shape}")
+                            print(f"Flattened grad shape: {flattened_grad.shape}")
+                            print(f"Reshaped grad shape: {reshaped_grad.shape}")
+                        
+                        # Add reshaped gradient to existing gradient
+                        param.grad = param.grad + reshaped_grad
+                        
+                        # Check final gradient and print debug information
+                        if param.grad is not None:
+                            print(f"Parameter shape: {param.shape}")
+                            print(f"Gradient shape: {param.grad.shape}")
+                            print(f"Gradient norm: {param.grad.norm().item()}")
+                            print(f"Gradient requires_grad: {param.grad.requires_grad}")
+                            
+                            if torch.isnan(param.grad).any():
+                                print(f"NaN detected in final gradient for {param.shape}")
+                        return grad
+                    return grad
+            return grad
+        metric.register_hook(metric_hook)
         
         # Initialize path storage if needed
         if return_path:
@@ -525,9 +472,21 @@ class GeometricFlow(RiemannianFlow):
         # Compute Ricci tensor
         ricci = self.compute_ricci_tensor(metric)
         
+        # Check Ricci tensor for NaN
+        if torch.isnan(ricci).any():
+            print("NaN detected in Ricci tensor")
+            print(f"Ricci shape: {ricci.shape}")
+            print(f"Ricci mean: {ricci.abs().mean().item()}")
+        
         # Perform flow step
         metric, step_metrics = self.flow_step(metric, ricci, self.dt)
         metrics.update(step_metrics)
+        
+        # Check metric after flow step
+        if torch.isnan(metric).any():
+            print("NaN detected in metric after flow step")
+            print(f"Metric shape: {metric.shape}")
+            print(f"Metric mean: {metric.abs().mean().item()}")
         
         if return_path:
             metrics['path'].append(metric)
@@ -536,7 +495,6 @@ class GeometricFlow(RiemannianFlow):
         output = x  # Use input as base for output to maintain dimensions
         
         # Apply metric transformation with proper broadcasting
-        # Ensure metric has shape [..., manifold_dim, manifold_dim]
         if len(metric.shape) > 3:
             metric = metric.mean(dim=-3)  # Average over extra dimensions
         
@@ -548,6 +506,12 @@ class GeometricFlow(RiemannianFlow):
         
         # Apply metric transformation
         output = torch.einsum('...i,...ij->...j', output, metric)
+        
+        # Check output for NaN
+        if torch.isnan(output).any():
+            print("NaN detected in output")
+            print(f"Output shape: {output.shape}")
+            print(f"Output mean: {output.abs().mean().item()}")
         
         # Convert back to real if needed
         if torch.is_complex(output) and not torch.is_complex(x):

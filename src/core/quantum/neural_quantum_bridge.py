@@ -368,19 +368,35 @@ class NeuralQuantumBridge(nn.Module):
         state_dim = state.amplitudes.shape[-1]
         batch_size = state.amplitudes.shape[0] if state.amplitudes.dim() > 1 else 1
         
+        # Debug prints for gradient tracking
+        print("\nQuantum State Evolution Debug:")
+        print(f"Input state amplitudes shape: {state.amplitudes.shape}")
+        print(f"Input state requires_grad: {state.amplitudes.requires_grad}")
+        print(f"Input state grad_fn: {state.amplitudes.grad_fn}")
+        
         # Get connection with proper gradient tracking
         connection = self.pattern_bundle.connection
         connection.requires_grad_(True)
         connection.retain_grad()  # Ensure gradients are retained
+        
+        print(f"Connection requires_grad: {connection.requires_grad}")
+        print(f"Connection grad_fn: {connection.grad_fn}")
         
         # Create connection view with gradient tracking
         connection_view = connection.view(state_dim, state_dim, state_dim)
         connection_view.requires_grad_(True)
         connection_view.retain_grad()  # Ensure gradients are retained
         
+        print(f"Connection view requires_grad: {connection_view.requires_grad}")
+        print(f"Connection view grad_fn: {connection_view.grad_fn}")
+        
         # Add gradient hook to connection view
         def connection_view_hook(grad):
             if grad is not None:
+                print(f"\nConnection View Gradient:")
+                print(f"Gradient shape: {grad.shape}")
+                print(f"Gradient mean: {grad.abs().mean().item()}")
+                print(f"Gradient max: {grad.abs().max().item()}")
                 # Scale gradient to prevent explosion
                 grad = grad / (grad.norm() + 1e-8)
                 # Ensure gradients flow back to original connection
@@ -398,6 +414,10 @@ class NeuralQuantumBridge(nn.Module):
             # Convert to float for layer norm and ensure gradients flow
             attention_pattern_real = attention_pattern_flat.real.float()
             attention_pattern_imag = attention_pattern_flat.imag.float()
+            
+            print(f"\nAttention Pattern Debug:")
+            print(f"Attention pattern requires_grad: {attention_pattern.requires_grad}")
+            print(f"Attention pattern grad_fn: {attention_pattern.grad_fn}")
             
             # Apply layer norm separately to real and imaginary parts
             attention_pattern_norm_real = self.layer_norm(attention_pattern_real)
@@ -418,6 +438,9 @@ class NeuralQuantumBridge(nn.Module):
             # Add residual connection to ensure layer norm is used in computation
             attention_pattern = attention_pattern + 0.1 * attention_pattern
             attention_pattern.requires_grad_(True)
+            
+            print(f"Normalized attention pattern requires_grad: {attention_pattern.requires_grad}")
+            print(f"Normalized attention pattern grad_fn: {attention_pattern.grad_fn}")
         
         # Initialize Hamiltonian with attention pattern if provided
         if attention_pattern is not None:
@@ -428,15 +451,27 @@ class NeuralQuantumBridge(nn.Module):
             hamiltonian = hamiltonian.reshape(batch_size, state_dim, state_dim)
         hamiltonian.requires_grad_(True)
         
+        print(f"\nHamiltonian Debug:")
+        print(f"Hamiltonian shape: {hamiltonian.shape}")
+        print(f"Hamiltonian requires_grad: {hamiltonian.requires_grad}")
+        print(f"Hamiltonian grad_fn: {hamiltonian.grad_fn}")
+        
         # Add connection contribution to Hamiltonian with gradient tracking
         connection_hamiltonian = torch.einsum('bij,bjk->bik', connection_view.expand(batch_size, -1, -1, -1), hamiltonian)
         connection_hamiltonian.requires_grad_(True)
         hamiltonian_with_connection = hamiltonian + connection_hamiltonian * 0.5  # Scale factor to control contribution
         hamiltonian_with_connection.requires_grad_(True)
         
+        print(f"Hamiltonian with connection requires_grad: {hamiltonian_with_connection.requires_grad}")
+        print(f"Hamiltonian with connection grad_fn: {hamiltonian_with_connection.grad_fn}")
+        
         # Add gradient hook to Hamiltonian
         def hamiltonian_hook(grad):
             if grad is not None:
+                print(f"\nHamiltonian Gradient:")
+                print(f"Gradient shape: {grad.shape}")
+                print(f"Gradient mean: {grad.abs().mean().item()}")
+                print(f"Gradient max: {grad.abs().max().item()}")
                 # Scale gradient to prevent explosion
                 grad = grad / (grad.norm() + 1e-8)
                 # Ensure gradients flow back to connection
@@ -452,6 +487,11 @@ class NeuralQuantumBridge(nn.Module):
         U = torch.matrix_exp(-time * hamiltonian_with_connection)
         U.requires_grad_(True)
         
+        print(f"\nEvolution Operator Debug:")
+        print(f"U shape: {U.shape}")
+        print(f"U requires_grad: {U.requires_grad}")
+        print(f"U grad_fn: {U.grad_fn}")
+        
         # Convert state amplitudes to complex64 for evolution
         amplitudes_float = state.amplitudes.to(self.dtype)
         amplitudes_float.requires_grad_(True)
@@ -460,9 +500,18 @@ class NeuralQuantumBridge(nn.Module):
         evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
         evolved_amplitudes.requires_grad_(True)
         
+        print(f"\nEvolved State Debug:")
+        print(f"Evolved amplitudes shape: {evolved_amplitudes.shape}")
+        print(f"Evolved amplitudes requires_grad: {evolved_amplitudes.requires_grad}")
+        print(f"Evolved amplitudes grad_fn: {evolved_amplitudes.grad_fn}")
+        
         # Add gradient hook to evolved amplitudes
         def evolved_hook(grad):
             if grad is not None:
+                print(f"\nEvolved Amplitudes Gradient:")
+                print(f"Gradient shape: {grad.shape}")
+                print(f"Gradient mean: {grad.abs().mean().item()}")
+                print(f"Gradient max: {grad.abs().max().item()}")
                 # Scale gradient to prevent explosion
                 grad = grad / (grad.norm() + 1e-8)
                 # Ensure gradients flow back to connection and amplitudes
@@ -484,6 +533,10 @@ class NeuralQuantumBridge(nn.Module):
         # Add residual connection to maintain gradient flow
         evolved_state.amplitudes = evolved_state.amplitudes + 0.1 * state.amplitudes
         
+        print(f"\nFinal State Debug:")
+        print(f"Final state requires_grad: {evolved_state.amplitudes.requires_grad}")
+        print(f"Final state grad_fn: {evolved_state.amplitudes.grad_fn}")
+        
         return evolved_state
 
     def construct_pattern_bundle(
@@ -491,58 +544,49 @@ class NeuralQuantumBridge(nn.Module):
         neural_pattern: torch.Tensor,
         return_metrics: bool = False
     ) -> Union[PatternSection, Tuple[PatternSection, Dict[str, Any]]]:
-        """Construct pattern space fiber bundle from neural pattern.
+        """Construct pattern bundle with proper gradient tracking."""
+        # Ensure input requires gradients
+        neural_pattern.requires_grad_(True)
         
-        Args:
-            neural_pattern: Neural pattern tensor
-            return_metrics: Whether to return metrics
-            
-        Returns:
-            Pattern section or tuple of (section, metrics)
-        """
-        # Ensure metric and connection require gradients
-        self.metric.requires_grad_(True)
-        self.metric.retain_grad()  # Retain gradients for metric
-        self.connection.requires_grad_(True)
-        self.connection.retain_grad()  # Retain gradients for connection
+        # Get metric and connection views with gradient tracking
+        metric_view = self.metric.clone()
+        connection_view = self.connection.clone()
         
         # Get metric_factors from pattern bundle's riemannian framework
         metric_factors = self.pattern_bundle.riemannian_framework.metric_factors
         metric_factors.requires_grad_(True)
         metric_factors.retain_grad()  # Retain gradients for metric factors
         
-        # Create views of metric and connection that maintain gradient connection
-        metric_view = self.metric.clone()
+        # Ensure views require gradients
         metric_view.requires_grad_(True)
-        metric_view.retain_grad()  # Retain gradients for metric view
-        connection_view = self.connection.clone()
         connection_view.requires_grad_(True)
-        connection_view.retain_grad()  # Retain gradients for connection view
         
-        # Register hooks to ensure gradients flow back to original parameters
+        # Add gradient hooks with improved gradient flow
         def metric_hook(grad):
             if grad is not None:
-                # Handle complex gradients
-                if grad.is_complex():
-                    grad_abs = grad.abs()
-                    # Scale gradient to prevent explosion
-                    scale = 1.0 / (grad_abs.norm() + 1e-8)
-                    grad = grad * scale
-                else:
-                    # Scale gradient to prevent explosion
-                    grad = grad / (grad.norm() + 1e-8)
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
                 
                 # Ensure gradients flow back to original metric
                 if self.metric.grad is None:
                     self.metric.grad = grad
                 else:
                     self.metric.grad = self.metric.grad + grad
-                
+                    
                 # Ensure gradients flow back to metric_factors
                 if metric_factors.grad is None:
                     metric_factors.grad = grad.mean(0).real
                 else:
                     metric_factors.grad = metric_factors.grad + grad.mean(0).real
+                    
+                # Ensure gradients flow to geometric flow components
+                if hasattr(self.pattern_bundle, 'geometric_flow'):
+                    for name, param in self.pattern_bundle.geometric_flow.named_parameters():
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        # Scale gradient contribution
+                        grad_contribution = grad.mean() * torch.ones_like(param)
+                        param.grad = param.grad + grad_contribution
                 return grad
             return grad
         metric_view.register_hook(metric_hook)
@@ -564,6 +608,21 @@ class NeuralQuantumBridge(nn.Module):
                     self.connection.grad = grad
                 else:
                     self.connection.grad = self.connection.grad + grad
+                    
+                # Ensure gradients flow back to metric_factors
+                if metric_factors.grad is None:
+                    metric_factors.grad = grad.mean(0).real
+                else:
+                    metric_factors.grad = metric_factors.grad + grad.mean(0).real
+                    
+                # Ensure gradients flow to geometric flow components
+                if hasattr(self.pattern_bundle, 'geometric_flow'):
+                    for name, param in self.pattern_bundle.geometric_flow.named_parameters():
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        # Scale gradient contribution
+                        grad_contribution = grad.mean() * torch.ones_like(param)
+                        param.grad = param.grad + grad_contribution
                 return grad
             return grad
         connection_view.register_hook(connection_hook)
@@ -577,7 +636,7 @@ class NeuralQuantumBridge(nn.Module):
         connection_form.requires_grad_(True)
         connection_form.retain_grad()  # Retain gradients for connection form
         
-        # Add gradient hook to connection form
+        # Add gradient hook to connection form with improved flow
         def connection_form_hook(grad):
             if grad is not None:
                 # Handle complex gradients
@@ -595,6 +654,15 @@ class NeuralQuantumBridge(nn.Module):
                     connection_view.grad = grad
                 else:
                     connection_view.grad = connection_view.grad + grad
+                    
+                # Ensure gradients flow to geometric flow components
+                if hasattr(self.pattern_bundle, 'geometric_flow'):
+                    for name, param in self.pattern_bundle.geometric_flow.named_parameters():
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        # Scale gradient contribution
+                        grad_contribution = grad.mean() * torch.ones_like(param)
+                        param.grad = param.grad + grad_contribution
                 return grad
             return grad
         connection_form.register_hook(connection_form_hook)
@@ -677,6 +745,13 @@ class NeuralQuantumBridge(nn.Module):
                     metric_factors.grad = grad.mean(0).real
                 else:
                     metric_factors.grad = metric_factors.grad + grad.mean(0).real
+                
+                # Ensure gradients flow back to geometric flow parameters
+                if hasattr(self.pattern_bundle, 'geometric_flow'):
+                    for param in self.pattern_bundle.geometric_flow.parameters():
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        param.grad = param.grad + grad.mean() * torch.ones_like(param)
                 return grad
             return grad
         section.coordinates.register_hook(section_hook)
