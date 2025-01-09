@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 import math
+import numpy as np
 
 from ..attention.geometric import (
     HyperbolicExponential,
@@ -64,6 +65,47 @@ from src.validation.quantum.state import (
 )
 from src.validation.patterns.formation import PatternFormationValidator
 from ..patterns.fiber_types import LocalChart as PatternSection
+
+
+class EnergyConservingLinear(nn.Module):
+    """Linear layer that conserves energy during forward pass."""
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        # Initialize weight and bias as complex parameters
+        self.weight = nn.Parameter(torch.complex(
+            torch.randn(out_features, in_features) / np.sqrt(in_features),
+            torch.randn(out_features, in_features) / np.sqrt(in_features)
+        ))
+        self.bias = nn.Parameter(torch.complex(
+            torch.zeros(out_features),
+            torch.zeros(out_features)
+        ))
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Forward pass with energy conservation."""
+        # Compute initial energy
+        initial_energy = torch.sum(input.abs() ** 2, dim=-1, keepdim=True)
+
+        # Apply linear transformation
+        output = F.linear(input, self.weight, self.bias)
+
+        # Compute output energy
+        output_energy = torch.sum(output.abs() ** 2, dim=-1, keepdim=True)
+
+        # Scale output to conserve energy
+        scale_factor = torch.sqrt(initial_energy / output_energy)
+        output = output * scale_factor
+
+        return output
+
+    def reset_parameters(self):
+        """Reset the parameters to their initial values."""
+        nn.init.kaiming_uniform_(self.weight.real, a=np.sqrt(5))
+        nn.init.kaiming_uniform_(self.weight.imag, a=np.sqrt(5))
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight.real)
+        bound = 1 / np.sqrt(fan_in)
+        nn.init.uniform_(self.bias.real, -bound, bound)
+        nn.init.uniform_(self.bias.imag, -bound, bound)
 
 
 class QuantumGeometricAttention(nn.Module):
@@ -121,8 +163,8 @@ class QuantumGeometricAttention(nn.Module):
             raise ValueError("dtype must be either torch.complex64 or torch.complex128")
 
         # Initialize manifold projections with complex dtype
-        self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=self.dtype, device=device)
-        self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, dtype=self.dtype, device=device)
+        self.manifold_proj = EnergyConservingLinear(hidden_dim, self.manifold_dim)
+        self.manifold_proj_inv = EnergyConservingLinear(self.manifold_dim, hidden_dim)
         
         # Initialize quantum bridge with complex dtype
         self.quantum_bridge = NeuralQuantumBridge(

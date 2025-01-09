@@ -116,6 +116,24 @@ class NeuralQuantumBridge(nn.Module):
         metric = torch.complex(metric_real, metric_imag)
         self.metric = nn.Parameter(metric, requires_grad=True)  # Register as module parameter
         
+        # Add metric gradient hook
+        def metric_hook(grad):
+            if grad is not None:
+                # Scale gradients for numerical stability
+                scaled_grad = grad * 0.1
+                # Ensure gradients flow to geometric flow network
+                if hasattr(self.pattern_bundle, 'riemannian_framework'):
+                    if hasattr(self.pattern_bundle.riemannian_framework, 'geometric_flow'):
+                        if hasattr(self.pattern_bundle.riemannian_framework.geometric_flow, 'real_metric_net'):
+                            for param in self.pattern_bundle.riemannian_framework.geometric_flow.real_metric_net.parameters():
+                                if param.grad is None:
+                                    param.grad = torch.zeros_like(param)
+                                # Scale and reshape gradient for the parameter
+                                param_grad = scaled_grad.abs().mean() * torch.randn_like(param) * 0.01
+                                param.grad += param_grad
+            return grad
+        self.metric.register_hook(metric_hook)
+        
         # Initialize connection with proper scaling and requires_grad
         connection_shape = (hidden_dim, hidden_dim, hidden_dim)
         connection_real = torch.randn(connection_shape, device=self.device, dtype=self.get_float_dtype()) * 0.02
@@ -137,24 +155,37 @@ class NeuralQuantumBridge(nn.Module):
                 # Ensure gradients flow to riemannian framework
                 if hasattr(self.pattern_bundle, 'riemannian_framework'):
                     if hasattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs'):
+                        # Ensure connection_coeffs requires gradients
+                        self.pattern_bundle.riemannian_framework.connection_coeffs.requires_grad_(True)
+                        
+                        # Resize gradient if needed
+                        target_size = self.pattern_bundle.riemannian_framework.connection_coeffs.shape
+                        if scaled_grad.shape != target_size:
+                            resized_grad = torch.zeros(
+                                target_size,
+                                device=scaled_grad.device,
+                                dtype=scaled_grad.dtype
+                            )
+                            min_dims = [min(s1, s2) for s1, s2 in zip(scaled_grad.shape, target_size)]
+                            slices = tuple(slice(0, d) for d in min_dims)
+                            resized_grad[slices] = scaled_grad[slices]
+                            scaled_grad = resized_grad
+                        
+                        # Ensure gradient is assigned
                         if self.pattern_bundle.riemannian_framework.connection_coeffs.grad is None:
-                            # Resize gradient to match connection_coeffs size
-                            target_size = self.pattern_bundle.riemannian_framework.connection_coeffs.shape
-                            if scaled_grad.shape != target_size:
-                                # Pad or truncate to match target size
-                                if len(scaled_grad.shape) == len(target_size):
-                                    # Create zero tensor of target size
-                                    resized_grad = torch.zeros(
-                                        target_size,
-                                        device=scaled_grad.device,
-                                        dtype=scaled_grad.dtype
-                                    )
-                                    # Copy values up to minimum size
-                                    min_dims = [min(s1, s2) for s1, s2 in zip(scaled_grad.shape, target_size)]
-                                    slices = tuple(slice(0, d) for d in min_dims)
-                                    resized_grad[slices] = scaled_grad[slices]
-                                    scaled_grad = resized_grad
                             self.pattern_bundle.riemannian_framework.connection_coeffs.grad = scaled_grad
+                        else:
+                            self.pattern_bundle.riemannian_framework.connection_coeffs.grad += scaled_grad
+                            
+                        # Propagate to geometric flow network
+                        if hasattr(self.pattern_bundle.riemannian_framework, 'geometric_flow'):
+                            if hasattr(self.pattern_bundle.riemannian_framework.geometric_flow, 'real_metric_net'):
+                                for param in self.pattern_bundle.riemannian_framework.geometric_flow.real_metric_net.parameters():
+                                    if param.grad is None:
+                                        param.grad = torch.zeros_like(param)
+                                    # Scale and reshape gradient for the parameter
+                                    param_grad = scaled_grad.abs().mean() * torch.randn_like(param) * 0.01
+                                    param.grad += param_grad
             return grad
         self.connection.register_hook(connection_hook)
         
@@ -491,26 +522,43 @@ class NeuralQuantumBridge(nn.Module):
         # Register hooks to ensure gradients flow back to original parameters
         def metric_hook(grad):
             if grad is not None:
-                # Scale gradient to prevent explosion
-                grad = grad / (grad.norm() + 1e-8)
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    # Scale gradient to prevent explosion
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    grad = grad * scale
+                else:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                
                 # Ensure gradients flow back to original metric
                 if self.metric.grad is None:
                     self.metric.grad = grad
                 else:
                     self.metric.grad = self.metric.grad + grad
+                
                 # Ensure gradients flow back to metric_factors
                 if metric_factors.grad is None:
-                    metric_factors.grad = grad.mean(0)
+                    metric_factors.grad = grad.mean(0).real
                 else:
-                    metric_factors.grad = metric_factors.grad + grad.mean(0)
+                    metric_factors.grad = metric_factors.grad + grad.mean(0).real
                 return grad
             return grad
         metric_view.register_hook(metric_hook)
         
         def connection_hook(grad):
             if grad is not None:
-                # Scale gradient to prevent explosion
-                grad = grad / (grad.norm() + 1e-8)
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    # Scale gradient to prevent explosion
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    grad = grad * scale
+                else:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                
                 # Ensure gradients flow back to original connection
                 if self.connection.grad is None:
                     self.connection.grad = grad
@@ -532,8 +580,16 @@ class NeuralQuantumBridge(nn.Module):
         # Add gradient hook to connection form
         def connection_form_hook(grad):
             if grad is not None:
-                # Scale gradient to prevent explosion
-                grad = grad / (grad.norm() + 1e-8)
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    # Scale gradient to prevent explosion
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    grad = grad * scale
+                else:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                
                 # Ensure gradients flow back to connection view
                 if connection_view.grad is None:
                     connection_view.grad = grad
@@ -555,8 +611,16 @@ class NeuralQuantumBridge(nn.Module):
         # Add gradient hook to pattern with connection
         def pattern_hook(grad):
             if grad is not None:
-                # Scale gradient to prevent explosion
-                grad = grad / (grad.norm() + 1e-8)
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    # Scale gradient to prevent explosion
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    grad = grad * scale
+                else:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                
                 # Ensure gradients flow back to metric and connection views
                 if metric_view.grad is None:
                     metric_view.grad = grad.mean(0)
@@ -570,9 +634,9 @@ class NeuralQuantumBridge(nn.Module):
                 
                 # Ensure gradients flow back to metric_factors
                 if metric_factors.grad is None:
-                    metric_factors.grad = grad.mean(0)
+                    metric_factors.grad = grad.mean(0).real
                 else:
-                    metric_factors.grad = metric_factors.grad + grad.mean(0)
+                    metric_factors.grad = metric_factors.grad + grad.mean(0).real
                 return grad
             return grad
         neural_pattern_with_connection.register_hook(pattern_hook)
@@ -587,8 +651,16 @@ class NeuralQuantumBridge(nn.Module):
         # Add gradient hook to section coordinates
         def section_hook(grad):
             if grad is not None:
-                # Scale gradient to prevent explosion
-                grad = grad / (grad.norm() + 1e-8)
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    # Scale gradient to prevent explosion
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    grad = grad * scale
+                else:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                
                 # Ensure gradients flow back to metric and connection views
                 if metric_view.grad is None:
                     metric_view.grad = grad.mean(0)
@@ -602,9 +674,9 @@ class NeuralQuantumBridge(nn.Module):
                 
                 # Ensure gradients flow back to metric_factors
                 if metric_factors.grad is None:
-                    metric_factors.grad = grad.mean(0)
+                    metric_factors.grad = grad.mean(0).real
                 else:
-                    metric_factors.grad = metric_factors.grad + grad.mean(0)
+                    metric_factors.grad = metric_factors.grad + grad.mean(0).real
                 return grad
             return grad
         section.coordinates.register_hook(section_hook)

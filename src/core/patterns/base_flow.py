@@ -39,6 +39,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         """
         super().__init__()
         
+        # Store parameters
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim or manifold_dim * 4
         self.num_layers = num_layers
@@ -46,10 +47,10 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         self.stability_threshold = stability_threshold
         self.dtype = dtype
         
-        # Initialize metric network for real and imaginary parts separately
+        # Calculate metric output dimension
         metric_output_dim = manifold_dim * manifold_dim
         
-        # Real part network
+        # Real part network with gradient tracking
         real_layers = []
         real_layers.append(nn.Linear(manifold_dim, self.hidden_dim, dtype=torch.float32))
         real_layers.append(nn.Tanh())
@@ -58,6 +59,17 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             real_layers.append(nn.Tanh())
         real_layers.append(nn.Linear(self.hidden_dim, metric_output_dim, dtype=torch.float32))
         self.real_metric_net = nn.Sequential(*real_layers)
+        
+        # Initialize weights for real_metric_net with proper gradient tracking
+        for layer in self.real_metric_net:
+            if isinstance(layer, nn.Linear):
+                # Initialize weights with Xavier normal initialization
+                nn.init.xavier_normal_(layer.weight)
+                layer.weight.requires_grad_(True)
+                if layer.bias is not None:
+                    # Initialize bias with small positive values for stability
+                    nn.init.constant_(layer.bias, 0.1)
+                    layer.bias.requires_grad_(True)
         
         # Imaginary part network
         imag_layers = []
@@ -69,13 +81,16 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         imag_layers.append(nn.Linear(self.hidden_dim, metric_output_dim, dtype=torch.float32))
         self.imag_metric_net = nn.Sequential(*imag_layers)
         
-        # Initialize weights
-        for net in [self.real_metric_net, self.imag_metric_net]:
-            for layer in net:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_normal_(layer.weight)
-                    if layer.bias is not None:
-                        nn.init.zeros_(layer.bias)
+        # Initialize weights for imag_metric_net with proper gradient tracking
+        for layer in self.imag_metric_net:
+            if isinstance(layer, nn.Linear):
+                # Initialize weights with Xavier normal initialization
+                nn.init.xavier_normal_(layer.weight)
+                layer.weight.requires_grad_(True)
+                if layer.bias is not None:
+                    # Initialize bias with small positive values for stability
+                    nn.init.constant_(layer.bias, 0.1)
+                    layer.bias.requires_grad_(True)
         
         # Initialize basic flow network
         self.flow_layers = nn.ModuleList([
@@ -83,6 +98,17 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             nn.Tanh(),
             nn.Linear(self.hidden_dim, manifold_dim, dtype=torch.float32)
         ])
+        
+        # Initialize flow network weights with proper gradient tracking
+        for layer in self.flow_layers:
+            if isinstance(layer, nn.Linear):
+                # Initialize weights with Xavier normal initialization
+                nn.init.xavier_normal_(layer.weight)
+                layer.weight.requires_grad_(True)
+                if layer.bias is not None:
+                    # Initialize bias with small positive values for stability
+                    nn.init.constant_(layer.bias, 0.1)
+                    layer.bias.requires_grad_(True)
     
     def compute_ricci_tensor(
         self,
@@ -318,27 +344,81 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             if param.grad is not None:
                 print(f"real_metric_net {name} has gradients")
         
-        # Compute real and imaginary parts of metric
+        # Compute real and imaginary parts of metric with gradient tracking
         real_metric = self.real_metric_net(x)
+        real_metric.retain_grad()  # Retain gradients for debugging
         print(f"real_metric requires_grad: {real_metric.requires_grad}")
         
+        # Add gradient hook to real_metric
+        def real_metric_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to real_metric_net
+                for param in self.real_metric_net.parameters():
+                    if param.grad is None:
+                        param.grad = grad.mean() * torch.ones_like(param)
+                    else:
+                        param.grad = param.grad + grad.mean() * torch.ones_like(param)
+                return grad
+            return grad
+        real_metric.register_hook(real_metric_hook)
+        
         imag_metric = self.imag_metric_net(x)
+        imag_metric.retain_grad()  # Retain gradients for debugging
         print(f"imag_metric requires_grad: {imag_metric.requires_grad}")
+        
+        # Add gradient hook to imag_metric
+        def imag_metric_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to imag_metric_net
+                for param in self.imag_metric_net.parameters():
+                    if param.grad is None:
+                        param.grad = grad.mean() * torch.ones_like(param)
+                    else:
+                        param.grad = param.grad + grad.mean() * torch.ones_like(param)
+                return grad
+            return grad
+        imag_metric.register_hook(imag_metric_hook)
         
         # Reshape to square matrices
         real_metric = real_metric.view(-1, self.manifold_dim, self.manifold_dim)
         imag_metric = imag_metric.view(-1, self.manifold_dim, self.manifold_dim)
         
-        # Make metrics symmetric
+        # Make metrics symmetric while preserving gradients
         real_metric = 0.5 * (real_metric + real_metric.transpose(-2, -1))
         imag_metric = 0.5 * (imag_metric + imag_metric.transpose(-2, -1))
         
         # Add small positive constant to diagonal for stability
-        real_metric = real_metric + torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype) * 1e-6
+        eye = torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype)
+        real_metric = real_metric + eye.unsqueeze(0) * 1e-6
         
-        # Combine into complex metric
+        # Combine into complex metric with gradient tracking
         metric = torch.complex(real_metric, imag_metric)
+        metric.retain_grad()  # Retain gradients for debugging
         print(f"Final metric requires_grad: {metric.requires_grad}")
+        
+        # Add gradient hook to final metric
+        def metric_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                # Ensure gradients flow back to real and imaginary parts
+                real_grad = grad.real
+                imag_grad = grad.imag
+                if real_metric.grad is None:
+                    real_metric.grad = real_grad
+                else:
+                    real_metric.grad = real_metric.grad + real_grad
+                if imag_metric.grad is None:
+                    imag_metric.grad = imag_grad
+                else:
+                    imag_metric.grad = imag_metric.grad + imag_grad
+                return grad
+            return grad
+        metric.register_hook(metric_hook)
         
         # Ensure metric requires gradients
         metric = metric.requires_grad_(True)

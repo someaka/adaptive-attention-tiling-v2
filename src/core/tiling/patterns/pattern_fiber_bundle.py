@@ -338,12 +338,39 @@ class PatternFiberBundle(BaseFiberBundle):
         self.fiber_type_manager = FiberTypeManager()
         self._fiber_type = "Vector"
         
-        # Initialize metric parameter with gradients
+        # Initialize metric parameter with proper complex gradients
         # Create a block diagonal metric tensor using manifold_dim
-        metric = torch.zeros(self.manifold_dim * 2, self.manifold_dim * 2, device=self.device, dtype=self.dtype)
-        metric[:self.base_dim * 2, :self.base_dim * 2] = torch.eye(self.base_dim * 2, device=self.device, dtype=self.dtype)
-        metric[self.base_dim * 2:, self.base_dim * 2:] = torch.eye(self.fiber_dim * 2, device=self.device, dtype=self.dtype)
-        self.register_parameter('metric', nn.Parameter(metric, requires_grad=True))
+        metric_real = torch.zeros(self.manifold_dim * 2, self.manifold_dim * 2, device=self.device)
+        metric_imag = torch.zeros_like(metric_real)
+        
+        # Initialize real part with identity matrices
+        metric_real[:self.base_dim * 2, :self.base_dim * 2] = torch.eye(self.base_dim * 2, device=self.device)
+        metric_real[self.base_dim * 2:, self.base_dim * 2:] = torch.eye(self.fiber_dim * 2, device=self.device)
+        
+        # Add small random perturbation to imaginary part for stability
+        metric_imag = torch.randn_like(metric_imag) * 0.01
+        
+        # Combine into complex metric
+        metric = torch.complex(metric_real, metric_imag)
+        
+        # Register as parameter with gradient tracking
+        self.register_parameter('metric', nn.Parameter(metric.to(self.dtype), requires_grad=True))
+        
+        # Add gradient hook to metric parameter
+        def metric_hook(grad):
+            if grad is not None:
+                # Handle complex gradients
+                if grad.is_complex():
+                    grad_abs = grad.abs()
+                    # Scale gradient to prevent explosion
+                    scale = 1.0 / (grad_abs.norm() + 1e-8)
+                    grad = grad * scale
+                else:
+                    # Scale gradient to prevent explosion
+                    grad = grad / (grad.norm() + 1e-8)
+                return grad
+            return grad
+        self.metric.register_hook(metric_hook)
         
         # Initialize height structure
         self.height_structure = HeightStructure(num_primes=8, dtype=self.dtype)
