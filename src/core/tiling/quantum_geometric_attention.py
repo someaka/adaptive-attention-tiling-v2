@@ -1362,109 +1362,100 @@ class QuantumGeometricAttention(nn.Module):
         dt: float = 0.1,
         return_metrics: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, FlowMetrics]]:
-        """Apply geometric attention flow to input tensor.
+        """Apply geometric flow to attention patterns."""
+        # Debug prints for gradient tracking
+        print("\nStarting geometric_attention_flow:")
+        print(f"Input requires_grad: {x.requires_grad}")
         
-        Args:
-            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
-            mask: Optional attention mask
-            num_steps: Number of flow steps
-            dt: Time step size
-            return_metrics: Whether to return flow metrics
-            
-        Returns:
-            Flowed tensor and optional metrics
-        """
-        # Initialize state
-        state = self.prepare_attention_state(x, mask)
-        batch_size, seq_len = x.shape[:2]
-
-        # Initialize metrics
-        curvature_list = []
-        parallel_transport_list = []
-        geodesic_distance_list = []
-        energy_list = []
-
-        # Initialize flow
+        # Ensure input requires gradients
+        x = x.requires_grad_(True)
+        
+        # Initialize flow metrics
+        metrics = []
+        
+        # Initialize flow state
+        current = x
+        
+        # Prepare attention state
+        state = self.prepare_attention_state(current, mask)
+        
+        # Apply mask if provided
+        if mask is not None:
+            state = self.apply_mask(state, mask)
+        
+        # Compute initial metric
+        metric = self.compute_metric_tensor(state)
+        print(f"Initial metric requires_grad: {metric.requires_grad}")
+        
+        # Ensure metric requires gradients
+        metric = metric.requires_grad_(True)
+        
+        # Apply flow steps
         for step in range(num_steps):
-            # Get current metric
-            metric = self.compute_metric_tensor(state)  # [batch_size, manifold_dim, manifold_dim]
-            # Remove extra dimensions from metric if present
-            while len(metric.shape) > 4:
-                metric = metric.squeeze(0)
-            print(f"\nMetric shape after squeezing: {metric.shape}")
+            print(f"\nStep {step}:")
+            # Compute Ricci tensor
+            ricci = self.pattern_bundle.compute_ricci_tensor(metric)
+            print(f"Ricci tensor requires_grad: {ricci.requires_grad}")
             
-            # Get current path from quantum state
-            path = state.state_manager.states.get("quantum", state.state_manager.initialize_state("quantum"))
-            # Reshape path to [batch_size, manifold_dim]
-            path = path.reshape(batch_size, -1)
+            # Take flow step
+            new_metric, step_metrics = self.pattern_bundle.flow_step(metric, ricci, dt)
+            print(f"New metric requires_grad: {new_metric.requires_grad}")
             
-            # Compute curvature
-            curvature = compute_ricci_tensor(metric)  # [batch_size, manifold_dim, manifold_dim]
-            # Print curvature shape for debugging
-            print(f"Curvature shape before reshape: {curvature.shape}")
-            # Reshape curvature to match expected shape
-            curvature = curvature.reshape(-1, self.manifold_dim, self.manifold_dim)  # Flatten all but last 2 dims
-            curvature = curvature[0]  # Take first element since we'll expand it anyway
-            print(f"Curvature shape after reshape: {curvature.shape}")
-            # Add batch and seq dimensions
-            curvature = curvature.unsqueeze(0).unsqueeze(0)
-            print(f"Curvature shape after unsqueeze: {curvature.shape}")
-            # Expand to match batch and seq dimensions
-            curvature = curvature.expand(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
-            print(f"Curvature shape after expand: {curvature.shape}")
-            curvature_list.append(curvature)
+            # Debug print pattern bundle parameters
+            for name, param in self.pattern_bundle.named_parameters():
+                if param.grad is None:
+                    print(f"Parameter {name} has no gradients")
             
-            # Compute parallel transport
-            transport = compute_parallel_transport(path, metric)  # [batch_size, manifold_dim, manifold_dim]
-            # Print transport shape for debugging
-            print(f"\nTransport shape before reshape: {transport.shape}")
-            # Reshape transport to match expected shape
-            transport = transport.reshape(-1, self.manifold_dim, self.manifold_dim)  # Flatten all but last 2 dims
-            transport = transport[0]  # Take first element since we'll expand it anyway
-            print(f"Transport shape after reshape: {transport.shape}")
-            # Add batch and seq dimensions
-            transport = transport.unsqueeze(0).unsqueeze(0)
-            print(f"Transport shape after unsqueeze: {transport.shape}")
-            # Expand to match batch and seq dimensions
-            transport = transport.expand(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
-            print(f"Transport shape after expand: {transport.shape}")
-            parallel_transport_list.append(transport)
+            # Update metric
+            metric = new_metric
             
-            # Compute geodesic distance
-            # Add sequence dimension to path for geodesic distance computation
-            path_with_seq = path.unsqueeze(1)  # [batch_size, 1, manifold_dim]
-            # Expand path to match sequence length
-            path_with_seq = path_with_seq.expand(-1, seq_len, -1)  # [batch_size, seq_len, manifold_dim]
-            # Ensure metric has correct shape for geodesic distance computation
-            metric_for_geodesic = metric
-            while len(metric_for_geodesic.shape) > 4:
-                metric_for_geodesic = metric_for_geodesic.squeeze(0)
-            if len(metric_for_geodesic.shape) == 3:
-                metric_for_geodesic = metric_for_geodesic.unsqueeze(1)
-            print(f"Metric shape for geodesic: {metric_for_geodesic.shape}")
-            # Expand metric for sequence dimension
-            metric_with_seq = metric_for_geodesic.expand(-1, seq_len, -1, -1)  # [batch_size, seq_len, manifold_dim, manifold_dim]
-            print(f"Metric shape after expand: {metric_with_seq.shape}")
-            distance = compute_geodesic_distance(path_with_seq, metric_with_seq)  # [batch_size, seq_len]
-            geodesic_distance_list.append(distance)
-            
-            # Compute flow energy
-            energy = compute_flow_energy(path_with_seq, metric_with_seq)  # [batch_size, seq_len]
-            energy_list.append(energy)
-            
-            # Update state with flow step
-            state = self.flow_step(state, dt)
-
-        # Return result based on metrics flag
-        if return_metrics:
-            metrics = FlowMetrics(
-                curvature=torch.stack(curvature_list).mean(dim=0),  # [batch_size, seq_len, manifold_dim, manifold_dim]
-                parallel_transport=torch.stack(parallel_transport_list).mean(dim=0),  # [batch_size, seq_len, manifold_dim, manifold_dim]
-                geodesic_distance=torch.stack(geodesic_distance_list).mean(dim=0),  # [batch_size, seq_len]
-                energy=torch.stack(energy_list).mean(dim=0)  # [batch_size, seq_len]
+            # Create new state with updated geometric state
+            state = AttentionState(
+                state_manager=state.state_manager,
+                geometric_state=metric.reshape(metric.shape[0], -1),  # Flatten metric for geometric state
+                manifold_state=state.manifold_state,  # Keep existing manifold state
+                attention_scores=state.attention_scores,  # Keep existing attention scores
+                attention_patterns=state.attention_patterns,  # Keep existing attention patterns
+                entanglement_history=state.entanglement_history,  # Keep existing entanglement history
+                metrics=state.metrics  # Keep existing metrics
             )
-            return x, metrics  # Return original input for now until flow is implemented
-        return x  # Return original input for now until flow is implemented
+            
+            # Process attention with updated state
+            current = self._process_attention(current)
+            print(f"Current output requires_grad: {current.requires_grad}")
+            
+            # Store metrics
+            metrics.append(step_metrics)
+        
+        # Return final state and metrics if requested
+        if return_metrics:
+            # Compute average curvature from metrics
+            curvature = torch.zeros_like(metric)
+            parallel_transport = torch.zeros_like(metric)
+            geodesic_distance = torch.zeros(metric.shape[0], metric.shape[1])
+            energy = torch.zeros(metric.shape[0], metric.shape[1])
+            
+            for m in metrics:
+                curvature = curvature + m.get('curvature', torch.zeros_like(curvature))
+                parallel_transport = parallel_transport + m.get('parallel_transport', torch.zeros_like(parallel_transport))
+                geodesic_distance = geodesic_distance + m.get('geodesic_distance', torch.zeros_like(geodesic_distance))
+                energy = energy + m.get('energy', torch.zeros_like(energy))
+            
+            num_metrics = len(metrics)
+            if num_metrics > 0:
+                curvature = curvature / num_metrics
+                parallel_transport = parallel_transport / num_metrics
+                geodesic_distance = geodesic_distance / num_metrics
+                energy = energy / num_metrics
+            
+            return current, FlowMetrics(
+                curvature=curvature,
+                parallel_transport=parallel_transport,
+                geodesic_distance=geodesic_distance,
+                energy=energy
+            )
+        
+        return current
 
     def flow_step(self, state: AttentionState, dt: float) -> AttentionState:
         """Perform a single flow step.

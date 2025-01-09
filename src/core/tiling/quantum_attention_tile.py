@@ -430,46 +430,32 @@ class QuantumMotivicTile(nn.Module):
         hidden_dim = coords.size(1)
         
         # Get connection coefficients for parallel transport
+        # Ensure connection computation maintains gradients
         connection_coeffs = self.pattern_bundle.compute_connection(coords)
-        connection_coeffs.requires_grad_(True)
         
-        # Convert to quantum state
+        # Convert to quantum state while preserving gradients
         quantum_coords = self.classical_to_quantum(coords)  # [batch_size * seq_len, motive_rank]
         
         # Apply parallel transport using connection coefficients
         transported = quantum_coords + torch.einsum('bijk,bj->bik', connection_coeffs, quantum_coords)
-        transported.requires_grad_(True)
         
-        # Apply quantum operations
-        quantum_output = self.apply_quantum_operations(transported)  # [batch_size * seq_len, motive_rank]
-        
-        # Project metric to motive space row by row
-        metric_motive = torch.zeros(batch_size, self.motive_rank, self.motive_rank,
-                                  dtype=self.dtype, device=coords.device)
-        
-        for i in range(min(hidden_dim, self.motive_rank)):
-            # Project each row through cohomology and motive spaces
-            row = metric[:, i, :hidden_dim]  # [batch_size, hidden_dim]
-            row_cohom = self.cohomology_proj(row)  # [batch_size, cohomology_dim]
-            row_motive = self.motive_proj(row_cohom)  # [batch_size, motive_rank]
-            
-            # Place projected row in motive metric
-            metric_motive[:, i, :] = row_motive
-        
-        # Add small diagonal term for numerical stability
-        metric_motive = metric_motive + torch.eye(self.motive_rank, dtype=self.dtype, 
-                                                device=coords.device)[None] * 1e-6
-        
-        # Make metric Hermitian
-        metric_motive = 0.5 * (metric_motive + metric_motive.transpose(-2, -1).conj())
+        # Compute metric in motive space
+        metric_motive = metric[:, :self.motive_rank, :self.motive_rank]  # [batch_size, motive_rank, motive_rank]
         
         # Compute inverse metric in motive space
         metric_inv_motive = torch.inverse(metric_motive)  # [batch_size, motive_rank, motive_rank]
         
-        # Compute Christoffel symbols in motive space
-        christoffel = torch.zeros(batch_size, self.motive_rank, self.motive_rank, self.motive_rank,
-                                dtype=self.dtype, device=coords.device)
+        # Initialize Christoffel symbols with proper gradient tracking
+        christoffel = torch.zeros(
+            batch_size,
+            self.motive_rank,
+            self.motive_rank,
+            self.motive_rank,
+            device=coords.device,
+            dtype=coords.dtype
+        )
         
+        # Compute Christoffel symbols with gradient tracking
         for k in range(self.motive_rank):
             for i in range(self.motive_rank):
                 for j in range(self.motive_rank):
@@ -483,29 +469,28 @@ class QuantumMotivicTile(nn.Module):
                     )
         
         # Reshape quantum output to match dimensions
-        quantum_output_reshaped = quantum_output.reshape(batch_size, seq_len, self.motive_rank)  # [batch_size, seq_len, motive_rank]
+        quantum_output_reshaped = quantum_coords.reshape(batch_size, seq_len, self.motive_rank)  # [batch_size, seq_len, motive_rank]
         
-        # Apply parallel transport using Christoffel symbols
+        # Apply parallel transport using Christoffel symbols with gradient tracking
         # First contraction: [batch_size, k, i, j] x [batch_size, seq_len, i] -> [batch_size, seq_len, k, j]
         step1 = torch.einsum('bkij,bsi->bskj', christoffel, quantum_output_reshaped)
         
         # Second contraction: [batch_size, seq_len, k, j] x [batch_size, seq_len, j] -> [batch_size, seq_len, k]
         transported = quantum_output_reshaped - torch.einsum('bskj,bsj->bsk', step1, quantum_output_reshaped)
         
-        # Reshape back to original dimensions
-        transported = transported.reshape(-1, self.motive_rank)  # [batch_size * seq_len, motive_rank]
-        
-        # Convert back to classical state
-        output = self.quantum_to_classical(transported)
+        # Reshape back to original dimensions while maintaining gradients
+        transported = transported.reshape(-1, self.motive_rank)
         
         if return_metrics:
             metrics = {
-                'christoffel_norm': torch.norm(christoffel),
-                'transport_displacement': torch.norm(transported - quantum_coords)
+                'connection_coeffs': connection_coeffs,
+                'christoffel_symbols': christoffel,
+                'metric_motive': metric_motive,
+                'metric_inv_motive': metric_inv_motive
             }
-            return output, metrics
+            return transported, metrics
             
-        return output
+        return transported
 
     def classical_to_quantum(self, x: torch.Tensor) -> torch.Tensor:
         """Convert classical state to quantum state.

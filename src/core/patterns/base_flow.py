@@ -126,7 +126,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             Tuple of (new_metric, flow_metrics)
         """
         # Compute eigendecomposition of metric
-        eigvals, eigvecs = torch.linalg.eig(metric)
+        eigvals, eigvecs = torch.linalg.eigh(metric)
         
         # Ensure metric stays positive definite
         min_eigval = torch.min(torch.abs(eigvals))
@@ -159,7 +159,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         flow = flow.reshape(*metric.shape)
         
         # Compute eigendecomposition of flow
-        flow_eigvals, flow_eigvecs = torch.linalg.eig(flow)
+        flow_eigvals, flow_eigvecs = torch.linalg.eigh(flow)
         
         # Limit the magnitude of negative eigenvalues
         max_neg_eigval = -self.stability_threshold / adaptive_timestep
@@ -172,7 +172,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         new_metric = metric + flow * adaptive_timestep
         
         # Project back to positive definite cone if needed
-        eigvals, eigvecs = torch.linalg.eig(new_metric)
+        eigvals, eigvecs = torch.linalg.eigh(new_metric)
         min_eigval = torch.min(torch.abs(eigvals))
         if min_eigval <= self.stability_threshold:
             eigvals = torch.clamp(torch.abs(eigvals), min=self.stability_threshold) * torch.exp(1j * torch.angle(eigvals))
@@ -298,63 +298,49 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         return current, metrics
     
     def compute_metric(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor for given points.
+        """Compute metric tensor from input.
         
         Args:
-            x: Input points tensor
+            x: Input tensor
             
         Returns:
             Metric tensor
         """
-        # Ensure input has correct shape
-        if x.dim() == 3:  # [batch, seq_len, dim]
-            batch_size, seq_len, dim = x.shape
-            x = x.reshape(-1, dim)  # Flatten batch and seq_len dimensions
-        elif x.dim() == 2:  # [batch, dim]
-            batch_size = x.shape[0]
-            seq_len = 1
-        else:
-            raise ValueError(f"Unexpected input shape: {x.shape}")
-
-        # Ensure input dimension matches manifold dimension
-        if x.shape[-1] != self.manifold_dim:
-            # Project input to manifold dimension if needed
-            proj = nn.Linear(x.shape[-1], self.manifold_dim, device=x.device, dtype=x.dtype)
-            x = proj(x)
+        print("\nIn compute_metric:")
+        print(f"Input requires_grad: {x.requires_grad}")
         
-        # If input is complex, compute metric on real and imaginary parts separately
-        if torch.is_complex(x):
-            x_real = x.real
-            x_imag = x.imag
-            
-            # Compute metric components for real and imaginary parts
-            metric_real = self.real_metric_net(x_real)
-            metric_imag = self.imag_metric_net(x_imag)
-            
-            # Combine into complex metric
-            metric = torch.complex(metric_real, metric_imag)
-            
-            # Reshape to proper dimensions
-            metric = metric.view(-1, self.manifold_dim, self.manifold_dim)
-            
-            # Make symmetric and positive definite
-            metric = 0.5 * (metric + metric.transpose(-2, -1).conj())
-            metric = metric + torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype).unsqueeze(0) * 1e-6
-            
-            # Restore original batch dimensions if needed
-            if seq_len > 1:
-                metric = metric.view(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
-            
-            return metric
-            
-        # For real inputs, use original behavior
-        metric_components = self.real_metric_net(x)
-        metric = metric_components.view(-1, self.manifold_dim, self.manifold_dim)
-        metric = 0.5 * (metric + metric.transpose(-2, -1))
-        metric = metric + torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype).unsqueeze(0) * 1e-6
+        # Ensure input requires gradients
+        x = x.requires_grad_(True)
         
-        # Restore original batch dimensions if needed
-        if seq_len > 1:
-            metric = metric.view(batch_size, seq_len, self.manifold_dim, self.manifold_dim)
+        # Debug print metric network parameters
+        for name, param in self.real_metric_net.named_parameters():
+            print(f"real_metric_net {name} requires_grad: {param.requires_grad}")
+            if param.grad is not None:
+                print(f"real_metric_net {name} has gradients")
+        
+        # Compute real and imaginary parts of metric
+        real_metric = self.real_metric_net(x)
+        print(f"real_metric requires_grad: {real_metric.requires_grad}")
+        
+        imag_metric = self.imag_metric_net(x)
+        print(f"imag_metric requires_grad: {imag_metric.requires_grad}")
+        
+        # Reshape to square matrices
+        real_metric = real_metric.view(-1, self.manifold_dim, self.manifold_dim)
+        imag_metric = imag_metric.view(-1, self.manifold_dim, self.manifold_dim)
+        
+        # Make metrics symmetric
+        real_metric = 0.5 * (real_metric + real_metric.transpose(-2, -1))
+        imag_metric = 0.5 * (imag_metric + imag_metric.transpose(-2, -1))
+        
+        # Add small positive constant to diagonal for stability
+        real_metric = real_metric + torch.eye(self.manifold_dim, device=x.device, dtype=x.dtype) * 1e-6
+        
+        # Combine into complex metric
+        metric = torch.complex(real_metric, imag_metric)
+        print(f"Final metric requires_grad: {metric.requires_grad}")
+        
+        # Ensure metric requires gradients
+        metric = metric.requires_grad_(True)
         
         return metric 

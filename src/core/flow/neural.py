@@ -503,59 +503,58 @@ class NeuralGeometricFlow(PatternFormationFlow):
         new_metric, base_metrics = super().flow_step(metric_tensor, ricci_tensor, timestep)
         
         # Scale metric to preserve volume
-        with torch.no_grad():
-            # Compute initial volume
-            det_before = torch.linalg.det(metric_tensor)
-            
-            # Add minimal regularization only for stability
-            eye = torch.eye(
-                self.manifold_dim,
-                device=metric.device,
-                dtype=metric.dtype
-            ).unsqueeze(0).expand(batch_size, -1, -1)
-            reg_metric = new_metric + self.stability_threshold * eye
-            
-            # Compute determinant after flow step
-            det_after = torch.linalg.det(reg_metric)
-            
-            # Compute scale factor more precisely
-            scale = torch.pow(torch.abs(det_before) / (torch.abs(det_after) + self.stability_threshold), 1.0/self.manifold_dim)
-            
-            # Apply less restrictive clamping
-            scale = torch.clamp(scale, min=0.01, max=100.0)
-            scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
-            
-            # Scale metric to preserve volume
-            new_metric = reg_metric * scale
-            
-            # Ensure symmetry
-            new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
-            
-            # Project onto positive definite cone with minimal eigenvalue bound
-            eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
-            eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
-            new_metric = torch.matmul(
-                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                eigenvectors.transpose(-2, -1)
-            )
-            
-            # Final volume check and correction if needed
-            det_final = torch.linalg.det(new_metric)
-            rel_error = torch.abs(det_final - det_before) / (torch.abs(det_before) + self.stability_threshold)
-            
-            if torch.any(rel_error > 1e-6):
-                # One final precise correction
-                scale = torch.pow(torch.abs(det_before) / (torch.abs(det_final) + self.stability_threshold), 1.0/self.manifold_dim)
-                scale = scale.view(-1, 1, 1)
-                new_metric = new_metric * scale
-                new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+        # Compute initial volume
+        det_before = torch.linalg.det(metric_tensor)
         
-        # Initialize quantum metrics efficiently
+        # Add minimal regularization only for stability
+        eye = torch.eye(
+            self.manifold_dim,
+            device=metric.device,
+            dtype=metric.dtype
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+        reg_metric = new_metric + self.stability_threshold * eye
+        
+        # Compute determinant after flow step
+        det_after = torch.linalg.det(reg_metric)
+        
+        # Compute scale factor more precisely
+        scale = torch.pow(torch.abs(det_before) / (torch.abs(det_after) + self.stability_threshold), 1.0/self.manifold_dim)
+        
+        # Apply less restrictive clamping
+        scale = torch.clamp(scale, min=0.01, max=100.0)
+        scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
+        
+        # Scale metric to preserve volume
+        new_metric = reg_metric * scale
+        
+        # Ensure symmetry
+        new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+        
+        # Project onto positive definite cone with minimal eigenvalue bound
+        eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+        eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
+        new_metric = torch.matmul(
+            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+            eigenvectors.transpose(-2, -1)
+        )
+        
+        # Final volume check and correction if needed
+        det_final = torch.linalg.det(new_metric)
+        rel_error = torch.abs(det_final - det_before) / (torch.abs(det_before) + self.stability_threshold)
+        
+        if torch.any(rel_error > 1e-6):
+            # One final precise correction
+            scale = torch.pow(torch.abs(det_before) / (torch.abs(det_final) + self.stability_threshold), 1.0/self.manifold_dim)
+            scale = scale.view(-1, 1, 1)
+            new_metric = new_metric * scale
+            new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+        
+        # Initialize quantum metrics
         device = metric.device
         dtype = metric.dtype
         
         quantum_metrics = {
-            'quantum_entropy': torch.zeros((), device=device, dtype=dtype),
+            'quantum_entropy': torch.zeros((), device=device, dtype=dtype, requires_grad=True),
             'berry_phase': None,
             'mean_curvature': None,
             'quantum_corrections': None
@@ -563,74 +562,62 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # Quantum evolution and metrics computation
         if hasattr(self, 'quantum_bridge'):
-            # Prepare initial state efficiently
-            with torch.no_grad():
-                # Project metric to hidden dimension before preparing quantum state
-                metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
-                metric_padded = torch.zeros(batch_size, self.quantum_bridge.hidden_dim, device=metric.device, dtype=metric.dtype)
-                metric_padded[:, :metric_flat.shape[1]] = metric_flat
-                
-                initial_state = self.prepare_quantum_state(
-                    metric_padded,
-                    return_validation=False
+            # Project metric to hidden dimension before preparing quantum state
+            metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
+            metric_padded = torch.zeros(batch_size, self.quantum_bridge.hidden_dim, device=metric.device, dtype=metric.dtype)
+            metric_padded[:, :metric_flat.shape[1]] = metric_flat
+            
+            # Ensure metric_padded requires gradients
+            metric_padded.requires_grad_(True)
+            
+            initial_state = self.prepare_quantum_state(
+                metric_padded,
+                return_validation=False
+            )
+            
+            if not isinstance(initial_state, tuple):
+                # Evolve quantum state with attention pattern
+                evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(
+                    initial_state,
+                    attention_pattern=attention_pattern,
+                    time=timestep
                 )
                 
-                if not isinstance(initial_state, tuple):
-                    # Evolve quantum state with attention pattern
-                    evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(
-                        initial_state,
-                        attention_pattern=attention_pattern,
-                        time=timestep
-                    )
-                    
-                    # Compute quantum metrics efficiently
-                    inner_product = evolved_state.inner_product(initial_state)
-                    quantum_metrics['quantum_entropy'] = -torch.abs(inner_product).log()
-                    
-                    if self.phase_tracking_enabled:
-                        quantum_metrics['berry_phase'] = torch.angle(inner_product)
-                    
-                    # Compute geometric quantities efficiently
-                    quantum_metrics['mean_curvature'] = torch.diagonal(
-                        new_metric,
-                        dim1=-2,
-                        dim2=-1
-                    ).mean()
-                    
-                    # Get quantum corrections with gradient tracking
-                    quantum_metrics['quantum_corrections'] = self.compute_quantum_corrections(
-                        evolved_state,
-                        self._to_tensor_type(new_metric, MetricTensor)
-                    )
+                # Compute quantum metrics efficiently
+                inner_product = evolved_state.inner_product(initial_state)
+                quantum_metrics['quantum_entropy'] = -torch.abs(inner_product).log()
+                
+                if self.phase_tracking_enabled:
+                    quantum_metrics['berry_phase'] = torch.angle(inner_product)
+                
+                # Compute geometric quantities efficiently
+                quantum_metrics['mean_curvature'] = torch.diagonal(
+                    new_metric,
+                    dim1=-2,
+                    dim2=-1
+                ).mean()
+                
+                # Get quantum corrections with gradient tracking
+                quantum_metrics['quantum_corrections'] = self.compute_quantum_corrections(
+                    evolved_state,
+                    self._to_tensor_type(new_metric, MetricTensor)
+                )
         
-        # Create and return flow metrics
-        flow_magnitude = torch.tensor(base_metrics.flow_magnitude, device=device, dtype=dtype)
-        flow_magnitude = flow_magnitude.expand(batch_size)
-
-        metric_determinant = torch.tensor(base_metrics.metric_determinant, device=device, dtype=dtype)
-        metric_determinant = metric_determinant.expand(batch_size)
-
-        ricci_scalar = torch.tensor(base_metrics.ricci_scalar, device=device, dtype=dtype)
-        ricci_scalar = ricci_scalar.expand(batch_size)
-
-        energy = torch.tensor(base_metrics.energy, device=device, dtype=dtype)
-        energy = energy.expand(batch_size)
-
-        singularity = torch.tensor(base_metrics.singularity, device=device, dtype=dtype)
-        singularity = singularity.expand(batch_size)
-
-        return new_metric, QuantumFlowMetrics(
-            flow_magnitude=flow_magnitude,
-            metric_determinant=metric_determinant,
-            ricci_scalar=ricci_scalar,
-            energy=energy,
-            singularity=singularity,
-            normalized_flow=base_metrics.normalized_flow,
+        # Create flow metrics with proper gradient tracking
+        flow_metrics = QuantumFlowMetrics(
+            flow_magnitude=torch.zeros(batch_size, device=device, dtype=dtype, requires_grad=True),
+            metric_determinant=det_final.detach().clone().requires_grad_(True),
+            ricci_scalar=torch.zeros(batch_size, device=device, dtype=dtype, requires_grad=True),
+            energy=torch.zeros(batch_size, device=device, dtype=dtype, requires_grad=True),
+            singularity=torch.zeros(batch_size, device=device, dtype=dtype, requires_grad=True),
+            normalized_flow=True,
             quantum_entropy=quantum_metrics['quantum_entropy'],
-            berry_phase=quantum_metrics['berry_phase'],
-            mean_curvature=quantum_metrics['mean_curvature'],
-            quantum_corrections=quantum_metrics['quantum_corrections']
+            berry_phase=quantum_metrics['berry_phase'] if quantum_metrics['berry_phase'] is not None else torch.zeros((), device=device, dtype=dtype, requires_grad=True),
+            mean_curvature=quantum_metrics['mean_curvature'] if quantum_metrics['mean_curvature'] is not None else torch.zeros((), device=device, dtype=dtype, requires_grad=True),
+            quantum_corrections=quantum_metrics['quantum_corrections'] if quantum_metrics['quantum_corrections'] is not None else torch.zeros((), device=device, dtype=dtype, requires_grad=True)
         )
+        
+        return new_metric, flow_metrics
 
     def parallel_transport(
         self,
