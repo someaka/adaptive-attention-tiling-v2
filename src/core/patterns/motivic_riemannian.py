@@ -157,7 +157,7 @@ class MotivicRiemannianStructure(
             self.device = device or get_device()
         except:
             self.device = device or torch.device('cpu')
-        self.dtype = dtype or torch.float32
+        self.dtype = dtype or torch.complex64
         
         # Initialize fiber and connection maps for RiemannianFiberBundle
         self.fiber_map = nn.Linear(manifold_dim, hidden_dim, device=self.device, dtype=self.dtype)
@@ -184,12 +184,12 @@ class MotivicRiemannianStructure(
         
         # Initialize metric as identity plus low-rank perturbation
         self.metric_factors = nn.Parameter(
-            torch.randn(manifold_dim, manifold_dim, device=self.device, dtype=self.dtype) * 0.01
+            torch.randn(manifold_dim, manifold_dim, device=self.device, dtype=torch.complex64) * 0.01
         )
         
         # Initialize connection coefficients
         self.connection_coeffs = nn.Parameter(
-            torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=self.dtype)
+            torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=torch.complex64)
         )
         
         # Cache for intermediate computations

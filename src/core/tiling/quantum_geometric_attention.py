@@ -80,7 +80,7 @@ class QuantumGeometricAttention(nn.Module):
         num_layers: int = 3,
         tile_size: int = 8,
         motive_rank: int = 4,
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.complex64,
         device: Optional[torch.device] = None,
         is_causal: bool = False,
     ):
@@ -116,9 +116,13 @@ class QuantumGeometricAttention(nn.Module):
         self.device = device if device is not None else torch.device('cpu')
         self.is_causal = is_causal
         
-        # Initialize manifold projections with float dtype
-        self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=dtype, device=device)
-        self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, dtype=dtype, device=device)
+        # Validate dtype
+        if dtype not in [torch.complex64, torch.complex128]:
+            raise ValueError("dtype must be either torch.complex64 or torch.complex128")
+
+        # Initialize manifold projections with complex dtype
+        self.manifold_proj = nn.Linear(hidden_dim, self.manifold_dim, dtype=self.dtype, device=device)
+        self.manifold_proj_inv = nn.Linear(self.manifold_dim, hidden_dim, dtype=self.dtype, device=device)
         
         # Initialize quantum bridge with complex dtype
         self.quantum_bridge = NeuralQuantumBridge(
@@ -127,7 +131,7 @@ class QuantumGeometricAttention(nn.Module):
             dropout=dropout,
             manifold_type=manifold_type,
             curvature=curvature,
-            dtype=torch.complex64,  # Use complex dtype for quantum components
+            dtype=self.dtype,
             device=device
         )
         
@@ -141,46 +145,45 @@ class QuantumGeometricAttention(nn.Module):
                 resolution=1.0,
                 cohomology_dim=self.manifold_dim,
                 motive_rank=motive_rank,
-                dtype=torch.complex64  # Use complex dtype for quantum components
+                dtype=self.dtype
             )
             for _ in range(num_heads)
         ])
         
         # Initialize attention layers with complex dtype
         self.attention_layers = nn.ModuleList([
-            nn.Linear(self.manifold_dim, self.manifold_dim, dtype=torch.complex64, device=device)
+            nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=device)
             for _ in range(num_layers)
         ])
         
-        # Initialize metric tensors with proper dimensions and dtype
+        # Initialize metric tensors with complex dtype
         self.base_metric = nn.Parameter(
-            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            torch.eye(self.manifold_dim, dtype=self.dtype, device=device),
             requires_grad=True
         )
         self.metric = nn.Parameter(
-            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            torch.eye(self.manifold_dim, dtype=self.dtype, device=device),
             requires_grad=True
         )
         self.pattern_metric = nn.Parameter(
-            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            torch.eye(self.manifold_dim, dtype=self.dtype, device=device),
             requires_grad=True
         )
-        # Initialize combined metric
         self.combined_metric = nn.Parameter(
-            torch.eye(self.manifold_dim, dtype=dtype, device=device),
+            torch.eye(self.manifold_dim, dtype=self.dtype, device=device),
             requires_grad=True
         )
         
-        # Initialize flow with float dtype
+        # Initialize flow with complex dtype
         self.flow = GeometricFlow(
             hidden_dim=hidden_dim,
             manifold_dim=self.manifold_dim,
             motive_rank=motive_rank,
-            num_charts=4,  # Default value
-            integration_steps=10,  # Default value
-            dt=0.1,  # Default value
-            stability_threshold=1e-6,  # Default value
-            dtype=dtype
+            num_charts=4,
+            integration_steps=10,
+            dt=0.1,
+            stability_threshold=1e-6,
+            dtype=self.dtype
         )
         
         # Initialize dropout
@@ -201,79 +204,55 @@ class QuantumGeometricAttention(nn.Module):
                 weight_shape = layer.weight.shape
                 std = 1.0 / math.sqrt(weight_shape[1])
                 
-                # Initialize real part with Glorot/Xavier initialization
-                real_weight = torch.randn(weight_shape, device=self.device) * std
-                imag_weight = torch.randn(weight_shape, device=self.device) * std
+                # Initialize real and imaginary parts with proper float dtype
+                float_dtype = torch.float32 if self.dtype == torch.complex64 else torch.float64
+                real_weight = torch.randn(weight_shape, device=self.device, dtype=float_dtype) * std
+                imag_weight = torch.randn(weight_shape, device=self.device, dtype=float_dtype) * std
                 
-                # Create complex weight tensor
-                complex_weight = torch.complex(real_weight, imag_weight)
-                
-                # Ensure the weight is complex and has the correct dtype
-                if not torch.is_complex(complex_weight):
-                    complex_weight = complex_weight.to(dtype=torch.complex64)
+                # Create complex weight tensor with proper complex dtype
+                complex_weight = torch.complex(real_weight, imag_weight).to(self.dtype)
                 layer.weight = nn.Parameter(complex_weight)
                 
                 if layer.bias is not None:
-                    real_bias = torch.randn(weight_shape[0], device=self.device) * std
-                    imag_bias = torch.randn(weight_shape[0], device=self.device) * std
+                    real_bias = torch.randn(weight_shape[0], device=self.device, dtype=float_dtype) * std
+                    imag_bias = torch.randn(weight_shape[0], device=self.device, dtype=float_dtype) * std
                     
-                    # Create complex bias tensor
-                    complex_bias = torch.complex(real_bias, imag_bias)
-                    
-                    # Ensure the bias is complex and has the correct dtype
-                    if not torch.is_complex(complex_bias):
-                        complex_bias = complex_bias.to(dtype=torch.complex64)
+                    # Create complex bias tensor with proper complex dtype
+                    complex_bias = torch.complex(real_bias, imag_bias).to(self.dtype)
                     layer.bias = nn.Parameter(complex_bias)
 
         # Initialize all attention layers
         for layer in self.attention_layers:
             init_complex_linear(layer)
+        
+        # Initialize manifold projections
+        init_complex_linear(self.manifold_proj)
+        init_complex_linear(self.manifold_proj_inv)
 
     def _init_weights(self):
         """Initialize weights with proper scaling."""
         # Initialize manifold projections with real weights first
         with torch.no_grad():
-            # Create real orthogonal matrices
-            real_weight = torch.empty_like(self.manifold_proj.weight.real)
+            # Get corresponding float dtype
+            float_dtype = torch.float32 if self.dtype == torch.complex64 else torch.float64
+            
+            # Create real orthogonal matrices with proper float dtype
+            real_weight = torch.empty_like(self.manifold_proj.weight.real, dtype=float_dtype)
             nn.init.orthogonal_(real_weight)
-            imag_weight = torch.empty_like(self.manifold_proj.weight.imag)
+            imag_weight = torch.empty_like(self.manifold_proj.weight.imag, dtype=float_dtype)
             nn.init.orthogonal_(imag_weight)
             
-            # Combine into complex weight
-            self.manifold_proj.weight.copy_(torch.complex(real_weight, imag_weight))
+            # Combine into complex weight with proper dtype
+            self.manifold_proj.weight.copy_(torch.complex(real_weight, imag_weight).to(self.dtype))
             self.manifold_proj.bias.zero_()
             
             # Same for inverse projection
-            real_weight = torch.empty_like(self.manifold_proj_inv.weight.real)
+            real_weight = torch.empty_like(self.manifold_proj_inv.weight.real, dtype=float_dtype)
             nn.init.orthogonal_(real_weight)
-            imag_weight = torch.empty_like(self.manifold_proj_inv.weight.imag)
+            imag_weight = torch.empty_like(self.manifold_proj_inv.weight.imag, dtype=float_dtype)
             nn.init.orthogonal_(imag_weight)
-            self.manifold_proj_inv.weight.copy_(torch.complex(real_weight, imag_weight))
+            self.manifold_proj_inv.weight.copy_(torch.complex(real_weight, imag_weight).to(self.dtype))
             self.manifold_proj_inv.bias.zero_()
-            
-            # Initialize pattern projections similarly
-            real_weight = torch.empty_like(self.pattern_proj.weight.real)
-            nn.init.orthogonal_(real_weight)
-            imag_weight = torch.empty_like(self.pattern_proj.weight.imag)
-            nn.init.orthogonal_(imag_weight)
-            self.pattern_proj.weight.copy_(torch.complex(real_weight, imag_weight))
-            self.pattern_proj.bias.zero_()
-            
-            real_weight = torch.empty_like(self.pattern_proj_inv.weight.real)
-            nn.init.orthogonal_(real_weight)
-            imag_weight = torch.empty_like(self.pattern_proj_inv.weight.imag)
-            nn.init.orthogonal_(imag_weight)
-            self.pattern_proj_inv.weight.copy_(torch.complex(real_weight, imag_weight))
-            self.pattern_proj_inv.bias.zero_()
-            
-            # Initialize attention components with small normal values
-            for layer in [self.query, self.key, self.value, self.to_qkv, self.to_out]:
-                real_weight = torch.empty_like(layer.weight.real)
-                imag_weight = torch.empty_like(layer.weight.imag)
-                nn.init.normal_(real_weight, std=0.02)
-                nn.init.normal_(imag_weight, std=0.02)
-                layer.weight.copy_(torch.complex(real_weight, imag_weight))
-                layer.bias.zero_()
 
     def compute_fisher_information(self, states: torch.Tensor) -> torch.Tensor:
         """Compute Fisher information metric for states."""
@@ -404,8 +383,19 @@ class QuantumGeometricAttention(nn.Module):
             scale = torch.sqrt(target_energy / (current_energy + 1e-8))
             return tensor * scale
 
+        # Convert input to complex with proper dtype
+        if not torch.is_complex(self.x_flat):
+            # If input is real, convert to complex
+            float_dtype = torch.float32 if self.dtype == torch.complex64 else torch.float64
+            x_real = self.x_flat.to(float_dtype)
+            x_imag = torch.zeros_like(x_real, dtype=float_dtype)
+            x_complex = torch.complex(x_real, x_imag).to(self.dtype)
+        else:
+            # If input is already complex, just ensure it has the right dtype
+            x_complex = self.x_flat.to(self.dtype)
+
         # Project input to manifold space using x_flat
-        x_manifold = self.manifold_proj(self.x_flat.reshape(batch_size, seq_len, -1))
+        x_manifold = self.manifold_proj(x_complex.reshape(batch_size, seq_len, -1))
         x_manifold = normalize_with_energy(x_manifold, initial_energy)
         print(f"After manifold projection shape: {x_manifold.shape}")
         print(f"x_manifold requires_grad: {x_manifold.requires_grad}")

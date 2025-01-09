@@ -26,7 +26,7 @@ class RiemannianFlow(BaseGeometricFlow):
         dt: float = 0.1,
         stability_threshold: float = 1e-6,
         use_parallel_transport: bool = True,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.complex64
     ):
         """Initialize Riemannian flow.
         

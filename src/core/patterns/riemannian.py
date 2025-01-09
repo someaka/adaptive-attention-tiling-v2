@@ -62,7 +62,7 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         self.manifold_dim = manifold_dim
         self.hidden_dim = hidden_dim
         self.device = device or torch.device('cpu')
-        self.dtype = dtype or torch.float32
+        self.dtype = dtype or torch.complex64
         
         # Initialize metric as identity plus low-rank perturbation for stability
         self.metric_factors = nn.Parameter(
