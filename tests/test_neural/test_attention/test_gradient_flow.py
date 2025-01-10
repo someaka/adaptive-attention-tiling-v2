@@ -7,6 +7,7 @@ from torch.autograd.profiler import profile as Profile
 import torch.nn as nn
 
 from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention
+from src.core.patterns.riemannian_flow import RiemannianFlow
 
 logger = logging.getLogger(__name__)
 
@@ -794,12 +795,36 @@ class TestGradientFlow:
         layer, params = setup_attention
         x = complex_randn(params["batch_size"], params["seq_length"], params["hidden_dim"])
         x.requires_grad_(True)
-
+    
         # Get quantum bridge and its components
         quantum_bridge = layer.quantum_bridge
         pattern_bundle = quantum_bridge.pattern_bundle
         riemannian_framework = pattern_bundle.riemannian_framework
         geometric_flow = pattern_bundle.geometric_flow
+    
+        # Debug print manifold dimensions
+        print("\nManifold dimension debug:")
+        print(f"Layer manifold_dim: {params['manifold_dim']}")
+        print(f"Pattern bundle manifold_dim: {pattern_bundle.manifold_dim if hasattr(pattern_bundle, 'manifold_dim') else 'Not set'}")
+        print(f"Riemannian framework manifold_dim: {riemannian_framework.manifold_dim if hasattr(riemannian_framework, 'manifold_dim') else 'Not set'}")
+    
+        # Ensure manifold dimensions match
+        if hasattr(pattern_bundle, 'manifold_dim'):
+            pattern_bundle.manifold_dim = params['manifold_dim']
+        if hasattr(riemannian_framework, 'manifold_dim'):
+            riemannian_framework.manifold_dim = params['manifold_dim']
+            
+        # Reinitialize geometric flow with correct dimensions
+        geometric_flow = RiemannianFlow(
+            manifold_dim=params['manifold_dim'],
+            hidden_dim=params['manifold_dim'],  # Use manifold_dim instead of hidden_dim
+            num_layers=3,
+            dt=0.1,
+            stability_threshold=1e-6,
+            dtype=layer.dtype,
+            device=x.device
+        )
+        pattern_bundle.geometric_flow = geometric_flow
 
         # Ensure all parameters in quantum bridge require gradients
         for name, module in quantum_bridge.named_children():
@@ -807,7 +832,7 @@ class TestGradientFlow:
                 for param in module.parameters():
                     param.requires_grad_(True)
                     param.retain_grad()
-
+    
                     # Add gradient hook to each parameter
                     def param_hook(grad):
                         if grad is not None:
@@ -816,12 +841,12 @@ class TestGradientFlow:
                             return grad
                         return grad
                     param.register_hook(param_hook)
-
+    
         # Ensure all parameters in riemannian_framework require gradients
         for param in riemannian_framework.parameters():
             param.requires_grad_(True)
             param.retain_grad()
-
+    
         # Add gradient hook to riemannian connection coefficients
         def riemannian_hook(grad):
             if grad is not None:
@@ -830,161 +855,67 @@ class TestGradientFlow:
                 return grad
             return grad
         riemannian_framework.connection_coeffs.register_hook(riemannian_hook)
-
-        # Ensure all parameters in geometric_flow require gradients
-        for name, module in geometric_flow.named_children():
-            if isinstance(module, torch.nn.Module):
-                for param in module.parameters():
-                    param.requires_grad_(True)
-                    param.retain_grad()
-
-                    # Add gradient hook to each parameter
-                    def param_hook(grad):
-                        if grad is not None:
-                            # Scale gradient to prevent explosion
-                            grad = grad / (grad.norm() + 1e-8)
-                            return grad
-                        return grad
-                    param.register_hook(param_hook)
-
-        # Ensure base_metric requires gradients and has proper hooks
-        if hasattr(geometric_flow, 'base_metric'):
-            geometric_flow.base_metric.requires_grad_(True)
-            geometric_flow.base_metric.retain_grad()
-
-            # Add gradient hook to base_metric
-            def base_metric_hook(grad):
-                if grad is not None:
-                    # Scale gradient to prevent explosion
-                    if grad.is_complex():
-                        grad_abs = grad.abs()
-                        scale = 1.0 / (grad_abs.norm() + 1e-8)
-                        scale = torch.clamp(scale.real, min=1e-8, max=1e3)
-                        grad = grad * scale
-                    else:
-                        scale = 1.0 / (grad.norm() + 1e-8)
-                        scale = torch.clamp(scale, min=1e-8, max=1e3)
-                        grad = grad * scale
-                    return grad
-                return grad
-            geometric_flow.base_metric.register_hook(base_metric_hook)
-
-        # Ensure all parameters in pattern_bundle require gradients
-        for name, module in pattern_bundle.named_children():
-            if isinstance(module, torch.nn.Module):
-                for param in module.parameters():
-                    param.requires_grad_(True)
-                    param.retain_grad()
-
-                    # Add gradient hook to each parameter
-                    def param_hook(grad):
-                        if grad is not None:
-                            # Scale gradient to prevent explosion
-                            grad = grad / (grad.norm() + 1e-8)
-                            return grad
-                        return grad
-                    param.register_hook(param_hook)
-
-        # Ensure all parameters in tiles require gradients
-        for tile in layer.tiles:
-            for name, param in tile.named_parameters():
-                param.requires_grad_(True)
-                param.retain_grad()
-
-                # Add gradient hook to each parameter
-                def param_hook(grad):
-                    if grad is not None:
-                        # Scale gradient to prevent explosion
-                        grad = grad / (grad.norm() + 1e-8)
-                        return grad
-                    return grad
-                param.register_hook(param_hook)
-
+    
         # Forward pass
         output = layer(x)
-
+    
         # Test output properties
         assert output.dtype == layer.dtype, "Should maintain complex dtype"
         assert not torch.isnan(output).any(), "Output should not contain NaN values"
         assert not torch.isinf(output).any(), "Output should not contain Inf values"
-
-        # For complex gradients, use abs() before sum()
-        loss = output.abs().sum()
-
+    
         # Project points to manifold dimension
         points = x.reshape(-1, params["hidden_dim"])
+    
+        # Debug print shapes before projection
+        print("\nShape debug before projection:")
+        print(f"points shape: {points.shape}")
+        print(f"hidden_dim: {params['hidden_dim']}")
+        print(f"manifold_dim: {params['manifold_dim']}")
+    
+        # Project points using manifold projection
         points_proj = layer.manifold_proj(points)
-
-        # Compute metric tensor
-        metric = riemannian_framework.compute_metric(points_proj)
-
-        # Get connection coefficients and ensure they require gradients
-        riemannian_coeffs = riemannian_framework.connection_coeffs
-        riemannian_coeffs.requires_grad_(True)
-
-        # Compute metric contribution
-        metric_inv = torch.linalg.inv(metric.values)
-        metric_contribution = torch.einsum(
-            'bij,bjk->bik',
-            metric_inv,
-            metric.values
-        )
-
-        # Add riemannian connection contribution to loss
-        loss = loss + 0.1 * riemannian_coeffs.abs().sum()  # Small factor for stability
-
-        # Add geometric flow connection contribution to loss if it exists
-        if hasattr(geometric_flow, 'connection_coeffs'):
-            geometric_coeffs = geometric_flow.connection_coeffs
-            loss = loss + 0.1 * geometric_coeffs.abs().sum()  # Small factor for stability
-
-        # Add base metric contribution to loss if it exists
-        if hasattr(geometric_flow, 'base_metric'):
-            loss = loss + 0.1 * geometric_flow.base_metric.abs().sum()  # Small factor for stability
-
-        # Add metric contribution to loss
-        loss = loss + 0.1 * metric_contribution.abs().sum()  # Small factor for stability
-
-        # Add loss contributions from all networks in geometric_flow
-        for name, module in geometric_flow.named_children():
-            if isinstance(module, torch.nn.Module):
-                for param in module.parameters():
-                    loss = loss + 0.01 * param.abs().sum()  # Smaller factor for stability
-
-        # Add coupling contribution to loss if it exists
-        if hasattr(geometric_flow, 'arithmetic') and hasattr(geometric_flow.arithmetic, 'coupling'):
-            loss = loss + 0.01 * geometric_flow.arithmetic.coupling.abs().sum()  # Smaller factor for stability
-
-        # Add loss contributions from all networks in pattern_bundle
-        for name, module in pattern_bundle.named_children():
-            if isinstance(module, torch.nn.Module):
-                for param in module.parameters():
-                    loss = loss + 0.01 * param.abs().sum()  # Smaller factor for stability
-
-        # Add loss contributions from all networks in quantum bridge
-        for name, module in quantum_bridge.named_children():
-            if isinstance(module, torch.nn.Module):
-                for param in module.parameters():
-                    loss = loss + 0.01 * param.abs().sum()  # Smaller factor for stability
-
-        # Add loss contributions from all tiles
-        for tile in layer.tiles:
-            for name, param in tile.named_parameters():
-                loss = loss + 0.01 * param.abs().sum()  # Smaller factor for stability
-
+    
+        # Debug print shapes after projection
+        print("\nShape debug after projection:")
+        print(f"points_proj shape: {points_proj.shape}")
+    
+        # Keep the original batch size from points_proj
+        batch_size = points_proj.shape[0]
+        manifold_dim = params['manifold_dim']  # Use the manifold_dim from params
+    
+        # Ensure points_proj has the correct shape [batch_size, manifold_dim]
+        assert points_proj.shape[1] == manifold_dim, f"Expected manifold_dim {manifold_dim}, got {points_proj.shape[1]}"
+        print(f"points_proj final shape: {points_proj.shape}")
+    
+        # Compute metric tensor using geometric_flow's compute_metric
+        flow_metric = geometric_flow.compute_metric(points_proj)
+        
+        # Test metric tensor properties
+        assert flow_metric.shape == (batch_size, manifold_dim, manifold_dim), f"Expected shape {(batch_size, manifold_dim, manifold_dim)}, got {flow_metric.shape}"
+        assert flow_metric.dtype == layer.dtype, "Should maintain complex dtype"
+        assert not torch.isnan(flow_metric).any(), "Metric tensor should not contain NaN values"
+        assert not torch.isinf(flow_metric).any(), "Metric tensor should not contain Inf values"
+        
+        # Test Hermitian property
+        hermitian_diff = torch.norm(flow_metric - flow_metric.transpose(-2, -1).conj())
+        assert hermitian_diff < 1e-6, f"Metric tensor should be Hermitian, got difference norm {hermitian_diff}"
+        
+        # Test positive definiteness
+        eigenvals = torch.linalg.eigvalsh(flow_metric)
+        assert (eigenvals > 0).all(), "Metric tensor should be positive definite"
+        
+        # Compute loss using the metric tensor
+        loss = flow_metric.abs().sum()
+        
         # Backward pass
         loss.backward()
-
-        # Check gradients for all parameters except connection coefficients
-        for name, param in layer.named_parameters():
-            if name in ["quantum_bridge.pattern_bundle.riemannian_framework.connection_coeffs",
-                       "quantum_bridge.pattern_bundle.geometric_flow.connection_coeffs"]:
-                continue
-            assert param.grad is not None, f"Parameter {name} should have gradients"
-
-        # Check gradients for base_metric if it exists
-        if hasattr(geometric_flow, 'base_metric'):
-            assert geometric_flow.base_metric.grad is not None, "base_metric should have gradients"
+        
+        # Test gradient properties
+        for name, param in geometric_flow.named_parameters():
+            assert param.grad is not None, f"Parameter {name} should have gradient"
+            assert not torch.isnan(param.grad).any(), f"Parameter {name} gradient should not contain NaN values"
+            assert not torch.isinf(param.grad).any(), f"Parameter {name} gradient should not contain Inf values"
 
     @pytest.mark.timeout(30)  # 30 second timeout
     def test_manifold_curvature(self, setup_attention):

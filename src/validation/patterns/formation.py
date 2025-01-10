@@ -1158,7 +1158,7 @@ class BifurcationAnalyzer:
         
         # Check eigenvalue crossing
         stability_change = torch.any(
-            torch.sign(eigenvals.real) != torch.sign(prev_eigenvals.real)
+            torch.sgn(eigenvals.real) != torch.sgn(prev_eigenvals.real)
         )
         
         return bool(state_change or stability_change.item())

@@ -513,8 +513,8 @@ class StructuralStabilityValidator:
 
         # Find where eigenvalues cross stability boundary
         crossings = torch.where(
-            torch.sign(eigenvalues[:-1].max(dim=-1)[0])
-            != torch.sign(eigenvalues[1:].max(dim=-1)[0])
+            torch.sgn(eigenvalues[:-1].max(dim=-1)[0])
+            != torch.sgn(eigenvalues[1:].max(dim=-1)[0])
         )[0]
 
         if len(crossings) > 0:

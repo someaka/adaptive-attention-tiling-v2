@@ -318,7 +318,7 @@ class PatternFiberBundle(BaseFiberBundle):
         """Initialize bundle components efficiently."""
         # Initialize geometric components
         self.riemannian_framework = PatternRiemannianStructure(
-            manifold_dim=self.manifold_dim,  # Use manifold_dim
+            manifold_dim=self.manifold_dim,  # Use manifold_dim instead of total_dim
             pattern_dim=self.fiber_dim,
             device=self.device,
             dtype=self.dtype
@@ -326,12 +326,9 @@ class PatternFiberBundle(BaseFiberBundle):
         
         # Initialize geometric flow with proper gradient tracking
         self.geometric_flow = RiemannianFlow(
-            manifold_dim=self.base_dim,  # Changed from total_dim to base_dim
-            num_layers=self._DEFAULT_NUM_LAYERS,
-            dt=0.1,
-            stability_threshold=1e-6,
-            use_parallel_transport=True,
-            dtype=self.dtype
+            manifold_dim=self.manifold_dim,  # Use manifold_dim instead of base_dim
+            hidden_dim=self.manifold_dim * 2,  # Use 2x manifold_dim for hidden dimension
+            device=self.device
         )
         
         # Ensure all parameters in geometric_flow require gradients
@@ -365,13 +362,11 @@ class PatternFiberBundle(BaseFiberBundle):
         metric_imag = torch.zeros_like(metric_real)
         
         # Initialize real part with identity matrices
-        metric_real[:self.base_dim * 2, :self.base_dim * 2] = torch.eye(self.base_dim * 2, device=self.device)
-        metric_real[self.base_dim * 2:, self.base_dim * 2:] = torch.eye(self.fiber_dim * 2, device=self.device)
+        metric_real[:self.manifold_dim, :self.manifold_dim] = torch.eye(self.manifold_dim, device=self.device)
+        metric_real[self.manifold_dim:, self.manifold_dim:] = torch.eye(self.manifold_dim, device=self.device)
         
-        # Add small random perturbation to imaginary part for stability
-        metric_imag = torch.randn_like(metric_imag) * 0.01
-        
-        # Combine into complex metric
+        # Initialize imaginary part with zeros (already done)
+        # Combine real and imaginary parts into complex metric
         metric = torch.complex(metric_real, metric_imag)
         
         # Register as parameter with gradient tracking

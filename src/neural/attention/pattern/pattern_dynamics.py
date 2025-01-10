@@ -1059,7 +1059,7 @@ class PatternDynamics(nn.Module):
                 param_diff = point2.parameter - point1.parameter
                 if param_diff > 0:
                     # Look for characteristic shape of pitchfork
-                    if torch.all(state_diff * torch.sign(point1.state) < 0):
+                    if torch.all(state_diff * torch.sgn(point1.state) < 0):
                         return "pitchfork"
         
         # Check for saddle-node bifurcation - real eigenvalue crossing zero

@@ -51,7 +51,13 @@ class GeometricFlow(RiemannianFlow):
             stability_threshold: Threshold for stability checks
             dtype: Data type for tensors
         """
-        super().__init__(manifold_dim=manifold_dim)
+        super().__init__(
+            manifold_dim=manifold_dim,
+            hidden_dim=hidden_dim,
+            dt=dt,
+            stability_threshold=stability_threshold,
+            dtype=dtype
+        )
         self.hidden_dim = hidden_dim
         self.manifold_dim = manifold_dim
         self.motive_rank = motive_rank
@@ -60,6 +66,27 @@ class GeometricFlow(RiemannianFlow):
         self.dt = dt
         self.stability_threshold = stability_threshold
         self.dtype = dtype
+        
+        # Initialize parameters with proper gradients and scaling
+        for param in self.parameters():
+            param.requires_grad_(True)
+            if len(param.shape) > 1:  # Weight matrices
+                # Custom orthogonal initialization for complex tensors
+                rows = param.size(0)
+                cols = param.numel() // rows
+                flattened = param.new_empty((rows, cols)).normal_(0, 1)
+                if rows < cols:
+                    flattened.t_()
+                q, r = torch.linalg.qr(flattened)
+                # Use sgn instead of sign for complex support
+                d = torch.diag(r, 0)
+                ph = torch.sgn(d)
+                q *= ph
+                if rows < cols:
+                    q.t_()
+                param.data = q.reshape(param.shape)
+            else:  # Bias vectors
+                nn.init.zeros_(param)
         
         print("\nInitializing GeometricFlow:")
         print(f"  hidden_dim: {hidden_dim}")
@@ -149,24 +176,27 @@ class GeometricFlow(RiemannianFlow):
         self.register_forward_hook(arithmetic_hook)
         
         # Initialize real metric network with proper gradient tracking
-        self.real_metric_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
-        ).to(dtype=torch.float32)
+        real_layers = []
+        real_layers.append(nn.Linear(manifold_dim, hidden_dim, dtype=torch.float32))
+        real_layers.append(nn.Tanh())
+        for _ in range(2):  # Add intermediate layers
+            real_layers.append(nn.Linear(hidden_dim, hidden_dim, dtype=torch.float32))
+            real_layers.append(nn.Tanh())
+        real_layers.append(nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=torch.float32))
+        self.real_metric_net = nn.Sequential(*real_layers)
         
-        # Enable gradients for the entire network
-        self.real_metric_net.requires_grad_(True)
-        
-        # Initialize each layer with proper dtype
+        # Initialize weights for real_metric_net with proper gradient tracking
         for layer in self.real_metric_net:
             if isinstance(layer, nn.Linear):
-                layer.weight.data = layer.weight.data.to(dtype=torch.float32)
+                # Initialize weights with Xavier normal initialization and reduced gain
+                nn.init.xavier_normal_(layer.weight, gain=0.1)  # Reduced gain for stability
                 layer.weight.requires_grad_(True)
-                if layer.bias is not None:
-                    layer.bias.data = layer.bias.data.to(dtype=torch.float32)
-                    layer.bias.requires_grad_(True)
                 
+                if layer.bias is not None:
+                    # Initialize bias with small values
+                    nn.init.constant_(layer.bias, 0.01)
+                    layer.bias.requires_grad_(True)
+                    
                 # Register gradient hooks for debugging only
                 def make_hook(name):
                     def hook(grad):
@@ -178,23 +208,28 @@ class GeometricFlow(RiemannianFlow):
                 if layer.bias is not None:
                     layer.bias.register_hook(make_hook(f"real_metric_net.{layer}.bias"))
         
-        # Initialize imaginary metric network with proper dtype
-        self.imag_metric_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim)
-        ).to(dtype=torch.float32)
+        # Initialize imaginary metric network with proper gradient tracking
+        imag_layers = []
+        imag_layers.append(nn.Linear(manifold_dim, hidden_dim, dtype=torch.float32))
+        imag_layers.append(nn.Tanh())
+        for _ in range(2):  # Add intermediate layers
+            imag_layers.append(nn.Linear(hidden_dim, hidden_dim, dtype=torch.float32))
+            imag_layers.append(nn.Tanh())
+        imag_layers.append(nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=torch.float32))
+        self.imag_metric_net = nn.Sequential(*imag_layers)
         
         # Enable gradients for the entire network
         self.imag_metric_net.requires_grad_(True)
         
-        # Initialize weights with proper dtype
+        # Initialize weights with proper dtype and scaling
         for layer in self.imag_metric_net:
             if isinstance(layer, nn.Linear):
-                layer.weight.data = layer.weight.data.to(dtype=torch.float32)
+                # Initialize weights with Xavier normal initialization and reduced gain
+                nn.init.xavier_normal_(layer.weight, gain=0.1)  # Reduced gain for stability
                 layer.weight.requires_grad_(True)
                 if layer.bias is not None:
-                    layer.bias.data = layer.bias.data.to(dtype=torch.float32)
+                    # Initialize bias with small values
+                    nn.init.constant_(layer.bias, 0.01)
                     layer.bias.requires_grad_(True)
                 
                 # Register gradient hooks for debugging only
@@ -310,29 +345,45 @@ class GeometricFlow(RiemannianFlow):
         return new_metric, metrics
     
     def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor from points."""
-        # Ensure points have correct dtype
-        points = points.to(dtype=self.dtype)
+        """Compute metric tensor from points.
         
-        # Split into real and imaginary parts
-        real_points = points.real if points.is_complex() else points
-        imag_points = points.imag if points.is_complex() else torch.zeros_like(points, dtype=self.dtype)
+        Args:
+            points: Points tensor of shape (batch_size, manifold_dim)
+            
+        Returns:
+            Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+        """
+        # Ensure points have correct dtype and require gradients
+        points = points.to(dtype=self.dtype).requires_grad_(True)
         
-        # Compute metric components with proper gradient tracking
-        real_metric = self.real_metric_net(real_points)
-        imag_metric = self.imag_metric_net(imag_points)
+        # Get batch size and flatten if needed
+        batch_size = points.shape[0] if points.dim() > 1 else 1
+        points_flat = points.reshape(batch_size, -1)
         
-        # Reshape metric components
-        batch_size = points.shape[0]
-        real_metric = real_metric.view(batch_size, self.manifold_dim, self.manifold_dim)
-        imag_metric = imag_metric.view(batch_size, self.manifold_dim, self.manifold_dim)
+        # Split into real and imaginary parts and ensure float32 dtype for network inputs
+        real_points = points_flat.real.to(dtype=torch.float32)
+        imag_points = points_flat.imag.to(dtype=torch.float32)
+        
+        # Compute metric components directly without using parent class's networks
+        real_metric = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, 
+                                dtype=torch.float32, device=points.device)
+        imag_metric = torch.zeros(batch_size, self.manifold_dim, self.manifold_dim,
+                                dtype=torch.float32, device=points.device)
+        
+        # Add learnable components
+        real_metric = real_metric + self.base_metric.real
+        imag_metric = imag_metric + self.base_metric.imag
+        
+        # Add point-dependent components
+        real_points_matrix = real_points.reshape(batch_size, self.manifold_dim, 1) @ real_points.reshape(batch_size, 1, self.manifold_dim)
+        imag_points_matrix = imag_points.reshape(batch_size, self.manifold_dim, 1) @ imag_points.reshape(batch_size, 1, self.manifold_dim)
+        
+        real_metric = real_metric + real_points_matrix
+        imag_metric = imag_metric + imag_points_matrix
         
         # Combine into full metric tensor
-        if points.is_complex():
-            metric = torch.complex(real_metric, imag_metric)
-        else:
-            metric = real_metric
-            
+        metric = torch.complex(real_metric, imag_metric)
+        
         # Add small diagonal term for stability
         eye = torch.eye(
             self.manifold_dim,
@@ -341,12 +392,8 @@ class GeometricFlow(RiemannianFlow):
         ).unsqueeze(0).expand(batch_size, -1, -1)
         metric = metric + 1e-6 * eye
         
-        # Add explicit metric regularization to ensure gradient flow
-        real_reg = torch.einsum('bij,bij->b', real_metric, real_metric).mean() * 0.0001
-        imag_reg = torch.einsum('bij,bij->b', imag_metric, imag_metric).mean() * 0.0001
-        
-        # Add regularization to metric
-        metric = metric + (real_reg + 1j * imag_reg).view(-1, 1, 1).expand_as(metric)
+        # Ensure metric requires gradients
+        metric = metric.requires_grad_(True)
         
         return metric
     
@@ -357,6 +404,15 @@ class GeometricFlow(RiemannianFlow):
         print(f"  Input requires grad: {x.requires_grad}")
         print(f"  Input grad fn: {x.grad_fn}")
         print(f"  Arithmetic coupling requires grad: {self.arithmetic.coupling.requires_grad}")
+        
+        # Track real metric net parameters before forward
+        print("\nReal metric net parameters before forward:")
+        for name, param in self.real_metric_net.named_parameters():
+            print(f"  {name}:")
+            print(f"    Shape: {param.shape}")
+            print(f"    Requires grad: {param.requires_grad}")
+            print(f"    Grad fn: {param.grad_fn}")
+            print(f"    Is leaf: {param.is_leaf}")
         
         # Apply arithmetic dynamics with gradient tracking
         arithmetic_output, metrics = self.arithmetic(x)
@@ -390,6 +446,19 @@ class GeometricFlow(RiemannianFlow):
         # Add explicit metric regularization
         metric_reg = torch.einsum('ij,ij->', self.base_metric, self.base_metric) * 0.0001
         output = output + metric_reg.real.unsqueeze(0).unsqueeze(0).expand_as(output)
+        
+        # Track real metric net parameters after forward
+        print("\nReal metric net parameters after forward:")
+        for name, param in self.real_metric_net.named_parameters():
+            print(f"  {name}:")
+            print(f"    Shape: {param.shape}")
+            print(f"    Requires grad: {param.requires_grad}")
+            print(f"    Grad fn: {param.grad_fn}")
+            print(f"    Is leaf: {param.is_leaf}")
+            print(f"    Has grad: {param.grad is not None}")
+            if param.grad is not None:
+                print(f"    Grad shape: {param.grad.shape}")
+                print(f"    Grad mean: {param.grad.abs().mean().item():.6f}")
         
         return output
     

@@ -69,16 +69,17 @@ from ..patterns.fiber_types import LocalChart as PatternSection
 
 class EnergyConservingLinear(nn.Module):
     """Linear layer that conserves energy during forward pass."""
-    def __init__(self, in_features: int, out_features: int):
+    def __init__(self, in_features: int, out_features: int, dtype: torch.dtype = torch.complex64, device: Optional[torch.device] = None):
         super().__init__()
         # Initialize weight and bias as complex parameters
+        real_dtype = torch.float32 if dtype == torch.complex64 else torch.float64
         self.weight = nn.Parameter(torch.complex(
-            torch.randn(out_features, in_features) / np.sqrt(in_features),
-            torch.randn(out_features, in_features) / np.sqrt(in_features)
+            torch.randn(out_features, in_features, dtype=real_dtype, device=device) / np.sqrt(in_features),
+            torch.randn(out_features, in_features, dtype=real_dtype, device=device) / np.sqrt(in_features)
         ))
         self.bias = nn.Parameter(torch.complex(
-            torch.zeros(out_features),
-            torch.zeros(out_features)
+            torch.zeros(out_features, dtype=real_dtype, device=device),
+            torch.zeros(out_features, dtype=real_dtype, device=device)
         ))
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -163,8 +164,8 @@ class QuantumGeometricAttention(nn.Module):
             raise ValueError("dtype must be either torch.complex64 or torch.complex128")
 
         # Initialize manifold projections with complex dtype
-        self.manifold_proj = EnergyConservingLinear(hidden_dim, self.manifold_dim)
-        self.manifold_proj_inv = EnergyConservingLinear(self.manifold_dim, hidden_dim)
+        self.manifold_proj = EnergyConservingLinear(hidden_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
+        self.manifold_proj_inv = EnergyConservingLinear(self.manifold_dim, hidden_dim, dtype=self.dtype, device=self.device)
         
         # Initialize quantum bridge with complex dtype
         self.quantum_bridge = NeuralQuantumBridge(
@@ -177,11 +178,11 @@ class QuantumGeometricAttention(nn.Module):
             device=device
         )
         
-        # Initialize tiles with complex dtype
+        # Initialize tiles with complex dtype and proper manifold dimension
         self.tiles = nn.ModuleList([
             QuantumMotivicTile(
                 size=tile_size,
-                hidden_dim=self.manifold_dim,
+                hidden_dim=self.manifold_dim,  # Use manifold_dim for tiles
                 num_heads=1,
                 dropout=dropout,
                 resolution=1.0,
@@ -198,7 +199,7 @@ class QuantumGeometricAttention(nn.Module):
             for _ in range(num_layers)
         ])
         
-        # Initialize metric tensors with complex dtype
+        # Initialize metric tensors with proper manifold dimension
         self.base_metric = nn.Parameter(
             torch.eye(self.manifold_dim, dtype=self.dtype, device=device),
             requires_grad=True
@@ -216,10 +217,10 @@ class QuantumGeometricAttention(nn.Module):
             requires_grad=True
         )
         
-        # Initialize flow with complex dtype
+        # Initialize flow with proper manifold dimension
         self.flow = GeometricFlow(
             hidden_dim=hidden_dim,
-            manifold_dim=self.manifold_dim,
+            manifold_dim=self.manifold_dim,  # Use manifold_dim for flow
             motive_rank=motive_rank,
             num_charts=4,
             integration_steps=10,

@@ -107,7 +107,8 @@ class NeuralQuantumBridge(nn.Module):
             motive_rank=4,
             num_primes=8,
             device=self.device,
-            dtype=dtype
+            dtype=dtype,
+            manifold_dim=self.manifold_dim
         )
         
         # Initialize metric tensor with proper scaling and requires_grad

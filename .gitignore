@@ -29,3 +29,4 @@ torch_compile_debug/
 **/torch_compile_debug/
 fx_graph_*
 **/fx_graph_*
+.aider*
