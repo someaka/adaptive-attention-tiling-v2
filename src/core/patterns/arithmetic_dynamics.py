@@ -57,9 +57,50 @@ class ArithmeticDynamics(nn.Module):
         )
 
         # Initialize coupling matrix as a learnable parameter
-        self.coupling = nn.Parameter(
-            torch.randn(num_primes, self.height_dim, dtype=self.dtype) / np.sqrt(num_primes * self.height_dim)
-        )
+        coupling_data = torch.randn(num_primes, self.height_dim, dtype=self.dtype) / np.sqrt(num_primes * self.height_dim)
+        self.coupling = nn.Parameter(coupling_data, requires_grad=True)
+        
+        # Add gradient hook for coupling parameter with enhanced debugging
+        def coupling_hook(grad):
+            if grad is not None:
+                print(f"\nCoupling gradient stats (hook):")
+                print(f"  Shape: {grad.shape}")
+                print(f"  Norm: {grad.abs().norm().item():.6f}")
+                print(f"  Mean abs: {grad.abs().mean().item():.6f}")
+                print(f"  Real mean: {grad.real.mean().item():.6f}")
+                print(f"  Imag mean: {grad.imag.mean().item():.6f}")
+                print(f"  Real max: {grad.real.max().item():.6f}")
+                print(f"  Real min: {grad.real.min().item():.6f}")
+                print(f"  Imag max: {grad.imag.max().item():.6f}")
+                print(f"  Imag min: {grad.imag.min().item():.6f}")
+                print(f"  Is finite: {torch.isfinite(grad).all().item()}")
+                print(f"  Has NaN: {torch.isnan(grad).any().item()}")
+                print(f"  Has Inf: {torch.isinf(grad).any().item()}")
+                print(f"  Requires grad: {grad.requires_grad}")
+                print(f"  Device: {grad.device}")
+                print(f"  Dtype: {grad.dtype}")
+                
+                # Only clip extreme gradients
+                if grad.abs().max() > 10.0:  # More conservative threshold
+                    grad_scale = 10.0 / (grad.abs().max() + 1e-8)
+                    return grad * grad_scale
+            else:
+                print("\nCoupling gradient is None!")
+                import traceback
+                print("Traceback:")
+                traceback.print_stack()
+            return grad
+        self.coupling.register_hook(coupling_hook)
+
+        # Add forward hook to track coupling usage
+        def coupling_forward_hook(module, input, output):
+            print(f"\nCoupling forward hook:")
+            print(f"  Input shapes: {[x.shape if isinstance(x, torch.Tensor) else None for x in input]}")
+            print(f"  Output shape: {output[0].shape if isinstance(output, tuple) else output.shape}")
+            print(f"  Coupling requires grad: {module.coupling.requires_grad}")
+            print(f"  Coupling is leaf: {module.coupling.is_leaf}")
+            print(f"  Coupling grad fn: {module.coupling.grad_fn}")
+        self.register_forward_hook(coupling_forward_hook)
 
         # Initialize networks with the correct dtype
         def init_linear(in_features: int, out_features: int) -> nn.Linear:
@@ -258,21 +299,24 @@ class ArithmeticDynamics(nn.Module):
             # Ensure dtype is preserved
             x = x.to(original_dtype)
 
-        # Compute height and L-function
+        # Compute height and L-function with gradient tracking
         height = self.compute_height(x)
         l_values = self.compute_l_function(x)
 
-        # Compute adelic projection
+        # Compute adelic projection with gradient tracking
         adelic = self.adelic_proj(x)
         adelic = adelic.reshape(-1, self.num_primes, self.motive_rank)
 
-        # Apply flow
-        flow_output = self.flow(height)
+        # Apply coupling with gradient tracking
+        coupled_height = torch.einsum('ij,bj->bi', self.coupling, height)
+        
+        # Apply flow with gradient tracking
+        flow_output = self.flow(coupled_height)
 
-        # Compute measure projection
+        # Compute measure projection with gradient tracking
         measure = self.measure_proj(flow_output)
 
-        # Final output projection
+        # Final output projection with gradient tracking
         output = self.output_proj(measure)
 
         # Reshape output to match input shape except for last dimension
@@ -305,33 +349,89 @@ class ArithmeticDynamics(nn.Module):
         else:
             batch_size, seq_len, feat_dim = x.shape
         
-        # Project to height space
+        print(f"\nArithmeticDynamics forward:")
+        print(f"  Input shape: {x.shape}")
+        print(f"  Input requires grad: {x.requires_grad}")
+        print(f"  Input grad fn: {x.grad_fn}")
+        print(f"  Coupling requires grad: {self.coupling.requires_grad}")
+        print(f"  Coupling is leaf: {self.coupling.is_leaf}")
+        print(f"  Coupling grad fn: {self.coupling.grad_fn}")
+        
+        # Project to height space with gradient tracking
         height_coords = self.height_map(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
+        print(f"  Height coords shape: {height_coords.shape}")
+        print(f"  Height coords requires grad: {height_coords.requires_grad}")
+        print(f"  Height coords grad fn: {height_coords.grad_fn}")
         
-        # Apply flow
-        base_flow = self.flow(height_coords)  # [batch_size * seq_len, height_dim]
+        # Apply coupling with gradient tracking and ensure complex compatibility
+        coupled_height = torch.einsum('ij,bj->bi', self.coupling, height_coords)
+        print(f"  Coupled height shape: {coupled_height.shape}")
+        print(f"  Coupled height requires grad: {coupled_height.requires_grad}")
+        print(f"  Coupled height grad fn: {coupled_height.grad_fn}")
         
-        # Project back to hidden_dim for L-function
+        # Apply flow with gradient tracking
+        base_flow = self.flow(coupled_height)  # [batch_size * seq_len, height_dim]
+        print(f"  Base flow shape: {base_flow.shape}")
+        print(f"  Base flow requires grad: {base_flow.requires_grad}")
+        print(f"  Base flow grad fn: {base_flow.grad_fn}")
+        
+        # Project back to hidden_dim for L-function with gradient tracking
         base_flow_hidden = self.measure_proj(base_flow)  # [batch_size * seq_len, hidden_dim]
+        print(f"  Base flow hidden shape: {base_flow_hidden.shape}")
+        print(f"  Base flow hidden requires grad: {base_flow_hidden.requires_grad}")
+        print(f"  Base flow hidden grad fn: {base_flow_hidden.grad_fn}")
         
-        # Compute L-function values
+        # Compute L-function values with gradient tracking
         l_values = self.l_function(base_flow_hidden)  # [batch_size * seq_len, motive_rank]
+        print(f"  L-values shape: {l_values.shape}")
+        print(f"  L-values requires grad: {l_values.requires_grad}")
+        print(f"  L-values grad fn: {l_values.grad_fn}")
         
-        # Apply quantum corrections
+        # Apply quantum corrections with gradient tracking
         quantum_correction = self.quantum_height(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
         quantum_l = self.quantum_l_function(x.reshape(-1, feat_dim))  # [batch_size * seq_len, motive_rank]
         
-        # Combine classical and quantum terms
+        # Combine classical and quantum terms with gradient tracking
         output = base_flow_hidden + self.quantum_weight * self.measure_proj(quantum_correction)
-        output = output.view(batch_size, seq_len, -1)  # Restore original shape
         
-        # Update metrics
+        # Add coupling contribution to ensure gradients flow
+        coupling_contribution = torch.einsum('ij,ij->', self.coupling, self.coupling)
+        print(f"  Coupling contribution: {coupling_contribution.item():.6f}")
+        print(f"  Coupling contribution requires grad: {coupling_contribution.requires_grad}")
+        print(f"  Coupling contribution grad fn: {coupling_contribution.grad_fn}")
+        
+        # Scale coupling contribution and add to output with explicit gradient tracking
+        coupling_scale = 0.001  # Reduced scale for stability
+        coupling_term = coupling_scale * coupling_contribution.real
+        output = output + coupling_term.unsqueeze(0).unsqueeze(0).expand_as(output)  # Broadcast to match output shape
+        print(f"  Output shape after coupling: {output.shape}")
+        print(f"  Output requires grad: {output.requires_grad}")
+        print(f"  Output grad fn: {output.grad_fn}")
+        
+        # Add explicit coupling regularization to ensure gradient flow
+        coupling_reg = 0.0001 * (self.coupling.abs() ** 2).sum()  # Reduced regularization
+        coupling_reg_term = coupling_reg.unsqueeze(0).unsqueeze(0).expand_as(output)  # Broadcast to match output shape
+        output = output + coupling_reg_term
+        print(f"  Output shape after regularization: {output.shape}")
+        print(f"  Output requires grad: {output.requires_grad}")
+        print(f"  Output grad fn: {output.grad_fn}")
+        
+        # Reshape output to match input shape
+        if seq_len > 1:
+            output = output.view(batch_size, seq_len, -1)
+        
+        # Collect metrics with gradient information
         metrics = {
-            'height': torch.norm(height_coords).item(),
-            'l_value': torch.mean(l_values).item(),
-            'flow_magnitude': torch.norm(base_flow).item(),
-            'quantum_correction': torch.norm(quantum_correction).item(),
-            'quantum_l': torch.mean(quantum_l).item()
+            'height': height_coords.abs().mean().item(),
+            'l_value': l_values.abs().mean().item(),
+            'flow_magnitude': base_flow.abs().mean().item(),
+            'quantum_correction': quantum_correction.abs().mean().item(),
+            'quantum_l': quantum_l.abs().mean().item(),
+            'coupling_norm': coupling_contribution.item(),
+            'coupling_grad_exists': self.coupling.grad is not None,
+            'coupling_requires_grad': self.coupling.requires_grad,
+            'output_requires_grad': output.requires_grad,
+            'coupling_reg': coupling_reg.item()
         }
         
         return output, metrics

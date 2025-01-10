@@ -2029,10 +2029,14 @@ class PatternFiberBundle(BaseFiberBundle):
         print(f"Input ricci shape: {ricci.shape}")
         print(f"Input ricci requires_grad: {ricci.requires_grad}")
         print(f"Input ricci grad_fn: {ricci.grad_fn}")
-        
         # Get base metric from geometric flow
         if hasattr(self, 'geometric_flow'):
             new_metric = self.geometric_flow(metric)
+            print(f"Geometric flow output requires_grad: {new_metric.requires_grad}")
+            if new_metric.grad_fn is not None:
+                print(f"Geometric flow output grad_fn: {new_metric.grad_fn}")
+            else:
+                print("Geometric flow output has no grad_fn")
             metrics = {
                 'flow_magnitude': torch.norm(new_metric - metric).item(),
                 'metric_determinant': torch.linalg.det(new_metric).mean().item()
@@ -2058,6 +2062,14 @@ class PatternFiberBundle(BaseFiberBundle):
                 print(f"Gradient mean: {grad.abs().mean().item()}")
                 print(f"Gradient max: {grad.abs().max().item()}")
                 # Ensure gradients flow back to geometric flow network
+                print("Propagating gradients to geometric flow parameters:")
+                for param in self.geometric_flow.parameters():
+                    if param.grad is not None:
+                        print(f"  Parameter has existing grad: {param.grad.abs().mean().item()}")
+                    else:
+                        print("  Parameter has no existing grad")
+                
+                # Ensure gradients flow back to geometric flow network
                 if hasattr(self, 'geometric_flow'):
                     for param in self.geometric_flow.parameters():
                         if param.grad is None:
@@ -2079,4 +2091,5 @@ class PatternFiberBundle(BaseFiberBundle):
         print(f"Quantum correction: {metrics['quantum_correction']}")
         print(f"Hamiltonian: {metrics['hamiltonian']}")
         
+        return new_metric, metrics
         return new_metric, metrics

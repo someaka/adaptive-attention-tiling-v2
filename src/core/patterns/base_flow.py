@@ -92,11 +92,12 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
                     nn.init.constant_(layer.bias, 0.1)
                     layer.bias.requires_grad_(True)
         
-        # Initialize basic flow network
+        # Initialize basic flow network with correct dimensions
+        metric_dim = manifold_dim * manifold_dim  # Input dimension is manifold_dim x manifold_dim flattened
         self.flow_layers = nn.ModuleList([
-            nn.Linear(manifold_dim, self.hidden_dim, dtype=torch.float32),
+            nn.Linear(metric_dim, self.hidden_dim, dtype=self.dtype),
             nn.Tanh(),
-            nn.Linear(self.hidden_dim, manifold_dim, dtype=torch.float32)
+            nn.Linear(self.hidden_dim, metric_dim, dtype=self.dtype)
         ])
         
         # Initialize flow network weights with proper gradient tracking
@@ -109,6 +110,11 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
                     # Initialize bias with small positive values for stability
                     nn.init.constant_(layer.bias, 0.1)
                     layer.bias.requires_grad_(True)
+                
+                # Convert weights and biases to complex dtype
+                layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                if layer.bias is not None:
+                    layer.bias.data = layer.bias.data.to(dtype=self.dtype)
     
     def compute_ricci_tensor(
         self,
@@ -141,33 +147,23 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         ricci: torch.Tensor,
         timestep: float = 0.1
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """Perform one step of geometric flow.
+        """Compute flow step with proper gradient tracking.
         
         Args:
             metric: Current metric tensor
-            ricci: Ricci curvature tensor
-            timestep: Integration time step
+            ricci: Ricci tensor
+            timestep: Integration timestep
             
         Returns:
             Tuple of (new_metric, flow_metrics)
         """
-        # Compute eigendecomposition of metric
-        eigvals, eigvecs = torch.linalg.eigh(metric)
+        # Get device and dtype from input
+        device = metric.device
+        dtype = metric.dtype
         
-        # Ensure metric stays positive definite
-        min_eigval = torch.min(torch.abs(eigvals))
-        if min_eigval <= self.stability_threshold:
-            # Add small positive constant to maintain positive definiteness
-            eigvals = eigvals + (-min_eigval + self.stability_threshold)
-            metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1).conj()
-            
-        # Scale timestep based on metric and Ricci norms
-        # Compute norms while preserving batch dimensions
-        metric_flat = metric.reshape(-1, metric.shape[-1] * metric.shape[-1])
-        ricci_flat = ricci.reshape(-1, ricci.shape[-1] * ricci.shape[-1])
-        
-        metric_norm = torch.norm(metric_flat, dim=1, keepdim=True)
-        ricci_norm = torch.norm(ricci_flat, dim=1, keepdim=True)
+        # Compute metric and ricci norms with gradient tracking
+        metric_norm = torch.norm(metric.reshape(metric.shape[0], -1), dim=-1)
+        ricci_norm = torch.norm(ricci.reshape(ricci.shape[0], -1), dim=-1)
         
         # Compute adaptive timestep with proper broadcasting
         adaptive_timestep = timestep * torch.minimum(
@@ -175,11 +171,24 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             0.1 * metric_norm / (ricci_norm + self.stability_threshold)
         )
         
-        # Reshape adaptive timestep for broadcasting with metric and flow tensors
+        # Reshape adaptive timestep for broadcasting
         adaptive_timestep = adaptive_timestep.view(*metric.shape[:-2], 1, 1)
         
-        # Compute flow step with positivity preservation
+        # Compute base flow with gradient tracking
         flow = -2 * ricci
+        
+        # Pass through flow layers with gradient tracking
+        batch_size = metric.shape[0]
+        flow_input = metric.reshape(batch_size, -1)  # Flatten metric tensor
+        flow_hidden = self.flow_layers[0](flow_input)  # First linear layer
+        flow_hidden = self.flow_layers[1](flow_hidden)  # Activation
+        flow_output = self.flow_layers[2](flow_hidden)  # Second linear layer
+        
+        # Reshape flow output to match metric shape
+        flow_shaped = flow_output.view(*metric.shape)
+        
+        # Combine flows with gradient tracking
+        flow = flow + flow_shaped
         
         # Ensure flow has the same shape as metric
         flow = flow.reshape(*metric.shape)
@@ -194,7 +203,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
         # Reconstruct flow with limited negative eigenvalues
         flow = flow_eigvecs @ torch.diag_embed(flow_eigvals) @ flow_eigvecs.transpose(-2, -1).conj()
         
-        # Update metric
+        # Update metric with gradient tracking
         new_metric = metric + flow * adaptive_timestep
         
         # Project back to positive definite cone if needed
@@ -204,30 +213,7 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol):
             eigvals = torch.clamp(torch.abs(eigvals), min=self.stability_threshold) * torch.exp(1j * torch.angle(eigvals))
             new_metric = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-2, -1).conj()
         
-        # Normalize metric if needed
-        new_metric_flat = new_metric.reshape(-1, new_metric.shape[-1] * new_metric.shape[-1])
-        new_metric_norm = torch.norm(new_metric_flat, dim=1, keepdim=True).view(-1, 1, 1)
-        
-        if torch.any(new_metric_norm > 1.0 / self.stability_threshold):
-            new_metric = new_metric * (1.0 / self.stability_threshold) / new_metric_norm
-        
-        # Ensure symmetry
-        new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1).conj())
-        
-        # Add small positive constant to diagonal for stability
-        new_metric = new_metric + torch.eye(new_metric.shape[-1], device=new_metric.device, dtype=new_metric.dtype).unsqueeze(0) * self.stability_threshold
-        
-        # Compute basic flow metrics
-        metrics = {
-            'metric_norm': torch.norm(new_metric).item(),
-            'ricci_norm': torch.norm(ricci).item(),
-            'step_size': adaptive_timestep.mean().item(),
-            'min_eigval': torch.min(torch.abs(eigvals)).item(),
-            'max_eigval': torch.max(torch.abs(eigvals)).item(),
-            'condition_number': (torch.max(torch.abs(eigvals)) / torch.clamp(torch.min(torch.abs(eigvals)), min=self.stability_threshold)).item()
-        }
-        
-        return new_metric, metrics
+        return new_metric, {}
     
     def detect_singularities(
         self,

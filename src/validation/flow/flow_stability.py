@@ -256,85 +256,72 @@ class NonlinearStabilityValidator:
     ) -> float:
         """Compute Lyapunov function."""
         # Use energy as Lyapunov function
-        _, metrics = flow.forward(state)
-        energy = metrics.get("energy", 0.0)
+        _, metrics_dict = flow.forward(state)
+        energy = float(metrics_dict.get("energy", 0.0)) if isinstance(metrics_dict, dict) else 0.0
         
         # For complex state, use squared magnitude
         if state.is_complex():
             reg_term = torch.sum(state.abs() ** 2)
         else:
             reg_term = torch.sum(state ** 2)
+            
+        # Add regularization term
+        energy = energy + 0.1 * float(reg_term)
         
-        # Add regularization for stability (use float32 for intermediate calculations)
-        reg_energy = float(energy) + 1e-6 * float(reg_term)
-        
-        return reg_energy
+        return energy
 
     def _estimate_basin(
         self, flow: GeometricFlow, state: torch.Tensor
     ) -> float:
-        """Estimate stability basin size."""
-        # Sample perturbations
-        perturbs = torch.randn_like(state)
-        perturbs = perturbs.unsqueeze(0).repeat(self.basin_samples, 1, 1, 1, 1)
-        scales = torch.logspace(-3, 0, self.basin_samples).view(-1, 1, 1, 1, 1)
+        """Estimate size of stability basin."""
+        # Sample perturbations of increasing magnitude
+        perturbations = [0.1 * i for i in range(self.basin_samples)]
         
-        perturbed = state.unsqueeze(0) + scales * perturbs
-        
-        # Check stability for each perturbation
-        stable_mask = torch.zeros(self.basin_samples, dtype=torch.bool)
-        
-        base_output, base_metrics = flow.forward(state)
-        base_energy = base_metrics.get("energy", 0.0)
-        
-        for i in range(self.basin_samples):
-            output, metrics = flow.forward(perturbed[i])
-            energy_i = metrics.get("energy", 0.0)
-            stable_mask[i] = energy_i < 2.0 * base_energy
-        
-        # Find largest stable perturbation
-        max_stable = scales[stable_mask][-1] if torch.any(stable_mask) else torch.tensor(0.0)
-        
-        return float(max_stable.item())
+        for eps in perturbations:
+            # Add random perturbation
+            perturbed = state + eps * torch.randn_like(state)
+            
+            # Check stability under perturbation
+            _, metrics_dict = flow.forward(perturbed)
+            energy = float(metrics_dict.get("energy", float('inf'))) if isinstance(metrics_dict, dict) else float('inf')
+            
+            # If energy exceeds threshold, we've left stability basin
+            if energy > 10.0:
+                return eps
+                
+        return perturbations[-1]
 
     def _find_perturbation_bound(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int
     ) -> float:
-        """Find maximum stable perturbation."""
+        """Find maximum stable perturbation magnitude."""
         # Binary search for perturbation bound
-        left = 1e-6
-        right = 1.0
+        left, right = 0.0, 1.0
         
-        base_output, base_metrics = flow.forward(state)
-        base_energy = base_metrics.get("energy", 0.0)
-        
-        for _ in range(10):  # Binary search iterations
+        for _ in range(10):  # 10 binary search steps
             mid = (left + right) / 2
-            perturb = mid * torch.randn_like(state)
+            perturbed = state + mid * torch.randn_like(state)
             
-            # Check if perturbation remains stable
-            current = state + perturb
+            # Evolve perturbed state
+            current = perturbed
             stable = True
             
             for _ in range(time_steps):
-                output, metrics = flow.forward(current)
-                next_state = output
-                if torch.any(torch.isnan(next_state)) or torch.any(torch.isinf(next_state)):
+                # One evolution step
+                current, metrics_dict = flow.forward(current)
+                energy = float(metrics_dict.get("energy", float('inf'))) if isinstance(metrics_dict, dict) else float('inf')
+                
+                # Check stability
+                if energy > 10.0:
                     stable = False
                     break
                     
-                energy = metrics.get("energy", 0.0)
-                if energy > 2.0 * base_energy:
-                    stable = False
-                    break
-                current = next_state
-            
             if stable:
-                left = mid
+                left = mid  # Try larger perturbation
             else:
-                right = mid
-        
-        return float(left)  # Conservative bound
+                right = mid  # Try smaller perturbation
+                
+        return left  # Return largest stable perturbation
 
 
 class StructuralStabilityValidator:

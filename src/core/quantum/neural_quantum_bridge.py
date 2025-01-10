@@ -119,18 +119,9 @@ class NeuralQuantumBridge(nn.Module):
         # Add metric gradient hook
         def metric_hook(grad):
             if grad is not None:
-                # Scale gradients for numerical stability
+                # Scale gradients for numerical stability only
                 scaled_grad = grad * 0.1
-                # Ensure gradients flow to geometric flow network
-                if hasattr(self.pattern_bundle, 'riemannian_framework'):
-                    if hasattr(self.pattern_bundle.riemannian_framework, 'geometric_flow'):
-                        if hasattr(self.pattern_bundle.riemannian_framework.geometric_flow, 'real_metric_net'):
-                            for param in self.pattern_bundle.riemannian_framework.geometric_flow.real_metric_net.parameters():
-                                if param.grad is None:
-                                    param.grad = torch.zeros_like(param)
-                                # Scale and reshape gradient for the parameter
-                                param_grad = scaled_grad.abs().mean() * torch.randn_like(param) * 0.01
-                                param.grad += param_grad
+                return scaled_grad
             return grad
         self.metric.register_hook(metric_hook)
         
@@ -150,42 +141,9 @@ class NeuralQuantumBridge(nn.Module):
         # Ensure connection coefficients are properly tracked for gradients
         def connection_hook(grad):
             if grad is not None:
-                # Scale gradients for numerical stability
+                # Scale gradients for numerical stability only
                 scaled_grad = grad * 0.1
-                # Ensure gradients flow to riemannian framework
-                if hasattr(self.pattern_bundle, 'riemannian_framework'):
-                    if hasattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs'):
-                        # Ensure connection_coeffs requires gradients
-                        self.pattern_bundle.riemannian_framework.connection_coeffs.requires_grad_(True)
-                        
-                        # Resize gradient if needed
-                        target_size = self.pattern_bundle.riemannian_framework.connection_coeffs.shape
-                        if scaled_grad.shape != target_size:
-                            resized_grad = torch.zeros(
-                                target_size,
-                                device=scaled_grad.device,
-                                dtype=scaled_grad.dtype
-                            )
-                            min_dims = [min(s1, s2) for s1, s2 in zip(scaled_grad.shape, target_size)]
-                            slices = tuple(slice(0, d) for d in min_dims)
-                            resized_grad[slices] = scaled_grad[slices]
-                            scaled_grad = resized_grad
-                        
-                        # Ensure gradient is assigned
-                        if self.pattern_bundle.riemannian_framework.connection_coeffs.grad is None:
-                            self.pattern_bundle.riemannian_framework.connection_coeffs.grad = scaled_grad
-                        else:
-                            self.pattern_bundle.riemannian_framework.connection_coeffs.grad += scaled_grad
-                            
-                        # Propagate to geometric flow network
-                        if hasattr(self.pattern_bundle.riemannian_framework, 'geometric_flow'):
-                            if hasattr(self.pattern_bundle.riemannian_framework.geometric_flow, 'real_metric_net'):
-                                for param in self.pattern_bundle.riemannian_framework.geometric_flow.real_metric_net.parameters():
-                                    if param.grad is None:
-                                        param.grad = torch.zeros_like(param)
-                                    # Scale and reshape gradient for the parameter
-                                    param_grad = scaled_grad.abs().mean() * torch.randn_like(param) * 0.01
-                                    param.grad += param_grad
+                return scaled_grad
             return grad
         self.connection.register_hook(connection_hook)
         
@@ -194,16 +152,32 @@ class NeuralQuantumBridge(nn.Module):
         
         # Ensure riemannian framework connection coeffs require gradients
         if hasattr(self.pattern_bundle, 'riemannian_framework'):
-            if hasattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs'):
-                self.pattern_bundle.riemannian_framework.connection_coeffs.requires_grad_(True)
-                # Register with pattern bundle using a flat name
-                self.pattern_bundle.register_parameter(
-                    'riemannian_connection_coeffs',  # Flat name without dots
-                    self.pattern_bundle.riemannian_framework.connection_coeffs
-                )
-                # Create reference for backward compatibility
-                setattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs', 
-                       self.pattern_bundle.riemannian_framework.connection_coeffs)
+            # Initialize riemannian connection coefficients
+            riemannian_connection = nn.Parameter(
+                torch.randn(hidden_dim, hidden_dim, hidden_dim, device=self.device, dtype=self.dtype) * 0.02,
+                requires_grad=True
+            )
+            
+            # Register gradient hook for riemannian connection
+            def riemannian_connection_hook(grad):
+                if grad is not None:
+                    # Scale gradients for numerical stability
+                    scaled_grad = grad * 0.1
+                    return scaled_grad
+                return grad
+            riemannian_connection.register_hook(riemannian_connection_hook)
+            
+            # Register with pattern bundle using a flat name
+            self.pattern_bundle.register_parameter(
+                'riemannian_connection_coeffs',  # Flat name without dots
+                riemannian_connection
+            )
+            
+            # Set the connection coefficients in the riemannian framework
+            self.pattern_bundle.riemannian_framework.connection_coeffs = riemannian_connection
+            
+            # Create reference for backward compatibility
+            setattr(self.pattern_bundle.riemannian_framework, 'connection_coeffs', riemannian_connection)
         
         # Initialize inverse projection
         self.inverse_projection = nn.Linear(
@@ -1143,6 +1117,7 @@ class NeuralQuantumBridge(nn.Module):
         # Get metric and connection with proper dtype
         metric = self.metric.to(dtype=self.dtype)
         connection = self.connection.to(dtype=self.dtype)
+        riemannian_connection = self.pattern_bundle.riemannian_connection_coeffs.to(dtype=self.dtype)
         
         # Compute metric contribution
         x_metric = torch.einsum('...i,ij->...j', x, metric)
@@ -1151,6 +1126,10 @@ class NeuralQuantumBridge(nn.Module):
         # Compute connection contribution
         x_connection = torch.einsum('...i,ijk->...k', x, connection)
         x_connection = x_connection.to(dtype=self.dtype)
+        
+        # Compute riemannian connection contribution
+        x_riemannian = torch.einsum('...i,ijk->...k', x, riemannian_connection)
+        x_riemannian = x_riemannian.to(dtype=self.dtype)
         
         # Add gradient hook to connection computation
         def connection_hook(grad):
@@ -1163,8 +1142,19 @@ class NeuralQuantumBridge(nn.Module):
             return grad
         x_connection.register_hook(connection_hook)
         
+        # Add gradient hook to riemannian connection computation
+        def riemannian_hook(grad):
+            if grad is not None:
+                # Ensure gradients flow back to riemannian connection
+                if riemannian_connection.grad is None:
+                    riemannian_connection.grad = grad.mean(0).unsqueeze(-1)
+                else:
+                    riemannian_connection.grad = riemannian_connection.grad + grad.mean(0).unsqueeze(-1)
+            return grad
+        x_riemannian.register_hook(riemannian_hook)
+        
         # Combine metric and connection contributions
-        x_combined = x_metric + x_connection
+        x_combined = x_metric + x_connection + x_riemannian
         x_combined = x_combined.to(dtype=self.dtype)
         
         # Normalize combined result while preserving input norm
