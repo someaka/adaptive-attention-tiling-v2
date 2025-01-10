@@ -211,35 +211,17 @@ class NeuralQuantumBridge(nn.Module):
         x: torch.Tensor,
         return_validation: bool = False
     ) -> Union[QuantumState, Tuple[QuantumState, QuantumStateValidationResult]]:
-        """Convert neural state to quantum state.
-        
-        Args:
-            x: Neural state tensor of shape (batch_size, hidden_dim) or (batch_size, manifold_dim)
-            return_validation: Whether to return validation result
-            
-        Returns:
-            If return_validation is True, returns (quantum_state, validation_result)
-            Otherwise, returns just quantum_state
-        """
-        # Validate input dimensions
-        if x.shape[-1] != self.hidden_dim:
-            raise ValueError(f"Input tensor must have hidden dimension {self.hidden_dim}, got {x.shape[-1]}")
-
-        # Ensure state manager is on correct device
-        if self.state_manager.device != x.device:
-            self.state_manager.device = x.device
-
-        # Store original energy
+        """Convert neural state to quantum state."""
+        # Store original shape and energy
+        original_shape = x.shape
         original_energy = torch.sum(torch.abs(x) ** 2, dim=-1, keepdim=True)
-
-        # Project to manifold dimension with energy preservation
+        
+        # Project to manifold
         x_manifold = x[..., :self.manifold_dim]
         
-        # Compute current energy
-        current_energy = torch.sum(torch.abs(x_manifold) ** 2, dim=-1, keepdim=True)
-        
-        # Scale factor to preserve energy exactly
-        energy_scale = torch.sqrt(original_energy / (current_energy + 1e-8))
+        # Normalize to preserve energy
+        x_manifold_energy = torch.sum(torch.abs(x_manifold) ** 2, dim=-1, keepdim=True)
+        energy_scale = torch.sqrt(original_energy / (x_manifold_energy + 1e-8))
         x_manifold = x_manifold * energy_scale
         
         # Add small residual connection with strict energy preservation
@@ -1535,16 +1517,16 @@ class NeuralQuantumBridge(nn.Module):
 
     def project_to_quantum(self, x: torch.Tensor) -> QuantumState:
         """Project neural state to quantum state with energy conservation."""
-        # Store original energy
-        original_energy = torch.sum(x.abs() ** 2)
+        # Store original energy per sample
+        original_energy = torch.sum(x.abs() ** 2, dim=-1, keepdim=True)
         
         # Project to manifold
         x_manifold = self.manifold_proj(x)
         
-        # Calculate current energy
-        current_energy = torch.sum(x_manifold.abs() ** 2)
+        # Calculate current energy per sample
+        current_energy = torch.sum(x_manifold.abs() ** 2, dim=-1, keepdim=True)
         
-        # Compute scaling factor to preserve energy
+        # Compute scaling factor to preserve energy per sample
         scale_factor = torch.sqrt(original_energy / (current_energy + self.stability_threshold))
         
         # Scale the manifold projection to preserve energy
@@ -1559,7 +1541,7 @@ class NeuralQuantumBridge(nn.Module):
             amplitudes=x_manifold,
             basis_labels=basis_labels,
             phase=phase,
-            original_norm=torch.norm(x),
+            original_norm=torch.norm(x, dim=-1, keepdim=True),
             original_energy=original_energy
         )
         

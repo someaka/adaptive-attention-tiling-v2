@@ -73,6 +73,7 @@ class EnergyConservingLinear(nn.Module):
         super().__init__()
         # Initialize weight and bias as complex parameters
         real_dtype = torch.float32 if dtype == torch.complex64 else torch.float64
+        # Initialize weight with shape [out_features, in_features] for direct use in forward pass
         self.weight = nn.Parameter(torch.complex(
             torch.randn(out_features, in_features, dtype=real_dtype, device=device) / np.sqrt(in_features),
             torch.randn(out_features, in_features, dtype=real_dtype, device=device) / np.sqrt(in_features)
@@ -84,17 +85,17 @@ class EnergyConservingLinear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Forward pass with energy conservation."""
-        # Compute initial energy
+        # Compute initial energy per sample
         initial_energy = torch.sum(input.abs() ** 2, dim=-1, keepdim=True)
 
-        # Apply linear transformation
+        # Apply linear transformation directly (no transpose needed)
         output = F.linear(input, self.weight, self.bias)
 
-        # Compute output energy
+        # Compute output energy per sample
         output_energy = torch.sum(output.abs() ** 2, dim=-1, keepdim=True)
 
-        # Scale output to conserve energy
-        scale_factor = torch.sqrt(initial_energy / output_energy)
+        # Scale output to conserve energy per sample
+        scale_factor = torch.sqrt(initial_energy / (output_energy + 1e-8))
         output = output * scale_factor
 
         return output
@@ -103,7 +104,7 @@ class EnergyConservingLinear(nn.Module):
         """Reset the parameters to their initial values."""
         nn.init.kaiming_uniform_(self.weight.real, a=np.sqrt(5))
         nn.init.kaiming_uniform_(self.weight.imag, a=np.sqrt(5))
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight.real)
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight.real.t())  # Transpose for correct fan calculation
         bound = 1 / np.sqrt(fan_in)
         nn.init.uniform_(self.bias.real, -bound, bound)
         nn.init.uniform_(self.bias.imag, -bound, bound)
@@ -178,6 +179,17 @@ class QuantumGeometricAttention(nn.Module):
             device=device
         )
         
+        # Add energy conservation hook to quantum bridge
+        def quantum_bridge_hook(grad):
+            if grad is not None:
+                # Scale gradient to prevent explosion
+                grad = grad / (grad.norm() + 1e-8)
+                return grad
+            return grad
+        
+        for param in self.quantum_bridge.parameters():
+            param.register_hook(quantum_bridge_hook)
+        
         # Initialize tiles with complex dtype and proper manifold dimension
         self.tiles = nn.ModuleList([
             QuantumMotivicTile(
@@ -231,6 +243,14 @@ class QuantumGeometricAttention(nn.Module):
         
         # Initialize dropout
         self.dropout = nn.Dropout(dropout)
+        
+        # Initialize pattern bundle
+        self.pattern_bundle = PatternRiemannianStructure(
+            manifold_dim=self.manifold_dim,
+            pattern_dim=self.manifold_dim,  # Use manifold_dim for pattern dimension
+            device=self.device,
+            dtype=self.dtype
+        )
         
         # Ensure all parameters require gradients
         for param in self.parameters():
@@ -623,8 +643,12 @@ class QuantumGeometricAttention(nn.Module):
         if mask is not None:
             # Expand mask to match stacked_outputs shape
             expanded_mask = mask.unsqueeze(1).unsqueeze(-1)  # [batch_size, 1, seq_len, 1]
-            expanded_mask = expanded_mask.expand(-1, self.num_heads, -1, self.manifold_dim)  # [batch_size, num_heads, seq_len, manifold_dim]
+            # Transpose stacked_outputs to match mask dimensions
+            stacked_outputs = stacked_outputs.transpose(1, 2)  # [batch_size, num_heads, seq_len, manifold_dim]
+            expanded_mask = expanded_mask.expand(-1, stacked_outputs.size(1), -1, stacked_outputs.size(-1))
             stacked_outputs = stacked_outputs.masked_fill(~expanded_mask, 0.0)
+            # Transpose back to original shape
+            stacked_outputs = stacked_outputs.transpose(1, 2)  # [batch_size, seq_len, num_heads, manifold_dim]
         
         # Mean over heads with energy preservation
         mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_len, manifold_dim]
@@ -931,53 +955,51 @@ class QuantumGeometricAttention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        return_metrics: bool = False,
+        return_metrics: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Compute quantum geometric attention patterns.
+        """Compute attention patterns with quantum geometric structure."""
+        # Get dimensions
+        batch_size, num_heads, seq_len, head_dim = query.shape
         
-        Args:
-            query: Query tensor [batch_size, num_heads, seq_len, head_dim]
-            key: Key tensor [batch_size, num_heads, seq_len, head_dim]
-            value: Value tensor [batch_size, num_heads, seq_len, head_dim]
-            mask: Optional attention mask [batch_size, seq_len]
-            return_metrics: Whether to return attention metrics
-            
-        Returns:
-            - Attention patterns [batch_size, num_heads, seq_len, seq_len]
-            - Optional metrics dictionary if return_metrics is True
-        """
-        # Initialize metrics
-        metrics: Dict[str, Any] = {}
+        # Reshape for manifold projection while preserving batch structure
+        query_flat = query.reshape(batch_size * num_heads * seq_len, head_dim)
+        key_flat = key.reshape(batch_size * num_heads * seq_len, head_dim)
+        value_flat = value.reshape(batch_size * num_heads * seq_len, head_dim)
         
-        # Compute attention scores
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # Project to manifold space
+        query_manifold = self.manifold_proj(query_flat)  # [batch*heads*seq, manifold_dim]
+        key_manifold = self.manifold_proj(key_flat)      # [batch*heads*seq, manifold_dim]
+        value_manifold = self.manifold_proj(value_flat)  # [batch*heads*seq, manifold_dim]
         
-        # Apply mask if provided
-        if mask is not None:
-            scores = scores.masked_fill(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+        # Reshape back to attention format
+        query_manifold = query_manifold.reshape(batch_size, num_heads, seq_len, -1)
+        key_manifold = key_manifold.reshape(batch_size, num_heads, seq_len, -1)
+        value_manifold = value_manifold.reshape(batch_size, num_heads, seq_len, -1)
         
-        # Split into real and imaginary parts
-        scores_real = scores.real
-        scores_imag = scores.imag
+        # Compute attention scores with quantum geometric structure
+        attention_scores = torch.matmul(query_manifold, key_manifold.transpose(-2, -1))
+        attention_scores = attention_scores / math.sqrt(head_dim)
         
-        # Apply softmax to real and imaginary parts separately
-        attn_real = F.softmax(scores_real, dim=-1)
-        attn_imag = F.softmax(scores_imag, dim=-1)
+        # Apply softmax
+        attention_weights = F.softmax(attention_scores, dim=-1)
         
-        # Combine real and imaginary parts
-        attn = torch.complex(attn_real, attn_imag)
+        # Apply attention to values
+        attention_output = torch.matmul(attention_weights, value_manifold)
         
-        # Normalize to ensure row-wise sum is 1
-        row_sums = torch.sum(attn, dim=-1, keepdim=True)
-        attn = attn / row_sums
+        # Project back to original space
+        attention_flat = attention_output.reshape(batch_size * num_heads * seq_len, -1)
+        output = self.manifold_proj_inv(attention_flat)
+        output = output.reshape(batch_size, num_heads, seq_len, self.hidden_dim)
         
-        if return_metrics:
-            metrics['attention_scores'] = scores
-            metrics['attention_weights'] = attn
-            return attn, metrics
-            
-        return attn
+        if not return_metrics:
+            return output
+        
+        metrics = {
+            'attention_weights': attention_weights,
+            'attention_scores': attention_scores
+        }
+        
+        return output, metrics
 
     def integrate_heads(self, head_states: List[torch.Tensor]) -> torch.Tensor:
         """Integrate multiple attention heads into a single representation.

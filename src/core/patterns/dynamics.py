@@ -63,8 +63,10 @@ class PatternDynamics:
         # Ensure field operator has correct shape for matrix multiplication
         if len(field_operator.shape) == 2:
             # Single operator for all batches
-            field_op_flat = field_operator.reshape(pattern_size, pattern_size)
-            field_op_flat = field_op_flat.unsqueeze(0).expand(batch_size, pattern_size, pattern_size)
+            field_op_flat = field_operator.reshape(pattern_size, -1)  # Allow flexible reshaping
+            # Ensure field operator has correct size
+            if field_op_flat.size(1) != pattern_size:
+                field_op_flat = field_op_flat[:, :pattern_size]  # Truncate if needed
         else:
             # Batch of operators
             field_op_flat = field_operator.reshape(batch_size, pattern_size, pattern_size)
