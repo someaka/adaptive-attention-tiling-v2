@@ -64,17 +64,22 @@ class TestQuantumGeometricAttention:
     @pytest.fixture
     def manifold_dim(self) -> int:
         """Return manifold dimension for tests."""
-        return 8  # Increased from 2 to match test_gradient_flow.py
+        return 8  # Base dimension
 
     @pytest.fixture
-    def hidden_dim(self, manifold_dim) -> int:
-        """Return hidden dimension for tests."""
-        return 16  # Updated to match test_gradient_flow.py
+    def head_dim(self, hidden_dim, num_heads) -> int:
+        """Return dimension per attention head."""
+        return hidden_dim // num_heads  # Each head gets hidden_dim/num_heads dimensions
 
     @pytest.fixture
     def num_heads(self) -> int:
         """Return number of attention heads for tests."""
-        return 2  # Reduced from 4 to match test_gradient_flow.py
+        return 2  # Keep as is
+
+    @pytest.fixture
+    def hidden_dim(self) -> int:
+        """Return total hidden dimension."""
+        return 16  # Fixed total dimension
 
     @pytest.fixture
     def batch_size(self) -> int:
@@ -165,13 +170,17 @@ class TestQuantumGeometricAttention:
         self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
     ):
         """Test attention pattern computation."""
-        # Create query, key, value tensors with correct shapes
-        head_dim = hidden_dim // num_heads
-        
+        # Get dimensions from attention layer to ensure consistency
+        head_dim = hidden_dim // num_heads  # This is hidden_dim // num_heads
+
         # Create tensors with correct shape [batch_size, num_heads, seq_len, head_dim]
         query = complex_randn(batch_size, num_heads, seq_length, head_dim)
         key = complex_randn(batch_size, num_heads, seq_length, head_dim)
         value = complex_randn(batch_size, num_heads, seq_length, head_dim)
+
+        # Print shapes for debugging
+        print(f"Query shape: {query.shape}, Head dim: {head_dim}")
+        print(f"Hidden dim: {hidden_dim}, Num heads: {num_heads}")
 
         # Ensure tensors require gradients
         query.requires_grad_(True)
@@ -187,21 +196,27 @@ class TestQuantumGeometricAttention:
         result = attention_layer.compute_attention_patterns(
             query, key, value, return_metrics=True
         )
-        attention_output, metrics = result
 
-        # Test output shape
-        expected_output_shape = (batch_size, num_heads, seq_length, hidden_dim)
-        assert attention_output.shape == expected_output_shape, \
-            f"Output shape should be {expected_output_shape}, got {attention_output.shape}"
+        # Check output shape and metrics
+        output, metrics = result
+        assert output.shape == (batch_size, num_heads, seq_length, head_dim), f"Expected shape {(batch_size, num_heads, seq_length, head_dim)}, got {output.shape}"
+        assert isinstance(metrics, dict), "Expected metrics to be a dictionary"
+        assert "attention_weights" in metrics, "Expected attention_weights in metrics"
+        assert "attention_scores" in metrics, "Expected attention_scores in metrics"
 
-        # Compute loss that ensures all parameters are used
-        loss = attention_output.abs().pow(2).sum()  # Use squared loss for stronger gradients
+        # Compute loss and check gradients
+        loss = output.abs().mean()
         loss.backward()
 
-        # Check gradients
-        assert query.grad is not None, "Query should receive gradients"
-        assert key.grad is not None, "Key should receive gradients"
-        assert value.grad is not None, "Value should receive gradients"
+        # Check that gradients are computed
+        assert query.grad is not None, "Expected gradients for query"
+        assert key.grad is not None, "Expected gradients for key"
+        assert value.grad is not None, "Expected gradients for value"
+
+        # Check gradient properties
+        assert not torch.isnan(query.grad).any(), "NaN in query gradients"
+        assert not torch.isnan(key.grad).any(), "NaN in key gradients"
+        assert not torch.isnan(value.grad).any(), "NaN in value gradients"
 
     def test_geometric_attention_flow(
         self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
@@ -647,9 +662,9 @@ class TestQuantumGeometricAttention:
         """Test attention pattern computation."""
         # Create query, key tensors with proper dimensions
         head_dim = hidden_dim // num_heads
-        query = complex_randn(batch_size, num_heads, seq_length, head_dim)
-        key = complex_randn(batch_size, num_heads, seq_length, head_dim)
-        value = complex_randn(batch_size, num_heads, seq_length, head_dim)
+        query = complex_randn(batch_size, num_heads, seq_length, hidden_dim)
+        key = complex_randn(batch_size, num_heads, seq_length, hidden_dim)
+        value = complex_randn(batch_size, num_heads, seq_length, hidden_dim)
 
         # Compute attention patterns
         result = attention_layer.compute_attention_patterns(query, key, value, return_metrics=True)
@@ -1187,3 +1202,116 @@ class TestQuantumGeometricAttention:
                 initial_energy, eval_energy,
                 rtol=1e-2, atol=1e-2
             ), f"Energy not conserved in eval mode: initial={initial_energy.item():.4f}, final={eval_energy.item():.4f}"
+
+    def trace_module_shapes(self, module, example_inputs):
+        """Helper function to trace module shapes and catch mismatches."""
+        try:
+            # Create a copy of the module for tracing
+            traced_module = torch.jit.trace(module, example_inputs)
+            
+            # Log basic module info
+            logger.info("\n=== Traced Module Info ===")
+            logger.info(f"Module type: {type(traced_module)}")
+            
+            # Try to get graph safely
+            try:
+                if isinstance(traced_module, torch.jit.ScriptModule):
+                    graph = traced_module.inlined_graph
+                    logger.info("\n=== Traced Computation Graph ===")
+                    logger.info(str(graph))
+                    
+                    # Extract and log shape information
+                    logger.info("\n=== Shape Analysis ===")
+                    for node in graph.nodes():
+                        try:
+                            if isinstance(node, torch._C.Node):
+                                logger.info(f"Processing node: {node.scopeName()}")
+                                # Skip shape inspection as it's not compatible with TorchScript
+                        except Exception as node_error:
+                            logger.warning(f"Could not process node: {node_error}")
+            except Exception as graph_error:
+                logger.warning(f"Could not access graph: {graph_error}")
+                
+            return traced_module
+        except Exception as e:
+            logger.error(f"Tracing failed: {str(e)}")
+            raise
+
+    @pytest.mark.tracing
+    def test_shape_tracing(self, attention_layer, batch_size, seq_length, hidden_dim):
+        """Test shape consistency using JIT tracing."""
+        logger.info("\n=== Starting Shape Tracing Test ===")
+        
+        # Create example inputs
+        x = complex_randn(batch_size, seq_length, hidden_dim)
+        mask = torch.ones(batch_size, seq_length).bool()
+        
+        # Trace the full forward pass
+        try:
+            traced_forward = self.trace_module_shapes(
+                attention_layer,
+                (x,)  # Example inputs tuple
+            )
+            logger.info("Full forward pass tracing successful")
+        except Exception as e:
+            logger.error(f"Forward pass tracing failed: {str(e)}")
+            raise
+            
+        # Trace individual components
+        try:
+            # Trace attention pattern computation
+            head_dim = hidden_dim // attention_layer.num_heads
+            query = complex_randn(batch_size, attention_layer.num_heads, seq_length, head_dim)
+            key = complex_randn(batch_size, attention_layer.num_heads, seq_length, head_dim)
+            value = complex_randn(batch_size, attention_layer.num_heads, seq_length, head_dim)
+            
+            traced_patterns = self.trace_module_shapes(
+                lambda q, k, v: attention_layer.compute_attention_patterns(q, k, v, return_metrics=False),
+                (query, key, value)
+            )
+            logger.info("Attention pattern computation tracing successful")
+            
+            # Trace geometric flow
+            traced_flow = self.trace_module_shapes(
+                lambda x: attention_layer.geometric_attention_flow(x, mask=mask, return_metrics=False),
+                (x,)
+            )
+            logger.info("Geometric flow tracing successful")
+            
+            # Trace quantum bridge
+            traced_bridge = self.trace_module_shapes(
+                attention_layer.quantum_bridge.neural_to_quantum,
+                (x,)
+            )
+            logger.info("Quantum bridge tracing successful")
+            
+        except Exception as e:
+            logger.error(f"Component tracing failed: {str(e)}")
+            raise
+            
+        # Verify shapes through traced modules
+        with torch.no_grad():
+            # Test forward pass shapes
+            if isinstance(traced_forward, torch.jit.ScriptModule):
+                output = traced_forward.forward(x)
+                assert output.shape == x.shape, f"Forward pass shape mismatch: expected {x.shape}, got {output.shape}"
+            
+            # Test attention pattern shapes
+            if isinstance(traced_patterns, torch.jit.ScriptModule):
+                patterns = traced_patterns.forward(query, key, value)
+                expected_pattern_shape = (batch_size, attention_layer.num_heads, seq_length, seq_length)
+                assert patterns.shape == expected_pattern_shape, \
+                    f"Pattern shape mismatch: expected {expected_pattern_shape}, got {patterns.shape}"
+            
+            # Test flow shapes
+            if isinstance(traced_flow, torch.jit.ScriptModule):
+                flow_output = traced_flow.forward(x)
+                assert flow_output.shape == x.shape, \
+                    f"Flow shape mismatch: expected {x.shape}, got {flow_output.shape}"
+            
+            # Test quantum bridge shapes
+            if isinstance(traced_bridge, torch.jit.ScriptModule):
+                quantum_output = traced_bridge.forward(x)
+                expected_quantum_shape = (batch_size, seq_length, attention_layer.manifold_dim)
+                assert quantum_output.shape == expected_quantum_shape, \
+                    f"Quantum bridge shape mismatch: expected {expected_quantum_shape}, got {quantum_output.shape}"

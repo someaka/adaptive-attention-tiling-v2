@@ -12,6 +12,7 @@ Into a unified framework for understanding computational patterns
 through the lens of quantum geometry and arithmetic dynamics.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union, Any, cast
 
@@ -66,14 +67,18 @@ from src.validation.quantum.state import (
 from src.validation.patterns.formation import PatternFormationValidator
 from ..patterns.fiber_types import LocalChart as PatternSection
 
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class EnergyConservingLinear(nn.Module):
     """Linear layer that conserves energy during forward pass."""
     def __init__(self, in_features: int, out_features: int, dtype: torch.dtype = torch.complex64, device: Optional[torch.device] = None):
         super().__init__()
-        # Initialize weight and bias as complex parameters
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # Initialize weight and bias with correct dimensions [out_features, in_features]
         real_dtype = torch.float32 if dtype == torch.complex64 else torch.float64
-        # Initialize weight with shape [out_features, in_features] for direct use in forward pass
         self.weight = nn.Parameter(torch.complex(
             torch.randn(out_features, in_features, dtype=real_dtype, device=device) / np.sqrt(in_features),
             torch.randn(out_features, in_features, dtype=real_dtype, device=device) / np.sqrt(in_features)
@@ -85,16 +90,16 @@ class EnergyConservingLinear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Forward pass with energy conservation."""
-        # Compute initial energy per sample
+        # Compute initial energy
         initial_energy = torch.sum(input.abs() ** 2, dim=-1, keepdim=True)
 
-        # Apply linear transformation directly (no transpose needed)
-        output = F.linear(input, self.weight, self.bias)
+        # Apply linear transformation
+        output = F.linear(input, self.weight, self.bias)  # weight shape is [out_features, in_features]
 
-        # Compute output energy per sample
+        # Compute output energy
         output_energy = torch.sum(output.abs() ** 2, dim=-1, keepdim=True)
 
-        # Scale output to conserve energy per sample
+        # Scale output to conserve energy
         scale_factor = torch.sqrt(initial_energy / (output_energy + 1e-8))
         output = output * scale_factor
 
@@ -104,7 +109,7 @@ class EnergyConservingLinear(nn.Module):
         """Reset the parameters to their initial values."""
         nn.init.kaiming_uniform_(self.weight.real, a=np.sqrt(5))
         nn.init.kaiming_uniform_(self.weight.imag, a=np.sqrt(5))
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight.real.t())  # Transpose for correct fan calculation
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight.real)
         bound = 1 / np.sqrt(fan_in)
         nn.init.uniform_(self.bias.real, -bound, bound)
         nn.init.uniform_(self.bias.imag, -bound, bound)
@@ -146,6 +151,10 @@ class QuantumGeometricAttention(nn.Module):
         """
         super().__init__()
         
+        # Add shape validation flag
+        self.validate_shapes = True
+        self.shape_errors = []
+        
         # Store parameters
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -164,9 +173,9 @@ class QuantumGeometricAttention(nn.Module):
         if dtype not in [torch.complex64, torch.complex128]:
             raise ValueError("dtype must be either torch.complex64 or torch.complex128")
 
-        # Initialize manifold projections with complex dtype
-        self.manifold_proj = EnergyConservingLinear(hidden_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
-        self.manifold_proj_inv = EnergyConservingLinear(self.manifold_dim, hidden_dim, dtype=self.dtype, device=self.device)
+        # Initialize manifold projections with complex dtype and correct dimensions
+        self.manifold_proj = EnergyConservingLinear(self.hidden_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
+        self.manifold_proj_inv = EnergyConservingLinear(self.manifold_dim, self.hidden_dim, dtype=self.dtype, device=self.device)
         
         # Initialize quantum bridge with complex dtype
         self.quantum_bridge = NeuralQuantumBridge(
@@ -429,351 +438,379 @@ class QuantumGeometricAttention(nn.Module):
         return x * mask
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass through quantum geometric attention."""
-        print(f"\nInput shape: {x.shape}")
-        batch_size, seq_len, _ = x.shape
+        """Forward pass with shape validation."""
+        self._clear_shape_errors()
         
-        # Store original input shape and energy for gradient flow
-        self.x_flat = x.reshape(-1, x.shape[-1])  # Store x_flat as class attribute
-        self.x_flat.requires_grad_(True)  # Ensure requires_grad is True
-        self.x_flat.retain_grad()  # Retain gradients for x_flat
-        initial_energy = torch.sum(self.x_flat.abs() ** 2)
-        print(f"x_flat requires_grad: {self.x_flat.requires_grad}")
-        
-        def normalize_with_energy(tensor, target_energy):
-            """Normalize tensor while preserving target energy and phase information."""
-            # Handle both real and complex tensors
-            if torch.is_complex(tensor):
-                current_energy = torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True)
+        try:
+            # Validate input shape
+            self._check_input_shapes(x)
+            
+            # Original forward pass code with added shape checks
+            batch_size, seq_len, _ = x.shape
+            
+            # Store original input shape and energy for gradient flow
+            self.x_flat = x.reshape(-1, x.shape[-1])
+            self._validate_shape(
+                self.x_flat,
+                (batch_size * seq_len, self.hidden_dim),
+                "x_flat"
+            )
+            
+            # Store original input shape and energy for gradient flow
+            self.x_flat = x.reshape(-1, x.shape[-1])  # Store x_flat as class attribute
+            self.x_flat.requires_grad_(True)  # Ensure requires_grad is True
+            self.x_flat.retain_grad()  # Retain gradients for x_flat
+            initial_energy = torch.sum(self.x_flat.abs() ** 2)
+            print(f"x_flat requires_grad: {self.x_flat.requires_grad}")
+            
+            def normalize_with_energy(tensor, target_energy):
+                """Normalize tensor while preserving target energy and phase information."""
+                # Handle both real and complex tensors
+                if torch.is_complex(tensor):
+                    current_energy = torch.sum(tensor.real ** 2 + tensor.imag ** 2, dim=-1, keepdim=True)
+                else:
+                    current_energy = torch.sum(tensor ** 2, dim=-1, keepdim=True)
+                
+                # Ensure scale is properly broadcast
+                scale = torch.sqrt(target_energy / (current_energy + 1e-8))
+                if scale.dim() < tensor.dim():
+                    scale = scale.view(*scale.shape, *([1] * (tensor.dim() - scale.dim())))
+                
+                # Scale tensor while preserving phase
+                return tensor * scale
+
+            # Convert input to complex with proper dtype
+            if not torch.is_complex(self.x_flat):
+                # If input is real, convert to complex
+                float_dtype = torch.float32 if self.dtype == torch.complex64 else torch.float64
+                x_real = self.x_flat.to(float_dtype)
+                x_imag = torch.zeros_like(x_real, dtype=float_dtype)
+                x_complex = torch.complex(x_real, x_imag).to(self.dtype)
             else:
-                current_energy = torch.sum(tensor ** 2, dim=-1, keepdim=True)
+                # If input is already complex, just ensure it has the right dtype
+                x_complex = self.x_flat.to(self.dtype)
+
+            # Project input to manifold space using x_flat
+            x_manifold = self.manifold_proj(x_complex.reshape(batch_size, seq_len, -1))
             
-            # Ensure scale is properly broadcast
-            scale = torch.sqrt(target_energy / (current_energy + 1e-8))
-            if scale.dim() < tensor.dim():
-                scale = scale.view(*scale.shape, *([1] * (tensor.dim() - scale.dim())))
+            # Calculate initial energy per sequence position
+            initial_energy = torch.sum(x_complex.reshape(batch_size, seq_len, -1).real ** 2 + 
+                             x_complex.reshape(batch_size, seq_len, -1).imag ** 2, 
+                             dim=-1, keepdim=True)
             
-            # Scale tensor while preserving phase
-            return tensor * scale
+            # Ensure x_manifold is complex
+            if not torch.is_complex(x_manifold):
+                x_manifold = torch.complex(x_manifold, torch.zeros_like(x_manifold))
+            
+            # Normalize manifold projection to match initial energy
+            x_manifold = normalize_with_energy(x_manifold, initial_energy)
+            print(f"After manifold projection shape: {x_manifold.shape}")
+            print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
+            
+            # Initialize base metric tensor with proper dimensions
+            base_metric = self.base_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+            base_metric.requires_grad_(True)
 
-        # Convert input to complex with proper dtype
-        if not torch.is_complex(self.x_flat):
-            # If input is real, convert to complex
-            float_dtype = torch.float32 if self.dtype == torch.complex64 else torch.float64
-            x_real = self.x_flat.to(float_dtype)
-            x_imag = torch.zeros_like(x_real, dtype=float_dtype)
-            x_complex = torch.complex(x_real, x_imag).to(self.dtype)
-        else:
-            # If input is already complex, just ensure it has the right dtype
-            x_complex = self.x_flat.to(self.dtype)
+            # Use pattern_metric parameter with proper dimensions
+            pattern_metric = self.pattern_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+            pattern_metric.requires_grad_(True)
+            pattern_metric.retain_grad()  # Retain gradients for pattern_metric
 
-        # Project input to manifold space using x_flat
-        x_manifold = self.manifold_proj(x_complex.reshape(batch_size, seq_len, -1))
-        
-        # Calculate initial energy per sequence position
-        initial_energy = torch.sum(x_complex.reshape(batch_size, seq_len, -1).real ** 2 + 
-                                 x_complex.reshape(batch_size, seq_len, -1).imag ** 2, 
-                                 dim=-1, keepdim=True)
-        
-        # Ensure x_manifold is complex
-        if not torch.is_complex(x_manifold):
-            x_manifold = torch.complex(x_manifold, torch.zeros_like(x_manifold))
-        
-        # Normalize manifold projection to match initial energy
-        x_manifold = normalize_with_energy(x_manifold, initial_energy)
-        print(f"After manifold projection shape: {x_manifold.shape}")
-        print(f"x_manifold requires_grad: {x_manifold.requires_grad}")
-        
-        # Initialize base metric tensor with proper dimensions
-        base_metric = self.base_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
-        base_metric.requires_grad_(True)
+            # Use metric parameter with proper dimensions
+            metric = self.metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+            metric.requires_grad_(True)
+            metric.retain_grad()  # Retain gradients for metric
 
-        # Use pattern_metric parameter with proper dimensions
-        pattern_metric = self.pattern_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
-        pattern_metric.requires_grad_(True)
-        pattern_metric.retain_grad()  # Retain gradients for pattern metric
+            # Get metric_factors from riemannian_framework and ensure gradient tracking
+            metric_factors = self.quantum_bridge.pattern_bundle.riemannian_framework.metric_factors
+            metric_factors.requires_grad_(True)
+            metric_factors.retain_grad()  # Ensure gradients are retained
 
-        # Use metric parameter with proper dimensions
-        metric = self.metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
-        metric.requires_grad_(True)
-        metric.retain_grad()  # Retain gradients for metric
+            # Create metric combination with gradient tracking
+            metric_combination = base_metric + 0.5 * (metric + pattern_metric)
+            metric_combination.requires_grad_(True)
 
-        # Get metric_factors from riemannian_framework and ensure gradient tracking
-        metric_factors = self.quantum_bridge.pattern_bundle.riemannian_framework.metric_factors
-        metric_factors.requires_grad_(True)
-        metric_factors.retain_grad()  # Ensure gradients are retained
+            # Add metric_factors contribution while preserving dimensions
+            metric_factors_reshaped = metric_factors.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+            metric_factors_contribution = torch.matmul(metric_factors_reshaped, metric_factors_reshaped.t())
+            metric_combination = metric_combination + 0.1 * metric_factors_contribution
+            metric_combination.requires_grad_(True)
 
-        # Create metric combination with gradient tracking
-        metric_combination = base_metric + 0.5 * (metric + pattern_metric)
-        metric_combination.requires_grad_(True)
+            # Add gradient hook to metric combination
+            def metric_combination_hook(grad):
+                if grad is not None:
+                    # Create full-size gradient for pattern_metric
+                    full_grad = torch.zeros_like(self.pattern_metric)
+                    full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
+                    # Ensure gradients flow back to pattern_metric
+                    if self.pattern_metric.grad is None:
+                        self.pattern_metric.grad = full_grad
+                    else:
+                        self.pattern_metric.grad = self.pattern_metric.grad + full_grad
 
-        # Add metric_factors contribution while preserving dimensions
-        metric_factors_reshaped = metric_factors.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
-        metric_factors_contribution = torch.matmul(metric_factors_reshaped, metric_factors_reshaped.t())
-        metric_combination = metric_combination + 0.1 * metric_factors_contribution
-        metric_combination.requires_grad_(True)
-
-        # Add gradient hook to metric combination
-        def metric_combination_hook(grad):
-            if grad is not None:
-                # Create full-size gradient for pattern_metric
-                full_grad = torch.zeros_like(self.pattern_metric)
-                full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
-                # Ensure gradients flow back to pattern_metric
-                if self.pattern_metric.grad is None:
-                    self.pattern_metric.grad = full_grad
-                else:
-                    self.pattern_metric.grad = self.pattern_metric.grad + full_grad
-
-                # Create full-size gradient for metric_factors
-                metric_factors_grad = torch.zeros_like(metric_factors)
-                # Compute the contribution for the top-left block
-                top_left_grad = 0.1 * grad @ metric_factors_reshaped
-                metric_factors_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(top_left_grad)
-                # Ensure gradients flow back to metric_factors
-                if metric_factors.grad is None:
-                    metric_factors.grad = metric_factors_grad
-                else:
-                    metric_factors.grad = metric_factors.grad + metric_factors_grad
+                    # Create full-size gradient for metric_factors
+                    metric_factors_grad = torch.zeros_like(metric_factors)
+                    # Compute the contribution for the top-left block
+                    top_left_grad = 0.1 * grad @ metric_factors_reshaped
+                    metric_factors_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(top_left_grad)
+                    # Ensure gradients flow back to metric_factors
+                    if metric_factors.grad is None:
+                        metric_factors.grad = metric_factors_grad
+                    else:
+                        metric_factors.grad = metric_factors.grad + metric_factors_grad
+                    return grad
                 return grad
-            return grad
-        metric_combination.register_hook(metric_combination_hook)
-        
-        # Create new combined metric tensor
-        combined_metric = metric_combination + self.combined_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
-        combined_metric.requires_grad_(True)
-        combined_metric.retain_grad()  # Retain gradients for combined metric
-        
-        # Add gradient hook to combined metric
-        def combined_metric_hook(grad):
-            if grad is not None:
-                # Create full-size gradient
-                full_grad = torch.zeros_like(self.pattern_metric)
-                full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
-                # Ensure gradients flow back to pattern_metric
-                if self.pattern_metric.grad is None:
-                    self.pattern_metric.grad = full_grad
-                else:
-                    self.pattern_metric.grad = self.pattern_metric.grad + full_grad
+            metric_combination.register_hook(metric_combination_hook)
+            
+            # Create new combined metric tensor
+            combined_metric = metric_combination + self.combined_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+            combined_metric.requires_grad_(True)
+            combined_metric.retain_grad()  # Retain gradients for combined metric
+            
+            # Add gradient hook to combined metric
+            def combined_metric_hook(grad):
+                if grad is not None:
+                    # Create full-size gradient
+                    full_grad = torch.zeros_like(self.pattern_metric)
+                    full_grad.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim).copy_(0.5 * grad)
+                    # Ensure gradients flow back to pattern_metric
+                    if self.pattern_metric.grad is None:
+                        self.pattern_metric.grad = full_grad
+                    else:
+                        self.pattern_metric.grad = self.pattern_metric.grad + full_grad
+                    return grad
                 return grad
-            return grad
-        combined_metric.register_hook(combined_metric_hook)
+            combined_metric.register_hook(combined_metric_hook)
 
-        # Apply metric with gradient stabilization
-        x_metric = torch.matmul(x_manifold, combined_metric)
-        metric_norm = torch.norm(combined_metric)
-        x_metric = x_metric * (1.0 + 1e-6 * metric_norm)
-        x_metric = torch.matmul(x_metric, combined_metric)
-        x_metric.requires_grad_(True)
-        
-        # Add gradient hook to x_metric
-        def x_metric_hook(grad):
-            if grad is not None:
-                # Take mean over batch dimension to match combined_metric shape
-                batch_grad = torch.mean(grad.transpose(-2, -1) @ x_manifold, dim=0)
-                # Create full-size gradient with zeros
-                full_grad = torch.zeros_like(self.quantum_bridge.pattern_bundle_metric)
-                # Copy the batch_grad into the top-left quadrant of full_grad
-                full_grad[:self.manifold_dim, :self.manifold_dim] = batch_grad
-                # Ensure gradients flow back to pattern_metric through combined_metric
-                if combined_metric.grad is None:
-                    combined_metric.grad = batch_grad
-                else:
-                    combined_metric.grad = combined_metric.grad + batch_grad
-                # Also ensure gradients flow to pattern bundle metric
-                if self.quantum_bridge.pattern_bundle_metric.grad is None:
-                    self.quantum_bridge.pattern_bundle_metric.grad = full_grad
-                else:
-                    self.quantum_bridge.pattern_bundle_metric.grad = self.quantum_bridge.pattern_bundle_metric.grad + full_grad
+            # Apply metric with gradient stabilization
+            x_metric = torch.matmul(x_manifold, combined_metric)
+            metric_norm = torch.norm(combined_metric)
+            x_metric = x_metric * (1.0 + 1e-6 * metric_norm)
+            x_metric = torch.matmul(x_metric, combined_metric)
+            x_metric.requires_grad_(True)
+            
+            # Add gradient hook to x_metric
+            def x_metric_hook(grad):
+                if grad is not None:
+                    # Take mean over batch dimension to match combined_metric shape
+                    batch_grad = torch.mean(grad.transpose(-2, -1) @ x_manifold, dim=0)
+                    # Create full-size gradient with zeros
+                    full_grad = torch.zeros_like(self.quantum_bridge.pattern_bundle_metric)
+                    # Copy the batch_grad into the top-left quadrant of full_grad
+                    full_grad[:self.manifold_dim, :self.manifold_dim] = batch_grad
+                    # Ensure gradients flow back to pattern_metric through combined_metric
+                    if combined_metric.grad is None:
+                        combined_metric.grad = batch_grad
+                    else:
+                        combined_metric.grad = combined_metric.grad + batch_grad
+                    # Also ensure gradients flow to pattern bundle metric
+                    if self.quantum_bridge.pattern_bundle_metric.grad is None:
+                        self.quantum_bridge.pattern_bundle_metric.grad = full_grad
+                    else:
+                        self.quantum_bridge.pattern_bundle_metric.grad = self.quantum_bridge.pattern_bundle_metric.grad + full_grad
+                    return grad
                 return grad
-            return grad
-        x_metric.register_hook(x_metric_hook)
-        
-        print(f"metric requires_grad: {combined_metric.requires_grad}")
-        print(f"pattern_metric requires_grad: {pattern_metric.requires_grad}")
-        print(f"x_metric requires_grad: {x_metric.requires_grad}")
-        
-        # Get connection and ensure consistent types
-        connection = self.quantum_bridge.pattern_bundle.connection
-        if connection.shape[-1] != self.manifold_dim:
-            # Project connection to manifold dimension using narrow
-            connection = connection.narrow(-3, 0, self.manifold_dim).narrow(-2, 0, self.manifold_dim).narrow(-1, 0, self.manifold_dim)
-        connection.requires_grad_(True)  # Ensure connection requires gradients
-        connection.retain_grad()  # Retain gradients for connection
-        print(f"connection requires_grad: {connection.requires_grad}")
-        
-        # Ensure pattern bundle metric requires gradients
-        pattern_bundle_metric = self.quantum_bridge.pattern_bundle_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
-        pattern_bundle_metric.requires_grad_(True)
-        pattern_bundle_metric.retain_grad()  # Retain gradients for pattern metric
-        
-        # Convert x_metric to complex if connection is complex
-        if torch.is_complex(connection):
-            x_metric = x_metric.to(dtype=torch.complex64)
-        
-        # Apply connection to input with gradient tracking
-        x_with_connection = x_metric + torch.einsum('bsi,ijk->bsj', x_metric, connection)
-
-        # Create stronger gradient path for connection
-        connection_scale = connection.abs().mean()
-        x_with_connection = x_with_connection * (1.0 + connection_scale * 1e-3)
-
-        # Add direct gradient path from connection to output
-        x_with_connection = x_with_connection + torch.einsum('bsi,ijk,bsk->bsj', x_metric, connection, x_metric) * 1e-3
-
-        # Normalize to preserve energy
-        x_with_connection_norm = torch.sqrt(torch.sum(x_with_connection.abs() ** 2))
-        x_with_connection = x_with_connection * torch.sqrt(initial_energy) / (x_with_connection_norm + 1e-8)
-        print(f"x_with_connection requires_grad: {x_with_connection.requires_grad}")
-        
-        # Process through tiles
-        tile_outputs = []
-        for i, tile in enumerate(self.tiles):
-            tile_output = tile(x_with_connection)
-            print(f"Tile {i} output shape: {tile_output.shape}")
-            print(f"Tile {i} output requires_grad: {tile_output.requires_grad}")
-            tile_outputs.append(tile_output)
-        
-        # Stack tile outputs
-        stacked_outputs = torch.stack(tile_outputs, dim=2)  # [batch_size, seq_len, num_heads, manifold_dim]
-        print(f"After stacking tile outputs shape: {stacked_outputs.shape}")
-        print(f"stacked_outputs requires_grad: {stacked_outputs.requires_grad}")
-        
-        # Apply mask if provided
-        if mask is not None:
-            # Expand mask to match stacked_outputs shape
-            expanded_mask = mask.unsqueeze(1).unsqueeze(-1)  # [batch_size, 1, seq_len, 1]
-            # Transpose stacked_outputs to match mask dimensions
-            stacked_outputs = stacked_outputs.transpose(1, 2)  # [batch_size, num_heads, seq_len, manifold_dim]
-            expanded_mask = expanded_mask.expand(-1, stacked_outputs.size(1), -1, stacked_outputs.size(-1))
-            stacked_outputs = stacked_outputs.masked_fill(~expanded_mask, 0.0)
-            # Transpose back to original shape
-            stacked_outputs = stacked_outputs.transpose(1, 2)  # [batch_size, seq_len, num_heads, manifold_dim]
-        
-        # Mean over heads with energy preservation
-        mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_len, manifold_dim]
-        mean_output = normalize_with_energy(mean_output, initial_energy)
-        print(f"After mean over heads shape: {mean_output.shape}")
-        print(f"mean_output requires_grad: {mean_output.requires_grad}")
-
-        # Apply quantum attention layers with energy preservation
-        quantum_output = mean_output
-        for i, layer in enumerate(self.attention_layers):
-            quantum_output = layer(quantum_output)
-            quantum_output = normalize_with_energy(quantum_output, initial_energy)
-            print(f"After quantum attention layer {i} shape: {quantum_output.shape}")
-            print(f"quantum_output layer {i} requires_grad: {quantum_output.requires_grad}")
-        
-        # Handle complex tensor for layer norm with energy preservation
-        if torch.is_complex(quantum_output):
-            # Compute current energy before layer norm
-            pre_norm_energy = torch.sum(quantum_output.abs() ** 2)
+            x_metric.register_hook(x_metric_hook)
             
-            # Apply layer norm to real and imaginary parts separately
-            real_part = quantum_output.real.float()
-            imag_part = quantum_output.imag.float()
+            print(f"metric requires_grad: {combined_metric.requires_grad}")
+            print(f"pattern_metric requires_grad: {pattern_metric.requires_grad}")
+            print(f"x_metric requires_grad: {x_metric.requires_grad}")
             
-            # Apply layer norm with correct shape
-            layer_norm = self.quantum_bridge.layer_norm
-            layer_norm.weight = nn.Parameter(layer_norm.weight[:self.manifold_dim])
-            layer_norm.bias = nn.Parameter(layer_norm.bias[:self.manifold_dim])
-            real_norm = F.layer_norm(
-                real_part,
-                normalized_shape=[self.manifold_dim],
-                weight=layer_norm.weight,
-                bias=layer_norm.bias
+            # Get connection and ensure consistent types
+            connection = self.quantum_bridge.pattern_bundle.connection
+            if connection.shape[-1] != self.manifold_dim:
+                # Project connection to manifold dimension using narrow
+                connection = connection.narrow(-3, 0, self.manifold_dim).narrow(-2, 0, self.manifold_dim).narrow(-1, 0, self.manifold_dim)
+            connection.requires_grad_(True)  # Ensure connection requires gradients
+            connection.retain_grad()  # Retain gradients for connection
+            print(f"connection requires_grad: {connection.requires_grad}")
+            
+            # Ensure pattern bundle metric requires gradients
+            pattern_bundle_metric = self.quantum_bridge.pattern_bundle_metric.narrow(0, 0, self.manifold_dim).narrow(1, 0, self.manifold_dim)
+            pattern_bundle_metric.requires_grad_(True)
+            pattern_bundle_metric.retain_grad()  # Retain gradients for pattern metric
+            
+            # Convert x_metric to complex if connection is complex
+            if torch.is_complex(connection):
+                x_metric = x_metric.to(dtype=torch.complex64)
+            
+            # Apply connection to input with gradient tracking
+            x_with_connection = x_metric + torch.einsum('bsi,ijk->bsj', x_metric, connection)
+
+            # Create stronger gradient path for connection
+            connection_scale = connection.abs().mean()
+            x_with_connection = x_with_connection * (1.0 + connection_scale * 1e-3)
+
+            # Add direct gradient path from connection to output
+            x_with_connection = x_with_connection + torch.einsum('bsi,ijk,bsk->bsj', x_metric, connection, x_metric) * 1e-3
+
+            # Normalize to preserve energy
+            x_with_connection_norm = torch.sqrt(torch.sum(x_with_connection.abs() ** 2))
+            x_with_connection = x_with_connection * torch.sqrt(initial_energy) / (x_with_connection_norm + 1e-8)
+            print(f"x_with_connection requires_grad: {x_with_connection.requires_grad}")
+            
+            # Process through tiles
+            tile_outputs = []
+            for i, tile in enumerate(self.tiles):
+                tile_output = tile(x_with_connection)
+                print(f"Tile {i} output shape: {tile_output.shape}")
+                print(f"Tile {i} output requires_grad: {tile_output.requires_grad}")
+                tile_outputs.append(tile_output)
+            
+            # Stack tile outputs
+            stacked_outputs = torch.stack(tile_outputs, dim=2)  # [batch_size, seq_len, num_heads, manifold_dim]
+            print(f"After stacking tile outputs shape: {stacked_outputs.shape}")
+            print(f"stacked_outputs requires_grad: {stacked_outputs.requires_grad}")
+            
+            # Apply mask if provided
+            if mask is not None:
+                # Expand mask to match stacked_outputs shape
+                expanded_mask = mask.unsqueeze(1).unsqueeze(-1)  # [batch_size, 1, seq_len, 1]
+                # Transpose stacked_outputs to match mask dimensions
+                stacked_outputs = stacked_outputs.transpose(1, 2)  # [batch_size, num_heads, seq_len, manifold_dim]
+                expanded_mask = expanded_mask.expand(-1, stacked_outputs.size(1), -1, stacked_outputs.size(-1))
+                stacked_outputs = stacked_outputs.masked_fill(~expanded_mask, 0.0)
+                # Transpose back to original shape
+                stacked_outputs = stacked_outputs.transpose(1, 2)  # [batch_size, seq_len, num_heads, manifold_dim]
+            
+            # Mean over heads with energy preservation
+            mean_output = stacked_outputs.mean(dim=2)  # [batch_size, seq_len, manifold_dim]
+            mean_output = normalize_with_energy(mean_output, initial_energy)
+            print(f"After mean over heads shape: {mean_output.shape}")
+            print(f"mean_output requires_grad: {mean_output.requires_grad}")
+
+            # Apply quantum attention layers with energy preservation
+            quantum_output = mean_output
+            for i, layer in enumerate(self.attention_layers):
+                quantum_output = layer(quantum_output)
+                quantum_output = normalize_with_energy(quantum_output, initial_energy)
+                print(f"After quantum attention layer {i} shape: {quantum_output.shape}")
+                print(f"quantum_output layer {i} requires_grad: {quantum_output.requires_grad}")
+            
+            # Handle complex tensor for layer norm with energy preservation
+            if torch.is_complex(quantum_output):
+                # Compute current energy before layer norm
+                pre_norm_energy = torch.sum(quantum_output.abs() ** 2)
+                
+                # Apply layer norm to real and imaginary parts separately
+                real_part = quantum_output.real.float()
+                imag_part = quantum_output.imag.float()
+                
+                # Apply layer norm with correct shape
+                layer_norm = self.quantum_bridge.layer_norm
+                layer_norm.weight = nn.Parameter(layer_norm.weight[:self.manifold_dim])
+                layer_norm.bias = nn.Parameter(layer_norm.bias[:self.manifold_dim])
+                real_norm = F.layer_norm(
+                    real_part,
+                    normalized_shape=[self.manifold_dim],
+                    weight=layer_norm.weight,
+                    bias=layer_norm.bias
+                )
+                imag_norm = F.layer_norm(
+                    imag_part,
+                    normalized_shape=[self.manifold_dim],
+                    weight=layer_norm.weight,
+                    bias=layer_norm.bias
+                )
+                
+                # Combine back to complex
+                quantum_output_norm = torch.complex(real_norm, imag_norm)
+                
+                # Restore original energy
+                quantum_output_norm = normalize_with_energy(quantum_output_norm, pre_norm_energy)
+            else:
+                # If real tensor, apply layer norm directly and preserve energy
+                pre_norm_energy = torch.sum(quantum_output ** 2)
+                layer_norm = self.quantum_bridge.layer_norm
+                layer_norm.weight = nn.Parameter(layer_norm.weight[:self.manifold_dim])
+                layer_norm.bias = nn.Parameter(layer_norm.bias[:self.manifold_dim])
+                quantum_output_norm = F.layer_norm(
+                    quantum_output.float(),
+                    normalized_shape=[self.manifold_dim],
+                    weight=layer_norm.weight,
+                    bias=layer_norm.bias
+                )
+                quantum_output_norm = normalize_with_energy(quantum_output_norm, pre_norm_energy)
+
+            # Add residual connection with energy preservation
+            residual_weight = 0.1
+            combined_output = quantum_output_norm + residual_weight * quantum_output
+            combined_output = normalize_with_energy(combined_output, initial_energy)
+            
+            # Apply flow operation and unpack output
+            flow_output, _ = self.flow(combined_output)
+            if torch.is_complex(flow_output):
+                flow_output = flow_output.real
+            flow_output = normalize_with_energy(flow_output, initial_energy)
+            print(f"flow_output requires_grad: {flow_output.requires_grad}")
+            
+            # Convert flow_output to complex before inverse projection
+            if not torch.is_complex(flow_output):
+                flow_output = torch.complex(flow_output, torch.zeros_like(flow_output))
+            flow_output = flow_output.to(dtype=self.dtype)
+            
+            # Calculate energy before inverse projection
+            pre_inverse_energy = torch.sum(flow_output.real ** 2 + flow_output.imag ** 2, 
+                                         dim=-1, keepdim=True)
+            
+            # Inverse manifold projection with energy preservation
+            output = self.manifold_proj_inv(flow_output)
+            
+            # Ensure output is complex
+            if not torch.is_complex(output):
+                output = torch.complex(output, torch.zeros_like(output))
+            output = normalize_with_energy(output, pre_inverse_energy)
+            print(f"After inverse manifold projection shape: {output.shape}")
+            print(f"output requires_grad: {output.requires_grad}")
+            
+            # Add final residual connection with energy preservation
+            x_flat_reshaped = self.x_flat.reshape(output.shape)
+            
+            # Ensure x_flat_reshaped is complex
+            if not torch.is_complex(x_flat_reshaped):
+                x_flat_reshaped = torch.complex(x_flat_reshaped, torch.zeros_like(x_flat_reshaped))
+            x_flat_reshaped = x_flat_reshaped.to(dtype=self.dtype)
+            
+            # Calculate energies
+            output_energy = torch.sum(output.real ** 2 + output.imag ** 2, dim=-1, keepdim=True)
+            residual_energy = torch.sum(x_flat_reshaped.real ** 2 + x_flat_reshaped.imag ** 2, 
+                                      dim=-1, keepdim=True)
+            
+            # Scale residual to match output energy
+            residual_weight = 0.1
+            scaled_residual = normalize_with_energy(x_flat_reshaped, output_energy) * residual_weight
+            
+            # Combine and normalize to preserve output energy
+            output = output + scaled_residual
+            output = normalize_with_energy(output, output_energy)
+            
+            # Create direct path for gradient flow while preserving energy
+            if self.training:
+                # Calculate connection scale while preserving complex structure
+                connection_scale = torch.sum(connection.real ** 2 + connection.imag ** 2, dim=(-3, -2, -1), keepdim=True)
+                output_with_connection = output * (1.0 + 1e-6 * connection_scale)
+                output_with_connection = normalize_with_energy(output_with_connection, output_energy)
+                
+                # Calculate input scale while preserving complex structure
+                x_flat_scale = torch.sum(x_flat_reshaped.real ** 2 + x_flat_reshaped.imag ** 2, dim=-1, keepdim=True)
+                output_with_input = output_with_connection * (1.0 + 1e-6 * x_flat_scale)
+                output = normalize_with_energy(output_with_input, output_energy)
+            
+            # Validate final output shape
+            self._validate_shape(
+                output,
+                (batch_size, seq_len, self.hidden_dim),
+                "final_output"
             )
-            imag_norm = F.layer_norm(
-                imag_part,
-                normalized_shape=[self.manifold_dim],
-                weight=layer_norm.weight,
-                bias=layer_norm.bias
-            )
             
-            # Combine back to complex
-            quantum_output_norm = torch.complex(real_norm, imag_norm)
+            return output
             
-            # Restore original energy
-            quantum_output_norm = normalize_with_energy(quantum_output_norm, pre_norm_energy)
-        else:
-            # If real tensor, apply layer norm directly and preserve energy
-            pre_norm_energy = torch.sum(quantum_output ** 2)
-            layer_norm = self.quantum_bridge.layer_norm
-            layer_norm.weight = nn.Parameter(layer_norm.weight[:self.manifold_dim])
-            layer_norm.bias = nn.Parameter(layer_norm.bias[:self.manifold_dim])
-            quantum_output_norm = F.layer_norm(
-                quantum_output.float(),
-                normalized_shape=[self.manifold_dim],
-                weight=layer_norm.weight,
-                bias=layer_norm.bias
-            )
-            quantum_output_norm = normalize_with_energy(quantum_output_norm, pre_norm_energy)
-
-        # Add residual connection with energy preservation
-        residual_weight = 0.1
-        combined_output = quantum_output_norm + residual_weight * quantum_output
-        combined_output = normalize_with_energy(combined_output, initial_energy)
-        
-        # Apply flow operation and unpack output
-        flow_output, _ = self.flow(combined_output)
-        if torch.is_complex(flow_output):
-            flow_output = flow_output.real
-        flow_output = normalize_with_energy(flow_output, initial_energy)
-        print(f"flow_output requires_grad: {flow_output.requires_grad}")
-        
-        # Convert flow_output to complex before inverse projection
-        if not torch.is_complex(flow_output):
-            flow_output = torch.complex(flow_output, torch.zeros_like(flow_output))
-        flow_output = flow_output.to(dtype=self.dtype)
-        
-        # Calculate energy before inverse projection
-        pre_inverse_energy = torch.sum(flow_output.real ** 2 + flow_output.imag ** 2, 
-                                     dim=-1, keepdim=True)
-        
-        # Inverse manifold projection with energy preservation
-        output = self.manifold_proj_inv(flow_output)
-        
-        # Ensure output is complex
-        if not torch.is_complex(output):
-            output = torch.complex(output, torch.zeros_like(output))
-        output = normalize_with_energy(output, pre_inverse_energy)
-        print(f"After inverse manifold projection shape: {output.shape}")
-        print(f"output requires_grad: {output.requires_grad}")
-        
-        # Add final residual connection with energy preservation
-        x_flat_reshaped = self.x_flat.reshape(output.shape)
-        
-        # Ensure x_flat_reshaped is complex
-        if not torch.is_complex(x_flat_reshaped):
-            x_flat_reshaped = torch.complex(x_flat_reshaped, torch.zeros_like(x_flat_reshaped))
-        x_flat_reshaped = x_flat_reshaped.to(dtype=self.dtype)
-        
-        # Calculate energies
-        output_energy = torch.sum(output.real ** 2 + output.imag ** 2, dim=-1, keepdim=True)
-        residual_energy = torch.sum(x_flat_reshaped.real ** 2 + x_flat_reshaped.imag ** 2, 
-                                  dim=-1, keepdim=True)
-        
-        # Scale residual to match output energy
-        residual_weight = 0.1
-        scaled_residual = normalize_with_energy(x_flat_reshaped, output_energy) * residual_weight
-        
-        # Combine and normalize to preserve output energy
-        output = output + scaled_residual
-        output = normalize_with_energy(output, output_energy)
-        
-        # Create direct path for gradient flow while preserving energy
-        if self.training:
-            # Calculate connection scale while preserving complex structure
-            connection_scale = torch.sum(connection.real ** 2 + connection.imag ** 2, dim=(-3, -2, -1), keepdim=True)
-            output_with_connection = output * (1.0 + 1e-6 * connection_scale)
-            output_with_connection = normalize_with_energy(output_with_connection, output_energy)
-            
-            # Calculate input scale while preserving complex structure
-            x_flat_scale = torch.sum(x_flat_reshaped.real ** 2 + x_flat_reshaped.imag ** 2, dim=-1, keepdim=True)
-            output_with_input = output_with_connection * (1.0 + 1e-6 * x_flat_scale)
-            output = normalize_with_energy(output_with_input, output_energy)
-        
-        return output
+        except Exception as e:
+            logger.error(f"Forward pass failed: {str(e)}")
+            logger.error("Shape errors accumulated:")
+            for error in self.shape_errors:
+                logger.error(error)
+            raise
 
     def prepare_attention_state(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> AttentionState:
         """Prepare attention state from input tensor.
@@ -957,49 +994,66 @@ class QuantumGeometricAttention(nn.Module):
         value: torch.Tensor,
         return_metrics: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Compute attention patterns with quantum geometric structure."""
-        # Get dimensions
-        batch_size, num_heads, seq_len, head_dim = query.shape
-        
-        # Reshape for manifold projection while preserving batch structure
-        query_flat = query.reshape(batch_size * num_heads * seq_len, head_dim)
-        key_flat = key.reshape(batch_size * num_heads * seq_len, head_dim)
-        value_flat = value.reshape(batch_size * num_heads * seq_len, head_dim)
-        
-        # Project to manifold space
-        query_manifold = self.manifold_proj(query_flat)  # [batch*heads*seq, manifold_dim]
-        key_manifold = self.manifold_proj(key_flat)      # [batch*heads*seq, manifold_dim]
-        value_manifold = self.manifold_proj(value_flat)  # [batch*heads*seq, manifold_dim]
-        
-        # Reshape back to attention format
-        query_manifold = query_manifold.reshape(batch_size, num_heads, seq_len, -1)
-        key_manifold = key_manifold.reshape(batch_size, num_heads, seq_len, -1)
-        value_manifold = value_manifold.reshape(batch_size, num_heads, seq_len, -1)
-        
-        # Compute attention scores with quantum geometric structure
-        attention_scores = torch.matmul(query_manifold, key_manifold.transpose(-2, -1))
-        attention_scores = attention_scores / math.sqrt(head_dim)
-        
-        # Apply softmax
-        attention_weights = F.softmax(attention_scores, dim=-1)
-        
-        # Apply attention to values
-        attention_output = torch.matmul(attention_weights, value_manifold)
-        
-        # Project back to original space
-        attention_flat = attention_output.reshape(batch_size * num_heads * seq_len, -1)
-        output = self.manifold_proj_inv(attention_flat)
-        output = output.reshape(batch_size, num_heads, seq_len, self.hidden_dim)
-        
-        if not return_metrics:
-            return output
-        
-        metrics = {
-            'attention_weights': attention_weights,
-            'attention_scores': attention_scores
-        }
-        
-        return output, metrics
+        """Compute attention patterns with shape validation."""
+        try:
+            # Validate shapes
+            self._check_attention_shapes(query, key, value)
+            
+            batch_size, num_heads, seq_len, head_dim = query.shape
+            
+            # Reshape tensors to 3D for projection
+            query_flat = query.reshape(batch_size * num_heads, seq_len, head_dim)  # [batch_size * num_heads, seq_len, head_dim]
+            key_flat = key.reshape(batch_size * num_heads, seq_len, head_dim)
+            value_flat = value.reshape(batch_size * num_heads, seq_len, head_dim)
+            
+            # Print shapes for debugging
+            print(f"Input shapes - query_flat: {query_flat.shape}, key_flat: {key_flat.shape}, value_flat: {value_flat.shape}")
+            print(f"Weight shapes - manifold_proj: {self.manifold_proj.weight.shape}")
+            
+            # Project to manifold space with correct dimensions
+            query_manifold = self.manifold_proj(query_flat)  # [batch_size * num_heads, seq_len, manifold_dim]
+            key_manifold = self.manifold_proj(key_flat)
+            value_manifold = self.manifold_proj(value_flat)
+            
+            print(f"Manifold shapes - query: {query_manifold.shape}, key: {key_manifold.shape}, value: {value_manifold.shape}")
+            
+            # Reshape back to 4D with correct dimensions
+            query_manifold = query_manifold.reshape(batch_size, num_heads, seq_len, -1)
+            key_manifold = key_manifold.reshape(batch_size, num_heads, seq_len, -1)
+            value_manifold = value_manifold.reshape(batch_size, num_heads, seq_len, -1)
+            
+            print(f"4D shapes - query: {query_manifold.shape}, key: {key_manifold.shape}, value: {value_manifold.shape}")
+            
+            # Compute attention scores with quantum geometric structure
+            attention_scores = torch.matmul(query_manifold, key_manifold.transpose(-2, -1))
+            attention_scores = attention_scores / math.sqrt(query_manifold.size(-1))  # Scale by actual feature dimension
+            
+            # Apply softmax
+            attention_weights = self.complex_softmax(attention_scores, dim=-1)
+            
+            # Apply attention to values
+            attention_output = torch.matmul(attention_weights, value_manifold)
+            
+            # Project back to original space
+            attention_output_flat = attention_output.reshape(batch_size * num_heads, seq_len, -1)
+            output = self.manifold_proj_inv(attention_output_flat)
+            
+            # Reshape back to 4D with original dimensions
+            output = output.reshape(batch_size, num_heads, seq_len, head_dim)
+            
+            if not return_metrics:
+                return output
+                
+            metrics = {
+                'attention_weights': attention_weights,
+                'attention_scores': attention_scores
+            }
+            
+            return output, metrics
+            
+        except Exception as e:
+            logger.error(f"Attention pattern computation failed: {str(e)}")
+            raise
 
     def integrate_heads(self, head_states: List[torch.Tensor]) -> torch.Tensor:
         """Integrate multiple attention heads into a single representation.
@@ -1572,4 +1626,74 @@ class QuantumGeometricAttention(nn.Module):
         norms = torch.norm(quantum_manifold, dim=-1, keepdim=True)
         quantum_manifold = quantum_manifold / (norms + 1e-8)
         return quantum_manifold
+
+    def _validate_shape(self, tensor: torch.Tensor, expected_shape: Tuple[int, ...], name: str) -> None:
+        """Validate tensor shape and log any mismatches."""
+        if not self.validate_shapes:
+            return
+            
+        if tensor.shape != expected_shape:
+            error_msg = f"Shape mismatch in {name}: expected {expected_shape}, got {tensor.shape}"
+            self.shape_errors.append(error_msg)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+    def _clear_shape_errors(self) -> None:
+        """Clear accumulated shape errors."""
+        self.shape_errors = []
+        
+    def get_shape_errors(self) -> List[str]:
+        """Get list of accumulated shape errors."""
+        return self.shape_errors
+        
+    @torch.jit.export
+    def _check_input_shapes(self, x: torch.Tensor) -> None:
+        """Validate input shapes with TorchScript support."""
+        if not self.validate_shapes:
+            return
+            
+        if len(x.shape) != 3:
+            raise ValueError(f"Input must be 3D (batch_size, seq_len, hidden_dim), got shape {x.shape}")
+            
+        if x.size(-1) != self.hidden_dim:
+            raise ValueError(f"Input hidden dimension must be {self.hidden_dim}, got {x.size(-1)}")
+            
+    @torch.jit.export
+    def _check_attention_shapes(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor
+    ) -> None:
+        """Validate attention computation shapes with TorchScript support."""
+        if not self.validate_shapes:
+            return
+            
+        # Check batch size and num_heads match
+        if not (query.size(0) == key.size(0) == value.size(0)):
+            raise ValueError("Batch sizes must match")
+            
+        if not (query.size(1) == key.size(1) == value.size(1)):
+            raise ValueError("Number of heads must match")
+            
+        # Check sequence lengths
+        if not (key.size(2) == value.size(2)):
+            raise ValueError("Key and value sequence lengths must match")
+            
+        # Check head dimensions
+        head_dim = self.hidden_dim // self.num_heads
+        if not (query.size(-1) == key.size(-1) == value.size(-1) == head_dim):
+            raise ValueError(f"Head dimension must be {head_dim}")
+            
+    @torch.jit.export
+    def _validate_quantum_state_shape(self, state: torch.Tensor) -> None:
+        """Validate quantum state shape with TorchScript support."""
+        if not self.validate_shapes:
+            return
+            
+        if len(state.shape) not in [3, 4]:
+            raise ValueError(f"Invalid quantum state shape: {state.shape}")
+            
+        if state.shape[-1] != self.manifold_dim:
+            raise ValueError(f"Expected manifold dimension {self.manifold_dim}, got {state.shape[-1]}")
 

@@ -67,3 +67,10 @@ def test_config():
     with open(config_path) as f:
         config = yaml.safe_load(f)
     return config
+
+def pytest_configure(config):
+    """Register custom marks."""
+    config.addinivalue_line(
+        "markers",
+        "tracing: mark test as a tracing test"
+    )
