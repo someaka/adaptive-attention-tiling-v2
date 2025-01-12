@@ -108,7 +108,6 @@ class MemoryPool:
 
         self.current_size -= freed_size
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
 class CacheOptimizer:
@@ -245,4 +244,3 @@ class MemoryManager:
         """Cleanup when the manager is deleted."""
         self.clear_stats()
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None

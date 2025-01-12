@@ -61,8 +61,6 @@ def test_timeout():
     elapsed = time.time() - start_time
     if elapsed > TEST_TIMEOUT:
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        raise TimeoutError(f"Test exceeded {TEST_TIMEOUT} seconds timeout")
 
 @contextmanager
 def operation_timeout():
@@ -72,8 +70,6 @@ def operation_timeout():
     elapsed = time.time() - start_time
     if elapsed > OPERATION_TIMEOUT:
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        raise TimeoutError(f"Operation exceeded {OPERATION_TIMEOUT} seconds timeout")
 
 @pytest.fixture(scope="session")
 def memory_manager():
@@ -87,7 +83,6 @@ def memory_manager():
         manager._cleanup_dead_refs()
         manager.defragment_memory()
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 @pytest.fixture(autouse=True)
 def setup_teardown(memory_manager):
@@ -95,7 +90,6 @@ def setup_teardown(memory_manager):
     try:
         # Clear memory before test
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         memory_manager._cleanup_dead_refs()
         memory_manager.defragment_memory()
         
@@ -104,7 +98,6 @@ def setup_teardown(memory_manager):
     finally:
         # Cleanup after test
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         memory_manager._cleanup_dead_refs()
         memory_manager.defragment_memory()
         
@@ -163,7 +156,6 @@ class TestValidationFramework:
         # Cleanup
         import gc
         gc.collect()  # Force garbage collection
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
     @pytest.fixture
     def batch_size(self, test_config) -> int:

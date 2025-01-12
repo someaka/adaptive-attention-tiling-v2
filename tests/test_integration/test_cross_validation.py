@@ -36,7 +36,6 @@ class TestCrossValidation:
     def setup_and_cleanup(self):
         """Setup and cleanup for each test."""
         # Setup - clear memory and cache before test
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         gc.collect()
         initial_memory = get_memory_usage()
         print(f"\nInitial memory usage: {initial_memory:.2f} MB")
@@ -44,7 +43,6 @@ class TestCrossValidation:
         yield
         
         # Cleanup - ensure memory is freed after test
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         gc.collect()
         final_memory = get_memory_usage()
         print(f"Final memory usage: {final_memory:.2f} MB")

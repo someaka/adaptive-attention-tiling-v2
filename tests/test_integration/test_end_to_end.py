@@ -17,7 +17,11 @@ from typing import Dict, Any, Optional, cast, Union, Tuple
 
 # Remove global tracemalloc.start() since we'll initialize it in the profile_memory_usage function
 
-from src.core.tiling.quantum_geometric_attention import QuantumGeometricAttention, AttentionState
+from src.core.tiling.quantum_geometric_attention import (
+    QuantumGeometricAttention,
+    AttentionState,
+    QuantumGeometricConfig
+)
 from src.core.tiling.quantum_attention_tile import QuantumMotivicTile
 from src.core.quantum.neural_quantum_bridge import NeuralQuantumBridge
 from src.core.patterns.fiber_types import LocalChart as PatternSection
@@ -80,7 +84,7 @@ def batch_size():
 def attention_layer(hidden_dim, num_heads):
     """Create quantum geometric attention layer."""
     logger.info(f"Initializing attention layer with hidden_dim={hidden_dim}, num_heads={num_heads}")
-    layer = QuantumGeometricAttention(
+    config = QuantumGeometricConfig(
         hidden_dim=hidden_dim,
         num_heads=num_heads,
         dropout=TEST_CONFIG["dropout"],
@@ -89,8 +93,12 @@ def attention_layer(hidden_dim, num_heads):
         manifold_dim=TEST_CONFIG["manifold_dim"],
         num_layers=TEST_CONFIG["num_layers"],
         tile_size=TEST_CONFIG["tile_size"],
-        motive_rank=TEST_CONFIG["motive_rank"]
+        motive_rank=TEST_CONFIG["motive_rank"],
+        dtype=torch.complex64,
+        device=torch.device('cpu'),
+        is_causal=False
     )
+    layer = QuantumGeometricAttention(config=config)
     logger.info(f"Attention layer initialized with manifold_dim={TEST_CONFIG['manifold_dim']}")
     return layer
 

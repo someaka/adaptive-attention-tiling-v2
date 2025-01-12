@@ -25,6 +25,7 @@ from src.core.tiling.quantum_geometric_attention import (
     AttentionState,
     GeometricStructures,
     QuantumGeometricAttention,
+    QuantumGeometricConfig
 )
 from src.metrics.attention import (
     AttentionMetrics,
@@ -44,7 +45,6 @@ class TestQuantumGeometricAttention:
 
     def teardown_method(self):
         """Clean up after each test."""
-        torch.cuda.empty_cache()
         import gc
         gc.collect()
 
@@ -76,18 +76,22 @@ class TestQuantumGeometricAttention:
     @pytest.fixture
     def attention_layer(self, hidden_dim, manifold_dim, num_heads):
         """Create a test attention layer with proper device placement."""
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        return QuantumGeometricAttention(
+        device = torch.device('cpu')
+        config = QuantumGeometricConfig(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             dropout=0.1,
-            motive_rank=4,
-            manifold_dim=manifold_dim,  # Explicitly pass manifold_dim
+            manifold_type="hyperbolic",
+            curvature=-1.0,
+            manifold_dim=manifold_dim,
             num_layers=3,
-            tile_size=8,  # Reduced from 16 to match smaller scale
+            tile_size=8,
+            motive_rank=4,
             dtype=torch.complex64,
-            device=device
+            device=device,
+            is_causal=False
         )
+        return QuantumGeometricAttention(config=config)
 
     @pytest.fixture
     def geometric_structures(self, manifold_dim):
@@ -197,7 +201,7 @@ class TestQuantumGeometricAttention:
         self, attention_layer, batch_size, seq_length, hidden_dim, num_heads
     ):
         """Test geometric attention flow computation."""
-        # Create input tensor
+        head_dim = hidden_dim // num_heads  # This will be 2 (8 // 4)
         x = complex_randn(batch_size, seq_length, hidden_dim)
         mask = torch.ones(batch_size, seq_length).bool()
 

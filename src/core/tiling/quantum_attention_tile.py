@@ -35,7 +35,7 @@ class QuantumMotivicTile(nn.Module):
         self.size = size
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.head_dim = hidden_dim  # Each tile handles one head, so head_dim = hidden_dim
+        self.head_dim = hidden_dim // num_heads
         self.dropout = dropout
         self.resolution = resolution
         self.dtype = dtype

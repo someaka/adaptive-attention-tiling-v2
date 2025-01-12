@@ -32,7 +32,7 @@ class HolographicTrainer:
     ):
         self.model = model
         self.save_dir = Path(save_dir)
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or torch.device("cpu")
         self.model.to(self.device)
         
         # Create save directory and inverse model in one go

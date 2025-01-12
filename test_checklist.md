@@ -77,14 +77,14 @@
 - [x] tests/test_neural/test_attention/test_pattern/test_bifurcation.py
 - [x] tests/test_neural/test_attention/test_pattern/test_control.py
 - [x] tests/test_neural/test_attention/test_pattern/test_diffusion_properties.py
-- [ ] tests/test_neural/test_attention/test_pattern/test_quantum.py
+- [x] tests/test_neural/test_attention/test_pattern/test_quantum.py
 - [x] tests/test_neural/test_attention/test_pattern/test_reaction_diffusion.py
 - [x] tests/test_neural/test_attention/test_pattern/test_stability.py
 
 ### Flow Tests
-- [ ] tests/test_neural/test_flow/test_geometric_flow.py
-- [ ] tests/test_neural/test_flow/test_hamiltonian.py
-- [ ] tests/test_neural/test_flow/test_tensor_shapes.py
+- [x] tests/test_neural/test_flow/test_geometric_flow.py
+- [x] tests/test_neural/test_flow/test_hamiltonian.py
+- [x] tests/test_neural/test_flow/test_tensor_shapes.py
 
 ## Integration Tests
 - [ ] tests/test_integration/test_cross_validation.py
