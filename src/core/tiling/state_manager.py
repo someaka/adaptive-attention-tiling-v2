@@ -45,27 +45,39 @@ class StateManager:
         self.states = {}
         self.history = []
 
-    def initialize_state(self, key: str, dim: Optional[int] = None) -> torch.Tensor:
+    def initialize_state(self, key: str, dim: Optional[int] = None, shape: Optional[tuple] = None) -> torch.Tensor:
         """Initialize a new quantum state.
 
         Args:
             key: Unique identifier for the state
-            dim: Optional dimension override
+            dim: Optional dimension override for 1D states
+            shape: Optional shape for multi-dimensional states
 
         Returns:
             Initialized quantum state tensor
         """
-        dim = dim or self.config.dim
+        if shape is not None:
+            # For multi-dimensional states
+            if self.config.type == StateType.PURE:
+                state = torch.randn(*shape, device=self.device, dtype=self.config.dtype)
+                state = state / torch.norm(state, dim=-1, keepdim=True)
+            elif self.config.type == StateType.MIXED:
+                raise ValueError("Mixed states not supported for multi-dimensional tensors")
+            else:  # ENTANGLED
+                raise ValueError("Entangled states not supported for multi-dimensional tensors")
+        else:
+            # For 1D states (original behavior)
+            dim = dim or self.config.dim
 
-        if self.config.type == StateType.PURE:
-            state = torch.randn(dim, device=self.device, dtype=self.config.dtype)
-            state = state / torch.norm(state)
-        elif self.config.type == StateType.MIXED:
-            state = torch.eye(dim, device=self.device, dtype=self.config.dtype)
-            state = state / torch.trace(state)
-        else:  # ENTANGLED
-            state = torch.randn(dim, dim, device=self.device, dtype=self.config.dtype)
-            state = state / torch.norm(state)
+            if self.config.type == StateType.PURE:
+                state = torch.randn(dim, device=self.device, dtype=self.config.dtype)
+                state = state / torch.norm(state)
+            elif self.config.type == StateType.MIXED:
+                state = torch.eye(dim, device=self.device, dtype=self.config.dtype)
+                state = state / torch.trace(state)
+            else:  # ENTANGLED
+                state = torch.randn(dim, dim, device=self.device, dtype=self.config.dtype)
+                state = state / torch.norm(state)
 
         self.states[key] = state
         return state

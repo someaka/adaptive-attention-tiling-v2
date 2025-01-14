@@ -534,20 +534,33 @@ class QuantumGeometricAttention(nn.Module):
         except Exception as e:
             raise InvalidQuantumStateError(f"Failed to measure quantum state: {str(e)}")
 
+    def _geometric_update(self, state: AttentionState) -> AttentionState:
+        """Apply geometric flow to update the state.
+        
+        Args:
+            state: Current attention state
+            
+        Returns:
+            Updated attention state
+        """
+        try:
+            # Apply geometric flow to the state
+            state.geometric_state = self.flow(state.geometric_state)
+            return state
+            
+        except Exception as e:
+            raise GeometricFlowError(f"Failed to compute geometric flow: {str(e)}")
+
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass of quantum geometric attention.
         
         Args:
-            x: Input tensor of shape [batch_size, seq_len, hidden_dim] or [batch_size, num_heads, seq_len, hidden_dim]
-            mask: Optional attention mask of shape [batch_size, seq_len]
+            x: Input tensor of shape [batch_size, num_heads, seq_len, hidden_dim]
+            mask: Optional attention mask of shape [batch_size, seq_len, seq_len]
             
         Returns:
-            Output tensor of shape [batch_size, seq_len, hidden_dim]
+            Output tensor of shape [batch_size, num_heads, seq_len, hidden_dim]
         """
-        # Convert input to correct dtype if needed
-        if x.dtype != self.config.dtype:
-            x = x.to(self.config.dtype)
-        
         # Initialize attention state
         state = self.prepare_attention_state(x)
         
@@ -558,39 +571,25 @@ class QuantumGeometricAttention(nn.Module):
             if not mask.any():
                 return torch.zeros_like(x)
         
-        # Get dimensions
-        batch_size = x.size(0)
-        seq_len = x.size(-2)
+        # Apply geometric flow
+        state = self._geometric_update(state)
         
-        # Get quantum state
-        quantum_state = self._measure_quantum_state(state)
-        
-        # Ensure quantum state has correct dtype
-        quantum_state = quantum_state.to(self.config.dtype)
-        
-        # Project to attention space
-        pattern_proj = self.pattern_proj(quantum_state)
-        
-        # Compute attention scores
-        attention_scores = torch.matmul(
-            pattern_proj, pattern_proj.transpose(-2, -1)
-        ) / math.sqrt(pattern_proj.size(-1))
-        
-        # Store attention patterns
-        state.attention_scores = attention_scores
-        state.attention_patterns["quantum"] = attention_scores.detach()
-        
-        # Apply attention
-        attended = torch.matmul(attention_scores, quantum_state)
+        # Extract tensor from geometric_state if it's a tuple
+        geometric_tensor = state.geometric_state[0] if isinstance(state.geometric_state, tuple) else state.geometric_state
         
         # Project back to hidden dimension
-        output = self.manifold_proj_inv(attended)
+        output = self.manifold_proj_inv(geometric_tensor)
         
-        # Reshape output to match input shape
-        if x.dim() == 4:  # Input had heads dimension
-            output = output.view(batch_size, self.num_heads, seq_len, self.hidden_dim)
-        else:  # Input was [batch_size, seq_len, hidden_dim]
-            output = output.view(batch_size, seq_len, self.hidden_dim)
+        # Get original dimensions
+        batch_size = x.size(0)
+        num_heads = x.size(1) if x.dim() > 3 else 1
+        seq_len = x.size(2) if x.dim() > 3 else x.size(1)
+        
+        # First reshape to combine batch and heads
+        output = output.reshape(batch_size * num_heads * seq_len, self.hidden_dim)
+        
+        # Then reshape back to 4D
+        output = output.view(batch_size, num_heads, seq_len, self.hidden_dim)
         
         return output
 
@@ -602,7 +601,7 @@ class QuantumGeometricAttention(nn.Module):
         """Prepare attention state with complex number handling.
         
         Args:
-            x: Input tensor of shape [batch_size, seq_len, hidden_dim]
+            x: Input tensor of shape [batch_size, num_heads, seq_len, hidden_dim]
             mask: Optional attention mask
             
         Returns:
@@ -620,16 +619,17 @@ class QuantumGeometricAttention(nn.Module):
             if not torch.is_complex(x):
                 x = x.to(self.config.dtype)
 
-            # Project input to manifold space
+            # Get dimensions
             batch_size = x.size(0)
             num_heads = x.size(1) if x.dim() > 3 else 1
             seq_len = x.size(2) if x.dim() > 3 else (x.size(1) if x.dim() > 2 else 1)
-            # Combine batch and head dimensions
+            
+            # Reshape input to combine batch and heads
             x_flat = x.reshape(batch_size * num_heads, seq_len, self.hidden_dim)
-            x_flat = x_flat.reshape(-1, self.hidden_dim)
+            
+            # Project to manifold space
             x_manifold = self.manifold_proj(x_flat)
-            x_manifold = x_manifold.reshape(batch_size * num_heads, seq_len, self.manifold_dim)
-
+            
             # Let QuantumState handle normalization
             quantum_result = self._prepare_quantum_state(x_manifold)
             quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
@@ -655,14 +655,27 @@ class QuantumGeometricAttention(nn.Module):
                 "num_heads": num_heads
             }
 
-            # Initialize attention state
+            # Create key padding mask if provided through the mask argument
+            key_padding_mask = None
+            attention_mask = None
+            if mask is not None:
+                if mask.dim() == 2:  # [batch_size, seq_len]
+                    key_padding_mask = mask
+                elif mask.dim() == 3:  # [batch_size, seq_len, seq_len]
+                    attention_mask = mask.unsqueeze(1)  # Add head dimension
+                elif mask.dim() == 4:  # [batch_size, num_heads, seq_len, seq_len]
+                    attention_mask = mask
+
+            # Initialize attention state with masks
             return AttentionState(
                 state_manager=self.state_manager,
-                geometric_state=x_manifold.clone(),  # Use manifold state instead of input
+                geometric_state=x_manifold,  # This is now [batch_size * num_heads, seq_len, manifold_dim]
                 attention_scores=None,
                 attention_patterns={},
                 entanglement_history={},
-                metrics={}
+                metrics={},
+                key_padding_mask=key_padding_mask,
+                attention_mask=attention_mask
             )
             
         except Exception as e:
@@ -673,40 +686,29 @@ class QuantumGeometricAttention(nn.Module):
         if mask is None:
             return state
 
-        # Store mask in state manager
-        state.state_manager.states["mask"] = mask
-
         # Compute attention scores if they don't exist
         if state.attention_scores is None:
+            # Project to query/key space
+            query = self.pattern_proj(state.geometric_state)  # [batch_size * num_heads, seq_len, hidden_dim]
+            key = self.pattern_proj(state.geometric_state)    # [batch_size * num_heads, seq_len, hidden_dim]
+
             # Get dimensions
             batch_size = mask.size(0)
-            seq_len = state.geometric_state.size(1)
+            seq_len = query.size(1)
             head_dim = self.hidden_dim // self.num_heads
 
-            # Reshape geometric state to include heads if needed
-            geometric_state = state.geometric_state
-            if geometric_state.size(0) == batch_size:  # No heads dimension
-                geometric_state = geometric_state.unsqueeze(1).expand(batch_size, self.num_heads, seq_len, -1)
-                geometric_state = geometric_state.reshape(batch_size * self.num_heads, seq_len, -1)
-            
-            # Project to query/key space
-            query = self.pattern_proj(geometric_state)  # [batch_size * num_heads, seq_len, head_dim]
-            key = self.pattern_proj(geometric_state)    # [batch_size * num_heads, seq_len, head_dim]
-
-            # Reshape for attention computation
-            query = query.view(batch_size, self.num_heads, seq_len, head_dim)
-            key = key.view(batch_size, self.num_heads, seq_len, head_dim)
+            # Reshape query and key for attention
+            query = query.view(batch_size * self.num_heads, seq_len, head_dim)
+            key = key.view(batch_size * self.num_heads, seq_len, head_dim)
 
             # Compute attention scores
             attention_scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
 
-            # Apply mask
-            if mask is not None:
-                # Create attention mask [batch_size, 1, seq_len, seq_len]
-                attention_mask = mask.unsqueeze(1).unsqueeze(2) * mask.unsqueeze(1).unsqueeze(-1)
-                # Expand mask for num_heads dimension
-                attention_mask = attention_mask.expand(-1, self.num_heads, -1, -1)
-                attention_scores = attention_scores.masked_fill(~attention_mask, float('-inf'))
+            # Reshape attention scores to include head dimension
+            attention_scores = attention_scores.view(batch_size, self.num_heads, seq_len, seq_len)
+
+            # Apply masks using AttentionState's apply_masks method
+            attention_scores = state.apply_masks(attention_scores)
 
             # Store attention scores in state
             state.attention_scores = attention_scores
@@ -1376,22 +1378,39 @@ class QuantumGeometricAttention(nn.Module):
                 
         return metrics
 
-    def _compute_quantum_metrics(self, state: QuantumState) -> Dict[str, float]:
+    def compute_quantum_metrics(self, state: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Compute quantum metrics for raw tensor state.
+        
+        Args:
+            state: Tensor to analyze [batch_size, seq_len, hidden_dim]
+            
+        Returns:
+            Dictionary of quantum metrics as tensors
+        """
+        # Convert to quantum state
+        quantum_state = self._prepare_quantum_state(state)
+        if isinstance(quantum_state, tuple):
+            quantum_state = quantum_state[0]  # Extract state from validation tuple
+        
+        # Compute metrics using QuantumMetrics
+        return self._compute_quantum_metrics(quantum_state)
+
+    def _compute_quantum_metrics(self, state: QuantumState) -> Dict[str, torch.Tensor]:
         """Compute quantum metrics for a given quantum state.
         
         Args:
             state: The quantum state to compute metrics for
             
         Returns:
-            Dictionary of quantum metrics
+            Dictionary of quantum metrics as tensors
         """
         try:
             # Initialize default metrics
             metrics = {
-                'entropy': 0.0,
-                'purity': 1.0,
-                'fisher': 0.0,
-                'transport_deviation': 0.0
+                'entropy': torch.tensor(0.0, device=self.config.device, dtype=self.config.dtype),
+                'purity': torch.tensor(1.0, device=self.config.device, dtype=self.config.dtype),
+                'fisher': torch.tensor(0.0, device=self.config.device, dtype=self.config.dtype),
+                'transport_deviation': torch.tensor(0.0, device=self.config.device, dtype=self.config.dtype)
             }
             
             if not isinstance(state, QuantumState):
@@ -1403,18 +1422,17 @@ class QuantumGeometricAttention(nn.Module):
             
             # Compute von Neumann entropy
             eigenvals = torch.linalg.eigvalsh(density_matrix)
-            eigenvals = torch.clamp(eigenvals, min=1e-10)
-            eigenvals = eigenvals / torch.sum(eigenvals)
-            metrics['entropy'] = float(-torch.sum(eigenvals * torch.log(eigenvals)).item())
+            entropy = -torch.sum(eigenvals * torch.log2(eigenvals + 1e-10), dim=-1)
+            metrics['von_neumann_entropy'] = entropy
             
             # Compute purity
             purity = torch.einsum('...ij,...ji->...', density_matrix, density_matrix)
-            metrics['purity'] = float(purity.mean().item())
+            metrics['purity'] = purity
             
             # Compute quantum Fisher information
             # Use diagonal approximation for efficiency
             fisher = torch.abs(torch.diagonal(density_matrix, dim1=-2, dim2=-1))
-            metrics['fisher'] = float(fisher.mean().item())
+            metrics['fisher'] = fisher
             
             # Compute transport deviation if we have previous state
             if hasattr(self, '_prev_state'):
@@ -1429,9 +1447,7 @@ class QuantumGeometricAttention(nn.Module):
                 )
                 
                 # Compute deviation
-                metrics['transport_deviation'] = float(
-                    torch.norm(transported - tangent).mean().item()
-                )
+                metrics['transport_deviation'] = torch.norm(transported - tangent)
                 
             # Store current state for next computation
             self._prev_state = state
@@ -1440,28 +1456,11 @@ class QuantumGeometricAttention(nn.Module):
         except Exception as e:
             # Keep default metrics in case of error
             return {
-                'entropy': 0.0,
-                'purity': 1.0,
-                'fisher': 0.0,
-                'transport_deviation': 0.0
+                'entropy': torch.tensor(0.0, device=self.config.device, dtype=self.config.dtype),
+                'purity': torch.tensor(1.0, device=self.config.device, dtype=self.config.dtype),
+                'fisher': torch.tensor(0.0, device=self.config.device, dtype=self.config.dtype),
+                'transport_deviation': torch.tensor(0.0, device=self.config.device, dtype=self.config.dtype)
             }
-
-    def _compute_quantum_state_metrics(self, state: torch.Tensor) -> Dict[str, float]:
-        """Compute quantum metrics for raw tensor state.
-        
-        Args:
-            state: Tensor to analyze [batch_size, seq_len, hidden_dim]
-            
-        Returns:
-            Dictionary of quantum metrics
-        """
-        # Convert to quantum state
-        quantum_state = self._prepare_quantum_state(state)
-        if isinstance(quantum_state, tuple):
-            quantum_state = quantum_state[0]  # Extract state from validation tuple
-        
-        # Compute metrics using QuantumMetrics
-        return self._compute_quantum_metrics(quantum_state)
 
     def _compute_geometric_metrics(
         self,
@@ -1715,6 +1714,9 @@ class QuantumGeometricAttention(nn.Module):
                 pattern_proj, pattern_proj.transpose(-2, -1)
             ) / math.sqrt(pattern_proj.size(-1))
 
+            # Apply masks to attention scores
+            attention_scores = state.apply_masks(attention_scores)
+
             # Store attention patterns
             state.attention_scores = attention_scores
             state.attention_patterns["quantum"] = attention_scores.detach()
@@ -1725,14 +1727,22 @@ class QuantumGeometricAttention(nn.Module):
             # Reshape back to original dimensions
             output = attended.reshape(batch_size * num_heads, seq_len, -1)
 
-            # Update geometric state in-place
-            state.geometric_state = output
-            
-            # Apply geometric update directly on state
-            self._geometric_update(state)
+            # Create new state for geometric update
+            updated_state = AttentionState(
+                state_manager=state.state_manager,
+                geometric_state=output,
+                attention_scores=state.attention_scores,
+                attention_patterns=state.attention_patterns,
+                entanglement_history=state.entanglement_history,
+                metrics=state.metrics,
+                key_padding_mask=state.key_padding_mask,
+                attention_mask=state.attention_mask
+            )
 
-            # Return the geometric state tensor
-            return state.geometric_state
+            # Apply geometric update
+            updated_state = self._geometric_update(updated_state)
+
+            return updated_state.geometric_state
 
         except Exception as e:
             raise GeometricFlowError(f"Failed to apply geometric flow: {str(e)}")

@@ -348,12 +348,12 @@ def test_invalid_state_manager_config():
     
     # Try to update with invalid state
     invalid_state = torch.randn(batch_size, num_heads, seq_length, hidden_dim // 2)
-    with pytest.raises(RuntimeError, match=r"The size of tensor a \(\d+\) must match the size of tensor b \(\d+\) at non-singleton dimension \d+"):
+    with pytest.raises(ValueError, match="Invalid state tensor"):
         attention_state.update_quantum_state("test", invalid_state)
         
     # Try to update with invalid dimensions
     invalid_state = torch.randn(batch_size, num_heads + 1, seq_length, hidden_dim)
-    with pytest.raises(RuntimeError, match=r"The size of tensor a \(\d+\) must match the size of tensor b \(\d+\) at non-singleton dimension \d+"):
+    with pytest.raises(ValueError, match="Invalid state tensor"):
         attention_state.update_quantum_state("test", invalid_state)
 
 def test_quantum_properties(attention_state: AttentionState):
@@ -395,3 +395,102 @@ def test_quantum_properties(attention_state: AttentionState):
     phase_shifted_norms = torch.sqrt(torch.sum(torch.abs(phase_shifted) ** 2,
                                              dim=tuple(range(1, len(phase_shifted.shape)))))
     assert torch.allclose(phase_shifted_norms, torch.ones_like(phase_shifted_norms), rtol=1e-5) 
+
+def test_mask_handling(
+    attention_state: AttentionState,
+    batch_size: int,
+    num_heads: int,
+    seq_length: int
+):
+    """Test attention mask handling."""
+    # Test default masks
+    assert attention_state.key_padding_mask is not None
+    assert attention_state.key_padding_mask.shape == (batch_size, seq_length)
+    assert attention_state.key_padding_mask.dtype == torch.bool
+    assert attention_state.key_padding_mask.all()  # All True by default
+
+    assert attention_state.attention_mask is not None
+    assert attention_state.attention_mask.shape == (batch_size, num_heads, seq_length, seq_length)
+    assert attention_state.attention_mask.dtype == torch.bool
+    assert attention_state.attention_mask.all()  # All True by default
+
+    # Test setting key padding mask
+    key_padding_mask = torch.ones(batch_size, seq_length, dtype=torch.bool)
+    key_padding_mask[:, -1] = False  # Mask out last token
+    attention_state.set_key_padding_mask(key_padding_mask)
+    assert torch.equal(attention_state.key_padding_mask, key_padding_mask)
+
+    # Test setting attention mask
+    attention_mask = torch.ones(seq_length, seq_length, dtype=torch.bool)
+    attention_mask.triu_(1).logical_not_()  # Causal mask
+    attention_state.set_attention_mask(attention_mask)
+    assert torch.equal(attention_state.attention_mask, attention_mask)
+
+    # Test head-specific attention mask
+    head_mask = torch.ones(batch_size, num_heads, seq_length, seq_length, dtype=torch.bool)
+    head_mask[:, :, :, -1] = False  # Can't attend to last token
+    attention_state.set_attention_mask(head_mask)
+    assert torch.equal(attention_state.attention_mask, head_mask)
+
+    # Test applying masks to attention scores
+    scores = torch.randn(batch_size, num_heads, seq_length, seq_length)
+    masked_scores = attention_state.apply_masks(scores)
+    
+    # Check that masked positions are -inf
+    assert torch.isinf(masked_scores[:, :, :, -1]).all()
+    assert (masked_scores[:, :, :, -1] < 0).all()
+
+def test_causal_initialization(
+    hidden_dim: int,
+    num_heads: int,
+    batch_size: int,
+    seq_length: int,
+    device: torch.device
+):
+    """Test initialization with causal masking."""
+    state = AttentionState.initialize(
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        batch_size=batch_size,
+        seq_length=seq_length,
+        device=device,
+        causal=True
+    )
+
+    # Verify causal mask was created
+    assert state.attention_mask is not None
+    assert state.attention_mask.shape == (seq_length, seq_length)
+    
+    # Verify it's a proper causal mask
+    causal = torch.triu(torch.ones(seq_length, seq_length, dtype=torch.bool), diagonal=1).logical_not()
+    assert torch.equal(state.attention_mask, causal)
+
+def test_invalid_masks():
+    """Test handling of invalid masks."""
+    state = AttentionState.initialize(
+        hidden_dim=64,
+        num_heads=8,
+        batch_size=16,
+        seq_length=32
+    )
+
+    # Test invalid key padding mask shapes
+    with pytest.raises(ValueError, match="Key padding mask must be 2-dimensional"):
+        state.set_key_padding_mask(torch.ones(16, 32, 32, dtype=torch.bool))  # Wrong dims
+
+    with pytest.raises(ValueError, match="Key padding mask sequence length must match geometric state"):
+        state.set_key_padding_mask(torch.ones(16, 64, dtype=torch.bool))  # Wrong seq length
+
+    # Test invalid attention mask shapes
+    with pytest.raises(ValueError, match="Attention mask must be 2D or 4D"):
+        state.set_attention_mask(torch.ones(32, 32, 32, dtype=torch.bool))  # Wrong dims
+
+    with pytest.raises(ValueError, match="2D attention mask must have shape"):
+        state.set_attention_mask(torch.ones(64, 64, dtype=torch.bool))  # Wrong size
+
+    # Test invalid mask dtypes
+    with pytest.raises(ValueError, match="Key padding mask must be a boolean tensor"):
+        state.set_key_padding_mask(torch.ones(16, 32))  # Wrong dtype
+
+    with pytest.raises(ValueError, match="Attention mask must be a boolean tensor"):
+        state.set_attention_mask(torch.ones(32, 32))  # Wrong dtype 

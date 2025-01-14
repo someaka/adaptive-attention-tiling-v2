@@ -17,18 +17,37 @@ class AttentionState:
     attention_patterns: Dict[str, torch.Tensor] = field(default_factory=dict)
     entanglement_history: Dict[str, list] = field(default_factory=dict)
     metrics: Dict[str, torch.Tensor] = field(default_factory=dict)
+    key_padding_mask: Optional[torch.Tensor] = None  # Shape: [batch_size, seq_length]
+    attention_mask: Optional[torch.Tensor] = None  # Shape: [seq_length, seq_length] or [batch_size, num_heads, seq_length, seq_length]
 
     def __post_init__(self):
         """Initialize state manager with geometric state."""
         # Initialize states in state manager if not already initialized
         if "input" not in self.state_manager.states:
-            self.state_manager.initialize_state("input")
+            self.state_manager.initialize_state("input", shape=self.geometric_state.shape)
         if "manifold" not in self.state_manager.states:
-            self.state_manager.initialize_state("manifold")
+            self.state_manager.initialize_state("manifold", shape=self.geometric_state.shape)
             
         # Update states with geometric state
         self.state_manager.states["manifold"].copy_(self.geometric_state)
+
+        # Get dimensions from debug info if available
+        debug_info = self.state_manager.states.get("debug_info", {})
+        num_heads = debug_info.get("num_heads", 1)
         
+        # Get shape info
+        if self.geometric_state.dim() == 4:
+            batch_size, num_heads, seq_length, _ = self.geometric_state.shape
+        else:  # 3D tensor with combined batch and heads
+            combined_batch, seq_length, _ = self.geometric_state.shape
+            batch_size = combined_batch // num_heads
+
+        # Initialize masks if not provided
+        if self.key_padding_mask is None:
+            self.key_padding_mask = torch.ones(batch_size, seq_length, dtype=torch.bool, device=self.geometric_state.device)
+        if self.attention_mask is None:
+            self.attention_mask = torch.ones(batch_size, num_heads, seq_length, seq_length, dtype=torch.bool, device=self.geometric_state.device)
+
     def validate_state(self, state: torch.Tensor) -> bool:
         """Validate tensor properties and normalization."""
         if not isinstance(state, torch.Tensor):
@@ -100,6 +119,71 @@ class AttentionState:
         """Update attention pattern dictionary."""
         self.attention_patterns[key] = pattern
 
+    def apply_masks(self, attention_scores: torch.Tensor) -> torch.Tensor:
+        """Apply attention masks to the attention scores.
+        
+        Args:
+            attention_scores: Raw attention scores [batch_size, num_heads, seq_length, seq_length]
+            
+        Returns:
+            Masked attention scores with the same shape
+        """
+        # Apply key padding mask if provided
+        if self.key_padding_mask is not None:
+            # Expand key_padding_mask to match attention scores shape
+            key_padding_mask = self.key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_length]
+            attention_scores = attention_scores.masked_fill(~key_padding_mask, float('-inf'))
+        
+        # Apply attention mask if provided
+        if self.attention_mask is not None:
+            # Handle both global and head-specific attention masks
+            if self.attention_mask.dim() == 2:
+                # Global attention mask [seq_length, seq_length]
+                attention_mask = self.attention_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_length, seq_length]
+            else:
+                # Head-specific attention mask [batch_size, num_heads, seq_length, seq_length]
+                attention_mask = self.attention_mask
+                
+            attention_scores = attention_scores.masked_fill(~attention_mask, float('-inf'))
+        
+        return attention_scores
+
+    def set_key_padding_mask(self, mask: torch.Tensor):
+        """Set the key padding mask.
+        
+        Args:
+            mask: Boolean tensor of shape [batch_size, seq_length] where True indicates valid tokens
+        """
+        if not isinstance(mask, torch.Tensor) or mask.dtype != torch.bool:
+            raise ValueError("Key padding mask must be a boolean tensor")
+        if mask.dim() != 2:
+            raise ValueError("Key padding mask must be 2-dimensional [batch_size, seq_length]")
+        if mask.shape[1] != self.geometric_state.shape[2]:
+            raise ValueError("Key padding mask sequence length must match geometric state")
+        self.key_padding_mask = mask
+
+    def set_attention_mask(self, mask: torch.Tensor):
+        """Set the attention mask.
+        
+        Args:
+            mask: Boolean tensor of shape [seq_length, seq_length] or 
+                 [batch_size, num_heads, seq_length, seq_length] where True indicates allowed attention
+        """
+        if not isinstance(mask, torch.Tensor) or mask.dtype != torch.bool:
+            raise ValueError("Attention mask must be a boolean tensor")
+        if mask.dim() not in [2, 4]:
+            raise ValueError("Attention mask must be 2D or 4D")
+            
+        seq_length = self.geometric_state.shape[2]
+        if mask.dim() == 2:
+            if mask.shape != (seq_length, seq_length):
+                raise ValueError("2D attention mask must have shape [seq_length, seq_length]")
+        else:
+            if mask.shape[2:] != (seq_length, seq_length):
+                raise ValueError("4D attention mask must have shape [..., seq_length, seq_length]")
+                
+        self.attention_mask = mask
+
     @classmethod
     def initialize(
         cls,
@@ -108,7 +192,8 @@ class AttentionState:
         batch_size: int = 1,
         seq_length: int = 32,
         dtype: torch.dtype = torch.float32,
-        device: torch.device = torch.device('cpu')
+        device: torch.device = torch.device('cpu'),
+        causal: bool = False
     ) -> 'AttentionState':
         """Initialize attention state with given dimensions."""
         if hidden_dim <= 0 or num_heads <= 0 or batch_size <= 0 or seq_length <= 0:
@@ -133,4 +218,16 @@ class AttentionState:
         )
         geometric_state = geometric_state / torch.norm(geometric_state, dim=-1, keepdim=True)
         
-        return cls(state_manager=state_manager, geometric_state=geometric_state) 
+        # Create causal mask if requested
+        attention_mask = None
+        if causal:
+            attention_mask = torch.triu(
+                torch.ones(seq_length, seq_length, dtype=torch.bool, device=device),
+                diagonal=1
+            ).logical_not()
+        
+        return cls(
+            state_manager=state_manager,
+            geometric_state=geometric_state,
+            attention_mask=attention_mask
+        ) 

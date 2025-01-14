@@ -95,27 +95,27 @@ class TestQuantumGeometricAttention:
     @pytest.fixture
     def manifold_dim(self) -> int:
         """Return manifold dimension for tests."""
-        return 16  # Increased from 4 to better handle quantum states
+        return 8  # Reduced from 16 to use less memory
 
     @pytest.fixture
     def hidden_dim(self, manifold_dim) -> int:
         """Return hidden dimension for tests."""
-        return manifold_dim * 4  # Increased to ensure proper head dimensions
+        return manifold_dim * 2  # Reduced from 4x to use less memory
 
     @pytest.fixture
     def num_heads(self) -> int:
         """Return number of attention heads for tests."""
-        return 8  # Increased to match hidden dimension
+        return 4  # Reduced from 8 to use less memory
 
     @pytest.fixture
     def batch_size(self) -> int:
         """Return batch size for tests."""
-        return 16
+        return 4  # Reduced from 16 to use less memory
 
     @pytest.fixture
     def seq_length(self) -> int:
         """Return sequence length for tests."""
-        return 8  # Reduced from 32 to better match test scale
+        return 4  # Reduced from 8 to use less memory
 
     @pytest.fixture
     def config(self, hidden_dim, manifold_dim, num_heads):
@@ -879,3 +879,114 @@ class TestQuantumGeometricAttention:
         x_complex128 = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim).to(torch.complex128)
         output_complex128 = attention_layer(x_complex128)
         assert output_complex128.dtype == attention_layer.config.dtype, "Should maintain or convert complex dtype"
+
+    def test_mask_handling_in_attention(
+        self,
+        attention_layer: QuantumGeometricAttention,
+        batch_size: int,
+        seq_length: int,
+        hidden_dim: int
+    ):
+        """Test attention mask handling in quantum geometric attention."""
+        # Create input tensor with correct shape [batch_size, num_heads, seq_len, hidden_dim]
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
+
+        # Test with key padding mask
+        key_padding_mask = torch.ones(batch_size, seq_length, dtype=torch.bool)
+        key_padding_mask[:, -1] = False  # Mask out last token
+        output_key_mask = attention_layer(x, mask=key_padding_mask)
+        
+        # Verify output shape
+        assert output_key_mask.shape == x.shape, "Output shape should match input shape"
+        
+        # Test with attention mask
+        attention_mask = torch.ones(seq_length, seq_length, dtype=torch.bool)
+        attention_mask.triu_(1).logical_not_()  # Causal mask
+        output_attn_mask = attention_layer(x, mask=attention_mask)
+        
+        # Verify output shape
+        assert output_attn_mask.shape == x.shape, "Output shape should match input shape"
+        
+        # Test with head-specific attention mask
+        head_mask = torch.ones(batch_size, attention_layer.num_heads, seq_length, seq_length, dtype=torch.bool)
+        head_mask[:, :, :, -1] = False  # Can't attend to last token
+        output_head_mask = attention_layer(x, mask=head_mask)
+        
+        # Verify output shape
+        assert output_head_mask.shape == x.shape, "Output shape should match input shape"
+
+    def test_causal_attention(
+        self,
+        attention_layer: QuantumGeometricAttention,
+        batch_size: int,
+        seq_length: int,
+        hidden_dim: int
+    ):
+        """Test causal attention masking."""
+        # Create input tensor
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
+        
+        # Create causal mask
+        causal_mask = torch.triu(
+            torch.ones(seq_length, seq_length, dtype=torch.bool),
+            diagonal=1
+        ).logical_not()
+        
+        # Process with causal mask
+        output = attention_layer(x, mask=causal_mask)
+        
+        # Verify output shape
+        assert output.shape == x.shape, "Output shape should match input shape"
+        
+        # Get attention scores from the layer
+        state = attention_layer.prepare_attention_state(x, causal_mask)
+        state = attention_layer.apply_mask(state, causal_mask)
+        scores = state.attention_scores
+        
+        # Verify causal pattern in attention scores
+        assert scores is not None, "Attention scores should not be None"
+        # Future tokens should have -inf attention scores
+        future_positions = ~causal_mask.unsqueeze(0).unsqueeze(0).expand_as(scores)
+        assert torch.all(scores[future_positions] == float('-inf')), "Future positions should have -inf scores"
+
+    def test_mixed_mask_types(
+        self,
+        attention_layer: QuantumGeometricAttention,
+        batch_size: int,
+        seq_length: int,
+        hidden_dim: int
+    ):
+        """Test handling of mixed mask types."""
+        # Create input tensor
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
+        
+        # Create key padding mask
+        key_padding_mask = torch.ones(batch_size, seq_length, dtype=torch.bool)
+        key_padding_mask[:, -1] = False  # Mask out last token
+        
+        # Create attention mask
+        attention_mask = torch.ones(seq_length, seq_length, dtype=torch.bool)
+        attention_mask.triu_(1).logical_not_()  # Causal mask
+        
+        # Process with both masks
+        state = attention_layer.prepare_attention_state(x)
+        state.set_key_padding_mask(key_padding_mask)
+        state.set_attention_mask(attention_mask)
+        
+        # Apply attention
+        output = attention_layer(x, mask=key_padding_mask)  # Use key_padding_mask as the primary mask
+        
+        # Verify output shape
+        assert output.shape == x.shape, "Output shape should match input shape"
+        
+        # Verify attention scores
+        scores = state.attention_scores
+        assert scores is not None, "Attention scores should not be None"
+        
+        # Check that masked positions have -inf scores
+        masked_positions = ~key_padding_mask.unsqueeze(1).unsqueeze(2)  # Expand for heads and seq_len
+        assert torch.all(scores[masked_positions] == float('-inf')), "Masked positions should have -inf scores"
+        
+        # Check causal pattern
+        future_positions = ~attention_mask.unsqueeze(0).unsqueeze(0)  # Expand for batch and heads
+        assert torch.all(scores[future_positions] == float('-inf')), "Future positions should have -inf scores"
