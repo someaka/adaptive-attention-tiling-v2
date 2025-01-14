@@ -128,11 +128,7 @@ class QuantumGeometricAttention(nn.Module):
     """Quantum geometric attention framework."""
 
     def __init__(self, config: QuantumGeometricConfig):
-        """Initialize quantum geometric attention.
-        
-        Args:
-            config: Configuration object containing all parameters
-        """
+        """Initialize quantum geometric attention layer."""
         super().__init__()
         self.config = config
         
@@ -142,18 +138,53 @@ class QuantumGeometricAttention(nn.Module):
         self.head_dim = config.hidden_dim // config.num_heads
         self.scale = self.head_dim ** -0.5
         self.manifold_dim = config.manifold_dim or config.hidden_dim // 2
-
-        # Initialize quantum infrastructure
-        self._init_quantum_components()
         
-        # Initialize geometric components
-        self._init_geometric_components()
+        # Initialize quantum bridge for state preparation
+        self.quantum_bridge = NeuralQuantumBridge(
+            hidden_dim=self.hidden_dim,
+            dtype=config.dtype
+        )
+        
+        # Initialize geometric structures
+        self.geometric_structures = GeometricStructures(
+            dim=self.manifold_dim,
+            manifold_type='hyperbolic',  # Default to hyperbolic manifold
+            curvature=config.curvature,
+            parallel_transport_method='schild'  # Default to Schild's ladder
+        )
+        
+        # Initialize state config
+        self.state_config = StateConfig(
+            dim=self.manifold_dim,
+            type=StateType.PURE,
+            epsilon=1e-6,
+            max_entanglement=1.0,
+            dtype=config.dtype
+        )
+        
+        # Initialize state manager with config
+        self.state_manager = StateManager(config=self.state_config)
+        
+        # Initialize geometric flow with minimal parameters
+        self.flow = GeometricFlow(
+            hidden_dim=self.manifold_dim,
+            manifold_dim=self.manifold_dim,
+            motive_rank=1,  # Minimal motive rank
+            num_charts=1,  # Single chart
+            integration_steps=3,  # Minimal integration steps
+            dt=0.5,  # Larger time step
+            stability_threshold=1e-4,  # More relaxed threshold
+            dtype=config.dtype
+        )
         
         # Initialize attention components
         self._init_attention_components()
         
-        # Initialize weights
-        self._init_weights()
+        # Initialize metrics
+        self.metrics = {}
+        
+        # Initialize debug mode
+        self.debug = getattr(config, 'debug', False)
 
     def _init_quantum_components(self) -> None:
         """Initialize quantum computation components."""
@@ -283,8 +314,8 @@ class QuantumGeometricAttention(nn.Module):
         self.manifold_proj = self._create_complex_linear(self.hidden_dim, self.manifold_dim)
         # Project back from manifold_dim to hidden_dim
         self.manifold_proj_inv = self._create_complex_linear(self.manifold_dim, self.hidden_dim)
-        # Pattern projection maintains hidden_dim
-        self.pattern_proj = self._create_complex_linear(self.hidden_dim, self.hidden_dim)
+        # Pattern projection from manifold_dim to head_dim
+        self.pattern_proj = self._create_complex_linear(self.manifold_dim, self.head_dim)
 
         # Initialize dropout
         self.dropout = nn.Dropout(self.config.dropout)
@@ -503,75 +534,65 @@ class QuantumGeometricAttention(nn.Module):
         except Exception as e:
             raise InvalidQuantumStateError(f"Failed to measure quantum state: {str(e)}")
 
-    def _geometric_update(self, x: torch.Tensor) -> torch.Tensor:
-        """Updates based on manifold structure using geometric flow."""
-        try:
-            print(f"Geometric update input shape: {x.shape}")
-            print(f"Flow manifold dim: {self.flow.manifold_dim}")
-            
-            # Project to manifold space if needed
-            if x.shape[-1] != self.flow.manifold_dim:
-                print(f"Projecting to manifold dim {self.flow.manifold_dim}")
-                x_manifold = x[..., :self.flow.manifold_dim]
-            else:
-                x_manifold = x
-                
-            print(f"Manifold shape before flow: {x_manifold.shape}")
-            
-            # Apply geometric flow with timeout
-            try:
-                print("Starting flow computation...")
-                x_flowed, _ = self.flow(
-                    x_manifold,
-                    return_path=False
-                )
-                print("Flow computation complete")
-            except Exception as flow_error:
-                print(f"Flow computation failed: {str(flow_error)}")
-                raise
-            
-            print(f"Flow output shape: {x_flowed.shape}")
-            return x_flowed
-            
-        except Exception as e:
-            print(f"Error in geometric update: {str(e)}")
-            raise GeometricFlowError(f"Failed to compute geometric flow: {str(e)}")
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        return_metrics: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Apply quantum geometric attention with pattern validation.
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass of quantum geometric attention.
         
         Args:
-            x: Input tensor
-            mask: Optional attention mask
-            return_metrics: Whether to return metrics
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim] or [batch_size, num_heads, seq_len, hidden_dim]
+            mask: Optional attention mask of shape [batch_size, seq_len]
             
         Returns:
-            Output tensor and optional metrics
+            Output tensor of shape [batch_size, seq_len, hidden_dim]
         """
-        try:
-            # Initialize state
-            state = self.prepare_attention_state(x, mask)
-            metrics_dict = {} if return_metrics else {}
-            
-            # Apply attention flow
-            output = self._apply_attention_flow(state)
-            
-            if return_metrics:
-                # Validate pattern formation
-                pattern_result = self.validate_pattern_formation(output)
-                metrics_dict['pattern_formation'] = pattern_result.data or {}
-                
-                return output, metrics_dict
-                
-            return output
-            
-        except Exception as e:
-            raise RuntimeError(f"Error in quantum geometric attention: {str(e)}")
+        # Convert input to correct dtype if needed
+        if x.dtype != self.config.dtype:
+            x = x.to(self.config.dtype)
+        
+        # Initialize attention state
+        state = self.prepare_attention_state(x)
+        
+        # Apply mask if provided
+        if mask is not None:
+            state = self.apply_mask(state, mask)
+            # If mask is all zeros, return zeros
+            if not mask.any():
+                return torch.zeros_like(x)
+        
+        # Get dimensions
+        batch_size = x.size(0)
+        seq_len = x.size(-2)
+        
+        # Get quantum state
+        quantum_state = self._measure_quantum_state(state)
+        
+        # Ensure quantum state has correct dtype
+        quantum_state = quantum_state.to(self.config.dtype)
+        
+        # Project to attention space
+        pattern_proj = self.pattern_proj(quantum_state)
+        
+        # Compute attention scores
+        attention_scores = torch.matmul(
+            pattern_proj, pattern_proj.transpose(-2, -1)
+        ) / math.sqrt(pattern_proj.size(-1))
+        
+        # Store attention patterns
+        state.attention_scores = attention_scores
+        state.attention_patterns["quantum"] = attention_scores.detach()
+        
+        # Apply attention
+        attended = torch.matmul(attention_scores, quantum_state)
+        
+        # Project back to hidden dimension
+        output = self.manifold_proj_inv(attended)
+        
+        # Reshape output to match input shape
+        if x.dim() == 4:  # Input had heads dimension
+            output = output.view(batch_size, self.num_heads, seq_len, self.hidden_dim)
+        else:  # Input was [batch_size, seq_len, hidden_dim]
+            output = output.view(batch_size, seq_len, self.hidden_dim)
+        
+        return output
 
     def prepare_attention_state(
         self,
@@ -601,35 +622,47 @@ class QuantumGeometricAttention(nn.Module):
 
             # Project input to manifold space
             batch_size = x.size(0)
-            seq_len = x.size(1) if x.dim() > 2 else 1
-            x_flat = x.reshape(-1, self.hidden_dim)
+            num_heads = x.size(1) if x.dim() > 3 else 1
+            seq_len = x.size(2) if x.dim() > 3 else (x.size(1) if x.dim() > 2 else 1)
+            # Combine batch and head dimensions
+            x_flat = x.reshape(batch_size * num_heads, seq_len, self.hidden_dim)
+            x_flat = x_flat.reshape(-1, self.hidden_dim)
             x_manifold = self.manifold_proj(x_flat)
-            x_manifold = x_manifold.reshape(batch_size, seq_len, self.manifold_dim)
+            x_manifold = x_manifold.reshape(batch_size * num_heads, seq_len, self.manifold_dim)
 
             # Let QuantumState handle normalization
             quantum_result = self._prepare_quantum_state(x_manifold)
             quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
             
             # Store states in manager
-            self.state_manager.states["input"] = x.clone()
-            self.state_manager.states["manifold"] = x_manifold
+            # Initialize states with correct dimensions
+            if "input" not in self.state_manager.states:
+                self.state_manager.states["input"] = torch.zeros_like(x)
+            if "manifold" not in self.state_manager.states:
+                self.state_manager.states["manifold"] = torch.zeros_like(x_manifold)
+            if "quantum" not in self.state_manager.states:
+                self.state_manager.states["quantum"] = quantum_state
+                
+            # Update states
+            self.state_manager.states["input"].copy_(x)
+            self.state_manager.states["manifold"].copy_(x_manifold)
             self.state_manager.states["quantum"] = quantum_state
             self.state_manager.states["debug_info"] = {
                 "input_shape": tuple(x.shape),
                 "input_dtype": str(x.dtype),
                 "manifold_shape": tuple(x_manifold.shape),
                 "quantum_shape": tuple(quantum_state.amplitudes.shape),
+                "num_heads": num_heads
             }
 
             # Initialize attention state
             return AttentionState(
                 state_manager=self.state_manager,
-                geometric_state=x.clone(),
-                manifold_state=x_manifold,
+                geometric_state=x_manifold.clone(),  # Use manifold state instead of input
                 attention_scores=None,
                 attention_patterns={},
                 entanglement_history={},
-                metrics={}  # Initialize empty metrics dictionary
+                metrics={}
             )
             
         except Exception as e:
@@ -640,36 +673,43 @@ class QuantumGeometricAttention(nn.Module):
         if mask is None:
             return state
 
-        # Compute attention scores if they don't exist
-        if state.attention_scores is None:
-            # Project to query/key space
-            query = self.pattern_proj(state.geometric_state)
-            key = self.pattern_proj(state.geometric_state)
-            
-            # Reshape for attention
-            batch_size = query.size(0)
-            seq_len = query.size(1)
-            head_dim = self.hidden_dim // self.num_heads
-            
-            query = query.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)
-            key = key.view(batch_size, seq_len, self.num_heads, head_dim).transpose(1, 2)
-            
-            # Compute scores
-            scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
-            state.attention_scores = scores
-
-        # Apply mask
-        batch_size = mask.size(0)
-        seq_len = mask.size(1)
-        expanded_mask = mask.unsqueeze(1).unsqueeze(1).expand(
-            batch_size, self.num_heads, seq_len, seq_len
-        )
-        state.attention_scores = state.attention_scores.masked_fill(
-            ~expanded_mask, float("-inf")
-        )
-
         # Store mask in state manager
         state.state_manager.states["mask"] = mask
+
+        # Compute attention scores if they don't exist
+        if state.attention_scores is None:
+            # Get dimensions
+            batch_size = mask.size(0)
+            seq_len = state.geometric_state.size(1)
+            head_dim = self.hidden_dim // self.num_heads
+
+            # Reshape geometric state to include heads if needed
+            geometric_state = state.geometric_state
+            if geometric_state.size(0) == batch_size:  # No heads dimension
+                geometric_state = geometric_state.unsqueeze(1).expand(batch_size, self.num_heads, seq_len, -1)
+                geometric_state = geometric_state.reshape(batch_size * self.num_heads, seq_len, -1)
+            
+            # Project to query/key space
+            query = self.pattern_proj(geometric_state)  # [batch_size * num_heads, seq_len, head_dim]
+            key = self.pattern_proj(geometric_state)    # [batch_size * num_heads, seq_len, head_dim]
+
+            # Reshape for attention computation
+            query = query.view(batch_size, self.num_heads, seq_len, head_dim)
+            key = key.view(batch_size, self.num_heads, seq_len, head_dim)
+
+            # Compute attention scores
+            attention_scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+
+            # Apply mask
+            if mask is not None:
+                # Create attention mask [batch_size, 1, seq_len, seq_len]
+                attention_mask = mask.unsqueeze(1).unsqueeze(2) * mask.unsqueeze(1).unsqueeze(-1)
+                # Expand mask for num_heads dimension
+                attention_mask = attention_mask.expand(-1, self.num_heads, -1, -1)
+                attention_scores = attention_scores.masked_fill(~attention_mask, float('-inf'))
+
+            # Store attention scores in state
+            state.attention_scores = attention_scores
 
         return state
 
@@ -1644,22 +1684,58 @@ class QuantumGeometricAttention(nn.Module):
             )
     
     def _apply_attention_flow(self, state: AttentionState) -> torch.Tensor:
-        """Apply attention flow using geometric flow on manifold."""
+        """Apply attention flow with quantum geometric updates.
+
+        Args:
+            state: Current attention state
+
+        Returns:
+            Updated attention output
+        """
         try:
-            # Get geometric state which is already on the manifold
-            geometric_state = state.geometric_state
+            # Get input and debug info
+            x = state.geometric_state
+            debug_info = state.state_manager.states.get("debug_info", {})
+            num_heads = debug_info.get("num_heads", 1)
+            batch_size = x.size(0) // num_heads
+            seq_len = x.size(1)
+
+            # Compute quantum attention scores
+            quantum_state = self._measure_quantum_state(state)
+            # Reshape quantum state back to [batch, heads, seq, dim]
+            quantum_state = quantum_state.reshape(batch_size, num_heads, seq_len, -1)
+            # Ensure quantum state has correct dtype
+            quantum_state = quantum_state.to(self.config.dtype)
+
+            # Project to attention space per head
+            pattern_proj = self.pattern_proj(quantum_state)
+
+            # Compute attention scores
+            attention_scores = torch.matmul(
+                pattern_proj, pattern_proj.transpose(-2, -1)
+            ) / math.sqrt(pattern_proj.size(-1))
+
+            # Store attention patterns
+            state.attention_scores = attention_scores
+            state.attention_patterns["quantum"] = attention_scores.detach()
+
+            # Apply attention
+            attended = torch.matmul(attention_scores, quantum_state)
+
+            # Reshape back to original dimensions
+            output = attended.reshape(batch_size * num_heads, seq_len, -1)
+
+            # Update geometric state in-place
+            state.geometric_state = output
             
-            # Apply geometric flow directly
-            flow_output = self._geometric_update(geometric_state)
-            
-            # Apply quantum bridge - output should maintain head structure
-            output = self.quantum_bridge(flow_output)
-            
-            # Output should already have shape [batch_size, seq_len, hidden_dim]
-            return output
-            
+            # Apply geometric update directly on state
+            self._geometric_update(state)
+
+            # Return the geometric state tensor
+            return state.geometric_state
+
         except Exception as e:
-            raise RuntimeError(f"Failed to apply attention flow: {str(e)}")
+            raise GeometricFlowError(f"Failed to apply geometric flow: {str(e)}")
     
     def _validate_pattern_formation(self, pattern: torch.Tensor) -> FormationValidationResult:
         """Validate pattern formation properties."""

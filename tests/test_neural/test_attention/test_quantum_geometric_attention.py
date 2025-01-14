@@ -91,7 +91,6 @@ class TestQuantumGeometricAttention:
         yield
         import gc
         gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     @pytest.fixture
     def manifold_dim(self) -> int:
@@ -208,34 +207,37 @@ class TestQuantumGeometricAttention:
         self, attention_layer, batch_size, seq_length, hidden_dim, manifold_dim, num_heads
     ):
         """Test comprehensive attention state preparation and validation."""
-        # Create input tensor
-        x = complex_randn(batch_size, seq_length, hidden_dim)
+        # Create input tensor with correct shape [batch_size, num_heads, seq_len, hidden_dim]
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
         mask = torch.ones(batch_size, seq_length).bool()
-
+    
         # Prepare attention state
         state = attention_layer.prepare_attention_state(x, mask)
-
+    
         # 1. Test basic type and existence properties
         assert isinstance(state, AttentionState), "Should return AttentionState"
         assert state.state_manager is not None, "Should have state manager"
         assert state.geometric_state is not None, "Should have geometric state"
-        assert state.manifold_state is not None, "Should have manifold state"
-
+    
         # 2. Test state manager initialization and contents
         assert "input" in state.state_manager.states, "Should store input state"
         assert "manifold" in state.state_manager.states, "Should store manifold state"
         assert "quantum" in state.state_manager.states, "Should store quantum state"
-
+    
         # 3. Test quantum state properties
         quantum_state = state.state_manager.states.get("quantum")
         assert quantum_state is not None, "Should have quantum state"
-
+    
         # 4. Test geometric and manifold state properties
-        assert state.geometric_state.shape == x.shape, "Geometric state shape mismatch"
+        # The geometric state should have shape [batch_size * num_heads, seq_len, manifold_dim]
+        expected_shape = (batch_size * attention_layer.num_heads, seq_length, manifold_dim)
+        assert state.geometric_state.shape == expected_shape, "Geometric state shape mismatch"
         assert state.geometric_state.dtype == attention_layer.config.dtype, "Geometric state dtype mismatch"
-        assert state.manifold_state.shape[-1] == manifold_dim, "Manifold state dimension mismatch"
-        assert not torch.isnan(state.manifold_state).any(), "Manifold state contains NaN"
-        assert not torch.isinf(state.manifold_state).any(), "Manifold state contains Inf"
+        
+        manifold_state = state.state_manager.states["manifold"]
+        assert manifold_state.shape[-1] == manifold_dim, "Manifold state dimension mismatch"
+        assert not torch.isnan(manifold_state).any(), "Manifold state contains NaN"
+        assert not torch.isinf(manifold_state).any(), "Manifold state contains Inf"
 
         # 5. Test attention components initialization
         assert state.attention_scores is None, "Initial attention scores should be None"
@@ -245,7 +247,7 @@ class TestQuantumGeometricAttention:
 
         # 6. Test state validation
         assert state.validate_state(state.geometric_state), "Geometric state validation failed"
-        assert state.validate_state(state.manifold_state), "Manifold state validation failed"
+        assert state.validate_state(manifold_state), "Manifold state validation failed"
 
         # 7. Test mask application
         masked_state = attention_layer.apply_mask(state, mask)
@@ -812,7 +814,8 @@ class TestQuantumGeometricAttention:
         self, attention_layer, batch_size, seq_length, hidden_dim
     ):
         """Test gradient stability through complex operations."""
-        x = complex_randn(batch_size, seq_length, hidden_dim)
+        # Create input with correct shape [batch_size, num_heads, seq_len, hidden_dim]
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
         x.requires_grad_(True)
         
         # Forward pass
@@ -837,7 +840,8 @@ class TestQuantumGeometricAttention:
     ):
         """Test consistency across batch processing."""
         # Create two identical inputs in different batch positions
-        x = complex_randn(batch_size, seq_length, hidden_dim)
+        # Shape: [batch_size, num_heads, seq_len, hidden_dim]
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
         x_repeated = x.clone()
         x_repeated[1] = x[0]  # Make second batch element identical to first
         
@@ -857,21 +861,21 @@ class TestQuantumGeometricAttention:
     def test_dtype_handling(self, attention_layer, batch_size, seq_length, hidden_dim):
         """Test handling of different dtypes."""
         # Test with float32 input
-        x_float32 = torch.randn(batch_size, seq_length, hidden_dim, dtype=torch.float32)
+        x_float32 = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim, dtype=torch.float32)
         output_float32 = attention_layer(x_float32)
         assert output_float32.dtype == attention_layer.config.dtype, "Should convert to config dtype"
         
         # Test with float64 input
-        x_float64 = torch.randn(batch_size, seq_length, hidden_dim, dtype=torch.float64)
+        x_float64 = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim, dtype=torch.float64)
         output_float64 = attention_layer(x_float64)
         assert output_float64.dtype == attention_layer.config.dtype, "Should convert to config dtype"
         
         # Test with complex64 input
-        x_complex64 = complex_randn(batch_size, seq_length, hidden_dim).to(torch.complex64)
+        x_complex64 = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim).to(torch.complex64)
         output_complex64 = attention_layer(x_complex64)
         assert output_complex64.dtype == attention_layer.config.dtype, "Should maintain or convert complex dtype"
         
         # Test with complex128 input
-        x_complex128 = complex_randn(batch_size, seq_length, hidden_dim).to(torch.complex128)
+        x_complex128 = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim).to(torch.complex128)
         output_complex128 = attention_layer(x_complex128)
         assert output_complex128.dtype == attention_layer.config.dtype, "Should maintain or convert complex dtype"

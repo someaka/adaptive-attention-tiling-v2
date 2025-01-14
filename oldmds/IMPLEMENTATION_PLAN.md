@@ -1,3 +1,7 @@
+THIS DOCUMENT IS DEPRECATED AND ONLY KEPT FOR DOCUMENTATION
+ON THE INTENT OF THE IMPLEMENTATION FOR THIS PROJECT
+
+
 # Adaptive Attention Tiling System v2 - Implementation Plan
 
 ## Overview
@@ -739,7 +743,9 @@ Last Updated: 2024-12-09T05:02:42+01:00
 - [x] Phase 4: Infrastructure Setup
 - [x] Phase 5: Testing Framework
 - [x] Phase 6: CPU Performance
-- [ ] Phase 7: GPU Performance (Next)
+- [ ] Phase 7: GPU Performance (Next) 
+
+-- ADDENDUM jan 14 2025 GPU has been abandonned in favor of CPU only --
 
 ## Next Steps
 1. Design GPU memory management system

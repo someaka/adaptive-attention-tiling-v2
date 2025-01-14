@@ -36,8 +36,10 @@ class QuantumState:
             # Single state vector
             norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
         else:
-            # Batch of state vectors - normalize globally across all dimensions except batch
-            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape))), keepdim=True))
+            # Global normalization across all dimensions except batch
+            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
+                                      dim=tuple(range(1, len(self.amplitudes.shape))), 
+                                      keepdim=True))
         
         # Store original norm if not provided
         if self.original_norm is None:
@@ -45,8 +47,8 @@ class QuantumState:
         else:
             self.original_norm = self.original_norm.to(torch.float64)
             
-        # Normalize state vector globally
-        self.amplitudes = self.amplitudes / (norm + 1e-8)
+        # Global normalization
+        self.amplitudes = self.amplitudes / norm.clamp(min=1e-8)
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -66,33 +68,40 @@ class QuantumState:
         return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape))))).to(torch.float64)
 
     def density_matrix(self) -> torch.Tensor:
-        """Compute the density matrix representation of the state."""
-        # For a pure state, density matrix is |ψ⟩⟨ψ|
-        if len(self.amplitudes.shape) == 1:
-            return torch.outer(self.amplitudes, self.amplitudes.conj())
+        """Compute the density matrix representation of the state.
         
-        # For batched states
-        batch_size = self.amplitudes.shape[0]
-        if len(self.amplitudes.shape) == 3:
-            # Handle case where amplitudes have sequence dimension
-            seq_len = self.amplitudes.shape[1]
-            state_dim = self.amplitudes.shape[2]
-            rho = torch.zeros((batch_size, seq_len, state_dim, state_dim), 
-                             dtype=torch.complex128, 
-                             device=self.amplitudes.device)
-            for i in range(batch_size):
-                for j in range(seq_len):
-                    rho[i, j] = torch.outer(self.amplitudes[i, j], self.amplitudes[i, j].conj())
-            return rho
-        else:
-            # Regular batch case
-            state_dim = self.amplitudes.shape[1]
-            rho = torch.zeros((batch_size, state_dim, state_dim), 
-                             dtype=torch.complex128, 
-                             device=self.amplitudes.device)
-            for i in range(batch_size):
-                rho[i] = torch.outer(self.amplitudes[i], self.amplitudes[i].conj())
-            return rho
+        For a pure state |ψ⟩, computes ρ = |ψ⟩⟨ψ| for each quantum state.
+        Preserves batch structure while ensuring each state has proper quantum properties.
+        
+        Returns:
+            torch.Tensor: Density matrix with shape (..., d, d) where d is Hilbert space dimension
+        """
+        # Handle single state case
+        if len(self.amplitudes.shape) == 1:
+            # Normalize state vector
+            state = self.amplitudes / torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
+            return torch.outer(state, state.conj())
+        
+        # Get Hilbert space dimension (last dimension)
+        hilbert_dim = self.amplitudes.shape[-1]
+        
+        # Normalize each state vector
+        norms = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=-1, keepdim=True))
+        normalized_states = self.amplitudes / norms.clamp(min=1e-8)
+        
+        # Reshape to combine all batch dimensions except last
+        batch_shape = normalized_states.shape[:-1]  # (batch, heads, seq) or similar
+        flattened = normalized_states.reshape(-1, hilbert_dim)  # (batch_prod, hilbert_dim)
+        
+        # Compute density matrices for all states in batch
+        # |ψ⟩⟨ψ| for each state via batched outer product
+        density_matrices = torch.bmm(
+            flattened.unsqueeze(-1),  # (batch_prod, hilbert_dim, 1)
+            flattened.conj().unsqueeze(-2)  # (batch_prod, 1, hilbert_dim)
+        )
+        
+        # Restore original batch dimensions plus density matrix dimensions
+        return density_matrices.reshape(*batch_shape, hilbert_dim, hilbert_dim)
 
     def inner_product(self, other: 'QuantumState') -> torch.Tensor:
         """Compute inner product with another state."""

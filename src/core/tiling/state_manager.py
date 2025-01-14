@@ -89,9 +89,12 @@ class StateManager:
         state = self.states[key]
         new_state = state + learning_rate * update
 
-        # Normalize based on state type
+        # Normalize globally across all dimensions except batch
         if self.config.type == StateType.PURE:
-            new_state = new_state / torch.norm(new_state)
+            # Global normalization across all dimensions except batch
+            new_state = new_state / torch.sqrt(torch.sum(torch.abs(new_state) ** 2, 
+                                                       dim=tuple(range(1, len(new_state.shape))), 
+                                                       keepdim=True)).clamp(min=1e-8)
         elif self.config.type == StateType.MIXED:
             new_state = 0.5 * (new_state + new_state.T)
             new_state = new_state / torch.trace(new_state)
