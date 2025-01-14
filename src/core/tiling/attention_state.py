@@ -4,7 +4,7 @@ This module provides the enhanced state management system for the quantum geomet
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import torch
 
@@ -105,9 +105,47 @@ class AttentionState:
             target_scale
         )
     
-    def validate_state(self, state: torch.Tensor) -> bool:
-        """Validate quantum state through state manager."""
-        return self.state_manager.validate_state(state)
+    def validate_state(self, state_tensor: torch.Tensor) -> bool:
+        """Validate a state tensor.
+        
+        Args:
+            state_tensor: Tensor to validate
+            
+        Returns:
+            bool: True if state is valid
+        """
+        try:
+            # Add debug prints
+            print(f"Validating state tensor:")
+            print(f"Shape: {state_tensor.shape}")
+            print(f"Dtype: {state_tensor.dtype}")
+            print(f"Has NaN: {torch.isnan(state_tensor).any()}")
+            print(f"Has Inf: {torch.isinf(state_tensor).any()}")
+            print(f"Is complex: {torch.is_complex(state_tensor)}")
+            print(f"Dimensions: {state_tensor.dim()}")
+            
+            # Check for NaN or Inf values
+            if torch.isnan(state_tensor).any() or torch.isinf(state_tensor).any():
+                print("Failed: Contains NaN or Inf")
+                return False
+                
+            # Check tensor has correct number of dimensions (batch, seq, features)
+            if state_tensor.dim() != 3:
+                print("Failed: Wrong number of dimensions")
+                return False
+                
+            # Check tensor is complex
+            if not torch.is_complex(state_tensor):
+                print("Failed: Not complex")
+                return False
+                
+            # All checks passed
+            print("Validation passed")
+            return True
+            
+        except Exception as e:
+            print(f"Validation failed with error: {str(e)}")
+            return False
     
     def update_attention_pattern(
         self,

@@ -52,8 +52,14 @@ class PatternDynamics:
             # Use default Laplacian evolution
             field_operator = self._compute_laplacian(pattern)
         
+        # Reshape for matrix multiplication
+        batch_size = pattern.shape[0]
+        hidden_dim = pattern.shape[1]
+        field_operator = field_operator.reshape(batch_size, hidden_dim, hidden_dim)
+        pattern_reshaped = pattern.unsqueeze(-1)  # Add dimension for matmul
+        
         # Evolve field
-        evolved_pattern = pattern + self.dt * torch.matmul(field_operator, pattern)
+        evolved_pattern = pattern + self.dt * torch.matmul(field_operator, pattern_reshaped).squeeze(-1)
         
         # Compute evolution metrics
         metrics["field_energy"] = torch.mean(torch.square(evolved_pattern))
@@ -73,13 +79,17 @@ class PatternDynamics:
         # Get pattern dimensions
         *batch_dims, height, width = pattern.shape
         
-        # Compute 2D Laplacian stencil
-        laplacian = torch.zeros((*batch_dims, height, width), device=self.device)
+        # Compute 2D Laplacian stencil with same dtype as input
+        laplacian = torch.zeros((*batch_dims, height, width), 
+                              device=self.device,
+                              dtype=pattern.dtype)
+        
+        # Apply stencil operations
         laplacian[..., 1:, :] += pattern[..., :-1, :]    # Up
         laplacian[..., :-1, :] += pattern[..., 1:, :]    # Down
         laplacian[..., :, 1:] += pattern[..., :, :-1]    # Left
         laplacian[..., :, :-1] += pattern[..., :, 1:]    # Right
-        laplacian = laplacian - 4 * pattern               # Center
+        laplacian[..., :, :] -= 4 * pattern              # Center
         
         return laplacian
 
