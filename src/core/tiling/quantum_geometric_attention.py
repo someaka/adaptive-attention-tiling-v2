@@ -551,46 +551,63 @@ class QuantumGeometricAttention(nn.Module):
         except Exception as e:
             raise GeometricFlowError(f"Failed to compute geometric flow: {str(e)}")
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass of quantum geometric attention.
-        
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Forward pass with quantum geometric attention.
+
         Args:
-            x: Input tensor of shape [batch_size, num_heads, seq_len, hidden_dim]
-            mask: Optional attention mask of shape [batch_size, seq_len, seq_len]
-            
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim] or [batch_size, num_heads, seq_len, hidden_dim]
+            mask: Optional attention mask
+
         Returns:
-            Output tensor of shape [batch_size, num_heads, seq_len, hidden_dim]
+            Output tensor with same shape as input
+
+        Raises:
+            ValueError: If input dimensions are invalid
         """
-        # Initialize attention state
-        state = self.prepare_attention_state(x)
+        # Validate input dimensions
+        if x.dim() not in [3, 4]:
+            raise ValueError(f"Input must be 3D or 4D tensor, got {x.dim()}D")
         
-        # Apply mask if provided
+        # Get sequence length based on input shape
+        seq_len = x.size(2) if x.dim() == 4 else x.size(1)
+        if seq_len == 0:
+            raise ValueError("Sequence length must be greater than 0")
+
+        # If mask is all zeros, return zeros
+        if mask is not None and not mask.any():
+            return torch.zeros_like(x)
+
+        # Prepare attention state
+        state = self.prepare_attention_state(x, mask)
+
+        # Apply attention mask if provided
         if mask is not None:
             state = self.apply_mask(state, mask)
-            # If mask is all zeros, return zeros
-            if not mask.any():
-                return torch.zeros_like(x)
-        
-        # Apply geometric flow
+
+        # Apply geometric update
         state = self._geometric_update(state)
-        
+
         # Extract tensor from geometric_state if it's a tuple
         geometric_tensor = state.geometric_state[0] if isinstance(state.geometric_state, tuple) else state.geometric_state
-        
-        # Project back to hidden dimension
-        output = self.manifold_proj_inv(geometric_tensor)
-        
+
         # Get original dimensions
         batch_size = x.size(0)
         num_heads = x.size(1) if x.dim() > 3 else 1
         seq_len = x.size(2) if x.dim() > 3 else x.size(1)
-        
-        # First reshape to combine batch and heads
-        output = output.reshape(batch_size * num_heads * seq_len, self.hidden_dim)
-        
-        # Then reshape back to 4D
-        output = output.view(batch_size, num_heads, seq_len, self.hidden_dim)
-        
+
+        # Project back to hidden dimension
+        output = self.manifold_proj_inv(geometric_tensor)
+
+        # Reshape back to match input shape
+        if x.dim() == 4:
+            output = output.view(batch_size, num_heads, seq_len, self.hidden_dim)
+        else:
+            output = output.view(batch_size, seq_len, self.hidden_dim)
+
         return output
 
     def prepare_attention_state(
@@ -611,9 +628,8 @@ class QuantumGeometricAttention(nn.Module):
             RuntimeError: If state preparation fails
         """
         try:
-            # Initialize state manager if needed
-            if not self.state_manager.states:
-                self.state_manager = StateManager(self.state_config)
+            # Always reinitialize state manager for each call
+            self.state_manager = StateManager(self.state_config)
 
             # Convert input to complex dtype if needed
             if not torch.is_complex(x):
@@ -634,15 +650,11 @@ class QuantumGeometricAttention(nn.Module):
             quantum_result = self._prepare_quantum_state(x_manifold)
             quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
             
-            # Store states in manager
             # Initialize states with correct dimensions
-            if "input" not in self.state_manager.states:
-                self.state_manager.states["input"] = torch.zeros_like(x)
-            if "manifold" not in self.state_manager.states:
-                self.state_manager.states["manifold"] = torch.zeros_like(x_manifold)
-            if "quantum" not in self.state_manager.states:
-                self.state_manager.states["quantum"] = quantum_state
-                
+            self.state_manager.states["input"] = torch.zeros_like(x)
+            self.state_manager.states["manifold"] = torch.zeros_like(x_manifold)
+            self.state_manager.states["quantum"] = quantum_state
+
             # Update states
             self.state_manager.states["input"].copy_(x)
             self.state_manager.states["manifold"].copy_(x_manifold)
@@ -686,26 +698,30 @@ class QuantumGeometricAttention(nn.Module):
         if mask is None:
             return state
 
+        # Store mask in state manager
+        state.state_manager.states["mask"] = mask
+
         # Compute attention scores if they don't exist
         if state.attention_scores is None:
-            # Project to query/key space
-            query = self.pattern_proj(state.geometric_state)  # [batch_size * num_heads, seq_len, hidden_dim]
-            key = self.pattern_proj(state.geometric_state)    # [batch_size * num_heads, seq_len, hidden_dim]
+            # Get dimensions from debug info
+            debug_info = state.state_manager.states.get("debug_info", {})
+            num_heads = debug_info.get("num_heads", 1)
+            
+            # Project to query/key space - input is [batch_size * num_heads, seq_len, manifold_dim]
+            query = self.pattern_proj(state.geometric_state)
+            key = self.pattern_proj(state.geometric_state)
 
             # Get dimensions
             batch_size = mask.size(0)
             seq_len = query.size(1)
-            head_dim = self.hidden_dim // self.num_heads
+            manifold_dim = query.size(-1)
 
-            # Reshape query and key for attention
-            query = query.view(batch_size * self.num_heads, seq_len, head_dim)
-            key = key.view(batch_size * self.num_heads, seq_len, head_dim)
+            # Reshape from [batch_size * num_heads, seq_len, manifold_dim] to [batch_size, num_heads, seq_len, manifold_dim]
+            query = query.view(batch_size, num_heads, seq_len, manifold_dim)
+            key = key.view(batch_size, num_heads, seq_len, manifold_dim)
 
             # Compute attention scores
-            attention_scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
-
-            # Reshape attention scores to include head dimension
-            attention_scores = attention_scores.view(batch_size, self.num_heads, seq_len, seq_len)
+            attention_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(manifold_dim)  # [batch_size, num_heads, seq_len, seq_len]
 
             # Apply masks using AttentionState's apply_masks method
             attention_scores = state.apply_masks(attention_scores)
