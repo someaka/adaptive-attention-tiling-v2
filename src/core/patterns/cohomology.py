@@ -485,17 +485,18 @@ class MotivicCohomology:
         return combined
 
 
-class HeightStructure:
+class HeightStructure(nn.Module):
     """Represents height functions for arithmetic dynamics."""
 
     def __init__(self, num_primes: int = 8, dtype: Optional[torch.dtype] = None):
         """Initialize height structure with prime bases."""
+        super().__init__()
         self.num_primes = num_primes
         self.dtype = dtype if dtype is not None else torch.float32
-        self.prime_bases = torch.tensor(
+        self.prime_bases = nn.Parameter(torch.tensor(
             [2, 3, 5, 7, 11, 13, 17, 19][:num_primes],
             dtype=self.dtype
-        )
+        ))
 
     def compute_height(self, coefficients: torch.Tensor) -> torch.Tensor:
         """Compute height function values.

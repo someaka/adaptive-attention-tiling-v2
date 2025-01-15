@@ -11,7 +11,7 @@ from typing import Optional, Tuple, Dict, Any, Union, overload, cast
 from dataclasses import dataclass
 from torch import Tensor
 
-from .riemannian import RiemannianFramework
+from .riemannian import PatternRiemannianStructure
 from .symplectic import SymplecticStructure, SymplecticForm
 from .operadic_structure import AttentionOperad, EnrichedAttention
 
@@ -27,7 +27,7 @@ class PatternEvolutionMetrics:
     geometric_flow: Optional[Tensor] = None
     wave_energy: float = 0.0
 
-class PatternEvolution:
+class PatternEvolution(nn.Module):
     """Pattern evolution on geometric manifolds with structure preservation.
     
     This class implements pattern evolution that preserves:
@@ -39,7 +39,7 @@ class PatternEvolution:
 
     def __init__(
         self,
-        framework: RiemannianFramework,
+        framework: PatternRiemannianStructure,
         learning_rate: float = 0.01,
         momentum: float = 0.9,
         symplectic: Optional[SymplecticStructure] = None,
@@ -58,12 +58,13 @@ class PatternEvolution:
             wave_enabled: Whether to enable wave packet evolution
             dim: Optional dimension override (defaults to pattern dimension)
         """
+        super().__init__()
         self.framework = framework
         self.learning_rate = learning_rate
         self.momentum = momentum
         self.preserve_structure = preserve_structure
         self.wave_enabled = wave_enabled
-        self.velocity = None
+        self.register_buffer('velocity', None)
         
         # Initialize geometric structures
         if symplectic is None:
@@ -98,6 +99,12 @@ class PatternEvolution:
         self.pattern_proj = None  # Initialize later when we know the input dimension
         self.pattern_proj_inv = None  # Initialize later when we know the input dimension
         self.manifold_dim = manifold_dim
+        
+        # Add submodules
+        self.add_module('framework', self.framework)
+        self.add_module('symplectic', self.symplectic)
+        self.add_module('enriched', self.enriched)
+        self.add_module('operadic', self.operadic)
 
     def _ensure_projections(self, pattern: torch.Tensor):
         """Ensure projection layers are initialized with correct dimensions."""

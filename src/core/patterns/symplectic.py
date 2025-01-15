@@ -49,6 +49,7 @@ from .operadic_structure import (
 )
 import logging
 import gc
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ class SymplecticForm:
         return torch.allclose(self.matrix, other.matrix)
 
 
-class SymplecticStructure:
+class SymplecticStructure(nn.Module):
     """Symplectic structure on a manifold with enriched operadic transitions.
     
     This class provides methods for working with symplectic geometry using
@@ -198,6 +199,8 @@ class SymplecticStructure:
         Raises:
             ValueError: If dimension is invalid or too large
         """
+        super().__init__()
+        
         if dim < 2:
             raise ValueError(f"Dimension must be at least 2, got {dim}")
         if dim > max_dim:
@@ -227,6 +230,22 @@ class SymplecticStructure:
             dtype=dtype
         )
         self.enriched.wave_enabled = wave_enabled
+
+        # Initialize metric and form as parameters
+        self.metric = nn.Parameter(torch.eye(self.target_dim, dtype=self.dtype))
+        self.form = nn.Parameter(self._create_standard_form())
+        
+        # Register operadic and enriched as submodules
+        self.add_module('operadic', self.operadic)
+        self.add_module('enriched', self.enriched)
+
+    def _create_standard_form(self) -> Tensor:
+        """Create standard symplectic form matrix."""
+        form = torch.zeros(self.target_dim, self.target_dim, dtype=self.dtype)
+        for i in range(0, self.target_dim, 2):
+            form[i, i+1] = 1.0
+            form[i+1, i] = -1.0
+        return form
 
     def _handle_dimension(self, tensor: Tensor, recursion_depth: int = 0) -> Tensor:
         """Handle dimension transitions using enriched operadic structure.
@@ -564,8 +583,20 @@ class SymplecticStructure:
         metric = torch.matmul(J.transpose(-2, -1), J)
         metric = metric + torch.eye(dim, dtype=self.dtype, device=pattern.device).unsqueeze(0)
         
-        # Combine into quantum geometric tensor
+        # Explicitly symmetrize the metric and ensure antisymmetry of J
+        metric = 0.5 * (metric + metric.transpose(-2, -1))  # Ensure perfect symmetry
+        J = 0.5 * (J - J.transpose(-2, -1))  # Ensure perfect antisymmetry
+        
+        # Combine into quantum geometric tensor with proper weight
         Q = metric + 1j * J * self._SYMPLECTIC_WEIGHT
+        
+        # Ensure Hermiticity of Q
+        Q = 0.5 * (Q + Q.conj().transpose(-2, -1))
+        
+        # Verify metric properties
+        assert torch.allclose(metric, metric.transpose(-2, -1), rtol=1e-5), "Metric must be symmetric"
+        assert torch.allclose(J, -J.transpose(-2, -1), rtol=1e-5), "J must be antisymmetric"
+        assert torch.allclose(Q, Q.conj().transpose(-2, -1), rtol=1e-5), "Q must be Hermitian"
         
         return Q
 

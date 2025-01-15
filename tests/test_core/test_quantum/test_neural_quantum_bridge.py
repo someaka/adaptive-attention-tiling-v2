@@ -27,6 +27,50 @@ def test_state():
 class TestNeuralQuantumBridge:
     """Tests for NeuralQuantumBridge."""
     
+    def test_forward_pass_and_gradients(self, bridge, test_state):
+        """Test forward pass and gradient flow through the bridge."""
+        # Enable gradient tracking
+        x = test_state.clone().requires_grad_(True)
+        
+        # Forward pass
+        output = bridge(x)
+        
+        # Check output properties
+        assert output.shape == x.shape, "Output shape should match input"
+        assert torch.all(torch.isfinite(output)), "Output should be finite"
+        
+        # Test gradient flow
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Check gradient properties
+        assert x.grad is not None, "Input should have gradients"
+        assert not torch.isnan(x.grad).any(), "Input gradients should not be NaN"
+        assert not torch.isinf(x.grad).any(), "Input gradients should not be Inf"
+        
+        # Check layer norm gradients for real part
+        assert bridge.layer_norm_real.weight.grad is not None, "Real layer norm weight should have gradients"
+        assert bridge.layer_norm_real.bias.grad is not None, "Real layer norm bias should have gradients"
+        assert not torch.isnan(bridge.layer_norm_real.weight.grad).any(), "Real layer norm gradients should not be NaN"
+        assert not torch.isinf(bridge.layer_norm_real.weight.grad).any(), "Real layer norm gradients should not be Inf"
+        
+        # Check layer norm gradients for imaginary part
+        assert bridge.layer_norm_imag.weight.grad is not None, "Imaginary layer norm weight should have gradients"
+        assert bridge.layer_norm_imag.bias.grad is not None, "Imaginary layer norm bias should have gradients"
+        assert not torch.isnan(bridge.layer_norm_imag.weight.grad).any(), "Imaginary layer norm gradients should not be NaN"
+        assert not torch.isinf(bridge.layer_norm_imag.weight.grad).any(), "Imaginary layer norm gradients should not be Inf"
+        
+        # Check gradient magnitudes
+        grad_norm = torch.norm(x.grad)
+        real_layer_norm_grad = torch.norm(bridge.layer_norm_real.weight.grad)
+        imag_layer_norm_grad = torch.norm(bridge.layer_norm_imag.weight.grad)
+        assert grad_norm > 1e-8, "Input gradients should not vanish"
+        assert real_layer_norm_grad > 1e-8, "Real layer norm gradients should not vanish"
+        assert imag_layer_norm_grad > 1e-8, "Imaginary layer norm gradients should not vanish"
+        assert grad_norm < 100, "Input gradients should not explode"
+        assert real_layer_norm_grad < 100, "Real layer norm gradients should not explode"
+        assert imag_layer_norm_grad < 100, "Imaginary layer norm gradients should not explode"
+    
     def test_bridge_scales(self, bridge, test_state):
         """Test scale bridging functionality."""
         # Test upscaling

@@ -8,9 +8,9 @@ def enriched_attention():
     return EnrichedAttention(
         base_category="SymplecticVect",
         wave_enabled=True,
+        dtype=torch.float32,
         _k=2.0,
-        _omega=1.0,
-        dtype=torch.float32
+        _omega=1.0
     )
 
 @pytest.fixture
@@ -119,14 +119,14 @@ def test_base_category(enriched_attention):
 
 def test_wave_parameters(enriched_attention):
     """Test wave parameter attributes."""
-    assert enriched_attention._k == 2.0
-    assert enriched_attention._omega == 1.0
+    assert enriched_attention.k.item() == 2.0
+    assert enriched_attention.omega.item() == 1.0
     assert enriched_attention.dtype == torch.float32
     
     # Test parameter changes
-    enriched_attention._k = 3.0
-    enriched_attention._omega = 2.0
+    enriched_attention.k.data = torch.tensor(3.0, dtype=enriched_attention.dtype)
+    enriched_attention.omega.data = torch.tensor(2.0, dtype=enriched_attention.dtype)
     enriched_attention.dtype = torch.float64
-    assert enriched_attention._k == 3.0
-    assert enriched_attention._omega == 2.0
+    assert enriched_attention.k.item() == 3.0
+    assert enriched_attention.omega.item() == 2.0
     assert enriched_attention.dtype == torch.float64

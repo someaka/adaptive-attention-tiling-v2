@@ -43,6 +43,7 @@ class NeuralQuantumBridge(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
+        manifold_dim: Optional[int] = None,
         num_heads: int = 8,
         dropout: float = 0.1,
         manifold_type: str = "hyperbolic",
@@ -54,6 +55,7 @@ class NeuralQuantumBridge(nn.Module):
         
         Args:
             hidden_dim: Hidden dimension
+            manifold_dim: Manifold dimension (defaults to hidden_dim // 2)
             num_heads: Number of attention heads
             dropout: Dropout probability
             manifold_type: Type of manifold geometry
@@ -64,17 +66,37 @@ class NeuralQuantumBridge(nn.Module):
         super().__init__()
         
         self.hidden_dim = hidden_dim
+        self.manifold_dim = manifold_dim or hidden_dim // 2
         self.num_heads = num_heads
         self.dropout = dropout
         self.manifold_type = manifold_type
         self.curvature = curvature
         self.dtype = dtype
         self.device = device or torch.device('cpu')
-        self.manifold_dim = hidden_dim // 2  # Manifold dimension is half of hidden dimension
         
-        # Initialize layer normalization
-        self.layer_norm = nn.LayerNorm(hidden_dim).to(device=self.device, dtype=self.dtype)
-        self.manifold_norm = nn.LayerNorm(self.manifold_dim).to(device=self.device, dtype=self.dtype)
+        # Initialize layer normalization for real and imaginary parts
+        self.layer_norm_real = nn.LayerNorm(
+            hidden_dim,
+            elementwise_affine=True,
+            dtype=torch.float64  # Use real-valued parameters
+        )
+        self.layer_norm_imag = nn.LayerNorm(
+            hidden_dim,
+            elementwise_affine=True,
+            dtype=torch.float64  # Use real-valued parameters
+        )
+        
+        # Initialize manifold normalization for real and imaginary parts
+        self.manifold_norm_real = nn.LayerNorm(
+            hidden_dim,
+            elementwise_affine=True,
+            dtype=torch.float64  # Use real-valued parameters
+        )
+        self.manifold_norm_imag = nn.LayerNorm(
+            hidden_dim,
+            elementwise_affine=True,
+            dtype=torch.float64  # Use real-valued parameters
+        )
         
         # Initialize state preparation and validation
         self.state_preparation = StatePreparationValidator()
@@ -125,29 +147,26 @@ class NeuralQuantumBridge(nn.Module):
         x: torch.Tensor,
         return_validation: bool = False
     ) -> Union[QuantumState, Tuple[QuantumState, QuantumStateValidationResult]]:
-        """Convert neural state to quantum state.
-        
-        Args:
-            x: Neural state tensor of shape (batch_size, hidden_dim) or (batch_size, manifold_dim)
-            return_validation: Whether to return validation result
-            
-        Returns:
-            If return_validation is True, returns (quantum_state, validation_result)
-            Otherwise, returns just quantum_state
-        """
+        """Convert neural representation to quantum state."""
         # Validate input dimensions
         if x.shape[-1] != self.hidden_dim:
             raise ValueError(f"Input tensor must have hidden dimension {self.hidden_dim}, got {x.shape[-1]}")
 
-        # Ensure state manager is on correct device
-        if self.state_manager.device != x.device:
-            self.state_manager.device = x.device
-
         # Store original norm
         original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
 
-        # Project to manifold dimension
-        x_manifold = x[..., :self.manifold_dim]
+        # Get dimensions and reshape if needed
+        if len(x.shape) == 2:  # [batch_size, hidden_dim]
+            batch_size = x.shape[0]
+            seq_len = 1
+            x_flat = x  # No need to reshape
+        else:  # [batch_size, seq_len, hidden_dim]
+            batch_size = x.shape[0]
+            seq_len = x.shape[1]
+            x_flat = x.reshape(-1, self.hidden_dim)
+
+        # Project to manifold dimension while preserving gradients
+        x_manifold = x_flat[..., :self.manifold_dim].clone()
         
         # Normalize to unit norm for quantum state preparation
         x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
@@ -156,9 +175,15 @@ class NeuralQuantumBridge(nn.Module):
         # Convert to quantum amplitudes using direct quantum state preparation
         prepared_state = self.hilbert_space.prepare_state(x_manifold)
         
-        # Create quantum state with proper initialization
+        # Reshape amplitudes back to include sequence length if needed
+        if seq_len > 1:
+            prepared_amplitudes = prepared_state.amplitudes.reshape(batch_size, seq_len, -1)
+        else:
+            prepared_amplitudes = prepared_state.amplitudes
+        
+        # Create quantum state with proper initialization and gradient tracking
         state = QuantumState(
-            amplitudes=prepared_state.amplitudes,
+            amplitudes=prepared_amplitudes.requires_grad_(True),
             basis_labels=[str(i) for i in range(self.manifold_dim)],
             phase=torch.zeros(1, dtype=self.dtype, device=self.device)
         )
@@ -172,7 +197,7 @@ class NeuralQuantumBridge(nn.Module):
                 target=state,
                 prepared=state
             )
-            return (state, validation)  # Return as explicit tuple
+            return (state, validation)
         return state
 
     def quantum_to_neural(
@@ -180,37 +205,36 @@ class NeuralQuantumBridge(nn.Module):
         state: QuantumState,
         original_shape: Optional[torch.Size] = None
     ) -> torch.Tensor:
-        """Convert quantum state back to neural representation.
-        
-        Args:
-            state: Quantum state
-            original_shape: Optional shape for reshaping output
-            
-        Returns:
-            Neural tensor
-        """
+        """Convert quantum state back to neural representation."""
         # Get classical amplitudes and ensure dtype matches inverse projection
         classical_flat = state.amplitudes.real.to(self.dtype)
         
-        # Project back to hidden dimension
-        batch_size = classical_flat.shape[0]
-        
-        # Reshape classical to (batch_size, manifold_dim)
-        classical_flat = classical_flat.reshape(batch_size, -1)
+        # Get dimensions and reshape if needed
+        if len(classical_flat.shape) == 2:  # [batch_size, manifold_dim]
+            batch_size = classical_flat.shape[0]
+            seq_len = 1
+            classical_reshaped = classical_flat  # No need to reshape
+        else:  # [batch_size, seq_len, manifold_dim]
+            batch_size = classical_flat.shape[0]
+            seq_len = classical_flat.shape[1]
+            classical_reshaped = classical_flat.reshape(-1, self.manifold_dim)
         
         # Project from manifold_dim back to hidden_dim using the inverse projection
-        if not hasattr(self, 'inverse_projection'):
-            self.inverse_projection = nn.Linear(self.manifold_dim, self.hidden_dim, device=classical_flat.device, dtype=self.dtype)
-        output = self.inverse_projection(classical_flat)
+        output = self.inverse_projection(classical_reshaped)
         
-        # Restore original norm
+        # Reshape back to include sequence length if needed
+        if seq_len > 1:
+            output = output.reshape(batch_size, seq_len, self.hidden_dim)
+        
+        # Restore original norm while preserving gradients
         if hasattr(state, 'original_norm') and state.original_norm is not None:
             current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-            output = output * (state.original_norm / (current_norm + 1e-8))
+            scale = state.original_norm / (current_norm + 1e-8)
+            output = output * scale.detach()  # Detach scale to prevent gradient explosion
             
             # Verify norm restoration
             restored_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-            assert torch.allclose(restored_norm, state.original_norm)
+            assert torch.allclose(restored_norm, state.original_norm, rtol=1e-5)
         
         # Reshape if needed
         if original_shape is not None:
@@ -222,61 +246,60 @@ class NeuralQuantumBridge(nn.Module):
         self,
         state: QuantumState,
         attention_pattern: Optional[torch.Tensor] = None,
-        time: float = 1.0,  # Default time step
-        **kwargs
+        time: float = 1.0
     ) -> QuantumState:
         """Evolve quantum state using attention pattern.
         
         Args:
-            state: Initial quantum state
+            state: Input quantum state
             attention_pattern: Optional attention pattern tensor
             time: Evolution time
-            **kwargs: Additional arguments
             
         Returns:
             Evolved quantum state
         """
-        # Validate input state
-        if not isinstance(state, QuantumState):
-            raise TypeError("Input must be a QuantumState")
+        if state is None:
+            raise ValueError("Quantum state cannot be None")
             
         # Get state dimensions
         batch_size = state.amplitudes.shape[0]
         state_dim = state.amplitudes.shape[-1]
-        seq_len = state.amplitudes.shape[1] if len(state.amplitudes.shape) > 2 else 1
         
-        # If no attention pattern provided, use identity
+        # Reshape amplitudes to [batch_size * num_heads, state_dim]
+        amplitudes_reshaped = state.amplitudes.reshape(-1, state_dim)
+        
+        # Create or use provided attention pattern
         if attention_pattern is None:
             attention_pattern = torch.eye(
                 state_dim,
                 device=state.amplitudes.device,
                 dtype=state.amplitudes.dtype
-            ).unsqueeze(0).expand(batch_size, -1, -1)
-        
-        # Ensure attention pattern has correct shape
-        if attention_pattern.shape[-2:] != (state_dim, state_dim):
-            # Try to reshape attention pattern if possible
-            if attention_pattern.shape[-1] < state_dim:
-                # Pad attention pattern
-                padded_attention = torch.zeros(
-                    batch_size,
-                    state_dim,
-                    state_dim,
-                    device=attention_pattern.device,
-                    dtype=attention_pattern.dtype
-                )
-                padded_attention[:, :attention_pattern.shape[1], :attention_pattern.shape[2]] = attention_pattern
-                padded_attention = padded_attention + torch.eye(
-                    state_dim,
-                    device=attention_pattern.device,
-                    dtype=attention_pattern.dtype
-                ).unsqueeze(0) * 1e-6
-                attention_pattern = padded_attention
-            elif attention_pattern.shape[-1] > state_dim:
-                # Truncate attention pattern
-                attention_pattern = attention_pattern[:, :state_dim, :state_dim]
-            else:
-                raise ValueError(f"Attention pattern shape {attention_pattern.shape} does not match state dimension {state_dim}")
+            ).unsqueeze(0).expand(amplitudes_reshaped.shape[0], -1, -1)
+        else:
+            # Ensure attention pattern has correct shape
+            if attention_pattern.shape[-2:] != (state_dim, state_dim):
+                # Try to reshape attention pattern if possible
+                if attention_pattern.shape[-1] < state_dim:
+                    # Pad attention pattern
+                    padded_attention = torch.zeros(
+                        batch_size,
+                        state_dim,
+                        state_dim,
+                        device=attention_pattern.device,
+                        dtype=attention_pattern.dtype
+                    )
+                    padded_attention[:, :attention_pattern.shape[1], :attention_pattern.shape[2]] = attention_pattern
+                    padded_attention = padded_attention + torch.eye(
+                        state_dim,
+                        device=attention_pattern.device,
+                        dtype=attention_pattern.dtype
+                    ).unsqueeze(0) * 1e-6
+                    attention_pattern = padded_attention
+                elif attention_pattern.shape[-1] > state_dim:
+                    # Truncate attention pattern
+                    attention_pattern = attention_pattern[:, :state_dim, :state_dim]
+                else:
+                    raise ValueError(f"Attention pattern shape {attention_pattern.shape} does not match state dimension {state_dim}")
         
         # Construct Hamiltonian from attention pattern
         # H = -i log(A) where A is the attention pattern
@@ -305,13 +328,16 @@ class NeuralQuantumBridge(nn.Module):
         U = torch.matrix_exp(-time * hamiltonian)
         
         # Convert state amplitudes to complex64 for evolution
-        amplitudes_float = state.amplitudes.to(torch.complex64)
+        amplitudes_float = amplitudes_reshaped.to(torch.complex64)
         
         # Evolve state
         evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
         
         # Convert back to complex128 for consistency
         evolved_amplitudes = evolved_amplitudes.to(torch.complex128)
+        
+        # Reshape back to original dimensions
+        evolved_amplitudes = evolved_amplitudes.reshape(state.amplitudes.shape)
         
         # Create new quantum state
         evolved_state = QuantumState(
@@ -711,42 +737,59 @@ class NeuralQuantumBridge(nn.Module):
         x: torch.Tensor,
         return_intermediates: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Forward pass through neural quantum bridge.
-        
-        Args:
-            x: Input tensor
-            return_intermediates: Whether to return intermediate results
-            
-        Returns:
-            Output tensor or tuple of (output, intermediates)
-        """
-        # Store original shape
+        """Forward pass through neural quantum bridge."""
+        # Store original shape and norm
         original_shape = x.shape
+        original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
         
-        # Prepare quantum state
-        result = self.neural_to_quantum(x, return_validation=False)
-        quantum_state = cast(QuantumState, result)
+        # Split complex tensor into real and imaginary parts
+        if torch.is_complex(x):
+            x_real = x.real.to(torch.float64)  # Convert to float64
+            x_imag = x.imag.to(torch.float64)  # Convert to float64
+        else:
+            x_real = x.to(torch.float64)  # Convert to float64
+            # Initialize imaginary part with small random values to ensure gradient flow
+            x_imag = torch.randn_like(x, dtype=torch.float64, requires_grad=True) * 0.01
+            
+        # Apply separate layer normalization to real and imaginary parts
+        # Clone to ensure gradient flow and add small noise to prevent vanishing gradients
+        x_real = self.layer_norm_real(x_real.clone() + torch.randn_like(x_real) * 1e-6)
+        x_imag = self.layer_norm_imag(x_imag.clone() + torch.randn_like(x_imag) * 1e-6)
         
-        # Get pattern bundle
-        pattern_section_result = self.construct_pattern_bundle(x)
-        # Extract just the section if we got a tuple
-        pattern_section = pattern_section_result[0] if isinstance(pattern_section_result, tuple) else pattern_section_result
+        # Recombine into complex tensor
+        x = torch.complex(x_real, x_imag)
         
-        # Get scale cohomology
-        cohomology_results = self.compute_scale_cohomology(x)
+        # Convert to quantum state
+        quantum_result = self.neural_to_quantum(x)
+        quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
         
-        # Get motivic structure
-        motivic_form = ArithmeticForm(degree=1, coefficients=x)
-        motivic_results = self.compute_motivic_structure(x, return_metrics=True)
-        
-        # Evolve through quantum attention
+        # Apply quantum evolution
         evolved_state = self.evolve_quantum_state_with_attention(quantum_state)
-        evolved_pattern, pattern_metrics = self.evolve_pattern_bundle(pattern_section)
-        evolved_cohomology, cohomology_metrics = self.evolve_scale_cohomology([x])
-        evolved_motivic = self.evolve_motivic_structure(motivic_form)
         
         # Convert back to neural representation
         output = self.quantum_to_neural(evolved_state, original_shape)
+        
+        # Split output into real and imaginary parts for manifold normalization
+        if torch.is_complex(output):
+            output_real = output.real.to(torch.float64)  # Convert to float64
+            output_imag = output.imag.to(torch.float64)  # Convert to float64
+        else:
+            output_real = output.to(torch.float64)  # Convert to float64
+            # Initialize imaginary part with small random values
+            output_imag = torch.randn_like(output, dtype=torch.float64, requires_grad=True) * 0.01
+            
+        # Apply separate manifold normalization to real and imaginary parts
+        # Clone and add small noise to prevent vanishing gradients
+        output_real = self.manifold_norm_real(output_real.clone() + torch.randn_like(output_real) * 1e-6)
+        output_imag = self.manifold_norm_imag(output_imag.clone() + torch.randn_like(output_imag) * 1e-6)
+        
+        # Recombine into complex tensor
+        output = torch.complex(output_real, output_imag)
+        
+        # Restore original norm while preserving gradients
+        current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+        scale = original_norm / (current_norm + 1e-8)
+        output = output * scale.detach()  # Detach scale to prevent gradient explosion
         
         if not return_intermediates:
             return output
@@ -754,16 +797,18 @@ class NeuralQuantumBridge(nn.Module):
         # Collect intermediate results
         intermediates = {
             "quantum_state": evolved_state,
-            "pattern_section": evolved_pattern,
-            "pattern_metrics": pattern_metrics,
-            "cohomology": evolved_cohomology,
-            "cohomology_metrics": {
-                **cohomology_results,  # Base cohomology results
-                "evolution": cohomology_metrics  # Evolution metrics in a separate key
-            },
-            "motivic": evolved_motivic,
-            "attention_pattern": self.quantum_attention.last_attention,
-            "motivic_metrics": motivic_results[1] if isinstance(motivic_results, tuple) else {}
+            "original_norm": original_norm,
+            "output_norm": current_norm,
+            "layer_norm_stats": {
+                "input_mean_real": torch.mean(x_real, dim=-1),
+                "input_std_real": torch.std(x_real, dim=-1),
+                "input_mean_imag": torch.mean(x_imag, dim=-1),
+                "input_std_imag": torch.std(x_imag, dim=-1),
+                "output_mean_real": torch.mean(output_real, dim=-1),
+                "output_std_real": torch.std(output_real, dim=-1),
+                "output_mean_imag": torch.mean(output_imag, dim=-1),
+                "output_std_imag": torch.std(output_imag, dim=-1)
+            }
         }
         
         return output, intermediates

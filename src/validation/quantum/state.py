@@ -260,19 +260,27 @@ class StatePreparationValidator:
         """Validate prepared quantum state against target."""
         # Initialize metrics dictionary
         metrics = {}
-        
-        # Check norm
-        norm = torch.norm(prepared.amplitudes)
-        target_norm = torch.tensor(1.0, dtype=norm.dtype, device=norm.device)
-        
-        if not torch.isclose(norm, target_norm):
+
+        # Check norm with provided tolerance
+        if len(prepared.amplitudes.shape) == 1:
+            # Single state vector
+            norm = torch.sqrt(torch.sum(torch.abs(prepared.amplitudes) ** 2))
+            target_norm = torch.tensor(1.0, dtype=norm.dtype, device=norm.device)
+        else:
+            # For batched states, compute norm globally across all dimensions except batch
+            norm = torch.sqrt(torch.sum(torch.abs(prepared.amplitudes) ** 2, 
+                                      dim=tuple(range(1, len(prepared.amplitudes.shape)))))
+            target_norm = torch.ones_like(norm)
+
+        if not torch.allclose(norm, target_norm, rtol=self.tolerance, atol=self.tolerance):
+            max_error = float(torch.max(torch.abs(norm - target_norm)).item())
             return QuantumStateValidationResult(
                 is_valid=False,
                 message="State norm validation failed",
                 error_type=StateValidationErrorType.INVALID_NORM,
-                data={"error_value": float(abs(norm.item() - 1.0))}
+                data={"error_value": max_error}
             )
-            
+
         # Check phase consistency
         if target.phase is not None and prepared.phase is not None:
             phase_diff = torch.abs(target.phase - prepared.phase)
@@ -283,7 +291,7 @@ class StatePreparationValidator:
                     error_type=StateValidationErrorType.INVALID_PHASE,
                     data={"error_value": float(phase_diff.max().item())}
                 )
-                
+
         # Check basis labels
         if len(target.basis_labels) != len(prepared.basis_labels):
             return QuantumStateValidationResult(
@@ -298,16 +306,32 @@ class StatePreparationValidator:
         trace_distance = self._compute_trace_distance(target, prepared)
         purity = self._compute_purity(prepared)
 
-        metrics["fidelity"] = float(abs(fidelity.item()))
-        metrics["trace_distance"] = float(abs(trace_distance.item()))
-        metrics["purity"] = float(abs(purity.item()))
+        # Convert complex metrics to real values and handle batched metrics
+        if torch.is_complex(fidelity):
+            fidelity = torch.abs(fidelity)
+        if torch.is_complex(trace_distance):
+            trace_distance = torch.abs(trace_distance)
+        if torch.is_complex(purity):
+            purity = torch.abs(purity)
 
-        # All checks passed
+        # Take mean for batched metrics
+        if isinstance(fidelity, torch.Tensor) and fidelity.dim() > 0:
+            fidelity = fidelity.mean()
+        if isinstance(trace_distance, torch.Tensor) and trace_distance.dim() > 0:
+            trace_distance = trace_distance.mean()
+        if isinstance(purity, torch.Tensor) and purity.dim() > 0:
+            purity = purity.mean()
+
+        # Return successful validation with metrics
         return QuantumStateValidationResult(
             is_valid=True,
-            message="State preparation validation successful",
+            message="State validation successful",
             error_type=None,
-            data={"metrics": metrics}
+            data={"metrics": {
+                "fidelity": float(fidelity.item()),
+                "trace_distance": float(trace_distance.item()),
+                "purity": float(purity.item())
+            }}
         )
 
     def _compute_fidelity(
@@ -340,19 +364,53 @@ class StatePreparationValidator:
             return torch.sum(torch.sqrt(torch.abs(eigvals))).real
 
     def _compute_trace_distance(
-        self, target: QuantumState, prepared: QuantumState
+        self, state1: QuantumState, state2: QuantumState
     ) -> torch.Tensor:
-        """Compute trace distance between states."""
-        diff = target.density_matrix() - prepared.density_matrix()
-        # Compute eigenvalues of diff^†diff
-        hermitian_product = torch.matmul(diff.conj().T, diff)
-        eigvals = torch.linalg.eigvalsh(hermitian_product)
-        return 0.5 * torch.sum(torch.sqrt(torch.abs(eigvals)))
+        """Compute trace distance between quantum states."""
+        rho1 = state1.density_matrix()
+        rho2 = state2.density_matrix()
+        
+        # Handle batched states
+        if rho1.dim() == 3:
+            # For batched states, compute difference and eigenvalues for each state
+            diff = rho1 - rho2
+            # Compute eigenvalues for each batch
+            eigenvals = torch.linalg.eigvalsh(diff)  # [batch_size, dim]
+            # Sum absolute eigenvalues and divide by 2 for each batch
+            trace_distance = torch.sum(torch.abs(eigenvals), dim=-1) / 2
+        else:
+            # Single state case
+            diff = rho1 - rho2
+            eigenvals = torch.linalg.eigvalsh(diff)
+            trace_distance = torch.sum(torch.abs(eigenvals)) / 2
+        
+        return trace_distance
 
     def _compute_purity(self, state: QuantumState) -> torch.Tensor:
         """Compute state purity."""
-        rho = state.density_matrix()
-        return torch.trace(torch.matmul(rho, rho))
+        rho = state.density_matrix()  # [batch_size, seq_len, dim, dim] or [batch_size, dim, dim]
+        
+        # Handle batched states
+        if rho.dim() == 4:  # [batch_size, seq_len, dim, dim]
+            # Reshape to combine batch and sequence dimensions
+            batch_size, seq_len = rho.shape[:2]
+            rho = rho.reshape(batch_size * seq_len, *rho.shape[2:])
+            # Use batched matrix multiplication
+            rho_squared = torch.bmm(rho, rho)
+            # Sum diagonal elements for each batch
+            purity = torch.diagonal(rho_squared, dim1=1, dim2=2).sum(dim=1)
+            # Reshape back to [batch_size, seq_len]
+            purity = purity.reshape(batch_size, seq_len)
+        elif rho.dim() == 3:  # [batch_size, dim, dim]
+            # Use batched matrix multiplication
+            rho_squared = torch.bmm(rho, rho)
+            # Sum diagonal elements for each batch
+            purity = torch.diagonal(rho_squared, dim1=1, dim2=2).sum(dim=1)
+        else:
+            # Single state case
+            purity = torch.trace(torch.matmul(rho, rho))
+        
+        return purity
 
     def _compute_concurrence(self, state: QuantumState) -> torch.Tensor:
         """Compute concurrence for 2-qubit states."""

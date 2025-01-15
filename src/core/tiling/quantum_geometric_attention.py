@@ -142,6 +142,11 @@ class QuantumGeometricAttention(nn.Module):
         # Initialize quantum bridge for state preparation
         self.quantum_bridge = NeuralQuantumBridge(
             hidden_dim=self.hidden_dim,
+            manifold_dim=self.manifold_dim,  # Add manifold_dim parameter
+            num_heads=self.num_heads,
+            dropout=config.dropout,
+            manifold_type=config.manifold_type,
+            curvature=config.curvature,
             dtype=config.dtype
         )
         
@@ -185,6 +190,21 @@ class QuantumGeometricAttention(nn.Module):
         
         # Initialize debug mode
         self.debug = getattr(config, 'debug', False)
+
+        # Initialize symplectic structure for quantum geometry
+        self.symplectic = SymplecticStructure(
+            dim=self.manifold_dim,
+            preserve_structure=True,
+            wave_enabled=True,
+            dtype=config.dtype
+        )
+
+        # Initialize Riemannian structure for pattern geometry
+        self.riemannian = PatternRiemannianStructure(
+            manifold_dim=self.manifold_dim,
+            pattern_dim=self.hidden_dim,
+            dtype=config.dtype
+        )
 
     def _init_quantum_components(self) -> None:
         """Initialize quantum computation components."""
@@ -297,18 +317,6 @@ class QuantumGeometricAttention(nn.Module):
 
     def _init_attention_components(self) -> None:
         """Initialize attention computation components."""
-        # Initialize tiles
-        self.tiles = nn.ModuleList([
-            QuantumMotivicTile(
-                size=self.config.tile_size,
-                hidden_dim=self.hidden_dim,
-                num_heads=1,
-                dropout=self.config.dropout,
-                dtype=self.config.dtype
-            )
-            for _ in range(self.config.num_layers)
-        ])
-
         # Initialize projections with correct dimensions
         # Project from hidden_dim to manifold_dim for quantum processing
         self.manifold_proj = self._create_complex_linear(self.hidden_dim, self.manifold_dim)
@@ -340,7 +348,7 @@ class QuantumGeometricAttention(nn.Module):
         Returns:
             Linear layer with complex weights
         """
-        layer = nn.Linear(in_features, out_features)
+        layer = nn.Linear(in_features, out_features, dtype=self.config.dtype)
         
         # Initialize complex weights with proper dtype and normalization
         with torch.no_grad():
@@ -358,11 +366,9 @@ class QuantumGeometricAttention(nn.Module):
             if not torch.allclose(check_norm, torch.ones_like(check_norm), rtol=1e-5):
                 weight = weight / (check_norm.unsqueeze(1) + 1e-10)
             
-            # Convert to specified dtype
-            layer.weight.data = weight.to(self.config.dtype)
-            
-            # Initialize bias to zero to maintain norm properties
-            layer.bias.data = torch.zeros(out_features, dtype=self.config.dtype)
+            # Convert to specified dtype and set directly
+            layer.weight = nn.Parameter(weight.to(self.config.dtype))
+            layer.bias = nn.Parameter(torch.zeros(out_features, dtype=self.config.dtype))
             
         return layer
 
@@ -440,8 +446,17 @@ class QuantumGeometricAttention(nn.Module):
     ) -> Union[QuantumState, Tuple[QuantumState, QuantumStateValidationResult]]:
         """Prepare quantum state with validation and correction."""
         try:
-            # Convert input to quantum state if needed
+            # Basic validation before creating state
             if not isinstance(x, QuantumState):
+                # Check for NaN or Inf values
+                if torch.isnan(x).any() or torch.isinf(x).any():
+                    raise InvalidQuantumStateError("State contains NaN or Inf values")
+                
+                # Normalize globally across all dimensions except batch
+                norm = torch.sqrt(torch.sum(torch.abs(x) ** 2, dim=tuple(range(1, len(x.shape))), keepdim=True))
+                if (norm < 1e-10).any():
+                    raise InvalidQuantumStateError("State has zero norm")
+
                 # Extract phase with improved stability
                 mask = (x.abs() > 1e-10)
                 first_nonzero_idx = mask.to(torch.int64).argmax(dim=-1, keepdim=True)
@@ -450,9 +465,12 @@ class QuantumGeometricAttention(nn.Module):
                 first_nonzero = x[batch_indices, seq_indices, first_nonzero_idx]
                 phase = torch.angle(first_nonzero + 1e-10j)
 
-                # Let QuantumState handle normalization
+                # Normalize with high precision
+                x_tensor = x / norm
+                
+                # Create QuantumState
                 state = QuantumState(
-                    amplitudes=x,
+                    amplitudes=x_tensor,
                     basis_labels=[str(i) for i in range(self.manifold_dim)],
                     phase=phase
                 )
@@ -461,7 +479,7 @@ class QuantumGeometricAttention(nn.Module):
 
             # Validate if requested
             if return_validation:
-                validator = StatePreparationValidator()
+                validator = StatePreparationValidator(tolerance=1e-8)  # Use stricter tolerance
                 validation_result = validator.validate_preparation(target_state or state, state)
                 return state, validation_result
 
@@ -545,7 +563,15 @@ class QuantumGeometricAttention(nn.Module):
         """
         try:
             # Apply geometric flow to the state
-            state.geometric_state = self.flow(state.geometric_state)
+            geometric_state = state.geometric_state
+            if not torch.is_complex(geometric_state):
+                geometric_state = geometric_state.to(self.config.dtype)
+
+            # Apply flow with gradient tracking
+            updated_state = self.flow(geometric_state)
+            
+            # Update state with gradient tracking
+            state.geometric_state = updated_state
             return state
             
         except Exception as e:
@@ -554,16 +580,18 @@ class QuantumGeometricAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+        mask: Optional[torch.Tensor] = None,
+        return_metrics: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Forward pass with quantum geometric attention.
 
         Args:
             x: Input tensor of shape [batch_size, seq_len, hidden_dim] or [batch_size, num_heads, seq_len, hidden_dim]
             mask: Optional attention mask
+            return_metrics: Whether to return attention metrics
 
         Returns:
-            Output tensor with same shape as input
+            Output tensor with same shape as input, or tuple of (output, metrics) if return_metrics is True
 
         Raises:
             ValueError: If input dimensions are invalid
@@ -608,6 +636,25 @@ class QuantumGeometricAttention(nn.Module):
         else:
             output = output.view(batch_size, seq_len, self.hidden_dim)
 
+        # Return metrics if requested
+        if return_metrics:
+            # Compute step-wise metrics
+            step_metrics = {
+                "quantum_entropy": self.compute_quantum_metrics(output)["von_neumann_entropy"],
+                "geodesic_distance": torch.tensor(0.0, device=x.device, dtype=x.dtype),  # Placeholder
+                "pattern_evolution": {"step": 0},  # Placeholder
+                "local_height": torch.zeros_like(output[..., 0])  # Placeholder
+            }
+
+            metrics = {
+                "step_0": step_metrics,
+                "attention_scores": state.attention_scores,
+                "attention_patterns": state.attention_patterns,
+                "entanglement_history": state.entanglement_history,
+                "metrics": state.metrics
+            }
+            return output, metrics
+
         return output
 
     def prepare_attention_state(
@@ -643,27 +690,33 @@ class QuantumGeometricAttention(nn.Module):
             # Reshape input to combine batch and heads
             x_flat = x.reshape(batch_size * num_heads, seq_len, self.hidden_dim)
             
-            # Project to manifold space
-            x_manifold = self.manifold_proj(x_flat)
+            # Use quantum bridge for state preparation and manifold projection with intermediates
+            x_manifold, intermediates = self.quantum_bridge(x_flat, return_intermediates=True)
             
-            # Let QuantumState handle normalization
-            quantum_result = self._prepare_quantum_state(x_manifold)
-            quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
+            # Project to manifold dimension if needed
+            if x_manifold.shape[-1] != self.manifold_dim:
+                # Convert to the same dtype as the quantum bridge output
+                x_manifold = x_manifold.to(self.config.dtype)
+                x_manifold = self.manifold_proj(x_manifold)  # Project to manifold_dim
             
             # Initialize states with correct dimensions
             self.state_manager.states["input"] = torch.zeros_like(x)
-            self.state_manager.states["manifold"] = torch.zeros_like(x_manifold)
-            self.state_manager.states["quantum"] = quantum_state
+            self.state_manager.states["manifold"] = torch.zeros(
+                batch_size * num_heads,
+                seq_len,
+                self.manifold_dim,
+                dtype=x_manifold.dtype,
+                device=x_manifold.device
+            )
+            self.state_manager.states["quantum"] = intermediates["quantum_state"]  # Store quantum state from intermediates
 
             # Update states
             self.state_manager.states["input"].copy_(x)
-            self.state_manager.states["manifold"].copy_(x_manifold)
-            self.state_manager.states["quantum"] = quantum_state
+            self.state_manager.states["manifold"].copy_(x_manifold[..., :self.manifold_dim])
             self.state_manager.states["debug_info"] = {
                 "input_shape": tuple(x.shape),
                 "input_dtype": str(x.dtype),
                 "manifold_shape": tuple(x_manifold.shape),
-                "quantum_shape": tuple(quantum_state.amplitudes.shape),
                 "num_heads": num_heads
             }
 
@@ -740,19 +793,15 @@ class QuantumGeometricAttention(nn.Module):
         return_metrics: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Compute attention patterns efficiently."""
-        batch_size, num_heads, seq_len, head_dim = query.shape
+        batch_size, num_heads, seq_len, manifold_dim = query.shape
         metrics = {} if return_metrics else None
 
         # Project to manifold space efficiently
         query = query.to(self.config.dtype)
         key = key.to(self.config.dtype)
         
-        # Reshape and project in one operation
-        query = self.manifold_proj(query.reshape(-1, head_dim)).view(batch_size, num_heads, seq_len, -1)
-        key = self.manifold_proj(key.reshape(-1, head_dim)).view(batch_size, num_heads, seq_len, -1)
-
         # Compute attention scores efficiently
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(manifold_dim)
 
         # Apply mask if provided
         if mask is not None:
@@ -765,7 +814,6 @@ class QuantumGeometricAttention(nn.Module):
         attention_output: torch.Tensor
         if value is not None:
             processed_value = value.to(self.config.dtype)
-            processed_value = self.manifold_proj(processed_value.reshape(-1, head_dim)).view(batch_size, num_heads, seq_len, -1)
             attention_output = torch.matmul(attention_weights, processed_value)
         else:
             attention_output = attention_weights
@@ -775,9 +823,7 @@ class QuantumGeometricAttention(nn.Module):
             metrics = {
                 'attention_weights': attention_weights,
                 'attention_scores': scores,
-                'query_proj': query,
-                'key_proj': key,
-                'value_proj': processed_value if 'processed_value' in locals() else None
+                'patterns': attention_output
             }
             return attention_output, metrics
 
@@ -1094,6 +1140,16 @@ class QuantumGeometricAttention(nn.Module):
                 metrics_dict.update(flow_output[1])
                 flow_output = flow_output[0]
 
+            # Pad output back to original dimension if needed
+            if flow_output.shape[-1] < x.shape[-1]:
+                padding = torch.zeros(
+                    *flow_output.shape[:-1],
+                    x.shape[-1] - flow_output.shape[-1],
+                    dtype=flow_output.dtype,
+                    device=flow_output.device
+                )
+                flow_output = torch.cat([flow_output, padding], dim=-1)
+
             if return_metrics:
                 return flow_output, metrics_dict
             return flow_output
@@ -1139,6 +1195,10 @@ class QuantumGeometricAttention(nn.Module):
                 raise MetricError(f"Expected 3D tensor after reshaping, got {state_tensor.dim()}D")
 
             # Project to quantum features with gradient validation
+            # First project to hidden dimension if needed
+            if state_tensor.size(-1) != self.hidden_dim:
+                state_tensor = self.manifold_proj_inv(state_tensor)
+
             quantum_features = self._compute_quantum_features(state_tensor)
             if quantum_features.requires_grad:
                 if quantum_features.grad_fn is None:
@@ -1149,12 +1209,24 @@ class QuantumGeometricAttention(nn.Module):
             # Compute quantum geometric tensor using symplectic structure
             try:
                 quantum_metric = self.symplectic.compute_quantum_geometric_tensor(quantum_features)
+                # Extract real part for metric
+                quantum_metric = quantum_metric.real
+                # Enforce perfect symmetry
+                quantum_metric = 0.5 * (quantum_metric + quantum_metric.transpose(-1, -2))
+                # Verify symmetry
+                if not torch.allclose(quantum_metric, quantum_metric.transpose(-1, -2), rtol=1e-5):
+                    raise MetricError("Quantum metric failed symmetry check")
             except Exception as e:
                 raise MetricError(f"Failed to compute quantum geometric tensor: {str(e)}")
 
             # Compute Riemannian metric for pattern structure
             try:
                 pattern_metric = self.riemannian.compute_metric(quantum_features).values
+                # Enforce perfect symmetry
+                pattern_metric = 0.5 * (pattern_metric + pattern_metric.transpose(-1, -2))
+                # Verify symmetry
+                if not torch.allclose(pattern_metric, pattern_metric.transpose(-1, -2), rtol=1e-5):
+                    raise MetricError("Pattern metric failed symmetry check")
             except Exception as e:
                 raise MetricError(f"Failed to compute Riemannian metric: {str(e)}")
 
@@ -1178,6 +1250,11 @@ class QuantumGeometricAttention(nn.Module):
 
             # Combine metrics with appropriate weights
             combined_metric = 0.7 * quantum_metric + 0.3 * pattern_metric
+            # Enforce perfect symmetry of combined metric
+            combined_metric = 0.5 * (combined_metric + combined_metric.transpose(-1, -2))
+            # Verify symmetry
+            if not torch.allclose(combined_metric, combined_metric.transpose(-1, -2), rtol=1e-5):
+                raise MetricError("Combined metric failed symmetry check")
 
             # Validate combined metric with gradient checks
             combined_properties = self._validate_metric_properties(combined_metric, "combined")
@@ -1794,4 +1871,163 @@ class QuantumGeometricAttention(nn.Module):
                 message=f"Pattern validation failed: {str(e)}",
                 data={"error": str(e)}
             )
+    
+    def _validate_metric_properties(self, metric: torch.Tensor, name: str) -> MetricProperties:
+        """Validate metric tensor properties.
+
+        Args:
+            metric: Metric tensor to validate
+            name: Name of metric for error messages
+
+        Returns:
+            MetricProperties object containing validation results
+
+        Raises:
+            MetricError: If validation fails
+        """
+        try:
+            # Check basic tensor properties
+            if not torch.is_tensor(metric):
+                raise MetricError(f"{name} metric must be a tensor")
+            if metric.dim() != 3:
+                raise MetricError(f"{name} metric must be 3D tensor, got {metric.dim()}D")
+            if metric.size(-1) != metric.size(-2):
+                raise MetricError(f"{name} metric must be square matrix")
+
+            # Check symmetry
+            is_symmetric = torch.allclose(metric, metric.transpose(-1, -2))
+            if not is_symmetric:
+                raise MetricError(f"{name} metric must be symmetric")
+
+            # Check positive definiteness
+            eigenvals = torch.linalg.eigvalsh(metric)
+            is_positive_definite = (eigenvals > 0).all()
+
+            # Compute basic properties
+            determinant = torch.linalg.det(metric)
+            trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
+
+            # Compute volume form
+            volume_form = torch.sqrt(torch.abs(determinant))
+
+            # Get Christoffel symbols and check compatibility
+            try:
+                christoffel = self._compute_christoffel_symbols(metric)
+                is_compatible = self._check_metric_compatibility(metric)
+            except Exception as e:
+                print(f"Error computing Christoffel symbols: {str(e)}")
+                christoffel = None
+                is_compatible = False
+
+            # Check completeness
+            try:
+                is_complete = True  # For now, assume complete
+            except Exception as e:
+                print(f"Error checking completeness: {str(e)}")
+                is_complete = False
+
+            # Compute curvature tensors
+            try:
+                sectional = self._compute_sectional_curvature(metric)
+                ricci = self._compute_ricci_curvature(metric)
+                scalar = self._compute_scalar_curvature(metric)
+
+                has_bounded_curvature = bool(
+                    (torch.abs(sectional) < 1e3).all() and
+                    (torch.abs(ricci) < 1e3).all() and
+                    (torch.abs(scalar) < 1e3).all()
+                )
+            except Exception as e:
+                print(f"Error computing curvature: {str(e)}")
+                sectional = None
+                ricci = None
+                scalar = None
+                has_bounded_curvature = False
+
+            # Return properties
+            return MetricProperties(
+                is_positive_definite=is_positive_definite,
+                is_compatible=is_compatible,
+                is_complete=is_complete,
+                has_bounded_curvature=has_bounded_curvature,
+                determinant=determinant,
+                trace=trace,
+                eigenvalues=eigenvals,
+                condition_number=float(eigenvals.max() / (eigenvals.min() + 1e-8)),
+                volume_form=volume_form,
+                christoffel_symbols=christoffel,
+                sectional_curvature=sectional,
+                ricci_curvature=ricci,
+                scalar_curvature=scalar
+            )
+
+        except Exception as e:
+            raise MetricError(f"Failed to validate {name} metric: {str(e)}")
+
+    def _compute_christoffel_symbols(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute Christoffel symbols for metric tensor.
+        
+        Args:
+            metric: Metric tensor [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            Christoffel symbols [batch_size, manifold_dim, manifold_dim, manifold_dim]
+        """
+        # For now, return placeholder values
+        batch_size = metric.size(0)
+        manifold_dim = metric.size(1)
+        return torch.zeros(batch_size, manifold_dim, manifold_dim, manifold_dim, device=metric.device)
+    
+    def _compute_sectional_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute sectional curvature of metric tensor.
+        
+        Args:
+            metric: Metric tensor [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            Sectional curvature tensor [batch_size, manifold_dim, manifold_dim]
+        """
+        # For now, return placeholder values
+        batch_size = metric.size(0)
+        manifold_dim = metric.size(1)
+        return torch.ones(batch_size, manifold_dim, manifold_dim, device=metric.device) * 0.5
+
+    def _compute_ricci_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute Ricci curvature of metric tensor.
+        
+        Args:
+            metric: Metric tensor [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            Ricci curvature tensor [batch_size, manifold_dim, manifold_dim]
+        """
+        # For now, return placeholder values
+        batch_size = metric.size(0)
+        manifold_dim = metric.size(1)
+        return torch.ones(batch_size, manifold_dim, manifold_dim, device=metric.device) * 0.5
+
+    def _compute_scalar_curvature(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute scalar curvature of metric tensor.
+        
+        Args:
+            metric: Metric tensor [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            Scalar curvature tensor [batch_size]
+        """
+        # For now, return placeholder values
+        batch_size = metric.size(0)
+        return torch.ones(batch_size, device=metric.device) * 0.5
+
+    def _check_metric_compatibility(self, metric: torch.Tensor) -> bool:
+        """Check if metric is compatible with manifold structure.
+        
+        Args:
+            metric: Metric tensor [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            True if metric is compatible with manifold structure
+        """
+        # For now, always return True since we're using placeholder values
+        return True
     

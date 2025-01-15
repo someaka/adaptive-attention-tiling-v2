@@ -232,14 +232,40 @@ class MotivicRiemannianStructure(
         return local_chart, fiber_chart
 
     def transition_functions(self, chart1: LocalChart[Tensor], chart2: LocalChart[Tensor]) -> Tensor:
-        """Computes transition between charts."""
+        """Computes transition between charts.
+        
+        Args:
+            chart1: First local chart
+            chart2: Second local chart
+            
+        Returns:
+            The transition function g₁₂ between charts as a fiber_dim × fiber_dim matrix
+        """
         chart1_coords = self._ensure_device(chart1.coordinates)
         chart2_coords = self._ensure_device(chart2.coordinates)
         
-        # Compute transition map directly between coordinates
+        # Get dimensions
+        batch_size = chart1_coords.shape[0]
+        
+        # Initialize transition matrix of correct shape
+        transition = torch.eye(self.fiber_dim, device=chart1_coords.device).expand(batch_size, -1, -1)
+        
+        # Compute coordinate differences
         diff = chart2_coords - chart1_coords
-        transition = torch.matmul(diff, self.metric_factors)
-        return chart1_coords + F.tanh(transition)
+        
+        # Project difference onto fiber components using metric factors
+        fiber_diff = torch.matmul(diff[..., self.base_dim:], self.metric_factors)
+        
+        # Update transition matrix with fiber components while preserving structure
+        transition = transition + torch.matmul(
+            fiber_diff.unsqueeze(-1),
+            torch.ones(batch_size, 1, self.fiber_dim, device=chart1_coords.device)
+        )
+        
+        # Ensure transition preserves fiber metric
+        transition = F.normalize(transition, p=2, dim=-1)
+        
+        return transition
 
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Computes the connection form for parallel transport."""

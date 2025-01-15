@@ -6,6 +6,7 @@ for analyzing pattern dynamics and bifurcations.
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple, Union, Protocol
 from dataclasses import dataclass
@@ -378,17 +379,8 @@ class BifurcationAnalyzer:
                 
         return evolved
 
-class PatternFormation:
-    """Pattern formation dynamics with geometric structure.
-    
-    This class implements pattern formation through reaction-diffusion dynamics
-    while preserving geometric structure (symplectic form, fiber bundle structure).
-    It integrates:
-    1. Symplectic geometry for Hamiltonian dynamics
-    2. Wave packet evolution for quantum behavior
-    3. Geometric flow for pattern evolution
-    4. Structure preservation for stability
-    """
+class PatternFormation(nn.Module):
+    """Pattern formation dynamics with geometric structure."""
     
     def __init__(
         self, 
@@ -398,49 +390,66 @@ class PatternFormation:
         reaction_coeff: float = 1.0,
         symplectic: Optional[SymplecticStructure] = None,
         preserve_structure: bool = True,
-        wave_enabled: bool = True
+        wave_enabled: bool = True,
+        dtype: torch.dtype = torch.float32
     ):
-        """Initialize pattern formation with geometric structure.
+        """Initialize pattern formation dynamics.
         
         Args:
             dim: Dimension of pattern space
-            dt: Time step for integration
+            dt: Time step size
             diffusion_coeff: Diffusion coefficient
             reaction_coeff: Reaction coefficient
             symplectic: Optional symplectic structure
-            preserve_structure: Whether to preserve structure
+            preserve_structure: Whether to preserve geometric structure
             wave_enabled: Whether to enable wave behavior
+            dtype: Data type for tensors
         """
+        super().__init__()
         self.dim = dim
         self.dt = dt
-        self.diffusion_coeff = diffusion_coeff
-        self.reaction_coeff = reaction_coeff
+        self.dtype = dtype
         self.preserve_structure = preserve_structure
         self.wave_enabled = wave_enabled
         
-        # Initialize geometric structures
+        # Initialize parameters
+        self.diffusion_coeff = nn.Parameter(torch.tensor(diffusion_coeff, dtype=dtype))
+        self.reaction_coeff = nn.Parameter(torch.tensor(reaction_coeff, dtype=dtype))
+        
+        # Initialize geometric structures first
         if symplectic is None:
             self.symplectic = SymplecticStructure(
                 dim=dim,
                 preserve_structure=preserve_structure,
-                wave_enabled=wave_enabled
+                wave_enabled=wave_enabled,
+                dtype=dtype
             )
         else:
             self.symplectic = symplectic
             
-        # Initialize enriched structure
-        self.enriched = EnrichedAttention()
-        self.enriched.wave_enabled = wave_enabled
+        # Add geometric structures as submodules
+        self.add_module('symplectic', self.symplectic)
         
-        # Initialize operadic structure
+        # Initialize enriched structure for wave behavior
+        self.enriched = EnrichedAttention(
+            base_category="SymplecticVect",
+            wave_enabled=wave_enabled,
+            dtype=dtype
+        )
+        self.add_module('enriched', self.enriched)
+        
+        # Initialize operadic structure for transitions
         self.operadic = AttentionOperad(
             base_dim=dim,
             preserve_symplectic=preserve_structure,
-            preserve_metric=True
+            preserve_metric=True,
+            dtype=dtype
         )
+        self.add_module('operadic', self.operadic)
         
-        # Initialize diffusion kernel with structure preservation
-        self.diffusion_kernel = self._create_structured_kernel()
+        # Create structured kernel as parameter after geometric structures are initialized
+        kernel = self._create_structured_kernel()
+        self.kernel = nn.Parameter(kernel)
         
     def _create_structured_kernel(self) -> torch.Tensor:
         """Create diffusion kernel that preserves geometric structure."""
@@ -533,7 +542,7 @@ class PatternFormation:
             current = trajectory[:, t-1].view(batch_size, 1, -1)  # Reshape for conv1d
             diffusion = torch.nn.functional.conv1d(
                 current,
-                self.diffusion_kernel,
+                self.kernel,
                 padding=1
             ).view(batch_size, -1)
             
@@ -669,7 +678,7 @@ class PatternFormation:
             current = x.view(batch_size, 1, -1)  # Reshape for conv1d
             diffusion = torch.nn.functional.conv1d(
                 current,
-                self.diffusion_kernel,
+                self.kernel,
                 padding=1
             ).view(batch_size, n, n)
             
@@ -718,7 +727,7 @@ class PatternFormation:
             symplectic_form = self.symplectic.compute_form(pattern_symplectic.view(pattern_symplectic.size(0), -1))
             symplectic_invariant = torch.abs(
                 symplectic_form.evaluate(pattern_symplectic.view(pattern_symplectic.size(0), -1),
-                                       pattern_symplectic.view(pattern_symplectic.size(0), -1))
+                pattern_symplectic.view(pattern_symplectic.size(0), -1))
             ).item()
             
             return {

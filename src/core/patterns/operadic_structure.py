@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any, Protocol
 from abc import ABC, abstractmethod
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 @dataclass
@@ -68,7 +69,7 @@ class OperadicComposition(ABC):
         """Create natural transformation between operadic operations."""
         pass
 
-class AttentionOperad(OperadicComposition):
+class AttentionOperad(OperadicComposition, nn.Module):
     """Implements operadic composition for attention operations.
     
     This class provides enriched operadic composition with:
@@ -92,10 +93,17 @@ class AttentionOperad(OperadicComposition):
             preserve_metric: Whether to preserve metric structure
             dtype: Data type for tensors
         """
+        super().__init__()
         self.base_dim = base_dim
         self.preserve_symplectic = preserve_symplectic
         self.preserve_metric = preserve_metric
         self.dtype = dtype
+        
+        # Initialize parameters
+        self.composition_basis = nn.Parameter(torch.eye(base_dim, dtype=dtype))
+        self.structure_preserving_map = nn.Parameter(
+            torch.eye(base_dim, dtype=dtype)
+        )
     
     def create_operation(
         self,
@@ -460,12 +468,8 @@ class AttentionOperad(OperadicComposition):
             preserve_structure=preserve_structure
         )
 
-class EnrichedAttention:
-    """Enriched attention structure with wave emergence.
-    
-    This class implements enriched categorical structure with wave emergence
-    behavior for natural transitions between dimensions.
-    """
+class EnrichedAttention(nn.Module):
+    """Enriched attention structure with wave operator integration."""
     
     def __init__(
         self,
@@ -475,13 +479,25 @@ class EnrichedAttention:
         _k: float = 2.0,
         _omega: float = 1.0
     ):
-        """Initialize enriched attention structure."""
+        """Initialize enriched attention structure.
+        
+        Args:
+            base_category: Base category for enrichment
+            wave_enabled: Whether to enable wave operator
+            dtype: Data type for tensors
+            _k: Wave number parameter
+            _omega: Angular frequency parameter
+        """
+        super().__init__()
         self.base_category = base_category
         self.wave_enabled = wave_enabled
         self.dtype = dtype
-        self._k = _k  # Wave number
-        self._omega = _omega  # Angular frequency
         
+        # Initialize parameters
+        self.k = nn.Parameter(torch.tensor(_k, dtype=dtype))
+        self.omega = nn.Parameter(torch.tensor(_omega, dtype=dtype))
+        self.wave_basis = nn.Parameter(torch.eye(2, dtype=dtype))  # 2D phase space basis
+
     def wave_operator(self, tensor: Tensor) -> Tensor:
         """Apply wave operator to tensor.
         
@@ -495,7 +511,7 @@ class EnrichedAttention:
             return tensor
             
         # Convert to complex with phase
-        phase = torch.sum(tensor * tensor, dim=-1, keepdim=True) * self._k
+        phase = torch.sum(tensor * tensor, dim=-1, keepdim=True) * self.k
         return torch.complex(
             tensor,
             tensor * torch.sin(phase)
@@ -521,7 +537,7 @@ class EnrichedAttention:
             position = torch.abs(position.to(dtype=self.dtype))
             
         if momentum.is_complex():
-            momentum = torch.angle(momentum) / self._k  # Extract phase
+            momentum = torch.angle(momentum) / self.k  # Extract phase
         else:
             momentum = momentum.to(dtype=self.dtype)
         
@@ -587,7 +603,7 @@ class EnrichedAttention:
             return wave
             
         # Extract momentum from phase gradient and normalize
-        mom = torch.angle(wave + 1j) / self._k  # Add i to avoid zero angle
+        mom = torch.angle(wave + 1j) / self.k  # Add i to avoid zero angle
         mom = mom / (torch.norm(mom) + 1e-7)  # Normalize
         mom = mom * torch.mean(torch.abs(wave))  # Scale by mean magnitude
         

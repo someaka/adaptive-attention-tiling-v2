@@ -14,8 +14,8 @@ def test_enriched_attention_initialization():
     
     assert enriched.base_category == "SymplecticVect"
     assert enriched.wave_enabled is True
-    assert enriched._k == 2.0
-    assert enriched._omega == 1.0
+    assert torch.allclose(enriched.k, torch.tensor(2.0))
+    assert torch.allclose(enriched.omega, torch.tensor(1.0))
 
 def test_wave_operator_functionality():
     """Test wave operator methods."""

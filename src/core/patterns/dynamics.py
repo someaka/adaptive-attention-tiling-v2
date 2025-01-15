@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 
 import torch
+import torch.nn as nn
 import numpy as np
 
 
-@dataclass
-class PatternDynamics:
+class PatternDynamics(nn.Module):
     """Base class for pattern dynamics."""
     
     def __init__(
@@ -22,6 +22,7 @@ class PatternDynamics:
             dt: Time step size
             device: Computation device
         """
+        super().__init__()
         self.dt = dt
         self.device = device
         

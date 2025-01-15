@@ -89,15 +89,15 @@ class QuantumState:
         norms = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=-1, keepdim=True))
         normalized_states = self.amplitudes / norms.clamp(min=1e-8)
         
-        # Reshape to combine all batch dimensions except last
-        batch_shape = normalized_states.shape[:-1]  # (batch, heads, seq) or similar
-        flattened = normalized_states.reshape(-1, hilbert_dim)  # (batch_prod, hilbert_dim)
+        # Reshape to combine all batch dimensions
+        batch_shape = normalized_states.shape[:-1]  # Original shape without hilbert dimension
+        flattened = normalized_states.reshape(-1, hilbert_dim)  # (total_batch, hilbert_dim)
         
         # Compute density matrices for all states in batch
         # |ψ⟩⟨ψ| for each state via batched outer product
         density_matrices = torch.bmm(
-            flattened.unsqueeze(-1),  # (batch_prod, hilbert_dim, 1)
-            flattened.conj().unsqueeze(-2)  # (batch_prod, 1, hilbert_dim)
+            flattened.unsqueeze(-1),  # (total_batch, hilbert_dim, 1)
+            flattened.conj().unsqueeze(-2)  # (total_batch, 1, hilbert_dim)
         )
         
         # Restore original batch dimensions plus density matrix dimensions
@@ -201,9 +201,17 @@ class QuantumState:
             bool: True if the state is pure, False otherwise
         """
         rho = self.density_matrix()
-        if len(rho.shape) == 3:  # Batched case
+        # Handle arbitrary batch dimensions
+        if len(rho.shape) > 2:  # Batched case
             # Compute purity for each state in batch
-            purity = torch.diagonal(torch.matmul(rho, rho), dim1=-2, dim2=-1).sum(-1).real
+            # Reshape to combine all batch dimensions
+            batch_shape = rho.shape[:-2]
+            hilbert_dim = rho.shape[-1]
+            rho_flat = rho.reshape(-1, hilbert_dim, hilbert_dim)
+            
+            # Compute purity for each state
+            purity = torch.diagonal(torch.bmm(rho_flat, rho_flat), dim1=-2, dim2=-1).sum(-1).real
+            purity = purity.reshape(batch_shape)
             return bool(torch.all(torch.abs(purity - 1.0) < tolerance))
         else:  # Single state case
             purity = torch.trace(torch.matmul(rho, rho)).real

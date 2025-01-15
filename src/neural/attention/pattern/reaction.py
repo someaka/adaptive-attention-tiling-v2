@@ -12,7 +12,7 @@ class ReactionTerm(Protocol):
     def __call__(self, state: torch.Tensor) -> torch.Tensor: ...
 
 
-class ReactionSystem:
+class ReactionSystem(nn.Module):
     """Handles reaction terms and dynamics."""
 
     def __init__(self, grid_size: int):
@@ -21,6 +21,7 @@ class ReactionSystem:
         Args:
             grid_size: Size of square grid
         """
+        super().__init__()
         self.grid_size = grid_size
         
         # Initialize neural networks for reaction terms

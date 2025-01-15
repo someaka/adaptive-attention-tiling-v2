@@ -10,6 +10,7 @@ from torch import Tensor
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from torch import nn
 
 from .operadic_structure import OperadicOperation
 
@@ -33,7 +34,7 @@ class EnrichedTransition(ABC):
         """Compose enriched morphisms."""
         pass
 
-class WaveEmergence:
+class WaveEmergence(nn.Module):
     """Implements wave equation based emergence of structures."""
     
     def __init__(self, dt: float = 0.1, num_steps: int = 10, dtype: torch.dtype = torch.float32):
@@ -44,9 +45,14 @@ class WaveEmergence:
             num_steps: Number of evolution steps
             dtype: Data type for tensors
         """
+        super().__init__()
         self.dt = dt
         self.num_steps = num_steps
         self.dtype = dtype
+        
+        # Initialize parameters
+        self.wave_speed = nn.Parameter(torch.tensor(1.0, dtype=dtype))
+        self.damping = nn.Parameter(torch.tensor(0.1, dtype=dtype))
     
     def evolve_structure(self, pattern: Tensor, direction: Tensor) -> Tensor:
         """Evolve pattern structure using wave equation.
@@ -138,7 +144,7 @@ class WaveEmergence:
             )
             return padded[..., :-2] + padded[..., 2:] - 2 * tensor
 
-class PatternTransition(EnrichedTransition):
+class PatternTransition(EnrichedTransition, nn.Module):
     """Implements enriched transitions for pattern spaces."""
     
     def __init__(self, wave_emergence: Optional[WaveEmergence] = None, dtype: torch.dtype = torch.float32):
@@ -148,7 +154,9 @@ class PatternTransition(EnrichedTransition):
             wave_emergence: Wave emergence structure for natural transitions
             dtype: Data type for tensors
         """
+        super().__init__()
         self.wave = wave_emergence or WaveEmergence(dtype=dtype)
+        self.add_module('wave', self.wave)
         
     def create_morphism(self, source: Tensor, target: Tensor) -> EnrichedMorphism:
         """Create an enriched morphism between pattern spaces.

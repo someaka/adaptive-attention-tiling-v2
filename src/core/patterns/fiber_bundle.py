@@ -8,6 +8,7 @@ implementing the FiberBundle protocol defined in core.patterns.fiber_types.
 from typing import List, Optional, Tuple, Dict, Any
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 from dataclasses import dataclass
 
 from .fiber_types import (
@@ -152,25 +153,48 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
 
     def transition_functions(self, chart1: LocalChart[Tensor], chart2: LocalChart[Tensor]) -> Tensor:
         """Implementation of FiberBundle.transition_functions.
-        
+
         Compute transition between charts.
-        
+
         Args:
             chart1: First local chart
             chart2: Second local chart
-            
+
         Returns:
             Transition function between charts
         """
-        diff = chart2.coordinates - chart1.coordinates  # Shape: (batch_size, base_dim)
+        batch_size = chart1.coordinates.shape[0]
+        device = chart1.coordinates.device
+        
+        # Initialize identity matrix for each batch element
+        transition = torch.eye(self.fiber_dim, device=device).expand(batch_size, -1, -1)
+        
+        # Compute coordinate differences
+        diff = chart2.coordinates - chart1.coordinates  # Shape: (batch_size, total_dim)
+        
+        # Only use base manifold components
+        base_diff = diff[..., :self.base_dim]  # Shape: (batch_size, base_dim)
         
         # Reshape for proper broadcasting
-        diff = diff.unsqueeze(-1)  # Shape: (batch_size, base_dim, 1)
-        connection = self.connection.unsqueeze(0)  # Shape: (1, base_dim, fiber_dim, fiber_dim)
+        base_diff = base_diff.unsqueeze(-1)  # Shape: (batch_size, base_dim, 1)
         
-        # Compute transition matrix
-        transition = torch.einsum('...i,ijkl->...kl', diff.squeeze(-1), connection)
-        return torch.eye(self.fiber_dim) + transition
+        # Handle different connection shapes for base vs pattern bundles
+        if len(self.connection.shape) == 3:  # Base bundle: (base_dim, fiber_dim, fiber_dim)
+            connection = self.connection.unsqueeze(0)  # Shape: (1, base_dim, fiber_dim, fiber_dim)
+            transition_update = torch.einsum('...i,ijkl->...kl', base_diff.squeeze(-1), connection)
+        else:  # Pattern bundle: (total_dim, total_dim, total_dim)
+            # Extract relevant connection components
+            connection = self.connection[:self.base_dim, self.base_dim:, self.base_dim:]
+            connection = connection.unsqueeze(0)  # Shape: (1, base_dim, fiber_dim, fiber_dim)
+            transition_update = torch.einsum('...i,ijkl->...kl', base_diff.squeeze(-1), connection)
+        
+        # Add update to identity while preserving structure
+        transition = transition + transition_update
+        
+        # Ensure transition preserves fiber metric
+        transition = F.normalize(transition, p=2, dim=-1)
+        
+        return transition
 
     def connection_form(self, tangent_vector: Tensor) -> Tensor:
         """Implementation of FiberBundle.connection_form.

@@ -298,12 +298,18 @@ class GeometricFlow(RiemannianFlow):
     def forward(
         self,
         x: Tensor,
+        metric: Optional[Tensor] = None,
+        num_steps: Optional[int] = None,
+        dt: Optional[float] = None,
         return_path: bool = False
     ) -> Tuple[Tensor, Dict[str, Any]]:
         """Apply quantum geometric flow.
         
         Args:
             x: Input tensor
+            metric: Optional pre-computed metric tensor
+            num_steps: Number of integration steps (overrides self.integration_steps)
+            dt: Time step for integration (overrides self.dt)
             return_path: Whether to return intermediate flow path
             
         Returns:
@@ -321,7 +327,8 @@ class GeometricFlow(RiemannianFlow):
             x = x[..., :self.manifold_dim]
         
         # Get initial metric with quantum structure
-        metric = self.compute_metric(x)
+        if metric is None:
+            metric = self.compute_metric(x)
         
         # Initialize metrics
         metrics: Dict[str, Any] = {
@@ -331,14 +338,18 @@ class GeometricFlow(RiemannianFlow):
             ).item()
         }
         
+        # Use provided num_steps and dt if given
+        steps = num_steps if num_steps is not None else self.integration_steps
+        timestep = dt if dt is not None else self.dt
+        
         # Perform integration steps
         current = x
-        for i in range(self.integration_steps):
+        for i in range(steps):
             # Compute Ricci tensor
             ricci = self.compute_ricci_tensor(metric)
             
             # Update metric and get step metrics
-            metric, step_metrics = self.flow_step(metric, ricci, self.dt)
+            metric, step_metrics = self.flow_step(metric, ricci, timestep)
             metrics.update({f'step_{i}_{k}': v for k, v in step_metrics.items()})
             
             # Apply flow layers
