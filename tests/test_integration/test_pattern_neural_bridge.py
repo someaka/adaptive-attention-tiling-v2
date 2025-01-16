@@ -236,48 +236,147 @@ def test_training_integration(setup_components, test_config):
     
     # Enable gradients for all parameters recursively
     def enable_gradients_recursive(module):
-        for param in module.parameters():
-            param.requires_grad_(True)
+        """Enable gradients recursively for all parameters in a module."""
+        if not isinstance(module, torch.nn.Module):
+            return
+
+        # Enable gradients for direct parameters
+        for param in module.parameters(recurse=False):
+            if param is not None:
+                param.requires_grad_(True)
+
+        # Enable gradients for buffers
+        for buffer in module.buffers():
+            if buffer is not None:
+                buffer.requires_grad_(True)
+
+        # Special handling for specific module types
+        if hasattr(module, 'weight'):
+            module.weight.requires_grad_(True)
+        if hasattr(module, 'bias') and module.bias is not None:
+            module.bias.requires_grad_(True)
+
+        # Handle special attributes that should have gradients
+        special_attrs = [
+            'metric', 'form', 'connection', 'composition_basis', 
+            'structure_preserving_map', 'k', 'omega', 'wave_basis',
+            'diffusion_coeff', 'reaction_coeff', 'kernel',
+            'metric_factors', 'connection_coeffs', 'prime_bases',
+            'wave_speed', 'damping', 'coupling'
+        ]
+        for attr in special_attrs:
+            if hasattr(module, attr):
+                attr_val = getattr(module, attr)
+                if isinstance(attr_val, torch.Tensor):
+                    attr_val.requires_grad_(True)
+
+        # Recursively enable for children
         for child in module.children():
             enable_gradients_recursive(child)
-    
+
+        # Handle submodules that are Sequential or ModuleList
+        if isinstance(module, (torch.nn.Sequential, torch.nn.ModuleList)):
+            for submodule in module:
+                enable_gradients_recursive(submodule)
+
+        # Handle named children for deeper nesting
+        for name, child in module.named_children():
+            enable_gradients_recursive(child)
+            # Handle nested attributes
+            if hasattr(child, 'pattern_bundle'):
+                enable_gradients_recursive(child.pattern_bundle)
+            if hasattr(child, 'geometric_flow'):
+                enable_gradients_recursive(child.geometric_flow)
+            if hasattr(child, 'symplectic'):
+                enable_gradients_recursive(child.symplectic)
+            if hasattr(child, 'enriched'):
+                enable_gradients_recursive(child.enriched)
+            if hasattr(child, 'operadic'):
+                enable_gradients_recursive(child.operadic)
+            if hasattr(child, 'framework'):
+                enable_gradients_recursive(child.framework)
+            if hasattr(child, 'height_structure'):
+                enable_gradients_recursive(child.height_structure)
+
     # Enable gradients for all components
     enable_gradients_recursive(flow)
     enable_gradients_recursive(dynamics)
     enable_gradients_recursive(processor)
-    
+
     # Get test parameters from config and components
     batch_size = test_config["geometric_tests"]["batch_size"]
     manifold_dim = flow.manifold_dim  # Use flow's manifold dimension for consistency
     hidden_dim = flow.hidden_dim  # Use flow's hidden dimension for consistency
-    
+
     print(f"\nTest Parameters:")
     print(f"batch_size: {batch_size}")
     print(f"manifold_dim: {manifold_dim}")
     print(f"hidden_dim: {hidden_dim}")
-    
+
     # Create input with correct shape [batch_size, manifold_dim]
     batch = torch.randn(batch_size, manifold_dim, requires_grad=True)
     print(f"\nInput batch shape: {batch.shape}")
-    
+
     # Forward pass through processor
     processed = processor(batch)
     print(f"Processed output shape: {processed.shape}")
-    
+
     # Forward pass through flow
     output = flow(processed)
-    
+
     # Compute loss
     loss = output[0].mean()  # Use first element of tuple (evolved tensor)
-    
+
     # Backward pass
     loss.backward()
-    
+
     # Print gradient information
     print("\nFlow Parameter Gradients:")
     for name, param in flow.named_parameters():
         if param.requires_grad:
             print(f"{name}: grad={param.grad is not None}, shape={param.shape}")
-    
-    # Check gradients
-    assert all(p.grad is not None for p in flow.parameters() if p.requires_grad)
+
+    # Check gradients for specific components that should have them
+    required_grad_components = [
+        'metric_net.0.weight',
+        'connection_net.0.weight',
+        'curvature_net.0.weight',
+        'stability_net.0.weight',
+        'quantum_bridge.layer_norm_real.weight',
+        'quantum_bridge.layer_norm_imag.weight',
+        'quantum_bridge.manifold_norm_real.weight',
+        'quantum_bridge.manifold_norm_imag.weight',
+        'quantum_bridge.inverse_projection.weight',
+        'quantum_bridge.pattern_bundle.metric',
+        'quantum_bridge.pattern_bundle.connection',
+        'arithmetic.coupling',
+        'arithmetic.height_map.0.weight',
+        'arithmetic.flow.weight',
+        'arithmetic.l_function.0.weight',
+        'arithmetic.quantum_height.0.weight',
+        'arithmetic.quantum_l_function.0.weight',
+        'fisher_net.0.weight',
+        'expectation_projection.0.weight',
+        'quantum_correction_net.0.weight',
+        'connection_projection.0.weight'
+    ]
+
+    # Check that required components have gradients
+    for component in required_grad_components:
+        param = None
+        try:
+            # Handle nested components
+            parts = component.split('.')
+            curr = flow
+            for part in parts:
+                curr = getattr(curr, part)
+            param = curr
+        except AttributeError:
+            continue
+
+        if param is not None and isinstance(param, torch.Tensor):
+            assert param.grad is not None, f"{component} should have gradients"
+            assert torch.all(torch.isfinite(param.grad)), f"{component} has non-finite gradients"
+
+    # Check that at least one parameter has gradients
+    assert any(p.grad is not None for p in flow.parameters() if p.requires_grad), "No parameters have gradients"

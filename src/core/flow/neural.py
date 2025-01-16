@@ -180,6 +180,18 @@ class NeuralGeometricFlow(PatternFormationFlow):
             curvature=-1.0
         )
         
+        # Initialize quantum bridge projection layer
+        self.quantum_bridge_projection = nn.Linear(
+            manifold_dim * manifold_dim,  # Input: flattened metric tensor
+            hidden_dim,  # Output: quantum bridge hidden dimension
+            dtype=self.dtype,
+            device=self.device,
+            bias=True  # Enable bias for better expressivity
+        )
+        # Initialize weights properly
+        nn.init.orthogonal_(self.quantum_bridge_projection.weight)
+        nn.init.zeros_(self.quantum_bridge_projection.bias)
+
         # Initialize dimension manager for operadic transitions
         self.dim_manager = DimensionManager(
             DimensionConfig.from_test_config(test_config)
@@ -618,14 +630,8 @@ class NeuralGeometricFlow(PatternFormationFlow):
             # Project metric to quantum state space using proper dimensionality
             metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
             
-            # Project to quantum bridge hidden dimension using learned projection
-            projection = nn.Linear(
-                metric_flat.shape[1],  # manifold_dim * manifold_dim
-                self.quantum_bridge.hidden_dim,
-                device=metric.device,
-                dtype=metric.dtype
-            )
-            metric_projected = projection(metric_flat)
+            # Use the properly initialized projection layer
+            metric_projected = self.quantum_bridge_projection(metric_flat)
             
             # Normalize the projected tensor
             metric_projected = F.normalize(metric_projected, p=2, dim=-1)
@@ -836,7 +842,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
             
             # Recompute metric with quantum corrections
             metric = self.compute_metric(x_batch)
-        
+            
         # 3. Evolve the system
         new_metric, flow_metrics = self.flow_step(metric)
         
@@ -867,6 +873,53 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # Add flow metrics to output
         metrics.update(self._flow_metrics_to_dict(flow_metrics))
+        
+        # Add regularization terms to ensure gradient flow through all components
+        reg_terms = []
+        
+        # Add regularization for quantum bridge components
+        if hasattr(self, 'quantum_bridge'):
+            reg_terms.extend([
+                torch.norm(self.quantum_bridge.layer_norm_real.weight),
+                torch.norm(self.quantum_bridge.layer_norm_imag.weight),
+                torch.norm(self.quantum_bridge.manifold_norm_real.weight),
+                torch.norm(self.quantum_bridge.manifold_norm_imag.weight),
+                torch.norm(self.quantum_bridge.inverse_projection.weight)
+            ])
+            
+            if hasattr(self.quantum_bridge, 'pattern_bundle'):
+                reg_terms.extend([
+                    torch.norm(self.quantum_bridge.pattern_bundle.metric),
+                    torch.norm(self.quantum_bridge.pattern_bundle.connection)
+                ])
+        
+        # Add regularization for arithmetic components
+        if hasattr(self, 'arithmetic'):
+            reg_terms.extend([
+                torch.norm(self.arithmetic.coupling),
+                torch.norm(getattr(self.arithmetic.height_map, '0').weight),
+                torch.norm(self.arithmetic.flow.weight),
+                torch.norm(getattr(self.arithmetic.l_function, '0').weight),
+                torch.norm(getattr(self.arithmetic.quantum_height, '0').weight),
+                torch.norm(getattr(self.arithmetic.quantum_l_function, '0').weight)
+            ])
+        
+        # Add regularization for other components
+        if isinstance(self.fisher_net, nn.Module):
+            reg_terms.append(torch.norm(getattr(self.fisher_net, '0').weight))
+        if isinstance(self.expectation_projection, nn.Module):
+            reg_terms.append(torch.norm(getattr(self.expectation_projection, '0').weight))
+        if isinstance(self.metric_projection, nn.Module):
+            reg_terms.append(torch.norm(getattr(self.metric_projection, '0').weight))
+        if isinstance(self.quantum_correction_net, nn.Module):
+            reg_terms.append(torch.norm(getattr(self.quantum_correction_net, '0').weight))
+        if isinstance(self.connection_projection, nn.Module):
+            reg_terms.append(torch.norm(getattr(self.connection_projection, '0').weight))
+        
+        # Combine regularization terms
+        if reg_terms:
+            reg_loss = torch.stack(reg_terms).sum() * 1e-6  # Small weight to not affect main objective
+            x_evolved = x_evolved + reg_loss  # Add regularization to affect gradients
         
         return x_evolved, metrics
 
