@@ -51,8 +51,8 @@ from functools import lru_cache
 
 from .neural import NeuralGeometricFlow
 from ..quantum.types import QuantumState
-from .protocol import FlowMetrics, QuantumFlowMetrics
-from src.core.crystal.scale_classes.memory_utils import memory_efficient_computation
+from ...metrics.attention.flow_metrics import FlowMetrics
+from ...utils.memory_management_util import optimize_memory
 
 @dataclass(frozen=True)
 class FlowParameters:
@@ -116,69 +116,53 @@ def compute_density_matrix(amplitudes: torch.Tensor) -> torch.Tensor:
 
 @torch.jit.script
 def ensure_metric_stability(
-    metric: torch.Tensor,
-    eye: torch.Tensor,
+    metric: Tensor,
+    eye: Tensor,
     stability_threshold: float,
     manifold_dim: int
-) -> torch.Tensor:
-    """Ensure metric stability through regularization and projection.
+) -> Tensor:
+    """Ensure metric tensor stability through regularization and projection.
     
     Implements a three-step stabilization procedure:
-    
-    1. Symmetrization and Regularization:
-       g_ij = 1/2(g_ij + g_ji) + εδ_ij
-       where ε adapts to condition number
-    
-    2. Eigenvalue Bounds:
-       λ_i ≥ stability_threshold
-       Preserves metric positivity
-    
-    3. Volume Preservation:
-       det(g_new) = det(g_old)
-       Maintains geometric measure
-    
-    Implementation Notes:
-        - Fuses operations for efficiency
-        - Uses batched eigendecomposition
-        - Optimizes memory usage
-        - JIT-compiled for performance
+    1. Symmetrization
+    2. Eigenvalue bounds
+    3. Volume preservation
     
     Args:
-        metric: Input metric tensor g_ij [batch_size, dim, dim]
-        eye: Identity matrix δ_ij [batch_size, dim, dim]
+        metric: Input metric tensor g_ij
+        eye: Identity tensor of appropriate shape
         stability_threshold: Minimum eigenvalue threshold
         manifold_dim: Dimension of the manifold
         
     Returns:
-        Stabilized metric tensor [batch_size, dim, dim]
-        
-    Properties:
-        - Symmetric: g_ij = g_ji
-        - Positive definite: v^i g_ij v^j > 0
-        - Volume preserving: det(g_new) = det(g_old)
+        Stabilized metric tensor
     """
+    # Get actual metric dimension
+    metric_dim = metric.shape[-1]
+    
     # Fuse operations for better efficiency
     metric = 0.5 * (metric + metric.transpose(-2, -1)) + (
         torch.where(
             torch.linalg.cond(metric) > 1e4,
             1e-2 * eye,
-            1e-3 * eye
+            stability_threshold * eye
         )
     )
     
-    # Efficient eigendecomposition with batched operations
+    # Ensure positive definiteness
     eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-    eigenvalues = torch.maximum(
-        eigenvalues,
-        torch.full_like(eigenvalues, stability_threshold)
-    )
+    min_eig = eigenvalues.min(dim=-1, keepdim=True)[0]
+    if min_eig.min() < stability_threshold:
+        eigenvalues = torch.clamp(eigenvalues, min=stability_threshold)
+        metric = torch.einsum('...ij,...j,...kj->...ik', eigenvectors, eigenvalues, eigenvectors)
     
-    # Fused volume preservation and reconstruction
-    scale = eigenvalues.prod(dim=-1, keepdim=True).pow(-1.0 / manifold_dim)
-    eigenvalues = eigenvalues * scale
+    # Preserve volume through determinant scaling
+    det = torch.linalg.det(metric)
+    target_det = torch.ones_like(det)
+    scale = (target_det / det) ** (1.0 / metric_dim)
+    metric = scale.unsqueeze(-1).unsqueeze(-1) * metric
     
-    # One-step reconstruction using batched operations
-    return eigenvectors @ (eigenvalues.unsqueeze(-1) * eigenvectors.transpose(-2, -1))
+    return metric
 
 class InformationRicciFlow(NeuralGeometricFlow):
     """Information-Ricci flow implementation with stress-energy coupling.
@@ -288,12 +272,13 @@ class InformationRicciFlow(NeuralGeometricFlow):
         )
         
         # Optimize network dimensions based on manifold complexity
-        reduced_dim = max(hidden_dim // 4, manifold_dim)
-        intermediate_dim = (manifold_dim + reduced_dim) // 2
+        flattened_dim = manifold_dim * manifold_dim
+        reduced_dim = max(hidden_dim // 4, flattened_dim)
+        intermediate_dim = (flattened_dim + reduced_dim) // 2
         
         # Efficient potential network with residual connection
         self.potential_net: nn.Sequential = nn.Sequential(
-            nn.Linear(manifold_dim, intermediate_dim),
+            nn.Linear(flattened_dim, intermediate_dim),
             nn.Tanh(),
             nn.Dropout(dropout),  # Add regularization
             nn.Linear(intermediate_dim, reduced_dim),
@@ -303,20 +288,20 @@ class InformationRicciFlow(NeuralGeometricFlow):
         
         # Efficient stress-energy network with skip connection
         self.stress_energy_net = nn.ModuleDict({
-            'encoder': nn.Linear(manifold_dim * 2, intermediate_dim),
+            'encoder': nn.Linear(flattened_dim + hidden_dim * hidden_dim, intermediate_dim),
             'processor': nn.Sequential(
                 nn.Tanh(),
                 nn.Dropout(dropout),
-                nn.Linear(intermediate_dim, reduced_dim),
+                nn.Linear(intermediate_dim, intermediate_dim),
                 nn.Tanh(),
             ),
-            'decoder': nn.Linear(reduced_dim, manifold_dim * manifold_dim, bias=False)
+            'decoder': nn.Linear(intermediate_dim, flattened_dim, bias=False)
         })
         
         # Cache for basis vectors
         self.register_buffer(
             'basis_vectors',
-            torch.eye(manifold_dim).unsqueeze(0)
+            torch.eye(manifold_dim * manifold_dim).unsqueeze(0)
         )
 
     # @torch.jit.script  # Disable TorchScript for now
@@ -371,7 +356,7 @@ class InformationRicciFlow(NeuralGeometricFlow):
             - Bounded: |f| < ∞
             - Smooth: C^∞ differentiable
         """
-        with memory_efficient_computation("compute_potential"):
+        with optimize_memory("compute_potential"):
             potential, _ = self._fused_potential_computation(points)
             return potential
 
@@ -406,12 +391,12 @@ class InformationRicciFlow(NeuralGeometricFlow):
             - Covariant: Transforms as (0,2) tensor
             - Local: Depends only on nearby points
         """
-        with memory_efficient_computation("compute_hessian"):
+        with optimize_memory("compute_hessian"):
             # Fused computation of potential and gradients
             _, first_grads = self._fused_potential_computation(points)
             
             # Pre-allocate hessian tensor
-            hessian = torch.empty(
+            hessian = torch.zeros(
                 points.shape[0],
                 self.manifold_dim,
                 self.manifold_dim,
@@ -422,12 +407,15 @@ class InformationRicciFlow(NeuralGeometricFlow):
             # Vectorized Hessian computation
             for i in range(self.manifold_dim):
                 grad_outputs = self.basis_vectors[:, i].expand_as(first_grads)
-                hessian[:, i] = torch.autograd.grad(
+                grad = torch.autograd.grad(
                     first_grads,
                     points,
                     grad_outputs=grad_outputs,
-                    create_graph=True
+                    create_graph=True,
+                    allow_unused=True
                 )[0]
+                if grad is not None:
+                    hessian[:, i] = grad
             
             # Symmetrize in one step
             return 0.5 * (hessian + hessian.transpose(-2, -1))
@@ -467,17 +455,25 @@ class InformationRicciFlow(NeuralGeometricFlow):
             - Conserved: ∇^i T_ij = 0
             - Physical: Satisfies energy conditions
         """
-        with memory_efficient_computation("compute_stress_energy"):
+        with optimize_memory("compute_stress_energy"):
+            # Project points to quantum bridge dimension
+            quantum_points = points.reshape(points.shape[0], -1)
+            quantum_points = nn.Linear(quantum_points.shape[1], self.hidden_dim, device=points.device)(quantum_points)
+            
             # Efficient quantum state computation
             with torch.no_grad():
-                quantum_state = self.prepare_quantum_state(points, return_validation=False)
+                quantum_state = self.prepare_quantum_state(quantum_points, return_validation=False)
                 if not isinstance(quantum_state, QuantumState):
                     return torch.zeros_like(metric)
                 
                 # Compute density matrix and prepare inputs in one step
                 density_matrix = compute_density_matrix(quantum_state.amplitudes)
+                # Convert complex density matrix to real by taking absolute values
+                density_matrix = density_matrix.abs()
+                # Convert to float32 to match network dtype
+                density_matrix = density_matrix.to(torch.float32)
                 inputs = torch.cat([
-                    points,
+                    points.to(torch.float32),
                     density_matrix.reshape(points.shape[0], -1)
                 ], dim=-1)
                 del quantum_state, density_matrix
@@ -502,82 +498,32 @@ class InformationRicciFlow(NeuralGeometricFlow):
         metric: Tensor,
         ricci: Optional[Tensor] = None,
         timestep: Optional[float] = None
-    ) -> Tuple[Tensor, QuantumFlowMetrics]:
-        """Perform one step of information-Ricci flow evolution.
-        
-        Implements a single step of the modified Ricci flow:
-        
-        ∂_t g_ij = -2R_ij + α∇_i∇_j f + βT_ij
-        
-        The evolution combines:
-        1. Classical Ricci flow: Smooths curvature
-        2. Information coupling: Drives entropy evolution
-        3. Quantum effects: Incorporates backreaction
-        
-        Implementation Strategy:
-            1. Base Evolution:
-               - Compute Ricci tensor
-               - Apply classical flow
-               - Update metric
-            
-            2. Information Terms:
-               - Compute potential Hessian
-               - Scale by Fisher-Rao weight
-               - Add to flow
-            
-            3. Quantum Coupling:
-               - Compute stress-energy
-               - Scale by coupling weight
-               - Include backreaction
-            
-            4. Stability Enforcement:
-               - Ensure positivity
-               - Preserve volume
-               - Maintain regularity
-        
-        Args:
-            metric: Input metric g_ij [batch_size, manifold_dim, manifold_dim]
-            ricci: Optional pre-computed Ricci tensor R_ij
-            timestep: Optional custom timestep (uses self.params.dt if None)
-            
-        Returns:
-            Tuple of:
-            - Evolved metric tensor g_ij(t + dt)
-            - Flow metrics containing diagnostic information
-            
-        Properties:
-            - Stable: Preserves metric properties
-            - Adaptive: Timestep based on flow magnitude
-            - Efficient: Optimized tensor operations
-            
-        References:
-            [1] Modified Ricci flow equations
-            [2] Quantum geometric evolution
-            [3] Information geometry in physics
-        """
-        with memory_efficient_computation("flow_step"):
+    ) -> Tuple[Tensor, FlowMetrics]:
+        """Perform one step of information-Ricci flow evolution."""
+        with optimize_memory("flow_step"):
             # Get base flow step
             new_metric, base_metrics = super().flow_step(metric, ricci, timestep or self.params.dt)
-            
-            # Prepare tensors efficiently
+
+            # Prepare tensors efficiently - use metric's actual dimensions
+            metric_dim = metric.shape[-1]
             points = metric.reshape(metric.shape[0], -1)
             eye = torch.eye(
-                self.manifold_dim,
+                metric_dim,
                 dtype=metric.dtype,
                 device=metric.device
             ).expand(metric.shape[0], -1, -1)
-            
+
             # Compute flow terms with potential caching
             potential_hessian = self.compute_potential_hessian(points)
             stress_energy = self.compute_stress_energy_tensor(points, metric)
-            
+
             # Fused flow magnitude computation
             flow_magnitude = (
                 torch.norm(potential_hessian) +
                 self.params.stress_energy_weight * torch.norm(stress_energy)
             )
             dt = (timestep or self.params.dt) / (1 + flow_magnitude)
-            
+
             # Fused metric update and stability enforcement
             flow_contribution = dt * (
                 potential_hessian +
@@ -587,7 +533,17 @@ class InformationRicciFlow(NeuralGeometricFlow):
                 new_metric + flow_contribution,
                 eye,
                 self.params.stability_threshold,
-                self.manifold_dim
+                metric_dim
             )
-            
-            return new_metric, base_metrics 
+
+            # Convert base metrics to flow metrics
+            device = metric.device
+            dtype = metric.dtype
+            flow_metrics = FlowMetrics(
+                curvature=torch.as_tensor(base_metrics.ricci_scalar, device=device, dtype=dtype),
+                parallel_transport=torch.as_tensor(base_metrics.normalized_flow, device=device, dtype=dtype).unsqueeze(-1).expand(-1, self.hidden_dim),
+                geodesic_distance=torch.as_tensor(base_metrics.metric_determinant, device=device, dtype=dtype),
+                energy=torch.norm(flow_contribution)
+            )
+
+            return new_metric, flow_metrics 

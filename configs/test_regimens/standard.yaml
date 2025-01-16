@@ -50,9 +50,9 @@ geometric_tests:
 # =================================== short test summary info ===================================
 # FAILED tests/test_validation/test_model_geometric.py::TestModelGeometricValidator::test_geometric_preservation - AssertionError: Attention does not preserve geometric structure for scale 1.0
 # =============================== 1 failed, 104 passed in 31.69s ================================
-  dimensions: 2  # Smaller dimension for better stability
+  dimensions: 32  # Match quantum bridge hidden_dim
   num_heads: 4  # Fewer heads for better stability
-  hidden_dim: 32  # Smaller hidden dimension for better stability
+  hidden_dim: 32  # Match quantum bridge hidden_dim
 
 quantum_arithmetic:
   dtype: float32  # Fixed data type for quantum operations

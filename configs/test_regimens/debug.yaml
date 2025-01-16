@@ -37,6 +37,7 @@ geometric_tests:
   dimensions: 2  # Smaller dimension for debugging
   num_heads: 4  # Fewer heads for debugging
   hidden_dim: 32  # Smaller hidden dimension
+  batch_size: 4  # Small batch size for debugging
 
 parallel_transport:
   test_cases: 5  # Fewer test cases

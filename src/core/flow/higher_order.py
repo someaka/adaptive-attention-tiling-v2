@@ -14,7 +14,7 @@ from torch import nn, Tensor
 
 from .pattern_heat import PatternHeatFlow
 from ..quantum.types import QuantumState
-from .protocol import FlowMetrics, QuantumFlowMetrics
+from ...metrics.attention.flow_metrics import FlowMetrics
 
 class HigherOrderFlow(PatternHeatFlow):
     """Higher-order geometric flow implementation.
@@ -221,7 +221,7 @@ class HigherOrderFlow(PatternHeatFlow):
         metric: Tensor,
         ricci: Optional[Tensor] = None,
         timestep: float = 0.1
-    ) -> Tuple[Tensor, QuantumFlowMetrics]:
+    ) -> Tuple[Tensor, FlowMetrics]:
         """Perform higher-order geometric flow step."""
         # Get pattern heat flow step from parent
         new_metric, flow_metrics = super().flow_step(metric, ricci, timestep)

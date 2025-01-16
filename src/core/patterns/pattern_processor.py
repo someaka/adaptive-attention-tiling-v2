@@ -247,27 +247,48 @@ class PatternProcessor(nn.Module):
         """Process pattern through geometric-quantum pipeline.
         
         Args:
-            pattern: Input pattern tensor
+            pattern: Input pattern tensor [batch_size, manifold_dim]
             with_quantum: Whether to use quantum processing
             return_intermediates: Whether to return intermediate results
             
         Returns:
-            Processed pattern tensor or tuple of (tensor, intermediates)
+            Processed pattern tensor [batch_size, manifold_dim] or tuple of (tensor, intermediates)
         """
+        batch_size = pattern.shape[0]
+        
         # Project pattern to hidden dimension
-        pattern = self._project_dimensions(pattern, self.hidden_dim)
+        hidden_pattern = self._project_dimensions(pattern, self.hidden_dim)
         
         # Get pattern bundle structure
-        bundle_point = self.pattern_bundle.bundle_projection(pattern)
+        bundle_point = self.pattern_bundle.bundle_projection(hidden_pattern)
         
         # Get metric structure
         metric = self.riemannian.compute_metric(bundle_point)
+        
+        # Project to manifold dimension and reshape for flow
+        bundle_point = self._project_dimensions(pattern, self.hidden_dim)
+        manifold_point = self._project_dimensions(bundle_point, self.manifold_dim)
+        
+        # Ensure manifold point has the correct dimension
+        if manifold_point.shape[-1] != self.manifold_dim:
+            manifold_point = self._project_dimensions(manifold_point, self.manifold_dim)
+        
+        # Construct metric tensor using outer products
+        metric_tensor = torch.einsum('bi,bj->bij', manifold_point, manifold_point)
+        
+        # Add small diagonal term for stability
+        eye = torch.eye(self.manifold_dim, device=pattern.device).unsqueeze(0)
+        metric_tensor = metric_tensor + 1e-6 * eye.expand(batch_size, -1, -1)
+        
+        # Ensure metric tensor is symmetric and positive definite
+        metric_tensor = 0.5 * (metric_tensor + metric_tensor.transpose(-2, -1))
+        metric_tensor = metric_tensor + 1e-6 * eye.expand(batch_size, -1, -1)
         
         # Quantum processing
         quantum_corrections = None
         if with_quantum:
             # Convert to quantum state
-            quantum_result = self.quantum_bridge.neural_to_quantum(pattern)
+            quantum_result = self.quantum_bridge.neural_to_quantum(hidden_pattern)
             if isinstance(quantum_result, tuple):
                 quantum_state = quantum_result[0]
             else:
@@ -281,32 +302,24 @@ class PatternProcessor(nn.Module):
         
         # Apply flow evolution
         evolved, _ = self.flow.flow_step(
-            bundle_point,
+            metric=metric_tensor,
             timestep=0.1
         )
         
-        # Apply pattern dynamics
-        dynamics = self.pattern_dynamics.evolve(evolved, time=0.1)
-        
-        # Get pattern formation
-        formation = self.pattern_formation.evolve(dynamics, time_steps=1)
-        
         # Project back to manifold dimension
-        formation = self._project_dimensions(formation, self.manifold_dim)
+        evolved = evolved.reshape(batch_size, -1)
+        evolved = self._project_dimensions(evolved, self.manifold_dim)
         
-        if not return_intermediates:
-            return formation
+        if return_intermediates:
+            intermediates = {
+                'bundle_point': bundle_point,
+                'manifold_point': manifold_point,
+                'metric_tensor': metric_tensor,
+                'evolved': evolved
+            }
+            return evolved, intermediates
             
-        # Collect intermediate results
-        intermediates = {
-            'bundle_point': bundle_point,
-            'metric': metric,
-            'quantum_corrections': quantum_corrections,
-            'evolved': evolved,
-            'dynamics': dynamics
-        }
-        
-        return formation, intermediates
+        return evolved
         
     def forward(
         self,

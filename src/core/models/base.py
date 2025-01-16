@@ -158,3 +158,17 @@ class ModelGeometry(nn.Module):
         if idx >= len(self.attention_heads):
             raise ValueError(f"Invalid head index: {idx}")
         return self.attention_heads[idx]
+
+    def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute sectional curvature at points.
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Sectional curvature tensor (batch_size x dim x dim)
+            
+        Raises:
+            NotImplementedError: This method must be implemented by subclasses
+        """
+        raise NotImplementedError("Subclasses must implement sectional_curvature")

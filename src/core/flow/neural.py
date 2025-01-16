@@ -565,13 +565,23 @@ class NeuralGeometricFlow(PatternFormationFlow):
         if hasattr(self, 'quantum_bridge'):
             # Prepare initial state efficiently
             with torch.no_grad():
-                # Project metric to hidden dimension before preparing quantum state
+                # Project metric to quantum state space using proper dimensionality
                 metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
-                metric_padded = torch.zeros(batch_size, self.quantum_bridge.hidden_dim, device=metric.device, dtype=metric.dtype)
-                metric_padded[:, :metric_flat.shape[1]] = metric_flat
+                
+                # Project to quantum bridge hidden dimension using learned projection
+                projection = nn.Linear(
+                    metric_flat.shape[1],  # manifold_dim * manifold_dim
+                    self.quantum_bridge.hidden_dim,
+                    device=metric.device,
+                    dtype=metric.dtype
+                )
+                metric_projected = projection(metric_flat)
+                
+                # Normalize the projected tensor
+                metric_projected = F.normalize(metric_projected, p=2, dim=-1)
                 
                 initial_state = self.prepare_quantum_state(
-                    metric_padded,
+                    metric_projected,
                     return_validation=False
                 )
                 

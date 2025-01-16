@@ -130,8 +130,8 @@ class NeuralQuantumBridge(nn.Module):
         
         # Initialize inverse projection
         self.inverse_projection = nn.Linear(
-            self.manifold_dim,
-            self.hidden_dim,
+            hidden_dim,  # Input is hidden_dim from quantum state
+            hidden_dim,  # Output is also hidden_dim to match neural representation
             device=self.device,
             dtype=self.dtype
         )
@@ -147,71 +147,70 @@ class NeuralQuantumBridge(nn.Module):
         x: torch.Tensor,
         return_validation: bool = False
     ) -> Union[QuantumState, Tuple[QuantumState, QuantumStateValidationResult]]:
-        """Convert neural representation to quantum state."""
+        """Convert neural representation to quantum state.
+        
+        Args:
+            x: Neural representation tensor
+            return_validation: Whether to return validation result
+            
+        Returns:
+            Quantum state or tuple of (quantum state, validation result)
+        """
         # Validate input dimensions
         if x.shape[-1] != self.hidden_dim:
             raise ValueError(f"Input tensor must have hidden dimension {self.hidden_dim}, got {x.shape[-1]}")
-
-        # Store original norm
+        
+        # Check for non-finite values
+        if not torch.all(torch.isfinite(x)):
+            raise ValueError("Input tensor contains non-finite values")
+        
+        # Store original shape and norm
+        original_shape = x.shape
         original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
-
-        # Get dimensions and reshape if needed
+        
+        # Get dimensions
         if len(x.shape) == 2:  # [batch_size, hidden_dim]
             batch_size = x.shape[0]
             seq_len = 1
             num_heads = 1
-            x_flat = x.unsqueeze(1)  # Add sequence dimension
         elif len(x.shape) == 3:  # [batch_size, seq_len, hidden_dim]
             batch_size = x.shape[0]
             seq_len = x.shape[1]
             num_heads = 1
-            x_flat = x
         else:  # [batch_size, num_heads, seq_len, hidden_dim]
             batch_size = x.shape[0]
             num_heads = x.shape[1]
             seq_len = x.shape[2]
-            x_flat = x.reshape(batch_size * num_heads, seq_len, self.hidden_dim)
-
+        
+        # Flatten input for processing
+        x_flat = x.reshape(-1, x.shape[-1])
+        
         # Project to manifold dimension while preserving gradients
-        x_manifold = x_flat[..., :self.manifold_dim].clone()
+        x_manifold = x_flat.clone()
         
         # Normalize to unit norm for quantum state preparation
         x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
         x_manifold = x_manifold / (x_norm + 1e-8)
         
-        # Convert to quantum amplitudes using direct quantum state preparation
-        prepared_state = self.hilbert_space.prepare_state(x_manifold)
-        
-        # Create layout information
-        if num_heads > 1:
-            layout = {
-                "type": "attention",
-                "batch_size": batch_size,
-                "num_heads": num_heads,
-                "seq_length": seq_len,
-                "dim": self.manifold_dim
-            }
-        elif seq_len > 1:
-            layout = {
-                "type": "sequence",
-                "batch_size": batch_size,
-                "seq_length": seq_len,
-                "dim": self.manifold_dim
-            }
+        # Convert to complex if input is real, otherwise use as is
+        if not torch.is_complex(x_manifold):
+            x_complex = torch.complex(x_manifold, torch.zeros_like(x_manifold))
         else:
-            layout = {
-                "type": "batch",
-                "batch_size": batch_size,
-                "dim": self.manifold_dim
-            }
+            x_complex = x_manifold
         
         # Create quantum state with proper initialization and gradient tracking
         state = QuantumState(
-            amplitudes=prepared_state.amplitudes.requires_grad_(True),
-            basis_labels=[str(i) for i in range(self.manifold_dim)],
+            amplitudes=x_complex.requires_grad_(True),
+            basis_labels=[str(i) for i in range(self.hidden_dim)],
             phase=torch.zeros(1, dtype=self.dtype, device=self.device),
             original_norm=original_norm,
-            layout=layout
+            layout={
+                "type": "batch" if num_heads == 1 and seq_len == 1 else "sequence" if num_heads == 1 else "attention",
+                "batch_size": batch_size,
+                "num_heads": num_heads,
+                "seq_length": seq_len,
+                "dim": self.hidden_dim
+            }
         )
         
         if return_validation:
@@ -228,30 +227,25 @@ class NeuralQuantumBridge(nn.Module):
         state: QuantumState,
         original_shape: Optional[torch.Size] = None
     ) -> torch.Tensor:
-        """Convert quantum state back to neural representation."""
-        # Get classical amplitudes and ensure dtype matches inverse projection
-        classical_flat = state.amplitudes.real.to(self.dtype)
+        """Convert quantum state to neural representation.
         
-        # Get dimensions from layout if available
-        if state.layout is not None:
-            if state.layout["type"] == "single_state":
-                batch_size = 1
-                seq_len = 1
-                num_heads = 1
-            elif state.layout["type"] == "batch":
-                batch_size = state.layout["batch_size"]
-                seq_len = 1
-                num_heads = 1
-            elif state.layout["type"] == "sequence":
-                batch_size = state.layout["batch_size"]
-                seq_len = state.layout["seq_length"]
-                num_heads = 1
-            elif state.layout["type"] == "attention":
-                batch_size = state.layout["batch_size"]
-                seq_len = state.layout["seq_length"]
-                num_heads = state.layout["num_heads"]
-            else:
-                raise ValueError(f"Unknown layout type: {state.layout['type']}")
+        Args:
+            state: Quantum state to convert
+            original_shape: Original shape of input tensor (optional)
+            
+        Returns:
+            Neural representation tensor
+        """
+        # Get classical amplitudes and preserve sign information
+        classical_flat = state.amplitudes.real
+        
+        # Infer dimensions from layout if available
+        if hasattr(state, 'layout') and state.layout is not None:
+            layout = state.layout
+            batch_size = layout.get('batch_size', 1)
+            seq_len = layout.get('seq_length', 1)
+            num_heads = layout.get('num_heads', 1)
+            hidden_dim = self.hidden_dim
         else:
             # Fallback to shape-based inference
             if len(classical_flat.shape) == 2:  # [batch_size, manifold_dim]
@@ -266,12 +260,22 @@ class NeuralQuantumBridge(nn.Module):
                 batch_size = classical_flat.shape[0]
                 num_heads = classical_flat.shape[1]
                 seq_len = classical_flat.shape[2]
+            hidden_dim = self.hidden_dim
         
-        # Ensure consistent dtype for inverse projection
-        classical_flat = classical_flat.to(self.inverse_projection.weight.dtype)
+        # Ensure classical_flat has the right shape [*, hidden_dim]
+        if len(classical_flat.shape) > 2:
+            classical_flat = classical_flat.reshape(-1, classical_flat.shape[-1])
         
-        # Project from manifold_dim back to hidden_dim using the inverse projection
-        output = self.inverse_projection(classical_flat)
+        # Normalize output to preserve relative magnitudes while keeping signs
+        norms = torch.linalg.vector_norm(classical_flat, dim=-1, keepdim=True)
+        output = classical_flat / (norms + 1e-8)
+        
+        # Convert to float64
+        output = output.to(torch.float64)
+        
+        # If original norm is stored in quantum state, restore it
+        if hasattr(state, 'original_norm') and state.original_norm is not None:
+            output = output * state.original_norm
         
         # Reshape back to original shape if provided
         if original_shape is not None:
@@ -279,14 +283,11 @@ class NeuralQuantumBridge(nn.Module):
         else:
             # Reshape based on layout dimensions
             if num_heads > 1:
-                output = output.reshape(batch_size, num_heads, seq_len, -1)
+                output = output.reshape(batch_size, num_heads, seq_len, hidden_dim)
             elif seq_len > 1:
-                output = output.reshape(batch_size, seq_len, -1)
+                output = output.reshape(batch_size, seq_len, hidden_dim)
             else:
-                output = output.reshape(batch_size, -1)
-        
-        # Ensure output has the same dtype as the inverse projection
-        output = output.to(self.inverse_projection.weight.dtype)
+                output = output.reshape(batch_size, hidden_dim)
         
         return output
 
@@ -384,7 +385,7 @@ class NeuralQuantumBridge(nn.Module):
         amplitudes_float = amplitudes_reshaped.to(working_dtype)
         
         # Evolve state
-        evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
+        evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze()
         
         # Convert back to target dtype
         evolved_amplitudes = evolved_amplitudes.to(target_dtype)
@@ -1052,23 +1053,7 @@ class NeuralQuantumBridge(nn.Module):
 
     def evolve_quantum_state(self, state: QuantumState, time: float = 1.0) -> QuantumState:
         """Evolve quantum state using Hamiltonian evolution."""
-        # Construct Hamiltonian using quantum_attention
-        H = self.quantum_attention.construct_hamiltonian(state.amplitudes)
-        
-        # Ensure complex64 type
-        if H.dtype != torch.complex64:
-            H = H.to(torch.complex64)
-        
-        # Compute evolution operator U = exp(-iHt)
-        U = torch.matrix_exp(-1j * time * H)
-        
-        # Ensure state amplitudes are complex64
-        if state.amplitudes.dtype != torch.complex64:
-            state.amplitudes = state.amplitudes.to(torch.complex64)
-        
-        # Evolve state
-        evolved_state = state.evolve(U)
-        return evolved_state
+        return self.evolve_quantum_state_with_attention(state, time=time)
 
     def evolve_pattern_bundle_with_attention(self, pattern_bundle: torch.Tensor, time: float = 1.0) -> torch.Tensor:
         """Evolve pattern bundle through quantum geometric flow with attention.

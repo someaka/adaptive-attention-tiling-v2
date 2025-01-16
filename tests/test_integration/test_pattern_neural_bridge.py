@@ -24,15 +24,20 @@ def test_config():
 @pytest.fixture
 def setup_components(test_config):
     """Setup test components."""
-    # Ensure minimum dimensions for attention heads
-    hidden_dim = max(test_config["geometric_tests"]["dimensions"], 8)  # Minimum 8 for attention
-    manifold_dim = max(test_config["geometric_tests"]["dimensions"], 8)  # Minimum 8 for attention
-    num_heads = test_config["geometric_tests"]["num_heads"]  # Use single head from debug config
+    # Get dimensions from config
+    hidden_dim = test_config["geometric_tests"]["hidden_dim"]
+    manifold_dim = test_config["geometric"]["manifold_dim"]  # Use manifold_dim from geometric section
+    num_heads = test_config["geometric_tests"]["num_heads"]
     grid_size = 8  # Fixed small grid size for debug
     
     dynamics = PatternDynamics(
+        grid_size=grid_size,
+        space_dim=2,  # 2D spatial dimensions
+        boundary='periodic',  # Use periodic boundary conditions
+        dt=0.01,  # Small time step for stability
+        num_modes=8,  # Number of stability modes
         hidden_dim=hidden_dim,
-        grid_size=grid_size
+        quantum_enabled=False  # Disable quantum features for basic tests
     )
     processor = PatternProcessor(
         manifold_dim=manifold_dim,
@@ -59,7 +64,7 @@ def test_forward_pass(setup_components):
     batch_size = 4
     num_heads = 8
     seq_len = 16
-    grid_size = dynamics.grid_size  # Get grid size from dynamics
+    grid_size = dynamics.size  # Get grid size from dynamics
     
     states = torch.randn(batch_size, dynamics.dim, grid_size, grid_size)
     
@@ -95,7 +100,7 @@ def test_backward_pass(setup_components):
     dynamics, processor, _ = setup_components
     
     # Create test input with gradients [batch, channels, height, width]
-    grid_size = dynamics.grid_size
+    grid_size = dynamics.size
     x = torch.randn(4, dynamics.dim, grid_size, grid_size, requires_grad=True)
     
     # Forward pass
@@ -122,7 +127,7 @@ def test_gradient_computation(setup_components):
     dynamics, _, _ = setup_components
     
     # Create test pattern [batch, channels, height, width]
-    grid_size = dynamics.grid_size
+    grid_size = dynamics.size
     pattern = torch.randn(1, dynamics.dim, grid_size, grid_size)
     
     # Compute linearization
@@ -153,8 +158,8 @@ def project_to_manifold(x: torch.Tensor, manifold_dim: int) -> torch.Tensor:
     batch_size = x.size(0)
     x_flat = x.reshape(batch_size, -1)  # Use reshape instead of view for better compatibility
     
-    # Project to half the manifold dimension since we'll double it for complex numbers
-    projection = nn.Linear(x_flat.size(1), manifold_dim // 2, dtype=x.dtype, device=x.device)
+    # Project directly to manifold dimension
+    projection = nn.Linear(x_flat.size(1), manifold_dim, dtype=x.dtype, device=x.device)
     projection.requires_grad_(True)  # Enable gradients for projection
     
     # Initialize weights and biases with proper gradients
@@ -163,10 +168,6 @@ def project_to_manifold(x: torch.Tensor, manifold_dim: int) -> torch.Tensor:
     
     # Project and ensure gradients are preserved
     projected = projection(x_flat)
-    
-    # Make it complex by adding zeros for imaginary part
-    zeros = torch.zeros_like(projected, requires_grad=True)
-    projected = torch.cat([projected, zeros], dim=-1)
     
     # Ensure output is normalized while preserving gradients
     norm = torch.norm(projected, p=2, dim=-1, keepdim=True)
@@ -177,7 +178,7 @@ def test_geometric_attention_integration(setup_components):
     dynamics, processor, flow = setup_components
     
     # Create test input
-    grid_size = dynamics.grid_size
+    grid_size = dynamics.size
     x = torch.randn(4, dynamics.dim, grid_size, grid_size, requires_grad=True)  # Enable gradients
     
     # Project to manifold dimension
@@ -202,7 +203,7 @@ def test_pattern_manipulation(setup_components):
     dynamics, processor, _ = setup_components
     
     # Create test pattern
-    grid_size = dynamics.grid_size
+    grid_size = dynamics.size
     pattern = torch.randn(1, dynamics.dim, grid_size, grid_size, requires_grad=True)  # Enable gradients
     
     # Get pattern evolution
@@ -237,15 +238,16 @@ def test_training_integration(setup_components, test_config):
     
     # Get test parameters from config and components
     batch_size = test_config["geometric_tests"]["batch_size"]
-    manifold_dim = processor.hidden_dim  # Use processor's hidden dimension
+    manifold_dim = processor.manifold_dim  # Use processor's manifold dimension
+    hidden_dim = processor.hidden_dim  # Use processor's hidden dimension
     
-    # Create input with shape [batch_size, manifold_dim, manifold_dim]
-    batch = torch.randn(batch_size, manifold_dim, manifold_dim, requires_grad=True)
+    # Create input with correct shape [batch_size, manifold_dim]
+    batch = torch.randn(batch_size, manifold_dim, requires_grad=True)
     
     # Forward pass through processor
     processed = processor(batch)
     
-    # Forward pass through flow
+    # Forward pass through flow - use processed output directly
     output = flow(processed)
     
     # Compute loss

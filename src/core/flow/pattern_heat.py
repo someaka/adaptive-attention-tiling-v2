@@ -9,14 +9,16 @@ where:
 - u: Pattern field
 """
 
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Tuple, Union, Any
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import nn, Tensor
+from torch import Tensor
 
-from .information_ricci import InformationRicciFlow
+from ...utils.memory_management_util import optimize_memory
+from .information_ricci import ensure_metric_stability, InformationRicciFlow
+from ...metrics.attention.flow_metrics import FlowMetrics
 from ..quantum.types import QuantumState
-from .protocol import FlowMetrics, QuantumFlowMetrics
 
 class PatternHeatFlow(InformationRicciFlow):
     """Pattern heat flow implementation.
@@ -228,32 +230,69 @@ class PatternHeatFlow(InformationRicciFlow):
         self,
         metric: Tensor,
         ricci: Optional[Tensor] = None,
-        timestep: float = 0.1
-    ) -> Tuple[Tensor, QuantumFlowMetrics]:
-        """Perform combined information-Ricci and pattern heat flow step."""
-        # Get information-Ricci flow step from parent
-        new_metric, flow_metrics = super().flow_step(metric, ricci, timestep)
-        
-        # Get current pattern field
-        pattern = self.pattern_net(metric.reshape(-1, self.manifold_dim))
-        
-        # Evolve pattern field
-        new_pattern = self.evolve_pattern(pattern, new_metric, timestep)
-        
-        # Update metric using evolved pattern
-        pattern_contribution = torch.einsum(
-            'bi,bj->bij',
-            new_pattern,
-            new_pattern
-        )
-        new_metric = new_metric + self.heat_diffusion_weight * pattern_contribution
-        
-        # Ensure metric remains symmetric and positive definite
-        new_metric = 0.5 * (new_metric + new_metric.transpose(-1, -2))
-        eye = torch.eye(
-            self.manifold_dim,
-            device=metric.device
-        ).unsqueeze(0).expand(metric.shape[0], -1, -1)
-        new_metric = new_metric + self.stability_threshold * eye
-        
-        return new_metric, flow_metrics 
+        timestep: Optional[float] = None
+    ) -> Tuple[Tensor, FlowMetrics]:
+        """Perform one step of information-Ricci flow evolution."""
+        with optimize_memory("flow_step"):
+            # Get base flow step
+            new_metric, base_metrics = super().flow_step(metric, ricci, timestep or self.params.dt)
+            
+            # Prepare tensors efficiently - use metric's actual dimensions
+            metric_dim = metric.shape[-1]
+            points = metric.reshape(metric.shape[0], -1)
+            eye = torch.eye(
+                metric_dim,
+                dtype=metric.dtype,
+                device=metric.device
+            ).expand(metric.shape[0], -1, -1)
+            
+            # Compute flow terms with potential caching
+            potential_hessian = self.compute_potential_hessian(points)
+            stress_energy = self.compute_stress_energy_tensor(points, metric)
+            
+            # Ensure flow contributions match metric dimensions
+            if potential_hessian.shape != metric.shape:
+                potential_hessian = F.interpolate(
+                    potential_hessian.unsqueeze(1),
+                    size=(metric_dim, metric_dim),
+                    mode='bilinear',
+                    align_corners=True
+                ).squeeze(1)
+            if stress_energy.shape != metric.shape:
+                stress_energy = F.interpolate(
+                    stress_energy.unsqueeze(1),
+                    size=(metric_dim, metric_dim),
+                    mode='bilinear',
+                    align_corners=True
+                ).squeeze(1)
+            
+            # Fused flow magnitude computation
+            flow_magnitude = (
+                torch.norm(potential_hessian) +
+                self.params.stress_energy_weight * torch.norm(stress_energy)
+            )
+            dt = (timestep or self.params.dt) / (1 + flow_magnitude)
+            
+            # Fused metric update and stability enforcement
+            flow_contribution = dt * (
+                potential_hessian +
+                self.params.stress_energy_weight * stress_energy
+            )
+            new_metric = ensure_metric_stability(
+                new_metric + flow_contribution,
+                eye,
+                self.params.stability_threshold,
+                metric_dim
+            )
+            
+            # Convert base metrics to flow metrics
+            device = metric.device
+            dtype = metric.dtype
+            flow_metrics = FlowMetrics(
+                curvature=torch.as_tensor(base_metrics.curvature, device=device, dtype=dtype),
+                parallel_transport=torch.as_tensor(base_metrics.parallel_transport, device=device, dtype=dtype).unsqueeze(-1).expand(-1, self.hidden_dim),
+                geodesic_distance=torch.as_tensor(base_metrics.geodesic_distance, device=device, dtype=dtype),
+                energy=torch.norm(flow_contribution)
+            )
+            
+            return new_metric, flow_metrics 
