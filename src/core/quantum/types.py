@@ -4,7 +4,7 @@ This module contains core quantum type definitions used across the framework.
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 import torch
 
@@ -17,6 +17,7 @@ class QuantumState:
     basis_labels: List[str]  # Labels for basis states
     phase: torch.Tensor  # Quantum phase information
     original_norm: Optional[torch.Tensor] = None  # Original norm of the input tensor
+    layout: Optional[Dict[str, Any]] = None  # Tensor layout information (e.g. batch, sequence, heads)
 
     def __post_init__(self):
         """Ensure state normalization and proper tensor types."""
@@ -49,6 +50,32 @@ class QuantumState:
             
         # Global normalization
         self.amplitudes = self.amplitudes / norm.clamp(min=1e-8)
+
+        # Initialize layout if not provided
+        if self.layout is None:
+            # Infer layout from tensor shape
+            shape = self.amplitudes.shape
+            if len(shape) == 1:
+                self.layout = {"type": "single_state", "dim": shape[0]}
+            elif len(shape) == 2:
+                self.layout = {"type": "batch", "batch_size": shape[0], "dim": shape[1]}
+            elif len(shape) == 3:
+                self.layout = {
+                    "type": "sequence",
+                    "batch_size": shape[0],
+                    "seq_length": shape[1],
+                    "dim": shape[2]
+                }
+            elif len(shape) == 4:
+                self.layout = {
+                    "type": "attention",
+                    "batch_size": shape[0],
+                    "num_heads": shape[1],
+                    "seq_length": shape[2],
+                    "dim": shape[3]
+                }
+            else:
+                raise ValueError(f"Unsupported tensor shape: {shape}")
 
     @property
     def shape(self) -> Tuple[int, ...]:

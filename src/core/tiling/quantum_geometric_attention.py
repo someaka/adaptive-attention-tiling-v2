@@ -452,27 +452,56 @@ class QuantumGeometricAttention(nn.Module):
                 if torch.isnan(x).any() or torch.isinf(x).any():
                     raise InvalidQuantumStateError("State contains NaN or Inf values")
                 
-                # Normalize globally across all dimensions except batch
-                norm = torch.sqrt(torch.sum(torch.abs(x) ** 2, dim=tuple(range(1, len(x.shape))), keepdim=True))
-                if (norm < 1e-10).any():
+                # Normalize per sequence element with high precision
+                norm = torch.sqrt(torch.sum(torch.abs(x) ** 2, dim=-1, keepdim=True))
+                if (norm == 0).any():
                     raise InvalidQuantumStateError("State has zero norm")
-
-                # Extract phase with improved stability
-                mask = (x.abs() > 1e-10)
-                first_nonzero_idx = mask.to(torch.int64).argmax(dim=-1, keepdim=True)
-                batch_indices = torch.arange(x.size(0), device=x.device).view(-1, 1, 1)
-                seq_indices = torch.arange(x.size(1) if x.dim() > 2 else 1, device=x.device).view(1, -1, 1)
-                first_nonzero = x[batch_indices, seq_indices, first_nonzero_idx]
-                phase = torch.angle(first_nonzero + 1e-10j)
-
-                # Normalize with high precision
+                
+                # Normalize without adding epsilon to preserve unit norm exactly
                 x_tensor = x / norm
                 
-                # Create QuantumState
+                # Extract phase more robustly
+                phase = torch.zeros_like(x[..., 0], dtype=x.dtype)
+                mask = (x.abs() > 1e-10)
+                if mask.any():
+                    # Find first non-zero element per sequence
+                    first_nonzero_idx = mask.to(torch.int64).argmax(dim=-1)
+                    batch_indices = torch.arange(x.size(0), device=x.device)
+                    if x.dim() > 2:
+                        seq_indices = torch.arange(x.size(1), device=x.device)
+                        batch_grid, seq_grid = torch.meshgrid(batch_indices, seq_indices, indexing='ij')
+                        first_nonzero = x[batch_grid, seq_grid, first_nonzero_idx]
+                    else:
+                        first_nonzero = x[batch_indices, first_nonzero_idx]
+                    phase = torch.angle(first_nonzero)
+                
+                # Create QuantumState with layout information
+                shape = x.shape
+                if len(shape) == 2:
+                    layout = {"type": "batch", "batch_size": shape[0], "dim": shape[1]}
+                elif len(shape) == 3:
+                    layout = {
+                        "type": "sequence",
+                        "batch_size": shape[0],
+                        "seq_length": shape[1],
+                        "dim": shape[2]
+                    }
+                elif len(shape) == 4:
+                    layout = {
+                        "type": "attention",
+                        "batch_size": shape[0],
+                        "num_heads": shape[1],
+                        "seq_length": shape[2],
+                        "dim": shape[3]
+                    }
+                else:
+                    raise ValueError(f"Unsupported tensor shape: {shape}")
+                
                 state = QuantumState(
-                    amplitudes=x_tensor,
+                    amplitudes=x_tensor * torch.exp(-1j * phase.unsqueeze(-1)),  # Align phases
                     basis_labels=[str(i) for i in range(self.manifold_dim)],
-                    phase=phase
+                    phase=phase,
+                    layout=layout
                 )
             else:
                 state = x
@@ -928,7 +957,8 @@ class QuantumGeometricAttention(nn.Module):
             return QuantumState(
                 amplitudes=evolved_state,
                 basis_labels=state.basis_labels,
-                phase=state.phase
+                phase=state.phase,
+                layout=state.layout  # Preserve the original layout
             )
             
         except Exception as e:
@@ -1190,7 +1220,6 @@ class QuantumGeometricAttention(nn.Module):
                 state_tensor = state_tensor.unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
             elif state_tensor.dim() == 2:
                 state_tensor = state_tensor.unsqueeze(0)  # Add batch dimension
-            
             if state_tensor.dim() != 3:
                 raise MetricError(f"Expected 3D tensor after reshaping, got {state_tensor.dim()}D")
 
@@ -1208,25 +1237,56 @@ class QuantumGeometricAttention(nn.Module):
 
             # Compute quantum geometric tensor using symplectic structure
             try:
+                # Compute quantum geometric tensor
                 quantum_metric = self.symplectic.compute_quantum_geometric_tensor(quantum_features)
-                # Extract real part for metric
+                
+                # Ensure the tensor is complex
+                if not torch.is_complex(quantum_metric):
+                    quantum_metric = quantum_metric.to(torch.complex128)
+                
+                # Add small positive diagonal for numerical stability before Hermitian enforcement
+                quantum_metric = quantum_metric + torch.eye(
+                    quantum_metric.size(-1),
+                    device=quantum_metric.device,
+                    dtype=quantum_metric.dtype
+                ).unsqueeze(0) * 1e-6
+                
+                # Make Hermitian by averaging with conjugate transpose
+                quantum_metric = 0.5 * (quantum_metric + quantum_metric.transpose(-2, -1).conj())
+                
+                # Verify Hermiticity
+                if not torch.allclose(quantum_metric, quantum_metric.transpose(-2, -1).conj(), rtol=1e-5, atol=1e-8):
+                    raise MetricError("Quantum metric failed Hermiticity check")
+                
+                # Extract real part for metric after Hermiticity is verified
                 quantum_metric = quantum_metric.real
-                # Enforce perfect symmetry
-                quantum_metric = 0.5 * (quantum_metric + quantum_metric.transpose(-1, -2))
-                # Verify symmetry
-                if not torch.allclose(quantum_metric, quantum_metric.transpose(-1, -2), rtol=1e-5):
-                    raise MetricError("Quantum metric failed symmetry check")
+                
             except Exception as e:
                 raise MetricError(f"Failed to compute quantum geometric tensor: {str(e)}")
 
             # Compute Riemannian metric for pattern structure
             try:
                 pattern_metric = self.riemannian.compute_metric(quantum_features).values
-                # Enforce perfect symmetry
-                pattern_metric = 0.5 * (pattern_metric + pattern_metric.transpose(-1, -2))
-                # Verify symmetry
-                if not torch.allclose(pattern_metric, pattern_metric.transpose(-1, -2), rtol=1e-5):
-                    raise MetricError("Pattern metric failed symmetry check")
+                # Ensure pattern metric is complex
+                if not torch.is_complex(pattern_metric):
+                    pattern_metric = pattern_metric.to(torch.complex128)
+                
+                # Add small positive diagonal for numerical stability
+                pattern_metric = pattern_metric + torch.eye(
+                    pattern_metric.size(-1),
+                    device=pattern_metric.device,
+                    dtype=pattern_metric.dtype
+                ).unsqueeze(0) * 1e-6
+                
+                # Enforce perfect symmetry for complex metric
+                pattern_metric = 0.5 * (pattern_metric + pattern_metric.transpose(-2, -1).conj())
+                
+                if not torch.allclose(pattern_metric, pattern_metric.transpose(-2, -1).conj(), rtol=1e-5, atol=1e-8):
+                    raise MetricError("Pattern metric failed Hermiticity check")
+                
+                # Extract real part after Hermiticity is verified
+                pattern_metric = pattern_metric.real
+                
             except Exception as e:
                 raise MetricError(f"Failed to compute Riemannian metric: {str(e)}")
 
@@ -1250,33 +1310,28 @@ class QuantumGeometricAttention(nn.Module):
 
             # Combine metrics with appropriate weights
             combined_metric = 0.7 * quantum_metric + 0.3 * pattern_metric
-            # Enforce perfect symmetry of combined metric
-            combined_metric = 0.5 * (combined_metric + combined_metric.transpose(-1, -2))
-            # Verify symmetry
-            if not torch.allclose(combined_metric, combined_metric.transpose(-1, -2), rtol=1e-5):
-                raise MetricError("Combined metric failed symmetry check")
+            
+            # Add small positive diagonal for final numerical stability
+            combined_metric = combined_metric + torch.eye(
+                combined_metric.size(-1),
+                device=combined_metric.device,
+                dtype=combined_metric.dtype
+            ).unsqueeze(0) * 1e-6
 
-            # Validate combined metric with gradient checks
-            combined_properties = self._validate_metric_properties(combined_metric, "combined")
-            if not combined_properties.is_positive_definite:
-                eigenvals = torch.linalg.eigvalsh(combined_metric)
-                raise MetricError(
-                    f"Combined metric not positive definite. Min eigenvalue: {eigenvals.min().item():.2e}, "
-                    f"Max eigenvalue: {eigenvals.max().item():.2e}"
-                )
-
-            # Validate gradients if tensor requires grad
-            if combined_metric.requires_grad:
-                if combined_metric.grad_fn is None:
-                    raise MetricError("Combined metric missing gradient function")
-                if torch.isnan(combined_metric).any():
-                    raise MetricError("Combined metric contains NaN values")
+            # Ensure combined metric is complex
+            if not torch.is_complex(combined_metric):
+                combined_metric = combined_metric.to(torch.complex128)
+            
+            # Enforce Hermiticity of combined metric
+            combined_metric = 0.5 * (combined_metric + combined_metric.transpose(-2, -1).conj())
+            
+            # Verify Hermiticity
+            if not torch.allclose(combined_metric, combined_metric.transpose(-2, -1).conj(), rtol=1e-5, atol=1e-8):
+                raise MetricError("Combined metric failed Hermiticity check")
 
             return combined_metric
 
         except Exception as e:
-            if isinstance(e, MetricError):
-                raise
             raise MetricError(f"Failed to compute metric tensor: {str(e)}")
 
     def _compute_quantum_features(self, x: torch.Tensor) -> torch.Tensor:

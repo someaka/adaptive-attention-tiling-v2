@@ -93,7 +93,7 @@ class HilbertSpace:
         return norm.to(torch.float64)
 
     def prepare_state(self, amplitudes: torch.Tensor) -> QuantumState:
-        """Prepare quantum state from amplitudes.
+        """Prepare a quantum state from amplitudes.
         
         Args:
             amplitudes: Complex amplitudes tensor
@@ -101,23 +101,47 @@ class HilbertSpace:
         Returns:
             Prepared quantum state
         """
-        # Ensure complex128 dtype
-        if amplitudes.dtype != torch.complex128:
-            amplitudes = amplitudes.to(dtype=torch.complex128)
-            
-        # Normalize state
-        norm = torch.sqrt(torch.sum(torch.abs(amplitudes)**2, dim=-1, keepdim=True))
-        if torch.any(norm > 1e-10):
-            amplitudes = amplitudes / norm
-            
-        # Create quantum state
-        state = QuantumState(
-            amplitudes=amplitudes,
-            basis_labels=self.basis_states,
-            phase=torch.zeros(1, dtype=torch.complex128, device=amplitudes.device)
-        )
+        # Convert to complex128
+        amplitudes = self._ensure_complex128(amplitudes)
         
-        return state
+        # Normalize
+        norm = self._compute_norm(amplitudes)
+        output_state = (amplitudes / norm).to(torch.complex128)
+        
+        # Store original norm
+        original_norm = norm.clone()
+        
+        # Determine layout based on tensor shape
+        shape = output_state.shape
+        if len(shape) == 1:
+            layout = {"type": "single_state", "dim": shape[0]}
+        elif len(shape) == 2:
+            layout = {"type": "batch", "batch_size": shape[0], "dim": shape[1]}
+        elif len(shape) == 3:
+            layout = {
+                "type": "sequence",
+                "batch_size": shape[0],
+                "seq_length": shape[1],
+                "dim": shape[2]
+            }
+        elif len(shape) == 4:
+            layout = {
+                "type": "attention",
+                "batch_size": shape[0],
+                "num_heads": shape[1],
+                "seq_length": shape[2],
+                "dim": shape[3]
+            }
+        else:
+            raise ValueError(f"Unsupported tensor shape: {shape}")
+        
+        return QuantumState(
+            amplitudes=output_state,
+            basis_labels=self.basis_states,
+            phase=torch.zeros_like(output_state[..., 0], dtype=torch.complex128),
+            original_norm=original_norm,
+            layout=layout
+        )
 
     def entanglement_entropy(self, state: Union[QuantumState, torch.Tensor]) -> torch.Tensor:
         """Compute entanglement entropy of a bipartite quantum state.
@@ -238,7 +262,8 @@ class HilbertSpace:
             evolved_state = QuantumState(
                 amplitudes=evolved.squeeze(),
                 basis_labels=initial_state.basis_labels,
-                phase=initial_state.phase.to(torch.complex128)
+                phase=initial_state.phase.to(torch.complex128),
+                layout=initial_state.layout  # Preserve original layout
             )
             evolved_states.append(evolved_state)
             
@@ -506,7 +531,8 @@ class HilbertSpace:
             amplitudes=output_state,
             basis_labels=state.basis_labels,
             phase=state.phase.to(torch.complex128),
-            original_norm=original_norm
+            original_norm=original_norm,
+            layout=state.layout  # Preserve original layout
         )
 
     def reconstruct_state(self, measurements: Dict[str, torch.Tensor], bases: Optional[List[torch.Tensor]] = None) -> QuantumState:
@@ -681,11 +707,15 @@ class HilbertSpace:
         # Store original norm
         original_norm = norm.clone()
         
+        # Single state layout since this is a reconstruction
+        layout = {"type": "single_state", "dim": len(state)}
+        
         return QuantumState(
             amplitudes=state,
             basis_labels=self.basis_states,
             phase=torch.zeros_like(state, dtype=torch.complex128),
-            original_norm=original_norm
+            original_norm=original_norm,
+            layout=layout
         )
 
     def evolve_with_decoherence(self, state: QuantumState, T1: float, T2: float, times: torch.Tensor) -> List[QuantumState]:
@@ -735,7 +765,8 @@ class HilbertSpace:
             states.append(QuantumState(
                 amplitudes=evolved.squeeze(),
                 basis_labels=state.basis_labels,
-                phase=state.phase
+                phase=state.phase,
+                layout=state.layout  # Preserve original layout
             ))
             
         return states
@@ -1125,10 +1156,35 @@ class HilbertSpace:
             amplitudes = amplitudes.squeeze(0)
             phase = phase.squeeze(0)
             
+        # Determine layout based on tensor shape
+        shape = amplitudes.shape
+        if len(shape) == 1:
+            layout = {"type": "single_state", "dim": shape[0]}
+        elif len(shape) == 2:
+            layout = {"type": "batch", "batch_size": shape[0], "dim": shape[1]}
+        elif len(shape) == 3:
+            layout = {
+                "type": "sequence",
+                "batch_size": shape[0],
+                "seq_length": shape[1],
+                "dim": shape[2]
+            }
+        elif len(shape) == 4:
+            layout = {
+                "type": "attention",
+                "batch_size": shape[0],
+                "num_heads": shape[1],
+                "seq_length": shape[2],
+                "dim": shape[3]
+            }
+        else:
+            raise ValueError(f"Unsupported tensor shape: {shape}")
+            
         return QuantumState(
             amplitudes=amplitudes,
             basis_labels=self.basis_states,
-            phase=phase
+            phase=phase,
+            layout=layout
         )
 
     def compute_geometric_phase(self, state: QuantumState, path: torch.Tensor) -> torch.Tensor:

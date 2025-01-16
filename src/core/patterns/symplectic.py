@@ -574,29 +574,35 @@ class SymplecticStructure(nn.Module):
         
         # Create standard symplectic form (antisymmetric by construction)
         n = dim // 2
-        J = torch.zeros(batch_size, dim, dim, dtype=self.dtype, device=pattern.device)
-        J[..., :n, n:] = torch.eye(n, dtype=self.dtype, device=pattern.device)
-        J[..., n:, :n] = -torch.eye(n, dtype=self.dtype, device=pattern.device)
+        J = torch.zeros(batch_size, dim, dim, dtype=torch.complex128, device=pattern.device)
+        J[..., :n, n:] = torch.eye(n, dtype=torch.complex128, device=pattern.device)
+        J[..., n:, :n] = -torch.eye(n, dtype=torch.complex128, device=pattern.device)
         
         # Create compatible metric (g = J^T J + I)
         # This ensures g and J are compatible by construction
-        metric = torch.matmul(J.transpose(-2, -1), J)
-        metric = metric + torch.eye(dim, dtype=self.dtype, device=pattern.device).unsqueeze(0)
+        metric = torch.matmul(J.transpose(-2, -1).conj(), J)
+        metric = metric + torch.eye(dim, dtype=torch.complex128, device=pattern.device).unsqueeze(0)
         
         # Explicitly symmetrize the metric and ensure antisymmetry of J
-        metric = 0.5 * (metric + metric.transpose(-2, -1))  # Ensure perfect symmetry
-        J = 0.5 * (J - J.transpose(-2, -1))  # Ensure perfect antisymmetry
+        metric = 0.5 * (metric + metric.transpose(-2, -1).conj())  # Proper Hermitian symmetrization
+        J = 0.5 * (J - J.transpose(-2, -1).conj())  # Ensure perfect antisymmetry
+        
+        # Add small positive diagonal for numerical stability
+        metric = metric + torch.eye(dim, dtype=torch.complex128, device=pattern.device).unsqueeze(0) * 1e-6
         
         # Combine into quantum geometric tensor with proper weight
         Q = metric + 1j * J * self._SYMPLECTIC_WEIGHT
         
         # Ensure Hermiticity of Q
-        Q = 0.5 * (Q + Q.conj().transpose(-2, -1))
+        Q = 0.5 * (Q + Q.transpose(-2, -1).conj())
+        
+        # Add small positive diagonal for numerical stability
+        Q = Q + torch.eye(dim, dtype=torch.complex128, device=pattern.device).unsqueeze(0) * 1e-6
         
         # Verify metric properties
-        assert torch.allclose(metric, metric.transpose(-2, -1), rtol=1e-5), "Metric must be symmetric"
-        assert torch.allclose(J, -J.transpose(-2, -1), rtol=1e-5), "J must be antisymmetric"
-        assert torch.allclose(Q, Q.conj().transpose(-2, -1), rtol=1e-5), "Q must be Hermitian"
+        assert torch.allclose(metric, metric.transpose(-2, -1).conj(), rtol=1e-5, atol=1e-8), "Metric must be Hermitian"
+        assert torch.allclose(J, -J.transpose(-2, -1).conj(), rtol=1e-5, atol=1e-8), "J must be antisymmetric"
+        assert torch.allclose(Q, Q.transpose(-2, -1).conj(), rtol=1e-5, atol=1e-8), "Q must be Hermitian"
         
         return Q
 
