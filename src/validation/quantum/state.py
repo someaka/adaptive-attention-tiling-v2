@@ -388,10 +388,21 @@ class StatePreparationValidator:
 
     def _compute_purity(self, state: QuantumState) -> torch.Tensor:
         """Compute state purity."""
-        rho = state.density_matrix()  # [batch_size, seq_len, dim, dim] or [batch_size, dim, dim]
+        rho = state.density_matrix()  # [batch_size, seq_len, dim, dim] or [batch_size, dim, dim] or [batch_size, num_heads, seq_len, dim, dim]
         
+        # Handle attention layout case
+        if rho.dim() == 5:  # [batch_size, num_heads, seq_len, dim, dim]
+            # Reshape to combine batch, heads, and sequence dimensions
+            batch_size, num_heads, seq_len = rho.shape[:3]
+            rho = rho.reshape(batch_size * num_heads * seq_len, *rho.shape[3:])
+            # Use batched matrix multiplication
+            rho_squared = torch.bmm(rho, rho)
+            # Sum diagonal elements for each batch
+            purity = torch.diagonal(rho_squared, dim1=1, dim2=2).sum(dim=1)
+            # Reshape back to [batch_size, num_heads, seq_len]
+            purity = purity.reshape(batch_size, num_heads, seq_len)
         # Handle batched states
-        if rho.dim() == 4:  # [batch_size, seq_len, dim, dim]
+        elif rho.dim() == 4:  # [batch_size, seq_len, dim, dim]
             # Reshape to combine batch and sequence dimensions
             batch_size, seq_len = rho.shape[:2]
             rho = rho.reshape(batch_size * seq_len, *rho.shape[2:])

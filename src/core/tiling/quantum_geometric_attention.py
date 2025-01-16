@@ -468,8 +468,13 @@ class QuantumGeometricAttention(nn.Module):
                     batch_indices = torch.arange(x.size(0), device=x.device)
                     if x.dim() > 2:
                         seq_indices = torch.arange(x.size(1), device=x.device)
-                        batch_grid, seq_grid = torch.meshgrid(batch_indices, seq_indices, indexing='ij')
-                        first_nonzero = x[batch_grid, seq_grid, first_nonzero_idx]
+                        head_indices = torch.arange(x.size(2), device=x.device) if x.dim() == 4 else None
+                        if head_indices is not None:
+                            batch_grid, head_grid, seq_grid = torch.meshgrid(batch_indices, seq_indices, head_indices, indexing='ij')
+                            first_nonzero = x[batch_grid, head_grid, seq_grid, first_nonzero_idx]
+                        else:
+                            batch_grid, seq_grid = torch.meshgrid(batch_indices, seq_indices, indexing='ij')
+                            first_nonzero = x[batch_grid, seq_grid, first_nonzero_idx]
                     else:
                         first_nonzero = x[batch_indices, first_nonzero_idx]
                     phase = torch.angle(first_nonzero)
@@ -495,9 +500,11 @@ class QuantumGeometricAttention(nn.Module):
                     }
                 else:
                     raise ValueError(f"Unsupported tensor shape: {shape}")
-                
+
+                # Align phases with proper broadcasting
+                phase_factor = torch.exp(-1j * phase.unsqueeze(-1).expand_as(x))
                 state = QuantumState(
-                    amplitudes=x_tensor * torch.exp(-1j * phase.unsqueeze(-1)),  # Align phases
+                    amplitudes=x_tensor * phase_factor,  # Align phases
                     basis_labels=[str(i) for i in range(self.manifold_dim)],
                     phase=phase,
                     layout=layout
