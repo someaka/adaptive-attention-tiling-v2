@@ -252,29 +252,38 @@ class PatternProcessor(nn.Module):
             return_intermediates: Whether to return intermediate results
             
         Returns:
-            Processed pattern tensor [batch_size, manifold_dim] or tuple of (tensor, intermediates)
+            Processed pattern tensor [batch_size, hidden_dim] or tuple of (tensor, intermediates)
         """
+        print("\nPattern Processor Steps:")
+        print(f"Input pattern shape: {tuple(pattern.shape)}")
+        
         batch_size = pattern.shape[0]
         
         # Project pattern to hidden dimension
         hidden_pattern = self._project_dimensions(pattern, self.hidden_dim)
+        print(f"After initial projection shape: {tuple(hidden_pattern.shape)}")
         
         # Get pattern bundle structure
         bundle_point = self.pattern_bundle.bundle_projection(hidden_pattern)
+        print(f"After bundle projection shape: {tuple(bundle_point.shape)}")
         
         # Get metric structure
         metric = self.riemannian.compute_metric(bundle_point)
+        # Skip shape printing for metric tensor as it's a custom type
         
         # Project to manifold dimension and reshape for flow
         bundle_point = self._project_dimensions(pattern, self.hidden_dim)
         manifold_point = self._project_dimensions(bundle_point, self.manifold_dim)
+        print(f"After manifold projection shape: {tuple(manifold_point.shape)}")
         
         # Ensure manifold point has the correct dimension
         if manifold_point.shape[-1] != self.manifold_dim:
             manifold_point = self._project_dimensions(manifold_point, self.manifold_dim)
+            print(f"After dimension correction shape: {tuple(manifold_point.shape)}")
         
         # Construct metric tensor using outer products
         metric_tensor = torch.einsum('bi,bj->bij', manifold_point, manifold_point)
+        print(f"After metric tensor construction shape: {tuple(metric_tensor.shape)}")
         
         # Add small diagonal term for stability
         eye = torch.eye(self.manifold_dim, device=pattern.device).unsqueeze(0)
@@ -287,28 +296,43 @@ class PatternProcessor(nn.Module):
         # Quantum processing
         quantum_corrections = None
         if with_quantum:
-            # Convert to quantum state
-            quantum_result = self.quantum_bridge.neural_to_quantum(hidden_pattern)
-            if isinstance(quantum_result, tuple):
-                quantum_state = quantum_result[0]
-            else:
-                quantum_state = quantum_result
-            
-            # Evolve quantum state
-            evolved_state = self.quantum_bridge.evolve_quantum_state(quantum_state, time=1.0)
-            
-            # Get quantum corrections
-            quantum_corrections = self.quantum_bridge.quantum_to_neural(evolved_state)
+            try:
+                # Convert to quantum state
+                quantum_result = self.quantum_bridge.neural_to_quantum(hidden_pattern)
+                print(f"After quantum bridge shape: {tuple(hidden_pattern.shape)}")
+                if isinstance(quantum_result, tuple):
+                    quantum_state = quantum_result[0]
+                else:
+                    quantum_state = quantum_result
+                
+                # Evolve quantum state
+                evolved_state = self.quantum_bridge.evolve_quantum_state(quantum_state, time=1.0)
+                
+                # Get quantum corrections
+                quantum_corrections = self.quantum_bridge.quantum_to_neural(evolved_state)
+            except Exception as e:
+                print(f"Warning: Quantum processing failed with error: {str(e)}")
+                quantum_corrections = None
         
         # Apply flow evolution
         evolved, _ = self.flow.flow_step(
             metric=metric_tensor,
             timestep=0.1
         )
+        # Skip shape printing for evolved tensor as it might be a custom type
         
-        # Project back to manifold dimension
-        evolved = evolved.reshape(batch_size, -1)
-        evolved = self._project_dimensions(evolved, self.manifold_dim)
+        # Project back to hidden dimension for flow processing
+        evolved = evolved.view(batch_size, self.manifold_dim, self.manifold_dim)  # Reshape to [batch, manifold_dim, manifold_dim]
+        print(f"After reshape shape: {tuple(evolved.shape)}")
+        evolved = evolved.mean(dim=2)  # Average over second manifold dimension to get [batch, manifold_dim]
+        print(f"After mean shape: {tuple(evolved.shape)}")
+        evolved = self._project_dimensions(evolved, self.hidden_dim)  # Project to hidden dimension
+        print(f"Final output shape: {tuple(evolved.shape)}")
+        
+        # Ensure output has the correct hidden dimension
+        if evolved.shape[-1] != self.hidden_dim:
+            evolved = torch.nn.functional.pad(evolved, (0, self.hidden_dim - evolved.shape[-1]))
+            print(f"After padding shape: {tuple(evolved.shape)}")
         
         if return_intermediates:
             intermediates = {

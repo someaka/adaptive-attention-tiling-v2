@@ -194,16 +194,16 @@ class NeuralQuantumBridge(nn.Module):
         
         # Convert to complex128 for quantum operations
         if not torch.is_complex(x_manifold):
-            x_complex = torch.complex(
-                x_manifold.to(torch.float64),
-                torch.zeros_like(x_manifold, dtype=torch.float64)
-            )
+            # Create complex tensor while preserving gradients
+            x_real = x_manifold.to(torch.float64)
+            x_imag = torch.zeros_like(x_real, dtype=torch.float64)
+            x_complex = torch.complex(x_real, x_imag)
         else:
             x_complex = x_manifold.to(torch.complex128)
         
         # Create quantum state with proper initialization and gradient tracking
         state = QuantumState(
-            amplitudes=x_complex.requires_grad_(True),
+            amplitudes=x_complex,  # No need to call requires_grad_ since input already has it
             basis_labels=[str(i) for i in range(self.hidden_dim)],
             phase=torch.zeros(1, dtype=torch.complex128, device=self.device),
             original_norm=original_norm,

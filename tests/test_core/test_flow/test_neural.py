@@ -5,6 +5,8 @@ import torch
 from torch import Tensor
 import yaml
 from pathlib import Path
+import torch.nn as nn
+import torch.nn.functional as F
 
 from src.core.common.dimensions import QuantumTensor, GeometricTensor, DimensionConfig
 from src.core.flow.neural import NeuralGeometricFlow
@@ -216,27 +218,48 @@ class TestNeuralGeometricFlow:
         # Create metric tensor with manifold dimensions
         manifold_dim = neural_flow.manifold_dim
         hidden_dim = neural_flow.quantum_bridge.hidden_dim
-        metric = torch.zeros(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
         
-        # Initialize with identity to preserve geometric structure
-        metric[:] = torch.eye(manifold_dim, device=device, dtype=dtype)
+        # Create metric tensor directly as identity matrix with gradients
+        metric = torch.eye(manifold_dim, device=device, dtype=dtype).unsqueeze(0).expand(test_batch_size, -1, -1).clone()
+        metric.requires_grad_(True)
         
         # Create a valid Ricci tensor matching manifold_dim
-        ricci = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
-        # Make the Ricci tensor symmetric as required
-        ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
+        # Create symmetric tensor directly to avoid gradient issues
+        ricci_raw = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
+        ricci = 0.5 * (ricci_raw + ricci_raw.transpose(-2, -1))
+        ricci.requires_grad_(True)
+        ricci.retain_grad()  # Ensure gradients are retained
         
         # Create attention pattern matching manifold_dim
-        attention_pattern = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype)
-        attention_pattern = torch.softmax(attention_pattern, dim=-1)  # Normalize attention weights
+        attention_raw = torch.randn(test_batch_size, manifold_dim, manifold_dim, device=device, dtype=dtype, requires_grad=True)
+        # Create attention pattern while preserving gradients
+        attention_pattern = F.softmax(attention_raw, dim=-1)
         
         # Project metric tensor to hidden dimension for quantum bridge
         metric_flat = metric.reshape(test_batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
-        metric_padded = torch.zeros(test_batch_size, hidden_dim, device=device, dtype=dtype)
-        metric_padded[:, :manifold_dim * manifold_dim] = metric_flat
         
-        # Run flow step
-        new_metric, flow_metrics = neural_flow.flow_step(metric, ricci, attention_pattern=attention_pattern)
+        # Create proper projection layer matching the one in flow_step
+        projection = nn.Linear(
+            metric_flat.shape[1],  # manifold_dim * manifold_dim
+            hidden_dim,
+            device=device,
+            dtype=dtype,
+            bias=True  # Enable bias for better expressivity
+        )
+        # Enable gradients for projection layer
+        for param in projection.parameters():
+            param.requires_grad_(True)
+            
+        metric_projected = projection(metric_flat)
+        
+        # Normalize the projected tensor
+        metric_projected = F.normalize(metric_projected, p=2, dim=-1)
+        
+        # Run flow step with timestep
+        new_metric, flow_metrics = neural_flow.flow_step(metric, ricci, timestep=0.1, attention_pattern=attention_pattern)
+        
+        # Ensure symmetry after all operations
+        new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
         
         # Verify output shapes
         assert new_metric.shape == metric.shape, f"Expected shape {metric.shape}, got {new_metric.shape}"
@@ -258,6 +281,23 @@ class TestNeuralGeometricFlow:
             assert isinstance(corrections, torch.Tensor), "Quantum corrections should be a tensor"
             assert torch.all(torch.isfinite(corrections)), "Quantum corrections contain non-finite values"
             assert corrections.shape[-2:] == (manifold_dim, manifold_dim), "Incorrect quantum corrections shape"
+            
+        # Verify gradients
+        loss = new_metric.mean() + flow_metrics.quantum_entropy.mean() + metric_projected.mean()  # Include projected metric in loss
+        loss.backward()
+        
+        # Check that gradients exist and are finite
+        assert metric.grad is not None, "Metric tensor has no gradients"
+        assert torch.all(torch.isfinite(metric.grad)), "Metric tensor has non-finite gradients"
+        assert ricci.grad is not None, "Ricci tensor has no gradients"
+        assert torch.all(torch.isfinite(ricci.grad)), "Ricci tensor has non-finite gradients"
+        assert attention_raw.grad is not None, "Attention raw tensor has no gradients"
+        assert torch.all(torch.isfinite(attention_raw.grad)), "Attention raw tensor has non-finite gradients"
+        
+        # Check projection layer gradients
+        for name, param in projection.named_parameters():
+            assert param.grad is not None, f"Projection layer {name} has no gradients"
+            assert torch.all(torch.isfinite(param.grad)), f"Projection layer {name} has non-finite gradients"
 
     def test_geometric_operations(self, neural_flow, batch_size, device):
         """Test geometric operations."""

@@ -288,9 +288,15 @@ class PatternHeatFlow(InformationRicciFlow):
             # Convert base metrics to flow metrics
             device = metric.device
             dtype = metric.dtype
+            parallel_transport = torch.as_tensor(base_metrics.parallel_transport, device=device, dtype=dtype)
+            if parallel_transport.dim() == 3:  # If already 3D, expand last dimension
+                parallel_transport = parallel_transport.expand(-1, -1, self.hidden_dim)
+            else:  # If 2D, add dimension and expand
+                parallel_transport = parallel_transport.unsqueeze(-1).expand(-1, -1, self.hidden_dim)
+            
             flow_metrics = FlowMetrics(
                 curvature=torch.as_tensor(base_metrics.curvature, device=device, dtype=dtype),
-                parallel_transport=torch.as_tensor(base_metrics.parallel_transport, device=device, dtype=dtype).unsqueeze(-1).expand(-1, self.hidden_dim),
+                parallel_transport=parallel_transport,
                 geodesic_distance=torch.as_tensor(base_metrics.geodesic_distance, device=device, dtype=dtype),
                 energy=torch.norm(flow_contribution)
             )

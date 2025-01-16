@@ -53,6 +53,17 @@ class SingularityInfo:
     point: Optional[torch.Tensor]
     eigenvalues: torch.Tensor
 
+def enable_gradients(module):
+    """Enable gradients for all parameters in a module and its children."""
+    if not isinstance(module, torch.nn.Module):
+        return
+        
+    for param in module.parameters():
+        param.requires_grad_(True)
+        
+    for child in module.children():
+        enable_gradients(child)
+
 class NeuralGeometricFlow(PatternFormationFlow):
     """Neural network-specific implementation of geometric flow.
     
@@ -161,7 +172,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # Initialize quantum bridge with proper configuration
         self.quantum_bridge = NeuralQuantumBridge(
-            hidden_dim=max(manifold_dim, num_heads * 8),  # Ensure hidden_dim is divisible by num_heads
+            hidden_dim=hidden_dim,  # Use the flow's hidden dimension
             num_heads=num_heads,
             dropout=dropout,
             dtype=self.dtype,
@@ -174,10 +185,64 @@ class NeuralGeometricFlow(PatternFormationFlow):
             DimensionConfig.from_test_config(test_config)
         )
         
-        # Initialize neural networks with proper dimensioning
+        # Initialize networks with proper dimensioning and gradients
         self._init_fisher_rao_networks()
         self._init_quantum_networks()
         self._init_connection_networks()
+        
+        # Enable gradients for all parameters recursively
+        enable_gradients(self)
+        
+        # Ensure specific components have gradients enabled
+        if hasattr(self, 'quantum_bridge'):
+            enable_gradients(self.quantum_bridge)
+            if hasattr(self.quantum_bridge, 'pattern_bundle'):
+                enable_gradients(self.quantum_bridge.pattern_bundle)
+                
+        if hasattr(self, 'arithmetic'):
+            enable_gradients(self.arithmetic)
+            for name, module in self.arithmetic.named_children():
+                enable_gradients(module)
+                
+        if hasattr(self, 'pattern_formation'):
+            enable_gradients(self.pattern_formation)
+            if hasattr(self.pattern_formation, 'symplectic'):
+                enable_gradients(self.pattern_formation.symplectic)
+                
+        if hasattr(self, 'pattern_evolution'):
+            enable_gradients(self.pattern_evolution)
+            if hasattr(self.pattern_evolution, 'framework'):
+                enable_gradients(self.pattern_evolution.framework)
+                
+        if hasattr(self, 'operadic'):
+            enable_gradients(self.operadic)
+            
+        if hasattr(self, 'wave'):
+            enable_gradients(self.wave)
+            
+        if hasattr(self, 'reaction_net'):
+            enable_gradients(self.reaction_net)
+            
+        if hasattr(self, 'diffusion_net'):
+            enable_gradients(self.diffusion_net)
+            
+        if hasattr(self, 'control_net'):
+            enable_gradients(self.control_net)
+            
+        if hasattr(self, 'fisher_net'):
+            enable_gradients(self.fisher_net)
+            
+        if hasattr(self, 'expectation_projection'):
+            enable_gradients(self.expectation_projection)
+            
+        if hasattr(self, 'metric_projection'):
+            enable_gradients(self.metric_projection)
+            
+        if hasattr(self, 'quantum_correction_net'):
+            enable_gradients(self.quantum_correction_net)
+            
+        if hasattr(self, 'connection_projection'):
+            enable_gradients(self.connection_projection)
         
         # quantum_correction_net is initialized in _init_quantum_networks
         
@@ -502,53 +567,39 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Get pattern flow step from parent
         new_metric, base_metrics = super().flow_step(metric_tensor, ricci_tensor, timestep)
         
+        # Scale metric to preserve volume while maintaining gradient flow
+        # Add minimal regularization only for stability
+        eye = torch.eye(
+            self.manifold_dim,
+            device=metric.device,
+            dtype=metric.dtype
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+        reg_metric = new_metric + self.stability_threshold * eye
+        
+        # Compute determinant after flow step
+        det_before = torch.linalg.det(metric_tensor)
+        det_after = torch.linalg.det(reg_metric)
+        
+        # Compute scale factor more precisely
+        scale = torch.pow(torch.abs(det_before) / (torch.abs(det_after) + self.stability_threshold), 1.0/self.manifold_dim)
+        
+        # Apply less restrictive clamping using torch.clamp
+        scale = torch.clamp(scale, min=0.01, max=100.0)
+        scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
+        
         # Scale metric to preserve volume
-        with torch.no_grad():
-            # Compute initial volume
-            det_before = torch.linalg.det(metric_tensor)
-            
-            # Add minimal regularization only for stability
-            eye = torch.eye(
-                self.manifold_dim,
-                device=metric.device,
-                dtype=metric.dtype
-            ).unsqueeze(0).expand(batch_size, -1, -1)
-            reg_metric = new_metric + self.stability_threshold * eye
-            
-            # Compute determinant after flow step
-            det_after = torch.linalg.det(reg_metric)
-            
-            # Compute scale factor more precisely
-            scale = torch.pow(torch.abs(det_before) / (torch.abs(det_after) + self.stability_threshold), 1.0/self.manifold_dim)
-            
-            # Apply less restrictive clamping
-            scale = torch.clamp(scale, min=0.01, max=100.0)
-            scale = scale.view(-1, 1, 1)  # Reshape for broadcasting
-            
-            # Scale metric to preserve volume
-            new_metric = reg_metric * scale
-            
-            # Ensure symmetry
-            new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
-            
-            # Project onto positive definite cone with minimal eigenvalue bound
-            eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
-            eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
-            new_metric = torch.matmul(
-                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
-                eigenvectors.transpose(-2, -1)
-            )
-            
-            # Final volume check and correction if needed
-            det_final = torch.linalg.det(new_metric)
-            rel_error = torch.abs(det_final - det_before) / (torch.abs(det_before) + self.stability_threshold)
-            
-            if torch.any(rel_error > 1e-6):
-                # One final precise correction
-                scale = torch.pow(torch.abs(det_before) / (torch.abs(det_final) + self.stability_threshold), 1.0/self.manifold_dim)
-                scale = scale.view(-1, 1, 1)
-                new_metric = new_metric * scale
-                new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+        new_metric = reg_metric * scale
+        
+        # Ensure symmetry
+        new_metric = 0.5 * (new_metric + new_metric.transpose(-2, -1))
+        
+        # Project onto positive definite cone with minimal eigenvalue bound
+        eigenvalues, eigenvectors = torch.linalg.eigh(new_metric)
+        eigenvalues = torch.clamp(eigenvalues, min=self.stability_threshold)
+        new_metric = torch.matmul(
+            torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
+            eigenvectors.transpose(-2, -1)
+        )
         
         # Initialize quantum metrics efficiently
         device = metric.device
@@ -564,69 +615,69 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Quantum evolution and metrics computation
         if hasattr(self, 'quantum_bridge'):
             # Prepare initial state efficiently
-            with torch.no_grad():
-                # Project metric to quantum state space using proper dimensionality
-                metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
-                
-                # Project to quantum bridge hidden dimension using learned projection
-                projection = nn.Linear(
-                    metric_flat.shape[1],  # manifold_dim * manifold_dim
-                    self.quantum_bridge.hidden_dim,
-                    device=metric.device,
-                    dtype=metric.dtype
+            # Project metric to quantum state space using proper dimensionality
+            metric_flat = new_metric.reshape(batch_size, -1)  # [batch_size, manifold_dim * manifold_dim]
+            
+            # Project to quantum bridge hidden dimension using learned projection
+            projection = nn.Linear(
+                metric_flat.shape[1],  # manifold_dim * manifold_dim
+                self.quantum_bridge.hidden_dim,
+                device=metric.device,
+                dtype=metric.dtype
+            )
+            metric_projected = projection(metric_flat)
+            
+            # Normalize the projected tensor
+            metric_projected = F.normalize(metric_projected, p=2, dim=-1)
+            
+            initial_state = self.prepare_quantum_state(
+                metric_projected,
+                return_validation=False
+            )
+            
+            if not isinstance(initial_state, tuple):
+                # Evolve quantum state with attention pattern
+                evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(
+                    initial_state,
+                    attention_pattern=attention_pattern,
+                    time=timestep
                 )
-                metric_projected = projection(metric_flat)
                 
-                # Normalize the projected tensor
-                metric_projected = F.normalize(metric_projected, p=2, dim=-1)
+                # Compute quantum metrics efficiently
+                inner_product = evolved_state.inner_product(initial_state)
+                quantum_metrics['quantum_entropy'] = -torch.abs(inner_product).log()
                 
-                initial_state = self.prepare_quantum_state(
-                    metric_projected,
-                    return_validation=False
+                if self.phase_tracking_enabled:
+                    quantum_metrics['berry_phase'] = torch.angle(inner_product)
+                
+                # Compute geometric quantities efficiently
+                quantum_metrics['mean_curvature'] = torch.diagonal(
+                    new_metric,
+                    dim1=-2,
+                    dim2=-1
+                ).mean()
+                
+                # Get quantum corrections with gradient tracking
+                quantum_metrics['quantum_corrections'] = self.compute_quantum_corrections(
+                    evolved_state,
+                    self._to_tensor_type(new_metric, MetricTensor)
                 )
-                
-                if not isinstance(initial_state, tuple):
-                    # Evolve quantum state with attention pattern
-                    evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(
-                        initial_state,
-                        attention_pattern=attention_pattern,
-                        time=timestep
-                    )
-                    
-                    # Compute quantum metrics efficiently
-                    inner_product = evolved_state.inner_product(initial_state)
-                    quantum_metrics['quantum_entropy'] = -torch.abs(inner_product).log()
-                    
-                    if self.phase_tracking_enabled:
-                        quantum_metrics['berry_phase'] = torch.angle(inner_product)
-                    
-                    # Compute geometric quantities efficiently
-                    quantum_metrics['mean_curvature'] = torch.diagonal(
-                        new_metric,
-                        dim1=-2,
-                        dim2=-1
-                    ).mean()
-                    
-                    # Get quantum corrections with gradient tracking
-                    quantum_metrics['quantum_corrections'] = self.compute_quantum_corrections(
-                        evolved_state,
-                        self._to_tensor_type(new_metric, MetricTensor)
-                    )
         
         # Create and return flow metrics
-        flow_magnitude = torch.tensor(base_metrics.flow_magnitude, device=device, dtype=dtype)
+        # Convert float metrics to tensors while preserving gradients
+        flow_magnitude = torch.as_tensor(float(base_metrics.flow_magnitude), device=device, dtype=dtype).requires_grad_(True)
         flow_magnitude = flow_magnitude.expand(batch_size)
 
-        metric_determinant = torch.tensor(base_metrics.metric_determinant, device=device, dtype=dtype)
+        metric_determinant = torch.as_tensor(float(base_metrics.metric_determinant), device=device, dtype=dtype).requires_grad_(True)
         metric_determinant = metric_determinant.expand(batch_size)
 
-        ricci_scalar = torch.tensor(base_metrics.ricci_scalar, device=device, dtype=dtype)
+        ricci_scalar = torch.as_tensor(float(base_metrics.ricci_scalar), device=device, dtype=dtype).requires_grad_(True)
         ricci_scalar = ricci_scalar.expand(batch_size)
 
-        energy = torch.tensor(base_metrics.energy, device=device, dtype=dtype)
+        energy = torch.as_tensor(float(base_metrics.energy), device=device, dtype=dtype).requires_grad_(True)
         energy = energy.expand(batch_size)
 
-        singularity = torch.tensor(base_metrics.singularity, device=device, dtype=dtype)
+        singularity = torch.as_tensor(float(base_metrics.singularity), device=device, dtype=dtype).requires_grad_(True)
         singularity = singularity.expand(batch_size)
 
         return new_metric, QuantumFlowMetrics(
@@ -736,8 +787,18 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Initialize metrics dictionary
         metrics: Dict[str, Any] = {}
         
-        # Convert input to BatchTensor
-        x_batch = self._to_tensor_type(x, BatchTensor)
+        # Convert input to BatchTensor while preserving gradients
+        x_batch = x.clone()
+        
+        # Project to manifold dimension if needed
+        batch_size = x_batch.shape[0]
+        if x_batch.shape[-1] != self.manifold_dim:
+            x_batch = self.dim_manager.project(
+                x_batch,
+                target_dim=self.manifold_dim,
+                dtype=self.dtype,
+                device=self.device
+            )
         
         # 1. Compute geometric quantities
         metric = self.compute_metric(x_batch)
@@ -750,26 +811,59 @@ class NeuralGeometricFlow(PatternFormationFlow):
         
         # 2. Apply quantum corrections if enabled
         if self.quantum_weight > 0:
+            # Project to hidden dimension for quantum state preparation
+            if x.shape[-1] != self.hidden_dim:
+                x_hidden = torch.nn.functional.pad(x, (0, self.hidden_dim - x.shape[-1]))
+            else:
+                x_hidden = x
+            
             # Prepare quantum state and compute corrections
-            quantum_state = self.prepare_quantum_state(x_batch)
+            quantum_state = self.prepare_quantum_state(x_hidden)
             quantum_correction = self.compute_quantum_corrections(quantum_state, metric)
             
             # Record quantum metrics
             metrics['quantum_correction_norm'] = torch.norm(quantum_correction)
             
             # Apply corrections to input
-            batch_size, manifold_dim = x.shape
             correction_flat = self.dim_manager.reshape_to_flat(quantum_correction)
             correction_proj = self.dim_manager.project(
                 correction_flat,
-                target_dim=manifold_dim,
+                target_dim=self.manifold_dim,
                 dtype=self.dtype,
                 device=self.device
             )
             x_batch = x_batch + self.quantum_weight * correction_proj
+            
+            # Recompute metric with quantum corrections
+            metric = self.compute_metric(x_batch)
         
         # 3. Evolve the system
-        x_evolved, flow_metrics = self.flow_step(metric)
+        new_metric, flow_metrics = self.flow_step(metric)
+        
+        # Project evolved metric back to manifold using Cholesky decomposition
+        try:
+            # Compute Cholesky decomposition
+            L = torch.linalg.cholesky(new_metric)
+            
+            # Use lower triangular part as coordinates
+            x_evolved = L.diagonal(dim1=-2, dim2=-1)
+            
+            # Add off-diagonal elements
+            for i in range(1, self.manifold_dim):
+                x_evolved = torch.cat([x_evolved, L[..., i, :i]], dim=-1)
+                
+        except:
+            # If Cholesky fails, use simpler approach
+            x_evolved = torch.diagonal(new_metric, dim1=-2, dim2=-1)
+        
+        # Ensure output has correct shape
+        if x_evolved.shape[-1] != self.manifold_dim:
+            x_evolved = self.dim_manager.project(
+                x_evolved,
+                target_dim=self.manifold_dim,
+                dtype=self.dtype,
+                device=self.device
+            )
         
         # Add flow metrics to output
         metrics.update(self._flow_metrics_to_dict(flow_metrics))
@@ -858,6 +952,13 @@ class NeuralGeometricFlow(PatternFormationFlow):
             nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
             nn.ReLU(),
             nn.Linear(self.hidden_dim, self.connection_dim, dtype=self.dtype, device=self.device)
+        )
+
+        # Metric projection network
+        self.metric_projection_net = nn.Sequential(
+            nn.Linear(self.manifold_dim * self.manifold_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
         )
 
         # Initialize other networks
@@ -1299,7 +1400,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
         metric: torch.Tensor,
         points: Optional[torch.Tensor] = None,
         threshold: float = 1e-6
-    ) -> BaseSingularityInfo[torch.Tensor]:
+    ) -> BaseSingularityInfo:
         """Detect flow singularities.
         
         Args:
@@ -1311,10 +1412,6 @@ class NeuralGeometricFlow(PatternFormationFlow):
             Singularity information
         """
         batch_size = metric.shape[0]
-        
-        # Reshape metric if needed
-        if len(metric.shape) == 2:
-            metric = metric.view(batch_size, self.manifold_dim, self.manifold_dim)
         
         # Add small regularization for numerical stability
         metric_reg = metric + torch.eye(
@@ -1355,7 +1452,7 @@ class NeuralGeometricFlow(PatternFormationFlow):
                     min_eigenvalue=float(min_eigenval[i].item()),
                     location=points[i] if points is not None else None,
                     curvature=self.compute_curvature(metric[i:i+1])[0])
-        
+                    
         # If no singularity found, return first point as non-singular
         return BaseSingularityInfo(
             index=0,
@@ -1425,3 +1522,32 @@ class NeuralGeometricFlow(PatternFormationFlow):
         ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
         
         return self._to_tensor_type(ricci, CurvatureTensor)
+        
+    def metric_projection(self, metric: torch.Tensor) -> torch.Tensor:
+        """Project metric tensor back to manifold points.
+        
+        Args:
+            metric: Metric tensor of shape (batch_size, manifold_dim, manifold_dim)
+            
+        Returns:
+            Points tensor of shape (batch_size, manifold_dim)
+        """
+        batch_size = metric.shape[0]
+        
+        # Flatten metric tensor
+        metric_flat = metric.reshape(batch_size, -1)
+        
+        # Project using metric projection network
+        points = self.metric_projection_net(metric_flat)
+        
+        # Ensure output has correct shape
+        points = points.reshape(batch_size, -1)
+        if points.shape[-1] != self.manifold_dim:
+            points = self.dim_manager.project(
+                points,
+                target_dim=self.manifold_dim,
+                dtype=self.dtype,
+                device=self.device
+            )
+        
+        return points

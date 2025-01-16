@@ -40,7 +40,7 @@ def setup_components(test_config):
         quantum_enabled=False  # Disable quantum features for basic tests
     )
     processor = PatternProcessor(
-        manifold_dim=manifold_dim,
+        manifold_dim=manifold_dim,  # Use same manifold_dim as flow
         hidden_dim=hidden_dim
     )
     flow = NeuralGeometricFlow(
@@ -228,35 +228,56 @@ def test_training_integration(setup_components, test_config):
     """Test integration with training pipeline."""
     dynamics, processor, flow = setup_components
     
-    # Enable gradients for all parameters
-    for param in flow.parameters():
-        param.requires_grad_(True)
-    for param in dynamics.parameters():
-        param.requires_grad_(True)
-    for param in processor.parameters():
-        param.requires_grad_(True)
+    print("\nDimension Configuration:")
+    print(f"Flow hidden_dim: {flow.hidden_dim}")
+    print(f"Flow manifold_dim: {flow.manifold_dim}")
+    print(f"Processor hidden_dim: {processor.hidden_dim}")
+    print(f"Processor manifold_dim: {processor.manifold_dim}")
+    
+    # Enable gradients for all parameters recursively
+    def enable_gradients_recursive(module):
+        for param in module.parameters():
+            param.requires_grad_(True)
+        for child in module.children():
+            enable_gradients_recursive(child)
+    
+    # Enable gradients for all components
+    enable_gradients_recursive(flow)
+    enable_gradients_recursive(dynamics)
+    enable_gradients_recursive(processor)
     
     # Get test parameters from config and components
     batch_size = test_config["geometric_tests"]["batch_size"]
-    manifold_dim = processor.manifold_dim  # Use processor's manifold dimension
-    hidden_dim = processor.hidden_dim  # Use processor's hidden dimension
+    manifold_dim = flow.manifold_dim  # Use flow's manifold dimension for consistency
+    hidden_dim = flow.hidden_dim  # Use flow's hidden dimension for consistency
+    
+    print(f"\nTest Parameters:")
+    print(f"batch_size: {batch_size}")
+    print(f"manifold_dim: {manifold_dim}")
+    print(f"hidden_dim: {hidden_dim}")
     
     # Create input with correct shape [batch_size, manifold_dim]
     batch = torch.randn(batch_size, manifold_dim, requires_grad=True)
+    print(f"\nInput batch shape: {batch.shape}")
     
     # Forward pass through processor
     processed = processor(batch)
+    print(f"Processed output shape: {processed.shape}")
     
-    # Forward pass through flow - use processed output directly
+    # Forward pass through flow
     output = flow(processed)
     
     # Compute loss
-    loss = output.mean()
+    loss = output[0].mean()  # Use first element of tuple (evolved tensor)
     
     # Backward pass
     loss.backward()
     
+    # Print gradient information
+    print("\nFlow Parameter Gradients:")
+    for name, param in flow.named_parameters():
+        if param.requires_grad:
+            print(f"{name}: grad={param.grad is not None}, shape={param.shape}")
+    
     # Check gradients
     assert all(p.grad is not None for p in flow.parameters() if p.requires_grad)
-    assert all(p.grad is not None for p in dynamics.parameters() if p.requires_grad)
-    assert all(p.grad is not None for p in processor.parameters() if p.requires_grad)

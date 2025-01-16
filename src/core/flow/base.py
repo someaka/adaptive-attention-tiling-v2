@@ -81,11 +81,11 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         """
         batch_size = points.shape[0]
         
-        # Compute metric components
+        # Compute metric components while preserving gradients
         metric_flat = self.metric_net(points)
         metric = metric_flat.view(batch_size, self.manifold_dim, self.manifold_dim)
         
-        # Ensure symmetry and positive definiteness
+        # Ensure symmetry and positive definiteness while preserving gradients
         metric = 0.5 * (metric + metric.transpose(-2, -1))
         eye = torch.eye(self.manifold_dim, device=points.device).unsqueeze(0)
         metric = metric + eye * self.stability_threshold
@@ -237,14 +237,21 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
             eigenvectors.transpose(-2, -1)
         )
         
-        # Compute flow metrics
+        # Compute flow metrics while preserving gradients
+        flow_magnitude = torch.norm(ricci).mean()
+        metric_determinant = torch.linalg.det(new_metric).mean()
+        ricci_scalar = torch.diagonal(ricci, dim1=-2, dim2=-1).sum(-1).mean()
+        energy = torch.linalg.det(new_metric).mean()
+        singularity = torch.linalg.det(metric).mean()
+        normalized_flow = torch.linalg.det(new_metric).mean()
+        
         metrics = FlowMetrics(
-            flow_magnitude=float(torch.norm(ricci).item()),
-            metric_determinant=float(torch.linalg.det(new_metric).mean().item()),
-            ricci_scalar=float(torch.diagonal(ricci, dim1=-2, dim2=-1).sum(-1).mean().item()),
-            energy=float(torch.linalg.det(new_metric).mean().item()),
-            singularity=float(torch.linalg.det(metric).mean().item()),
-            normalized_flow=float(torch.linalg.det(new_metric).mean().item())
+            flow_magnitude=flow_magnitude,
+            metric_determinant=metric_determinant,
+            ricci_scalar=ricci_scalar,
+            energy=energy,
+            singularity=singularity,
+            normalized_flow=normalized_flow
         )
         
         return new_metric, metrics

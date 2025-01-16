@@ -121,43 +121,40 @@ def ensure_metric_stability(
     stability_threshold: float,
     metric_dim: int
 ) -> torch.Tensor:
-    """Ensure metric tensor stability.
+    """Ensure metric stability by adding regularization term.
     
     Args:
-        metric: Metric tensor
+        metric: Input metric tensor
         eye: Identity tensor
-        stability_threshold: Stability threshold
-        metric_dim: Dimension of metric tensor
+        stability_threshold: Threshold for stability
+        metric_dim: Dimension of the metric
         
     Returns:
         Stabilized metric tensor
     """
-    # Handle complex input
-    if torch.is_complex(metric):
-        metric_real = metric.real
-        metric_imag = metric.imag
-    else:
-        metric_real = metric
-        metric_imag = None
-        
+    # Handle complex metrics by using real part for stability check
+    metric_real = metric.real if torch.is_complex(metric) else metric
+    
+    # Create eye tensor with correct dimensions
+    eye = torch.eye(
+        metric_real.shape[-1],  # Use actual metric dimension
+        dtype=metric_real.dtype,
+        device=metric_real.device
+    ).expand(metric_real.shape[0], metric_real.shape[-1], metric_real.shape[-1])
+    
     # Add stability term based on condition number
     cond = torch.linalg.cond(metric_real)
+    cond = cond.unsqueeze(-1).unsqueeze(-1).expand_as(eye)  # Match dimensions with eye tensor
     stability_term = torch.where(
         cond > 1e4,
         stability_threshold * eye,
-        torch.zeros_like(metric_real)
+        torch.zeros_like(eye)
     )
     
-    # Apply stability term
-    metric_real = metric_real + stability_term
-    
-    # Reconstruct complex metric if needed
-    if metric_imag is not None:
-        metric = torch.complex(metric_real, metric_imag)
-    else:
-        metric = metric_real
-        
-    return metric
+    # Add stability term to original metric
+    if torch.is_complex(metric):
+        stability_term = torch.complex(stability_term, torch.zeros_like(stability_term))
+    return metric + stability_term
 
 class InformationRicciFlow(NeuralGeometricFlow):
     """Information-Ricci flow implementation with stress-energy coupling.
