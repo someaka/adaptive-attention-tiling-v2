@@ -53,9 +53,11 @@ class GeometricFlow(RiemannianFlow):
         """
         # Convert dtype to complex if it's not already
         if dtype == torch.float32:
-            dtype = torch.complex64
+            self.dtype = torch.complex64
         elif dtype == torch.float64:
-            dtype = torch.complex128
+            self.dtype = torch.complex128
+        else:
+            self.dtype = dtype
             
         super().__init__(
             manifold_dim=manifold_dim,
@@ -64,13 +66,12 @@ class GeometricFlow(RiemannianFlow):
             dt=dt,
             stability_threshold=stability_threshold,
             use_parallel_transport=True,
-            dtype=dtype
+            dtype=self.dtype
         )
         
         self.motive_rank = motive_rank
         self.num_charts = num_charts
         self.integration_steps = integration_steps
-        self.dtype = dtype
         
         # Initialize arithmetic structure
         self.arithmetic = ArithmeticDynamics(
@@ -88,8 +89,8 @@ class GeometricFlow(RiemannianFlow):
         
         # Initialize flow layers with complex weights
         self.flow_layers = nn.ModuleList([
-            nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype),
             nn.Linear(manifold_dim, manifold_dim, dtype=self.dtype)
+            for _ in range(2)  # Fixed for pattern implementation
         ])
         
         # Initialize metric network with complex weights
@@ -317,7 +318,7 @@ class GeometricFlow(RiemannianFlow):
         """
         # Convert input to complex if needed
         if not x.is_complex() and next(self.parameters()).is_complex():
-            x = torch.complex(x, torch.zeros_like(x))
+            x = x.to(self.dtype)
             
         # Initialize path if requested
         path: List[Tensor] = [x] if return_path else []
@@ -352,8 +353,14 @@ class GeometricFlow(RiemannianFlow):
             metric, step_metrics = self.flow_step(metric, ricci, timestep)
             metrics.update({f'step_{i}_{k}': v for k, v in step_metrics.items()})
             
-            # Apply flow layers
+            # Apply flow layers with dtype consistency
+            current = x.to(dtype=self.dtype)  # Ensure input has correct dtype
             for layer in self.flow_layers:
+                # Ensure layer weights have correct dtype
+                if layer.weight.dtype != self.dtype:
+                    layer.weight.data = layer.weight.data.to(self.dtype)
+                if layer.bias is not None and layer.bias.dtype != self.dtype:
+                    layer.bias.data = layer.bias.data.to(self.dtype)
                 current = layer(current)
             
             # Store path if requested

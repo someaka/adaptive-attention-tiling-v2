@@ -178,7 +178,7 @@ class TestQuantumGeometricAttention:
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             manifold_dim=manifold_dim,
-            dtype=torch.complex64
+            dtype=torch.complex128
         )
         attention = QuantumGeometricAttention(valid_config)
         assert attention is not None, "Should create with valid config"
@@ -189,7 +189,7 @@ class TestQuantumGeometricAttention:
                 hidden_dim=-1,
                 num_heads=num_heads,
                 manifold_dim=manifold_dim,
-                dtype=torch.complex64
+                dtype=torch.complex128
             )
             QuantumGeometricAttention(invalid_config)
 
@@ -199,7 +199,7 @@ class TestQuantumGeometricAttention:
                 hidden_dim=hidden_dim,
                 num_heads=hidden_dim + 1,  # More heads than dimensions
                 manifold_dim=manifold_dim,
-                dtype=torch.complex64
+                dtype=torch.complex128
             )
             QuantumGeometricAttention(invalid_config)
 

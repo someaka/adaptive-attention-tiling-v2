@@ -236,8 +236,8 @@ class NeuralQuantumBridge(nn.Module):
         Returns:
             Neural representation tensor
         """
-        # Get classical amplitudes and preserve sign information
-        classical_flat = state.amplitudes.real
+        # Get classical amplitudes and preserve both real and imaginary parts
+        classical_flat = state.amplitudes
         
         # Infer dimensions from layout if available
         if hasattr(state, 'layout') and state.layout is not None:
@@ -266,12 +266,9 @@ class NeuralQuantumBridge(nn.Module):
         if len(classical_flat.shape) > 2:
             classical_flat = classical_flat.reshape(-1, classical_flat.shape[-1])
         
-        # Normalize output to preserve relative magnitudes while keeping signs
+        # Normalize output to preserve relative magnitudes
         norms = torch.linalg.vector_norm(classical_flat, dim=-1, keepdim=True)
         output = classical_flat / (norms + 1e-8)
-        
-        # Convert to float64
-        output = output.to(torch.float64)
         
         # If original norm is stored in quantum state, restore it
         if hasattr(state, 'original_norm') and state.original_norm is not None:
@@ -288,6 +285,10 @@ class NeuralQuantumBridge(nn.Module):
                 output = output.reshape(batch_size, seq_len, hidden_dim)
             else:
                 output = output.reshape(batch_size, hidden_dim)
+        
+        # Ensure final output has unit norm
+        output_norms = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+        output = output / (output_norms + 1e-8)
         
         return output
 
@@ -1034,7 +1035,7 @@ class NeuralQuantumBridge(nn.Module):
         rho2 = quantum_state2.density_matrix()
 
         # Compute fidelity for each batch element
-        batch_size = rho1.shape[0]
+        batch_size = state1.shape[0]  # Use input tensor's batch size
         fidelity = torch.zeros(batch_size, device=rho1.device)
         
         for i in range(batch_size):

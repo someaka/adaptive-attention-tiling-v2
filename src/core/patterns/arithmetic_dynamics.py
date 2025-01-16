@@ -489,8 +489,8 @@ class ArithmeticDynamics(nn.Module):
         else:
             x_proj = x
 
-        # Convert to complex domain after interpolation
-        x_proj = x_proj.to(dtype=torch.complex64)
+        # Convert to the correct complex dtype
+        x_proj = x_proj.to(dtype=self.dtype)
 
         # Project to quantum state space
         quantum_state = self.quantum_proj(x_proj)  # [batch_size * ..., manifold_dim]

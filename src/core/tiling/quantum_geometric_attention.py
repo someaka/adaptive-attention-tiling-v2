@@ -334,42 +334,30 @@ class QuantumGeometricAttention(nn.Module):
         # Initialize pattern metrics
         self.pattern_metrics = PatternMetrics()
 
-    def _create_complex_linear(
-        self,
-        in_features: int,
-        out_features: int
-    ) -> nn.Linear:
+    def _create_complex_linear(self, in_features: int, out_features: int) -> nn.Linear:
         """Create a linear layer with complex weights.
         
         Args:
-            in_features: Number of input features
-            out_features: Number of output features
+            in_features: Input feature dimension
+            out_features: Output feature dimension
             
         Returns:
             Linear layer with complex weights
         """
-        layer = nn.Linear(in_features, out_features, dtype=self.config.dtype)
+        # Create layer with correct dtype
+        layer = nn.Linear(in_features, out_features)
         
-        # Initialize complex weights with proper dtype and normalization
-        with torch.no_grad():
-            # Create real and imaginary parts with double precision
-            real_weight = torch.randn(out_features, in_features, dtype=torch.float64)
-            imag_weight = torch.randn(out_features, in_features, dtype=torch.float64)
-            
-            # Normalize weights to ensure unit norm
-            weight = torch.complex(real_weight, imag_weight)
-            weight_norm = torch.sqrt(torch.sum(torch.abs(weight) ** 2, dim=1, keepdim=True))
-            weight = weight / (weight_norm + 1e-10)
-            
-            # Verify normalization
-            check_norm = torch.sqrt(torch.sum(torch.abs(weight) ** 2, dim=1))
-            if not torch.allclose(check_norm, torch.ones_like(check_norm), rtol=1e-5):
-                weight = weight / (check_norm.unsqueeze(1) + 1e-10)
-            
-            # Convert to specified dtype and set directly
-            layer.weight = nn.Parameter(weight.to(self.config.dtype))
-            layer.bias = nn.Parameter(torch.zeros(out_features, dtype=self.config.dtype))
-            
+        # Create complex weights with correct dtype
+        real_weight = layer.weight.data.to(dtype=torch.float64 if self.config.dtype == torch.complex128 else torch.float32)
+        imag_weight = torch.zeros_like(real_weight)
+        layer.weight = nn.Parameter(torch.complex(real_weight, imag_weight))
+        
+        # Create complex bias with correct dtype if it exists
+        if layer.bias is not None:
+            real_bias = layer.bias.data.to(dtype=torch.float64 if self.config.dtype == torch.complex128 else torch.float32)
+            imag_bias = torch.zeros_like(real_bias)
+            layer.bias = nn.Parameter(torch.complex(real_bias, imag_bias))
+        
         return layer
 
     def _init_attention_layers(self) -> None:

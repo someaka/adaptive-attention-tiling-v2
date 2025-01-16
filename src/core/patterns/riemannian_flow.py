@@ -62,10 +62,44 @@ class RiemannianFlow(BaseGeometricFlow):
         
         # Additional Riemannian-specific networks
         self.christoffel_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim),
+            nn.Linear(manifold_dim, hidden_dim, dtype=self.dtype),
             nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim * manifold_dim)
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim * manifold_dim, dtype=self.dtype)
         )
+        
+        # Initialize weights with proper complex initialization
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Create complex weights directly
+                weight_shape = m.weight.shape
+                real_weight = torch.randn(*weight_shape) * 0.02
+                imag_weight = torch.randn(*weight_shape) * 0.02
+                
+                # Convert to correct float dtype first
+                if self.dtype == torch.complex128:
+                    real_weight = real_weight.to(torch.float64)
+                    imag_weight = imag_weight.to(torch.float64)
+                else:
+                    real_weight = real_weight.to(torch.float32)
+                    imag_weight = imag_weight.to(torch.float32)
+                    
+                # Create complex tensor with correct dtype
+                m.weight.data = torch.complex(real_weight, imag_weight)
+                
+                if m.bias is not None:
+                    real_bias = torch.randn(m.bias.shape) * 0.02
+                    imag_bias = torch.randn(m.bias.shape) * 0.02
+                    
+                    # Convert to correct float dtype first
+                    if self.dtype == torch.complex128:
+                        real_bias = real_bias.to(torch.float64)
+                        imag_bias = imag_bias.to(torch.float64)
+                    else:
+                        real_bias = real_bias.to(torch.float32)
+                        imag_bias = imag_bias.to(torch.float32)
+                        
+                    # Create complex tensor with correct dtype
+                    m.bias.data = torch.complex(real_bias, imag_bias)
     
     def compute_christoffel(
         self,

@@ -140,14 +140,25 @@ def ensure_metric_stability(
     # Get actual metric dimension
     metric_dim = metric.shape[-1]
     
+    # Ensure eye tensor matches metric dimensions
+    if eye.shape[-1] != metric_dim:
+        eye = torch.eye(
+            metric_dim,
+            dtype=metric.dtype,
+            device=metric.device
+        ).expand(metric.shape[0], -1, -1)
+    
     # Fuse operations for better efficiency
-    metric = 0.5 * (metric + metric.transpose(-2, -1)) + (
-        torch.where(
-            torch.linalg.cond(metric) > 1e4,
-            1e-2 * eye,
-            stability_threshold * eye
-        )
+    metric = 0.5 * (metric + metric.transpose(-2, -1))
+    
+    # Add stability term based on condition number
+    cond = torch.linalg.cond(metric)
+    stability_term = torch.where(
+        cond > 1e4,
+        1e-2 * eye,
+        stability_threshold * eye
     )
+    metric = metric + stability_term
     
     # Ensure positive definiteness
     eigenvalues, eigenvectors = torch.linalg.eigh(metric)
