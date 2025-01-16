@@ -195,7 +195,9 @@ class CPUOptimizer:
 
             print("\nTop 5 time-consuming functions:")
             for stat in sorted_stats:
-                print(f"{stat.code.co_name}: {stat.inlinetime:.4f} seconds")
+                # Handle both string and code object function names
+                func_name = stat.code.co_name if hasattr(stat.code, 'co_name') else str(stat.code)
+                print(f"{func_name}: {stat.inlinetime:.4f} seconds")
 
     def get_performance_metrics(self) -> PerformanceMetrics:
         """Get current performance metrics.

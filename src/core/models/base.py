@@ -6,6 +6,7 @@ This module provides base classes for representing geometric properties of neura
 """
 
 from typing import Dict, List, Optional, TypeVar, cast
+from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,7 @@ import torch.nn as nn
 from ..patterns.riemannian import PatternRiemannianStructure
 
 
-class LayerGeometry(nn.Module):
+class LayerGeometry(nn.Module, ABC):
     """Base class for layer geometry."""
 
     def __init__(self, manifold_dim: int, pattern_dim: Optional[int] = None):
@@ -74,6 +75,18 @@ class LayerGeometry(nn.Module):
         framework.connection_coeffs = nn.Parameter(self.connection_coeffs)
         
         return framework
+
+    @abstractmethod
+    def sectional_curvature(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute sectional curvature at points.
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Sectional curvature tensor (batch_size x dim x dim)
+        """
+        pass
 
 
 class LayerGeometryDict(nn.ModuleDict):
@@ -167,8 +180,42 @@ class ModelGeometry(nn.Module):
             
         Returns:
             Sectional curvature tensor (batch_size x dim x dim)
-            
-        Raises:
-            NotImplementedError: This method must be implemented by subclasses
         """
-        raise NotImplementedError("Subclasses must implement sectional_curvature")
+        # Compute sectional curvature as average of layer curvatures
+        batch_size = points.shape[0]
+        curvatures = []
+        
+        for layer in self.layers.values():
+            curvature = layer.sectional_curvature(points)
+            curvatures.append(curvature)
+            
+        if not curvatures:
+            # If no layers, return zero curvature
+            return torch.zeros(batch_size, self.manifold_dim, self.manifold_dim, device=points.device)
+            
+        # Average curvatures
+        return torch.mean(torch.stack(curvatures), dim=0)
+
+    def metric(self, points: torch.Tensor) -> torch.Tensor:
+        """Compute metric tensor at points.
+        
+        Args:
+            points: Points tensor (batch_size x dim)
+            
+        Returns:
+            Metric tensor values (batch_size x dim x dim)
+        """
+        # Compute metric as average of layer metrics
+        batch_size = points.shape[0]
+        metrics = []
+        
+        for layer in self.layers.values():
+            metric = layer.metric(points)
+            metrics.append(metric)
+            
+        if not metrics:
+            # If no layers, return identity metric
+            return torch.eye(self.manifold_dim, device=points.device).unsqueeze(0).expand(batch_size, -1, -1)
+            
+        # Average metrics
+        return torch.mean(torch.stack(metrics), dim=0)

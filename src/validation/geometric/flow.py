@@ -268,13 +268,16 @@ class TilingFlowValidator:
             is_valid = is_symmetric and is_positive_definite and condition_number < max_condition
             
             validation_data = {
-                'eigenvalues': eigenvals,  # This will preserve complex values
-                'eigenvectors': eigenvecs,
-                'condition_number': condition_number,
-                'is_symmetric': is_symmetric,
-                'is_positive_definite': is_positive_definite,
-                'max_imag': max_imag,
-                'chart': chart
+                'metric': {
+                    'eigenvalues': eigenvals,  # This will preserve complex values
+                    'eigenvectors': eigenvecs,
+                    'condition_number': condition_number,
+                    'is_symmetric': is_symmetric,
+                    'is_positive_definite': is_positive_definite,
+                    'max_imag': max_imag,
+                    'chart': chart,
+                    'tensor': metric  # Include the actual metric tensor
+                }
             }
             
             message = (
@@ -610,42 +613,59 @@ class TilingFlowValidator:
             # Handle different input formats
             if len(x.shape) == 3:  # [batch_size, time_steps, dim]
                 batch_size, time_steps, dim = x.shape
-                # Reshape to [time_steps, batch_size, space_dim, 1, 1]
-                x_reshaped = x.transpose(0, 1).reshape(time_steps, batch_size, dim, 1, 1)
+                # For simple flows, compute metric directly on each time step
+                metrics = []
+                try:
+                    for t in range(time_steps):
+                        # Get batch for this time step [batch_size, dim]
+                        x_t = x[:, t, :]
+                        # Compute metric for this time step
+                        metric_t = self.flow.compute_metric(x_t)
+                        metrics.append(metric_t)
+                    metric = torch.stack(metrics, dim=0)  # [time_steps, batch_size, manifold_dim, manifold_dim]
+                except Exception as e:
+                    return TilingFlowValidationResult(
+                        is_valid=False,
+                        message=f"Error computing metric: {str(e)}",
+                        data={"error": str(e)}
+                    )
+                
+                # Validate energy conservation
+                energy_valid = self.validate_energy_conservation(x.transpose(0, 1))  # [time_steps, batch_size, dim]
+                
             elif len(x.shape) == 5:  # [time_steps, batch_size, space_dim, height, width]
-                x_reshaped = x
+                # For tiling patterns, compute metric on flattened spatial dimensions
+                time_steps, batch_size, space_dim, height, width = x.shape
+                metrics = []
+                try:
+                    for t in range(time_steps):
+                        # Reshape to [batch_size, space_dim, height * width]
+                        x_t = x[t].reshape(batch_size, space_dim, -1)
+                        # Compute metric for this time step
+                        metric_t = self.flow.compute_metric(x_t)
+                        metrics.append(metric_t)
+                    metric = torch.stack(metrics)  # [time_steps, batch_size, manifold_dim, manifold_dim]
+                except Exception as e:
+                    return TilingFlowValidationResult(
+                        is_valid=False,
+                        message=f"Error computing metric: {str(e)}",
+                        data={"error": str(e)}
+                    )
+                
+                # Validate energy conservation
+                energy_valid = self.validate_energy_conservation(x)
+                
             else:
                 raise ValueError(f"Invalid input shape: {x.shape}")
             
-            # Validate energy conservation first since we have the flow field
-            energy_valid = self.validate_energy_conservation(x_reshaped)
-            
-            # Get metric tensor using compute_metric
-            # Reshape x to [batch_size, space_dim * height * width] for metric computation
-            if len(x_reshaped.shape) == 5:  # [time_steps, batch_size, space_dim, height, width]
-                x_flat = x_reshaped[0]  # Take first time step
-                batch_size, space_dim, height, width = x_flat.shape
-                x_flat = x_flat.reshape(batch_size, space_dim * height * width)
-            else:
-                raise ValueError(f"Invalid reshaped input shape: {x_reshaped.shape}")
-            
-            try:
-                metric = self.flow.compute_metric(x_flat)
-            except Exception as e:
-                return TilingFlowValidationResult(
-                    is_valid=False,
-                    message=f"Error computing metric: {str(e)}",
-                    data={"error": str(e)}
-                )
-            
             # Validate metric tensor
-            metric_valid = self.validate_metric_tensor(metric, chart)
+            metric_valid = self.validate_metric_tensor(metric[-1], chart)  # Use last time step
             
             # Validate flow stability
             stability_valid = None
             try:
                 if hasattr(self.flow, 'compute_stability'):
-                    stability = self.flow.compute_stability(x_flat)
+                    stability = self.flow.compute_stability(x)
                     stability_valid = TilingFlowValidationResult(
                         is_valid=True,
                         message="Flow stability validated",
@@ -693,7 +713,7 @@ class TilingFlowValidator:
                     
                     stability_valid = TilingFlowValidationResult(
                         is_valid=True,
-                        message="Basic flow stability metrics computed",
+                        message="Basic stability metrics computed",
                         data={"stability": stability_metrics}
                     )
             except Exception as e:
@@ -703,46 +723,28 @@ class TilingFlowValidator:
                     data={"error": str(e)}
                 )
             
-            # Combine all validations
-            result = energy_valid.merge(metric_valid)
-            if stability_valid is not None:
-                result = result.merge(stability_valid)
-            
-            # Ensure all required data is present
-            combined_data = result.data or {}
-            if 'energy' not in combined_data and energy_valid.data is not None:
-                combined_data['energy'] = energy_valid.data.get('energy')
-            if 'metric' not in combined_data and metric_valid.data is not None:
-                combined_data['metric'] = {
-                    'eigenvalues': metric_valid.data.get('eigenvalues'),
-                    'condition_number': metric_valid.data.get('condition_number'),
-                    'is_symmetric': metric_valid.data.get('is_symmetric'),
-                    'is_positive_definite': metric_valid.data.get('is_positive_definite')
-                }
-            
-            # Update result with combined data
-            result = TilingFlowValidationResult(
-                is_valid=result.is_valid,
-                message=result.message,
-                data=combined_data
-            )
+            # Combine all validation results
+            all_results = {
+                'metric': metric_valid,
+                'energy': energy_valid,
+                'stability': stability_valid
+            }
             
             if return_all:
-                return {
-                    'energy': energy_valid,
-                    'metric': metric_valid,
-                    'stability': stability_valid if stability_valid is not None else TilingFlowValidationResult(
-                        is_valid=False,
-                        message="Stability validation not performed",
-                        data={}
-                    )
-                }
+                return all_results
+            
+            # Merge all results into one
+            result = metric_valid
+            for other in [energy_valid, stability_valid]:
+                if other is not None:
+                    result = result.merge(other)
+            
             return result
             
         except Exception as e:
             return TilingFlowValidationResult(
                 is_valid=False,
-                message=f"Error validating geometric flow: {str(e)}",
+                message=f"Error validating flow: {str(e)}",
                 data={"error": str(e)}
             )
 

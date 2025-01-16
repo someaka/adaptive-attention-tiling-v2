@@ -116,63 +116,47 @@ def compute_density_matrix(amplitudes: torch.Tensor) -> torch.Tensor:
 
 @torch.jit.script
 def ensure_metric_stability(
-    metric: Tensor,
-    eye: Tensor,
+    metric: torch.Tensor,
+    eye: torch.Tensor,
     stability_threshold: float,
-    manifold_dim: int
-) -> Tensor:
-    """Ensure metric tensor stability through regularization and projection.
-    
-    Implements a three-step stabilization procedure:
-    1. Symmetrization
-    2. Eigenvalue bounds
-    3. Volume preservation
+    metric_dim: int
+) -> torch.Tensor:
+    """Ensure metric tensor stability.
     
     Args:
-        metric: Input metric tensor g_ij
-        eye: Identity tensor of appropriate shape
-        stability_threshold: Minimum eigenvalue threshold
-        manifold_dim: Dimension of the manifold
+        metric: Metric tensor
+        eye: Identity tensor
+        stability_threshold: Stability threshold
+        metric_dim: Dimension of metric tensor
         
     Returns:
         Stabilized metric tensor
     """
-    # Get actual metric dimension
-    metric_dim = metric.shape[-1]
-    
-    # Ensure eye tensor matches metric dimensions
-    if eye.shape[-1] != metric_dim:
-        eye = torch.eye(
-            metric_dim,
-            dtype=metric.dtype,
-            device=metric.device
-        ).expand(metric.shape[0], -1, -1)
-    
-    # Fuse operations for better efficiency
-    metric = 0.5 * (metric + metric.transpose(-2, -1))
-    
+    # Handle complex input
+    if torch.is_complex(metric):
+        metric_real = metric.real
+        metric_imag = metric.imag
+    else:
+        metric_real = metric
+        metric_imag = None
+        
     # Add stability term based on condition number
-    cond = torch.linalg.cond(metric)
+    cond = torch.linalg.cond(metric_real)
     stability_term = torch.where(
         cond > 1e4,
-        1e-2 * eye,
-        stability_threshold * eye
+        stability_threshold * eye,
+        torch.zeros_like(metric_real)
     )
-    metric = metric + stability_term
     
-    # Ensure positive definiteness
-    eigenvalues, eigenvectors = torch.linalg.eigh(metric)
-    min_eig = eigenvalues.min(dim=-1, keepdim=True)[0]
-    if min_eig.min() < stability_threshold:
-        eigenvalues = torch.clamp(eigenvalues, min=stability_threshold)
-        metric = torch.einsum('...ij,...j,...kj->...ik', eigenvectors, eigenvalues, eigenvectors)
+    # Apply stability term
+    metric_real = metric_real + stability_term
     
-    # Preserve volume through determinant scaling
-    det = torch.linalg.det(metric)
-    target_det = torch.ones_like(det)
-    scale = (target_det / det) ** (1.0 / metric_dim)
-    metric = scale.unsqueeze(-1).unsqueeze(-1) * metric
-    
+    # Reconstruct complex metric if needed
+    if metric_imag is not None:
+        metric = torch.complex(metric_real, metric_imag)
+    else:
+        metric = metric_real
+        
     return metric
 
 class InformationRicciFlow(NeuralGeometricFlow):

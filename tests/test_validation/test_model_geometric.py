@@ -33,10 +33,12 @@ Scores = Tensor  # Shape: (batch_size, batch_size)
 
 
 class MockLayer(LayerGeometry):
-    """Mock layer with Riemannian structure."""
+    """Mock layer for testing."""
     
     def __init__(self, manifold_dim: int = 16, pattern_dim: Optional[int] = None) -> None:
-        super().__init__(manifold_dim, pattern_dim)
+        """Initialize mock layer."""
+        super().__init__(manifold_dim=manifold_dim, pattern_dim=pattern_dim)
+        
         self.riemannian_framework = PatternRiemannianStructure(
             manifold_dim=manifold_dim,
             pattern_dim=pattern_dim if pattern_dim is not None else manifold_dim
@@ -49,11 +51,19 @@ class MockLayer(LayerGeometry):
     def metric(self, points: Points) -> MetricTensor:
         """Compute metric tensor."""
         batch_size = points.shape[0]
-        return self.metric_tensor.expand(batch_size, -1, -1)
+        return torch.eye(self.manifold_dim).unsqueeze(0).repeat(batch_size, 1, 1)
         
     def get_riemannian_framework(self, points: Points) -> RiemannianFramework:
         """Get Riemannian framework."""
-        return self.riemannian_framework
+        return super().get_riemannian_framework(points)
+        
+    def sectional_curvature(self, points: Points) -> Tensor:
+        """Compute sectional curvature.
+        
+        Returns constant zero curvature for testing.
+        """
+        batch_size = points.shape[0]
+        return torch.zeros(batch_size, self.manifold_dim, self.manifold_dim)
 
 
 @runtime_checkable

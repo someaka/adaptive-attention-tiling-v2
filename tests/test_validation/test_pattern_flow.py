@@ -623,7 +623,7 @@ def test_wavelength_computation_diagnostic(setup_test_parameters):
 # Pattern Flow Integration Tests
 # =====================================
 
-def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_validator):
+def test_pattern_flow_stability(setup_test_parameters, pattern_validator, test_config):
     """Test pattern stability under flow."""
     params = setup_test_parameters
 
@@ -654,6 +654,15 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, flow_v
         dt=params['dt'],
         stability_threshold=params['stability_threshold'],
         dtype=params['dtype']
+    )
+
+    # Create flow validator with the same flow instance
+    flow_validator = FlowValidator(
+        flow=pattern_flow,  # Use the same flow instance
+        stability_threshold=params['stability_threshold'],
+        curvature_bounds=(-test_config['geometric']['fisher_rao_weight'],
+                         test_config['geometric']['fisher_rao_weight']),
+        max_energy=1.0/test_config['quantum_geometric']['dt']  # Use inverse dt as energy bound
     )
 
     # Quick stability check

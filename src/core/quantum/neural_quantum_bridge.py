@@ -192,17 +192,20 @@ class NeuralQuantumBridge(nn.Module):
         x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
         x_manifold = x_manifold / (x_norm + 1e-8)
         
-        # Convert to complex if input is real, otherwise use as is
+        # Convert to complex128 for quantum operations
         if not torch.is_complex(x_manifold):
-            x_complex = torch.complex(x_manifold, torch.zeros_like(x_manifold))
+            x_complex = torch.complex(
+                x_manifold.to(torch.float64),
+                torch.zeros_like(x_manifold, dtype=torch.float64)
+            )
         else:
-            x_complex = x_manifold
+            x_complex = x_manifold.to(torch.complex128)
         
         # Create quantum state with proper initialization and gradient tracking
         state = QuantumState(
             amplitudes=x_complex.requires_grad_(True),
             basis_labels=[str(i) for i in range(self.hidden_dim)],
-            phase=torch.zeros(1, dtype=self.dtype, device=self.device),
+            phase=torch.zeros(1, dtype=torch.complex128, device=self.device),
             original_norm=original_norm,
             layout={
                 "type": "batch" if num_heads == 1 and seq_len == 1 else "sequence" if num_heads == 1 else "attention",
@@ -266,9 +269,12 @@ class NeuralQuantumBridge(nn.Module):
         if len(classical_flat.shape) > 2:
             classical_flat = classical_flat.reshape(-1, classical_flat.shape[-1])
         
+        # Extract real component and convert to original dtype
+        output = classical_flat.real.to(self.dtype)
+        
         # Normalize output to preserve relative magnitudes
-        norms = torch.linalg.vector_norm(classical_flat, dim=-1, keepdim=True)
-        output = classical_flat / (norms + 1e-8)
+        norms = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+        output = output / (norms + 1e-8)
         
         # If original norm is stored in quantum state, restore it
         if hasattr(state, 'original_norm') and state.original_norm is not None:

@@ -347,16 +347,10 @@ class QuantumGeometricAttention(nn.Module):
         # Create layer with correct dtype
         layer = nn.Linear(in_features, out_features)
         
-        # Create complex weights with correct dtype
-        real_weight = layer.weight.data.to(dtype=torch.float64 if self.config.dtype == torch.complex128 else torch.float32)
-        imag_weight = torch.zeros_like(real_weight)
-        layer.weight = nn.Parameter(torch.complex(real_weight, imag_weight))
-        
-        # Create complex bias with correct dtype if it exists
+        # Convert weights and bias to complex dtype
+        layer.weight.data = layer.weight.data.to(dtype=self.config.dtype)
         if layer.bias is not None:
-            real_bias = layer.bias.data.to(dtype=torch.float64 if self.config.dtype == torch.complex128 else torch.float32)
-            imag_bias = torch.zeros_like(real_bias)
-            layer.bias = nn.Parameter(torch.complex(real_bias, imag_bias))
+            layer.bias.data = layer.bias.data.to(dtype=self.config.dtype)
         
         return layer
 
@@ -638,6 +632,10 @@ class QuantumGeometricAttention(nn.Module):
 
         # Extract tensor from geometric_state if it's a tuple
         geometric_tensor = state.geometric_state[0] if isinstance(state.geometric_state, tuple) else state.geometric_state
+
+        # Ensure geometric tensor has correct dtype before projection
+        if not torch.is_complex(geometric_tensor):
+            geometric_tensor = geometric_tensor.to(dtype=self.config.dtype)
 
         # Get original dimensions
         batch_size = x.size(0)
