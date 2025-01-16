@@ -208,11 +208,12 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         """
         batch_size = points.shape[0]
         
-        # Compute base metric
+        # Compute base metric with correct dtype
         identity = torch.eye(
             self.manifold_dim,
-            dtype=self.dtype
-        ).expand(batch_size, -1, -1).to(device=self.device)
+            dtype=self.dtype,
+            device=self.device
+        ).expand(batch_size, -1, -1)
         
         # Add learned perturbation
         perturbation = torch.matmul(
@@ -220,7 +221,8 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
             self.metric_factors
         ).expand(batch_size, -1, -1)
         
-        values = identity + perturbation
+        # Ensure consistent dtype
+        values = (identity + perturbation).to(dtype=self.dtype)
         
         # Validate metric properties
         is_compatible = self.validate_metric_properties(

@@ -65,11 +65,12 @@ class TestCoreOperations:
         self.iterations = perf_config["test_iters"]
         self.metrics = BenchmarkMetrics()
         
-        # Initialize framework with config parameters
+        # Initialize framework with config parameters and explicit dtype
         self.riemannian_framework = PatternRiemannianStructure(
             manifold_dim=geo_config["max_dim"] // 2,  # Use half of max_dim for manifold
             pattern_dim=geo_config["max_dim"] // 2,   # Use half of max_dim for pattern
-            device=torch.device('cpu')  # CPU-only implementation
+            device=torch.device('cpu'),  # CPU-only implementation
+            dtype=torch.float32  # Explicitly use float32
         )
 
     def test_attention_computation(self):
@@ -115,8 +116,8 @@ class TestCoreOperations:
         pattern = PatternEvolution(framework=self.riemannian_framework)
 
         for size in self.sizes:
-            # Initialize pattern state
-            state = torch.randn(size, size)
+            # Initialize pattern state with explicit float32 dtype
+            state = torch.randn(size, size, dtype=torch.float32)
 
             # Warm-up
             result = pattern.step(state, torch.randn_like(state), return_metrics=False)

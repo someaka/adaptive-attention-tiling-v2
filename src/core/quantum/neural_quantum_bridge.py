@@ -267,6 +267,9 @@ class NeuralQuantumBridge(nn.Module):
                 num_heads = classical_flat.shape[1]
                 seq_len = classical_flat.shape[2]
         
+        # Ensure consistent dtype for inverse projection
+        classical_flat = classical_flat.to(self.inverse_projection.weight.dtype)
+        
         # Project from manifold_dim back to hidden_dim using the inverse projection
         output = self.inverse_projection(classical_flat)
         
@@ -281,6 +284,9 @@ class NeuralQuantumBridge(nn.Module):
                 output = output.reshape(batch_size, seq_len, -1)
             else:
                 output = output.reshape(batch_size, -1)
+        
+        # Ensure output has the same dtype as the inverse projection
+        output = output.to(self.inverse_projection.weight.dtype)
         
         return output
 
@@ -308,6 +314,10 @@ class NeuralQuantumBridge(nn.Module):
         seq_len = state.amplitudes.shape[1] if len(state.amplitudes.shape) > 2 else 1
         state_dim = state.amplitudes.shape[-1]
         
+        # Ensure consistent dtype throughout evolution
+        target_dtype = state.amplitudes.dtype
+        working_dtype = torch.complex64  # Use complex64 for internal computations
+        
         # Reshape amplitudes to [batch_size * seq_len, state_dim]
         amplitudes_reshaped = state.amplitudes.reshape(-1, state_dim)
         
@@ -316,9 +326,12 @@ class NeuralQuantumBridge(nn.Module):
             attention_pattern = torch.eye(
                 state_dim,
                 device=state.amplitudes.device,
-                dtype=state.amplitudes.dtype
+                dtype=working_dtype  # Use working dtype
             ).unsqueeze(0).expand(batch_size * seq_len, -1, -1)
         else:
+            # Convert attention pattern to working dtype
+            attention_pattern = attention_pattern.to(working_dtype)
+            
             # Ensure attention pattern has correct shape
             if attention_pattern.shape[-2:] != (state_dim, state_dim):
                 # Try to reshape attention pattern if possible
@@ -329,13 +342,13 @@ class NeuralQuantumBridge(nn.Module):
                         state_dim,
                         state_dim,
                         device=attention_pattern.device,
-                        dtype=attention_pattern.dtype
+                        dtype=working_dtype  # Use working dtype
                     )
                     padded_attention[:, :attention_pattern.shape[1], :attention_pattern.shape[2]] = attention_pattern
                     padded_attention = padded_attention + torch.eye(
                         state_dim,
                         device=attention_pattern.device,
-                        dtype=attention_pattern.dtype
+                        dtype=working_dtype  # Use working dtype
                     ).unsqueeze(0) * 1e-6
                     attention_pattern = padded_attention
                 elif attention_pattern.shape[-1] > state_dim:
@@ -350,11 +363,8 @@ class NeuralQuantumBridge(nn.Module):
         attention_regularized = attention_pattern + torch.eye(
             state_dim,
             device=attention_pattern.device,
-            dtype=attention_pattern.dtype
+            dtype=working_dtype  # Use working dtype
         ).unsqueeze(0) * 1e-6
-        
-        # Convert to complex64 for matrix operations
-        attention_regularized = attention_regularized.to(torch.complex64)
         
         # Compute matrix logarithm
         try:
@@ -364,20 +374,20 @@ class NeuralQuantumBridge(nn.Module):
             hamiltonian = -1j * (attention_regularized - torch.eye(
                 state_dim,
                 device=attention_pattern.device,
-                dtype=torch.complex64
+                dtype=working_dtype  # Use working dtype
             ).unsqueeze(0))
         
         # Compute evolution operator U = exp(-iHt)
         U = torch.matrix_exp(-time * hamiltonian)
         
-        # Convert amplitudes to complex64
-        amplitudes_float = amplitudes_reshaped.to(torch.complex64)
+        # Convert amplitudes to working dtype for evolution
+        amplitudes_float = amplitudes_reshaped.to(working_dtype)
         
         # Evolve state
         evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
         
-        # Convert back to complex128 for consistency
-        evolved_amplitudes = evolved_amplitudes.to(torch.complex128)
+        # Convert back to target dtype
+        evolved_amplitudes = evolved_amplitudes.to(target_dtype)
         
         # Reshape back to original dimensions
         if len(state.amplitudes.shape) > 2:

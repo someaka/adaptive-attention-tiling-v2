@@ -63,11 +63,12 @@ from src.validation.geometric.metric import (
 )
 from src.core.patterns.dynamics import PatternDynamics
 
-def complex_randn(*size):
+def complex_randn(*size, dtype=torch.complex64):
     """Helper to create random complex tensor.
     
     Args:
         *size: The shape of the tensor to create
+        dtype: The dtype of the tensor (default: torch.complex64)
         
     Returns:
         A complex tensor with random values, normalized globally across all dimensions except batch
@@ -79,7 +80,7 @@ def complex_randn(*size):
     
     # Normalize globally across all dimensions except batch
     norm = torch.sqrt(torch.sum(torch.abs(z) ** 2, dim=tuple(range(1, len(z.shape))), keepdim=True))
-    return z / norm  # Remove clamp since we validate for zero norms
+    return (z / norm).to(dtype)  # Convert to specified dtype
 
 class TestQuantumGeometricAttention:
     """Test suite for quantum geometric attention with proper cleanup."""

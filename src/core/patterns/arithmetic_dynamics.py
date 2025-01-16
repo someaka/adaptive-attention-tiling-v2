@@ -63,7 +63,7 @@ class ArithmeticDynamics(nn.Module):
 
         # Initialize networks with the correct dtype
         def init_linear(in_features: int, out_features: int) -> nn.Linear:
-            if self.dtype.is_complex:
+            if self.dtype in [torch.complex64, torch.complex128]:
                 # For complex dtypes, initialize with real and imaginary parts
                 real_weight = torch.randn(out_features, in_features) / np.sqrt(in_features)
                 imag_weight = torch.randn(out_features, in_features) / np.sqrt(in_features)
@@ -73,7 +73,7 @@ class ArithmeticDynamics(nn.Module):
                 imag_bias = torch.randn(out_features) / np.sqrt(out_features)
                 bias = torch.complex(real_bias, imag_bias)
                 
-                linear = nn.Linear(in_features, out_features, bias=True)
+                linear = nn.Linear(in_features, out_features, dtype=self.dtype, bias=True)
                 with torch.no_grad():
                     linear.weight.data = weight.to(self.dtype)
                     linear.bias.data = bias.to(self.dtype)
@@ -305,6 +305,9 @@ class ArithmeticDynamics(nn.Module):
         else:
             batch_size, seq_len, feat_dim = x.shape
         
+        # Ensure input has correct dtype
+        x = x.to(self.dtype)
+        
         # Project to height space
         height_coords = self.height_map(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
         
@@ -317,9 +320,13 @@ class ArithmeticDynamics(nn.Module):
         # Compute L-function values
         l_values = self.l_function(base_flow_hidden)  # [batch_size * seq_len, motive_rank]
         
-        # Apply quantum corrections
+        # Apply quantum corrections with proper dtype handling
         quantum_correction = self.quantum_height(x.reshape(-1, feat_dim))  # [batch_size * seq_len, height_dim]
         quantum_l = self.quantum_l_function(x.reshape(-1, feat_dim))  # [batch_size * seq_len, motive_rank]
+        
+        # Ensure all tensors have the same dtype
+        quantum_correction = quantum_correction.to(self.dtype)
+        quantum_l = quantum_l.to(self.dtype)
         
         # Combine classical and quantum terms
         output = base_flow_hidden + self.quantum_weight * self.measure_proj(quantum_correction)
@@ -366,6 +373,7 @@ class ArithmeticDynamics(nn.Module):
         """
         # Get original shape and flatten to 2D
         orig_shape = metric.shape[:-1]  # Remove last dimension
+        orig_dtype = metric.dtype
         metric_flat = metric.reshape(-1, metric.shape[-1])  # [batch_size * ..., hidden_dim]
         
         # Project to manifold space first if needed
@@ -399,13 +407,17 @@ class ArithmeticDynamics(nn.Module):
                         mode='nearest'
                     ).squeeze(1)  # Remove channel dimension
             
+            # Ensure dtype is preserved before quantum projection
+            metric_flat = metric_flat.to(orig_dtype)
             metric_flat = self.quantum_proj(metric_flat)  # Project to manifold_dim
         
-        # Project to height space
+        # Project to height space while preserving dtype
         height_coords = self.quantum_height(metric_flat)  # [batch_size * ..., height_dim]
+        height_coords = height_coords.to(orig_dtype)
         
-        # Project back to hidden_dim
+        # Project back to hidden_dim while preserving dtype
         quantum_measure = self.measure_proj(height_coords)  # [batch_size * ..., hidden_dim]
+        quantum_measure = quantum_measure.to(orig_dtype)
         
         # Reshape back to original dimensions
         quantum_measure = quantum_measure.reshape(*orig_shape, self.hidden_dim)

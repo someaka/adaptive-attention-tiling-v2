@@ -1240,9 +1240,11 @@ class QuantumGeometricAttention(nn.Module):
                 # Compute quantum geometric tensor
                 quantum_metric = self.symplectic.compute_quantum_geometric_tensor(quantum_features)
                 
-                # Ensure the tensor is complex
+                # Ensure the tensor is complex with correct dtype
                 if not torch.is_complex(quantum_metric):
-                    quantum_metric = quantum_metric.to(torch.complex128)
+                    quantum_metric = quantum_metric.to(self.config.dtype)
+                else:
+                    quantum_metric = quantum_metric.to(self.config.dtype)
                 
                 # Add small positive diagonal for numerical stability before Hermitian enforcement
                 quantum_metric = quantum_metric + torch.eye(
@@ -1267,9 +1269,11 @@ class QuantumGeometricAttention(nn.Module):
             # Compute Riemannian metric for pattern structure
             try:
                 pattern_metric = self.riemannian.compute_metric(quantum_features).values
-                # Ensure pattern metric is complex
+                # Ensure pattern metric is complex with correct dtype
                 if not torch.is_complex(pattern_metric):
-                    pattern_metric = pattern_metric.to(torch.complex128)
+                    pattern_metric = pattern_metric.to(self.config.dtype)
+                else:
+                    pattern_metric = pattern_metric.to(self.config.dtype)
                 
                 # Add small positive diagonal for numerical stability
                 pattern_metric = pattern_metric + torch.eye(
@@ -1318,9 +1322,11 @@ class QuantumGeometricAttention(nn.Module):
                 dtype=combined_metric.dtype
             ).unsqueeze(0) * 1e-6
 
-            # Ensure combined metric is complex
+            # Ensure combined metric is complex with correct dtype
             if not torch.is_complex(combined_metric):
-                combined_metric = combined_metric.to(torch.complex128)
+                combined_metric = combined_metric.to(self.config.dtype)
+            else:
+                combined_metric = combined_metric.to(self.config.dtype)
             
             # Enforce Hermiticity of combined metric
             combined_metric = 0.5 * (combined_metric + combined_metric.transpose(-2, -1).conj())
