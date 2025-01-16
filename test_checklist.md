@@ -89,6 +89,6 @@
 ## Integration Tests
 - [x] tests/test_integration/test_cross_validation.py
 - [x] tests/test_integration/test_end_to_end.py
-- [ ] tests/test_integration/test_pattern_neural_bridge.py
+- [x] tests/test_integration/test_pattern_neural_bridge.py
 - [x] tests/test_integration/test_quantum_pattern_bridge.py
 
