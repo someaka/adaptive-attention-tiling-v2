@@ -296,17 +296,23 @@ class NonlinearStabilityValidator:
         stable_mask = torch.zeros(self.basin_samples, dtype=torch.bool)
         
         base_output, base_metrics = flow.forward(state)
-        base_energy = base_metrics.get("energy", 0.0)
+        base_energy = base_metrics.get("energy", torch.tensor(0.0))
+        if isinstance(base_energy, torch.Tensor) and torch.is_complex(base_energy):
+            base_energy = base_energy.abs()
         
         for i in range(self.basin_samples):
             output, metrics = flow.forward(perturbed[i])
-            energy_i = metrics.get("energy", 0.0)
+            energy_i = metrics.get("energy", torch.tensor(0.0))
+            if isinstance(energy_i, torch.Tensor) and torch.is_complex(energy_i):
+                energy_i = energy_i.abs()
             stable_mask[i] = energy_i < 2.0 * base_energy
         
-        # Find largest stable perturbation
-        max_stable = scales[stable_mask][-1] if torch.any(stable_mask) else torch.tensor(0.0)
+        # Find largest stable scale
+        if not stable_mask.any():
+            return 0.0
         
-        return float(max_stable.item())
+        max_stable_idx = stable_mask.nonzero()[-1]
+        return scales[max_stable_idx].item()
 
     def _find_perturbation_bound(
         self, flow: GeometricFlow, state: torch.Tensor, time_steps: int
@@ -315,37 +321,49 @@ class NonlinearStabilityValidator:
         # Binary search for perturbation bound
         left = 1e-6
         right = 1.0
-        
+
         base_output, base_metrics = flow.forward(state)
         base_energy = base_metrics.get("energy", 0.0)
-        
+        # Convert to real by taking magnitude if complex
+        if isinstance(base_energy, torch.Tensor) and base_energy.is_complex():
+            base_energy = torch.abs(base_energy)
+        else:
+            base_energy = float(base_energy)
+
         for _ in range(10):  # Binary search iterations
             mid = (left + right) / 2
             perturb = mid * torch.randn_like(state)
-            
+
             # Check if perturbation remains stable
             current = state + perturb
             stable = True
-            
+
             for _ in range(time_steps):
                 output, metrics = flow.forward(current)
                 next_state = output
                 if torch.any(torch.isnan(next_state)) or torch.any(torch.isinf(next_state)):
                     stable = False
                     break
-                    
+
                 energy = metrics.get("energy", 0.0)
+                # Convert to real by taking magnitude if complex
+                if isinstance(energy, torch.Tensor) and energy.is_complex():
+                    energy = torch.abs(energy)
+                else:
+                    energy = float(energy)
+
                 if energy > 2.0 * base_energy:
                     stable = False
                     break
+
                 current = next_state
-            
+
             if stable:
-                left = mid
+                left = mid  # Try larger perturbation
             else:
-                right = mid
-        
-        return float(left)  # Conservative bound
+                right = mid  # Try smaller perturbation
+
+        return float(left)  # Return largest stable perturbation
 
 
 class StructuralStabilityValidator:
@@ -368,11 +386,11 @@ class StructuralStabilityValidator:
         # Estimate bifurcation distance
         bifurcation = self._estimate_bifurcation(flow, state)
 
-        # Check stability with more lenient thresholds - consider near-zero values as stable
+        # Check stability with proper thresholds
         is_stable = bool(
-            (sensitivity < 10.0 / self.tolerance or abs(sensitivity) < 1e-5) and  # Allow near-zero or small values
-            (robustness > 0.1 * self.tolerance or abs(robustness) < 1e-5) and  # Allow near-zero or positive values
-            (bifurcation > 0.1 * self.tolerance or abs(bifurcation - 1.0) < 1e-3)  # Allow near-1 or positive values
+            (sensitivity < 1.0 / self.tolerance or abs(sensitivity) < 1e-6) and  # Strict sensitivity threshold
+            (robustness > self.tolerance or abs(robustness) < 1e-6) and  # Proper robustness threshold
+            (bifurcation > self.tolerance or abs(bifurcation - 1.0) < 1e-6)  # Proper bifurcation threshold
         )
 
         # Create validation message
@@ -397,51 +415,42 @@ class StructuralStabilityValidator:
         # Get parameters
         params = list(flow.parameters())
         
-        # Forward pass
-        output, _ = flow.forward(state)
+        # Forward pass with gradient tracking
+        state_detached = state.detach().requires_grad_(True)
+        output, metrics = flow.forward(state_detached)
         
         # Compute sensitivity based on output type
         sensitivity = 0.0
-        if output.is_complex():
-            # Split complex output into real and imaginary parts
-            output_real = output.real
-            output_imag = output.imag
-            
-            # Compute gradients for real and imaginary parts
-            for param in params:
-                # Real part gradient
+        for param in params:
+            if torch.is_complex(output):
+                # For complex outputs, compute gradients for real and imaginary parts
                 grad_real = torch.autograd.grad(
-                    output_real.sum(), param, create_graph=True, retain_graph=True,
+                    output.real.sum(), param, create_graph=True,
                     allow_unused=True
                 )[0]
-                
-                # Imaginary part gradient
                 grad_imag = torch.autograd.grad(
-                    output_imag.sum(), param, create_graph=True,
+                    output.imag.sum(), param, create_graph=True,
                     allow_unused=True
                 )[0]
                 
                 # Handle None gradients
-                if grad_real is None:
-                    grad_real = torch.zeros_like(param)
-                if grad_imag is None:
-                    grad_imag = torch.zeros_like(param)
+                grad_real = torch.zeros_like(param) if grad_real is None else grad_real
+                grad_imag = torch.zeros_like(param) if grad_imag is None else grad_imag
                 
-                # Combine gradients
-                sensitivity += torch.norm(grad_real + 1j * grad_imag).item()
-        else:
-            # Real output - compute gradients directly
-            for param in params:
+                # Combine gradients using complex norm
+                sensitivity += torch.sqrt(torch.norm(grad_real)**2 + torch.norm(grad_imag)**2).item()
+            else:
                 grad = torch.autograd.grad(
                     output.sum(), param, create_graph=True,
                     allow_unused=True
                 )[0]
                 
                 # Handle None gradients
-                if grad is None:
-                    grad = torch.zeros_like(param)
-                
+                grad = torch.zeros_like(param) if grad is None else grad
                 sensitivity += torch.norm(grad).item()
+            
+            # Add small regularization
+            sensitivity += 1e-6 * torch.norm(param).item()
         
         return torch.tensor(sensitivity / len(params))
 
@@ -453,30 +462,37 @@ class StructuralStabilityValidator:
         params = list(flow.parameters())
         original_params = [p.clone().detach() for p in params]
 
-        # Test parameter perturbations with fewer samples
-        magnitudes = torch.logspace(-3, 0, 3)
+        # Test parameter perturbations with proper sampling
+        magnitudes = torch.logspace(-6, -1, 5)  # More samples in smaller range
         robust_magnitude = torch.tensor(0.0)
 
         for mag in magnitudes:
             stable = True
 
-            # Try fewer random perturbations
-            for _ in range(2):
-                # Perturb parameters
+            # Try more random perturbations for better coverage
+            for _ in range(5):
+                # Perturb parameters with small regularization
                 for param, orig_param in zip(params, original_params):
-                    param.data = orig_param + mag * torch.randn_like(orig_param)
+                    param.data = orig_param + mag * torch.randn_like(orig_param) + 1e-6 * orig_param
 
-                # Check stability with fewer steps
+                # Check stability with proper steps
                 current = state.clone()
-                for _ in range(min(time_steps, 2)):
-                    output, _ = flow.forward(current)
+                for _ in range(time_steps):
+                    output, metrics = flow.forward(current)
                     next_state = output
                     # Project current to same shape as next_state for comparison
                     if current.shape != next_state.shape:
                         current_proj = current[..., :next_state.shape[-1]]
                     else:
                         current_proj = current
-                    if torch.norm(next_state - current_proj) > 10 * mag:
+                    # Use complex-aware distance metric
+                    if torch.is_complex(next_state):
+                        diff = torch.sqrt(
+                            torch.abs(next_state - current_proj)**2
+                        ).max().item()
+                    else:
+                        diff = torch.norm(next_state - current_proj).item()
+                    if diff > 2 * mag:  # Stricter stability criterion
                         stable = False
                         break
                     current = next_state
@@ -490,67 +506,54 @@ class StructuralStabilityValidator:
 
             if stable:
                 robust_magnitude = mag
-            else:
-                break
 
         return robust_magnitude
 
     def _estimate_bifurcation(
         self, flow: GeometricFlow, state: torch.Tensor
-    ) -> torch.Tensor:
-        """Estimate distance to bifurcation."""
-        # Get nominal parameters
-        params = list(flow.parameters())
-        original_params = [p.clone().detach() for p in params]
-
-        # Define wrapper functions based on output type
-        def forward_fn(x):
-            output, _ = flow.forward(x)
-            return output
-
-        # Compute eigenvalues at different parameter values with fewer samples
-        eigenvalues = []
-
-        for eps in torch.linspace(0, self.parameter_range, 3):
-            # Perturb parameters
-            for param, orig_param in zip(params, original_params):
-                param.data = orig_param + eps * torch.randn_like(orig_param)
-
-            # Compute stability using autograd
-            state_detached = state.detach()
-            state_detached.requires_grad_(True)
-            jacobian = torch.autograd.functional.jacobian(forward_fn, state_detached)
-            state_detached.requires_grad_(False)
-
-            # Convert tuple to tensor if needed
-            if isinstance(jacobian, tuple):
-                jacobian = torch.stack(list(jacobian))
+    ) -> float:
+        """Estimate the bifurcation point by computing the Jacobian eigenvalues.
+        
+        Args:
+            flow: The flow to analyze
+            state: The current state tensor
             
-            # Get the correct shape for the Jacobian
-            batch_size = state.size(0)
-            manifold_dim = flow.manifold_dim
-            # Flatten spatial dimensions and reshape to manifold dimensions
-            jacobian = jacobian.reshape(batch_size, -1, manifold_dim)[:, :manifold_dim, :]
-
-            # Take real part of eigenvalues (they're real for stability analysis)
-            eigs = torch.real(torch.linalg.eigvals(jacobian))
-            eigenvalues.append(eigs)
-
-            # Restore parameters
-            for param, orig_param in zip(params, original_params):
-                param.data = orig_param.clone()
-
-        eigenvalues = torch.stack(eigenvalues)
-
-        # Find where eigenvalues cross stability boundary
-        crossings = torch.where(
-            torch.sign(eigenvalues[:-1].max(dim=-1)[0])
-            != torch.sign(eigenvalues[1:].max(dim=-1)[0])
-        )[0]
-
-        if len(crossings) > 0:
-            return self.parameter_range * crossings[0].float() / 3
-        return torch.tensor(self.parameter_range)
+        Returns:
+            float: The maximum real part of the eigenvalues
+        """
+        state_detached = state.detach().requires_grad_(True)
+        
+        # Define forward function for jacobian computation that preserves complex values
+        def forward_fn(x: torch.Tensor) -> torch.Tensor:
+            output, _ = flow.forward(x)
+            output = output.reshape(x.shape)
+            if torch.is_complex(output):
+                # Split complex output into real components for gradient computation
+                return torch.cat([output.real, output.imag], dim=-1)
+            return output
+        
+        # Compute jacobian and reshape to square matrix
+        jacobian = torch.autograd.functional.jacobian(forward_fn, state_detached)
+        if isinstance(jacobian, tuple):
+            jacobian = torch.stack(jacobian)
+            
+        # For complex inputs, reconstruct complex jacobian
+        if torch.is_complex(state):
+            n = state.size(-1)
+            total_size = jacobian.size(-1)
+            half_size = total_size // 2  # This should be equal to n
+            jacobian_real = jacobian[..., :half_size].real  # Ensure we have real tensors
+            jacobian_imag = jacobian[..., half_size:].real  # Ensure we have real tensors
+            jacobian = torch.complex(jacobian_real, jacobian_imag)
+            # Reshape to square matrix after reconstruction
+            jacobian = jacobian.reshape(state.size(-1), state.size(-1))
+        else:
+            # For real inputs, reshape to square matrix
+            jacobian = jacobian.reshape(state.size(-1), state.size(-1))
+            
+        # Compute eigenvalues and return maximum real part
+        eigenvals = torch.linalg.eigvals(jacobian)
+        return eigenvals.real.max().item()
 
 
 class StabilityValidator:

@@ -54,133 +54,179 @@ class GeometricFlow(RiemannianFlow):
         Args:
             hidden_dim: Hidden dimension for flow computations
             manifold_dim: Dimension of the base manifold
-            motive_rank: Rank of motivic structure
+            motive_rank: Rank of motive force
             num_charts: Number of coordinate charts
             integration_steps: Number of integration steps
             dt: Time step for flow integration
             stability_threshold: Threshold for stability checks
             dtype: Data type for tensors
-            use_quantum_features: Whether to enable quantum geometric features
+            use_quantum_features: Whether to use quantum features
         """
-        # Initialize flow parameters
+        super().__init__(manifold_dim=manifold_dim)
+        
+        # Initialize parameters
         self.params = FlowParams(
             dt=dt,
             stability_threshold=stability_threshold,
+            stress_energy_weight=0.1,
             use_quantum_features=use_quantum_features
         )
         
-        # Store dtype for consistent handling
-        self.dtype = dtype
-        self.use_quantum_features = use_quantum_features
-        if use_quantum_features:
-            self.quantum_dtype = torch.complex64 if dtype == torch.float32 else torch.complex128
-        else:
-            self.quantum_dtype = dtype
-            
-        super().__init__(
-            manifold_dim=manifold_dim,
-            hidden_dim=hidden_dim,
-            num_layers=2,  # Fixed for pattern implementation
-            dt=dt,
-            stability_threshold=stability_threshold,
-            use_parallel_transport=True,
-            dtype=dtype  # Use original dtype for base features
-        )
-        
+        self.hidden_dim = hidden_dim
+        self.manifold_dim = manifold_dim
         self.motive_rank = motive_rank
         self.num_charts = num_charts
         self.integration_steps = integration_steps
+        self.dtype = dtype
+        self.use_quantum_features = use_quantum_features
+        self.quantum_dtype = torch.complex64 if dtype == torch.float32 else torch.complex128
         
-        # Initialize quantum features
-        self._init_quantum_features(hidden_dim, manifold_dim, motive_rank) if use_quantum_features else None
-        
-        # Initialize flow layers with consistent dtype
+        # Initialize flow layers with proper dtype
+        layer_dtype = self.quantum_dtype if use_quantum_features else dtype
         self.flow_layers = nn.ModuleList([
-            nn.Linear(manifold_dim, manifold_dim).to(dtype=dtype)
-            for _ in range(2)  # Fixed for pattern implementation
+            nn.Linear(manifold_dim, hidden_dim, dtype=layer_dtype),
+            ComplexTanh() if use_quantum_features else nn.ReLU(),
+            nn.Linear(hidden_dim, manifold_dim, dtype=layer_dtype)
         ])
         
-        # Override metric_net with correct output dimension
+        # Initialize metric network with proper dtype
         self.metric_net = nn.Sequential(
-            nn.Linear(manifold_dim, hidden_dim, dtype=dtype),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=dtype)
+            nn.Linear(manifold_dim, hidden_dim, dtype=layer_dtype),
+            ComplexTanh() if use_quantum_features else nn.ReLU(),
+            nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=layer_dtype)
         )
         
-        # Initialize weights with proper initialization
+        # Initialize weights properly
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+                if use_quantum_features:
+                    # Initialize complex weights with real and imaginary parts
+                    weight_shape = m.weight.shape
+                    weight_real = torch.empty(weight_shape, dtype=torch.float32)
+                    weight_imag = torch.empty(weight_shape, dtype=torch.float32)
+                    
+                    # Use Xavier initialization for both real and imaginary parts
+                    nn.init.xavier_uniform_(weight_real)
+                    nn.init.xavier_uniform_(weight_imag)
+                    
+                    # Combine into complex weight
+                    m.weight.data = torch.complex(weight_real, weight_imag).to(self.quantum_dtype)
+                    
+                    # Initialize bias if present
+                    if m.bias is not None:
+                        bias_shape = m.bias.shape
+                        bias_real = torch.zeros(bias_shape, dtype=torch.float32)
+                        bias_imag = torch.zeros(bias_shape, dtype=torch.float32)
+                        m.bias.data = torch.complex(bias_real, bias_imag).to(self.quantum_dtype)
+                else:
+                    # Standard initialization for real weights
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
     
-    def _init_quantum_features(self, hidden_dim: int, manifold_dim: int, motive_rank: int) -> None:
-        """Initialize quantum geometric features.
-        
-        Args:
-            hidden_dim: Hidden dimension for computations
-            manifold_dim: Dimension of the base manifold
-            motive_rank: Rank of motivic structure
-        """
-        # Initialize arithmetic structure with quantum dtype
-        self.arithmetic = ArithmeticDynamics(
-            hidden_dim=hidden_dim,
-            motive_rank=motive_rank,
-            dtype=self.quantum_dtype
-        )
-        
-        # Chart embeddings for local coordinates (complex for quantum features)
-        real_chart = torch.randn(self.num_charts, manifold_dim) * 0.02
-        imag_chart = torch.randn(self.num_charts, manifold_dim) * 0.02
-        self.chart_embedding = nn.Parameter(
-            torch.complex(real_chart, imag_chart).to(dtype=self.quantum_dtype)
-        )
-        
-        # Quantum hamiltonian network
-        self.quantum_net = nn.Sequential(
-            nn.Linear(hidden_dim, manifold_dim, dtype=self.quantum_dtype),
-            nn.Tanh(),
-            nn.Linear(manifold_dim, 1, dtype=self.quantum_dtype)
-        )
-    
-    def compute_quantum_energy(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute quantum energy of the metric tensor.
-        
-        Args:
-            metric: Metric tensor of shape [batch_size, n, n]
-            
-        Returns:
-            Quantum energy tensor
-        """
+    def _init_quantum_features(self):
+        """Initialize weights for quantum features."""
         if not self.use_quantum_features:
-            return torch.zeros(1, device=metric.device, dtype=metric.dtype)
+            raise RuntimeError("Attempting to initialize quantum features when not enabled")
             
-        return self.quantum_net(metric).squeeze(-1).mean()
+        # Convert flow layers to complex dtype
+        for layer in self.flow_layers:
+            if isinstance(layer, nn.Linear):
+                # Initialize complex weights
+                real_weight = nn.init.xavier_uniform_(torch.empty_like(layer.weight.real))
+                imag_weight = torch.zeros_like(layer.weight.real)
+                layer.weight.data = torch.complex(real_weight, imag_weight)
+                
+                if layer.bias is not None:
+                    real_bias = nn.init.zeros_(torch.empty_like(layer.bias.real))
+                    imag_bias = torch.zeros_like(layer.bias.real)
+                    layer.bias.data = torch.complex(real_bias, imag_bias)
+        
+        # Convert metric network to complex dtype
+        for layer in self.metric_net:
+            if isinstance(layer, nn.Linear):
+                # Initialize complex weights
+                real_weight = nn.init.xavier_uniform_(torch.empty_like(layer.weight.real))
+                imag_weight = torch.zeros_like(layer.weight.real)
+                layer.weight.data = torch.complex(real_weight, imag_weight)
+                
+                if layer.bias is not None:
+                    real_bias = nn.init.zeros_(torch.empty_like(layer.bias.real))
+                    imag_bias = torch.zeros_like(layer.bias.real)
+                    layer.bias.data = torch.complex(real_bias, imag_bias)
     
-    def compute_hamiltonian(self, metric: torch.Tensor) -> torch.Tensor:
+    def compute_hamiltonian(self, metric: torch.Tensor, include_quantum: bool = True) -> torch.Tensor:
         """Compute Hamiltonian energy of the metric tensor.
         
+        This method computes both classical and quantum contributions to the
+        Hamiltonian energy. The quantum contribution is only included if
+        quantum features are enabled and include_quantum is True.
+        
         Args:
             metric: Metric tensor of shape [batch_size, n, n]
+            include_quantum: Whether to include quantum energy contribution
             
         Returns:
             Hamiltonian energy tensor
+            
+        Raises:
+            ValueError: If metric tensor contains invalid values
         """
-        # Compute determinant and trace
+        if not torch.isfinite(metric).all():
+            raise ValueError("Metric tensor contains non-finite values")
+            
+        # Compute classical terms
         det = torch.linalg.det(metric).real  # Take real part for energy
         trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
         
         # Compute Ricci scalar (simplified)
-        ricci_scalar = -torch.log(det.abs() + 1e-8)
+        ricci_scalar = -torch.log(det.abs() + self.params.stability_threshold)
         
-        # Combine terms for energy
+        # Combine classical terms for energy
         energy = (
             ricci_scalar +  # Curvature term
             0.1 * trace +   # Kinetic term
             0.01 * det      # Volume term
         )
         
+        # Add quantum contribution if enabled
+        if self.use_quantum_features and include_quantum and hasattr(self, 'quantum_net'):
+            quantum_energy = self.quantum_net(metric).squeeze(-1).real
+            energy = energy + self.params.stress_energy_weight * quantum_energy
+            
         return energy.unsqueeze(-1)  # Add dimension for consistency
+    
+    def compute_quantum_energy(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute quantum energy of the metric tensor.
+        
+        Args:
+            metric: Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            Quantum energy tensor
+            
+        Raises:
+            RuntimeError: If quantum features are not enabled
+        """
+        if not self.use_quantum_features:
+            raise RuntimeError("Quantum features not enabled")
+            
+        if not hasattr(self, 'quantum_net'):
+            raise RuntimeError("Quantum network not initialized")
+            
+        # Handle complex input
+        if torch.is_complex(metric):
+            metric = metric.real
+            
+        # Compute quantum energy
+        with torch.set_grad_enabled(True):
+            energy = self.quantum_net(metric)
+            
+        # Ensure real output
+        if torch.is_complex(energy):
+            energy = energy.real
+            
+        return energy.squeeze(-1).mean()
     
     def compute_quantum_metric(self, x: torch.Tensor) -> Optional[torch.Tensor]:
         """Compute metric with quantum geometric structure.
@@ -313,151 +359,281 @@ class GeometricFlow(RiemannianFlow):
         
         return new_metric, metrics
     
-    def compute_metric(self, x: Tensor) -> Tensor:
+    def compute_metric(
+        self,
+        x: torch.Tensor
+    ) -> torch.Tensor:
         """Compute metric tensor from input.
-    
+        
         Args:
-            x: Input tensor of shape [time_steps?, batch_size, ..., manifold_dim]
-                For simple flows: [batch_size, manifold_dim] or [time_steps, batch_size, manifold_dim]
-                For tiling flows: [batch_size, space_dim, height, width, manifold_dim] or
-                                [time_steps, batch_size, space_dim, height, width, manifold_dim]
-    
+            x: Input tensor of shape [batch_size, ..., manifold_dim]
+                
         Returns:
-            Metric tensor of shape [time_steps?, batch_size, manifold_dim, manifold_dim]
+            Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
         """
-        # Check if we have a time dimension
-        has_time_dim = len(x.shape) > 3  # At minimum we need [batch, space, manifold]
+        # Validate input
+        if x.size(-1) < self.manifold_dim:
+            raise ValueError(f"Input dimension {x.size(-1)} smaller than manifold_dim {self.manifold_dim}")
+            
+        # Handle time dimension consistently
+        has_time_dim = len(x.shape) > 3
         if has_time_dim:
             time_steps = x.size(0)
-            x_no_time = x.reshape(-1, *x.shape[2:])  # Combine time and batch
-            metric = self.compute_metric(x_no_time)  # Recursive call without time
+            x_no_time = x.reshape(-1, *x.shape[2:])
+            metric = self.compute_metric(x_no_time)
             return metric.reshape(time_steps, -1, metric.size(-2), metric.size(-1))
             
-        # Get dimensions while preserving spatial structure
+        # Get dimensions while preserving batch structure
         batch_size = x.size(0)
-        manifold_dim = self.manifold_dim  # Use class attribute instead of input size
+        spatial_dims = x.shape[1:-1] if len(x.shape) > 2 else ()
+        total_spatial_dim = int(torch.prod(torch.tensor(spatial_dims)).item()) if spatial_dims else 1
         
-        # Check if we have spatial dimensions
-        has_spatial_dims = len(x.shape) > 2
-        if has_spatial_dims:
-            # Combine all spatial dimensions into one
-            spatial_dims = x.shape[1:-1]
-            total_spatial_dim = int(torch.prod(torch.tensor(spatial_dims)).item())
+        # Ensure input has correct dtype
+        if self.use_quantum_features and not torch.is_complex(x):
+            x = x.to(dtype=self.quantum_dtype)
+        elif not self.use_quantum_features and torch.is_complex(x):
+            x = x.real
+            
+        # Reshape preserving batch structure
+        if spatial_dims:
+            x = x.reshape(batch_size * total_spatial_dim, -1)[:, :self.manifold_dim]
         else:
-            # No spatial dimensions, just use batch dimension
-            total_spatial_dim = 1
+            x = x.reshape(batch_size, -1)[:, :self.manifold_dim]
         
-        if torch.is_complex(x):
-            # Split into real and imaginary parts
-            x_real = x.real
-            x_imag = x.imag
+        # Compute metric features
+        with torch.set_grad_enabled(True):
+            metric = self.metric_net(x)
             
-            # Reshape preserving batch and manifold dims
-            if has_spatial_dims:
-                x_real = x_real.reshape(batch_size * total_spatial_dim, -1)[:, :manifold_dim]
-                x_imag = x_imag.reshape(batch_size * total_spatial_dim, -1)[:, :manifold_dim]
-            else:
-                x_real = x_real.reshape(batch_size, -1)[:, :manifold_dim]
-                x_imag = x_imag.reshape(batch_size, -1)[:, :manifold_dim]
-            
-            # Compute metric features for both parts
-            metric_real = self.metric_net(x_real)
-            metric_imag = self.metric_net(x_imag)
-            
-            # Reshape to proper dimensions
-            if has_spatial_dims:
-                metric_real = metric_real.reshape(batch_size, total_spatial_dim, manifold_dim, manifold_dim)
-                metric_imag = metric_imag.reshape(batch_size, total_spatial_dim, manifold_dim, manifold_dim)
-                # Average over spatial dimensions
-                metric_real = metric_real.mean(dim=1)
-                metric_imag = metric_imag.mean(dim=1)
-            else:
-                metric_real = metric_real.reshape(batch_size, manifold_dim, manifold_dim)
-                metric_imag = metric_imag.reshape(batch_size, manifold_dim, manifold_dim)
-            
-            # Combine real and imaginary parts using Hermitian form
-            metric = metric_real + 1j * metric_imag
-            
+        # Reshape to proper dimensions
+        if spatial_dims:
+            metric = metric.reshape(batch_size, total_spatial_dim, self.manifold_dim, self.manifold_dim)
+            metric = metric.mean(dim=1)  # Average over spatial dimensions
         else:
-            # Reshape preserving batch and manifold dims
-            if has_spatial_dims:
-                x_flat = x.reshape(batch_size * total_spatial_dim, -1)[:, :manifold_dim]
-            else:
-                x_flat = x.reshape(batch_size, -1)[:, :manifold_dim]
-            
-            # Compute metric features
-            metric_features = self.metric_net(x_flat)
-            
-            # Reshape to proper dimensions
-            if has_spatial_dims:
-                metric = metric_features.reshape(batch_size, total_spatial_dim, manifold_dim, manifold_dim)
-                metric = metric.mean(dim=1)  # Average over spatial dimensions
-            else:
-                metric = metric_features.reshape(batch_size, manifold_dim, manifold_dim)
-    
-        # Ensure metric is Hermitian and positive definite
-        metric = 0.5 * (metric + metric.transpose(-2, -1).conj())
-        eye = torch.eye(manifold_dim, dtype=metric.dtype, device=metric.device)
-        eye = eye.expand(batch_size, -1, -1)
-        metric = metric + self.params.stability_threshold * eye
-    
+            metric = metric.reshape(batch_size, self.manifold_dim, self.manifold_dim)
+        
+        # Make metric symmetric
+        metric = 0.5 * (metric + metric.transpose(-2, -1))
+        
+        # Add initial regularization term
+        eye = torch.eye(
+            self.manifold_dim,
+            device=metric.device,
+            dtype=metric.dtype
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+        metric = metric + 1e-3 * eye
+        
+        # Project onto positive definite cone with strong minimum eigenvalue
+        if torch.is_complex(metric):
+            # For complex metrics, use eigendecomposition that preserves complex structure
+            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+            # Convert eigenvalues to complex if they aren't already
+            if not torch.is_complex(eigenvalues):
+                eigenvalues = eigenvalues.to(dtype=metric.dtype)
+            # Now we can safely access real and imag parts
+            eigenvalues_real = eigenvalues.real
+            eigenvalues_imag = eigenvalues.imag
+            eigenvalues_real = torch.clamp(eigenvalues_real, min=1e-2)
+            eigenvalues = eigenvalues_real + 1j * eigenvalues_imag
+            metric = eigenvectors @ torch.diag_embed(eigenvalues) @ eigenvectors.transpose(-2, -1).conj()
+        else:
+            # For real metrics, use standard eigendecomposition
+            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+            eigenvalues = torch.clamp(eigenvalues, min=1e-2)
+            metric = eigenvectors @ torch.diag_embed(eigenvalues) @ eigenvectors.transpose(-2, -1)
+        
+        # Add final regularization to ensure stability
+        metric = metric + 1e-3 * eye
+        
+        # Normalize by determinant to ensure unit volume
+        det = torch.linalg.det(metric).unsqueeze(-1).unsqueeze(-1)
+        metric = metric / (det + 1e-8).pow(1/self.manifold_dim)
+        
+        # Final projection to ensure minimum eigenvalue after normalization
+        if torch.is_complex(metric):
+            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+            # Convert eigenvalues to complex if they aren't already
+            if not torch.is_complex(eigenvalues):
+                eigenvalues = eigenvalues.to(dtype=metric.dtype)
+            # Now we can safely access real and imag parts
+            eigenvalues_real = eigenvalues.real
+            eigenvalues_imag = eigenvalues.imag
+            eigenvalues_real = torch.clamp(eigenvalues_real, min=1e-6)
+            eigenvalues = eigenvalues_real + 1j * eigenvalues_imag
+            metric = eigenvectors @ torch.diag_embed(eigenvalues) @ eigenvectors.transpose(-2, -1).conj()
+        else:
+            eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+            eigenvalues = torch.clamp(eigenvalues, min=1e-6)
+            metric = eigenvectors @ torch.diag_embed(eigenvalues) @ eigenvectors.transpose(-2, -1)
+        
         return metric
     
-    def forward(self, x: Tensor) -> Tuple[Tensor, Dict[str, Tensor]]:
-        """Forward pass through geometric flow.
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Forward pass with geometric flow.
         
         Args:
-            x: Input tensor
-            
+            x: Input tensor of shape [batch_size, time_steps, ...] or [batch_size, ...]
+               where ... represents spatial dimensions.
+               
         Returns:
-            Tuple of (evolved tensor, metrics dictionary)
+            Tuple of:
+            - Output tensor with same shape as input
+            - Dictionary containing metrics like energy and stability
         """
-        # Handle complex input by properly converting to target dtype
-        if torch.is_complex(x) and not torch.is_complex(torch.empty(1, dtype=self.dtype)):
-            # If input is complex but target dtype is real, use magnitude
-            x_magnitude = torch.abs(x)
-            x = x_magnitude.to(dtype=self.dtype)
+        # Store original dtype and shape
+        orig_dtype = x.dtype
+        orig_shape = x.shape
+        is_complex_dtype = torch.is_complex(x)
+        
+        # Convert to working dtype while preserving complex values
+        if is_complex_dtype:
+            x = x.to(dtype=self.quantum_dtype if self.use_quantum_features else torch.complex64)
         else:
-            # Otherwise just convert to target dtype
             x = x.to(dtype=self.dtype)
         
-        # Compute metric tensor
+        # Check if we have time dimension
+        has_time_dim = len(x.shape) > 2
+        if has_time_dim:
+            time_steps = x.size(1)
+            # Flatten time dimension into batch
+            x = x.reshape(-1, *x.shape[2:])
+        else:
+            time_steps = 1
+            x = x.unsqueeze(0)
+            
+        # Handle dimensionality by projecting to manifold space instead of truncating
+        if x.size(-1) > self.manifold_dim:
+            # Project to manifold dimension using learned projection
+            if not hasattr(self, 'dim_reduction'):
+                # Initialize projection matrix if not exists
+                in_dim = x.size(-1)
+                if torch.is_complex(x):
+                    real_proj = torch.randn(in_dim, self.manifold_dim) * 0.02
+                    imag_proj = torch.randn(in_dim, self.manifold_dim) * 0.02
+                    proj = torch.complex(real_proj, imag_proj)
+                    self.dim_reduction = nn.Parameter(proj.to(dtype=x.dtype))
+                else:
+                    self.dim_reduction = nn.Parameter(
+                        torch.randn(in_dim, self.manifold_dim).to(dtype=x.dtype) * 0.02
+                    )
+            
+            # Apply projection
+            x = x @ self.dim_reduction
+            
+        # Compute metrics
+        metrics = {}
         metric = self.compute_metric(x)
+        metrics['energy'] = self._compute_energy(metric)
+        metrics['stability'] = self._compute_stability(metric)
         
         # Apply flow layers
+        output = x
         for layer in self.flow_layers:
-            x = layer(x)
+            output = layer(output)
             
-        # Return evolved tensor and metrics
-        metrics = {
-            'metric': metric,
-            'energy': self.compute_hamiltonian(metric)
-        }
+        # Project back to original dimension if needed
+        if orig_shape[-1] > self.manifold_dim:
+            # Use transpose of reduction matrix for inverse projection
+            output = output @ self.dim_reduction.transpose(-2, -1)
+            
+        # Reshape output back to original shape
+        if has_time_dim:
+            output = output.reshape(*orig_shape)
+        else:
+            output = output.squeeze(0)
+            
+        # Convert back to original dtype while preserving complex values
+        if torch.is_complex(output) and not is_complex_dtype:
+            # If original was real but we produced complex, take magnitude
+            output = output.abs()
+        output = output.to(dtype=orig_dtype)
         
-        return x, metrics
+        return output, metrics
     
-    def quantum_hamiltonian(self, metric: torch.Tensor) -> torch.Tensor:
-        """Compute Hamiltonian energy of the metric tensor.
+    def _compute_energy(self, metric: torch.Tensor) -> torch.Tensor:
+        """Compute energy of metric tensor.
         
         Args:
-            metric: Metric tensor of shape [batch_size, n, n]
+            metric: Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
             
         Returns:
-            Hamiltonian energy tensor
+            Energy tensor of shape [batch_size]
         """
+        # Add stability threshold to diagonal
+        eye = torch.eye(
+            self.manifold_dim,
+            device=metric.device,
+            dtype=metric.dtype
+        ).unsqueeze(0).expand(metric.size(0), -1, -1)
+        metric_stable = metric + self.params.stability_threshold * eye
+
         # Compute determinant and trace
-        det = torch.linalg.det(metric).real  # Take real part for energy
-        trace = torch.diagonal(metric, dim1=-2, dim2=-1).sum(-1)
+        det = torch.linalg.det(metric_stable).abs()
+        tr = torch.diagonal(metric_stable, dim1=-2, dim2=-1).sum(-1)
+
+        # Compute condition number
+        if torch.is_complex(metric):
+            eigenvalues = torch.linalg.eigvals(metric_stable)
+            eigenvalues_abs = eigenvalues.abs()
+            condition = eigenvalues_abs.max(-1)[0] / (eigenvalues_abs.min(-1)[0] + self.params.stability_threshold)
+        else:
+            eigenvalues = torch.linalg.eigvalsh(metric_stable)
+            condition = eigenvalues.max(-1)[0] / (eigenvalues.min(-1)[0] + self.params.stability_threshold)
+
+        # Compute energy terms
+        det_energy = -torch.log(det + self.params.stability_threshold)
+        tr_energy = 0.5 * tr
+        condition_energy = torch.log(condition + self.params.stability_threshold)
+
+        # Combine energy terms with stress energy weight
+        energy = det_energy + tr_energy + self.params.stress_energy_weight * condition_energy
+        return energy
         
-        # Compute Ricci scalar (simplified)
-        ricci_scalar = -torch.log(det.abs() + 1e-8)
+    def _compute_stability(self, metric: Tensor) -> Tensor:
+        """Compute stability of metric tensor.
         
-        # Combine terms for energy
-        energy = (
-            ricci_scalar +  # Curvature term
-            0.1 * trace +   # Kinetic term
-            0.01 * det      # Volume term
-        )
+        Args:
+            metric: Metric tensor of shape [batch_size, manifold_dim, manifold_dim]
+            
+        Returns:
+            Stability scalar measuring numerical conditioning
+            
+        Raises:
+            ValueError: If metric tensor contains invalid values
+        """
+        if not torch.isfinite(metric).all():
+            raise ValueError("Metric tensor contains non-finite values")
+            
+        # Add stability term
+        metric = metric + self.params.stability_threshold * torch.eye(
+            metric.size(-1), device=metric.device, dtype=metric.dtype
+        ).unsqueeze(0)
         
-        return energy.unsqueeze(-1)  # Add dimension for consistency
+        # Compute eigenvalues safely
+        try:
+            eigenvals = torch.linalg.eigvalsh(metric)  # Use eigvalsh for Hermitian matrices
+        except RuntimeError:
+            # If eigenvalue computation fails, return worst stability
+            return torch.zeros(metric.size(0), device=metric.device)
+            
+        # Get real part if complex
+        if torch.is_complex(eigenvals):
+            eigenvals = eigenvals.real
+            
+        # Compute condition number
+        max_eigenval = eigenvals.max(dim=-1).values
+        min_eigenval = eigenvals.min(dim=-1).values
+        condition_number = max_eigenval / (min_eigenval + self.params.stability_threshold)
+        
+        # Stability is inverse of condition number
+        stability = 1.0 / (condition_number + self.params.stability_threshold)
+        
+        return stability
+
+class ComplexTanh(nn.Module):
+    """Complex-valued tanh activation function."""
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if torch.is_complex(input):
+            return torch.tanh(input.real) + 1j * torch.tanh(input.imag)
+        return torch.tanh(input)
 

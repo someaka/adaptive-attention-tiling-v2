@@ -139,6 +139,10 @@ class QuantumGeometricAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.manifold_dim = config.manifold_dim or config.hidden_dim // 2
         
+        # Store dtype for consistent handling
+        self.dtype = config.dtype
+        self.quantum_dtype = torch.complex64 if config.dtype == torch.float32 else torch.complex128
+        
         # Initialize quantum bridge for state preparation
         self.quantum_bridge = NeuralQuantumBridge(
             hidden_dim=self.hidden_dim,
@@ -179,7 +183,8 @@ class QuantumGeometricAttention(nn.Module):
             integration_steps=3,  # Minimal integration steps
             dt=0.5,  # Larger time step
             stability_threshold=1e-4,  # More relaxed threshold
-            dtype=config.dtype
+            dtype=config.dtype,
+            use_quantum_features=True  # Enable quantum features
         )
         
         # Initialize attention components
@@ -316,15 +321,19 @@ class QuantumGeometricAttention(nn.Module):
         )
 
     def _init_attention_components(self) -> None:
-        """Initialize attention computation components."""
-        # Initialize projections with correct dimensions
-        # Project from hidden_dim to manifold_dim for quantum processing
-        self.manifold_proj = self._create_complex_linear(self.hidden_dim, self.manifold_dim)
-        # Project back from manifold_dim to hidden_dim
-        self.manifold_proj_inv = self._create_complex_linear(self.manifold_dim, self.hidden_dim)
-        # Pattern projection from manifold_dim to head_dim
-        self.pattern_proj = self._create_complex_linear(self.manifold_dim, self.head_dim)
-
+        """Initialize attention components."""
+        # Initialize projections
+        self.manifold_proj = nn.Linear(self.hidden_dim, self.manifold_dim)
+        self.manifold_proj_inv = nn.Linear(self.manifold_dim, self.hidden_dim)
+        
+        # Convert weights and biases to complex dtype
+        self.manifold_proj_inv.weight.data = self.manifold_proj_inv.weight.data.to(dtype=self.quantum_dtype)
+        self.manifold_proj_inv.bias.data = self.manifold_proj_inv.bias.data.to(dtype=self.quantum_dtype)
+        
+        # Initialize pattern projections
+        self.pattern_proj = nn.Linear(self.manifold_dim, self.manifold_dim)
+        self.pattern_proj_inv = nn.Linear(self.manifold_dim, self.manifold_dim)
+        
         # Initialize dropout
         self.dropout = nn.Dropout(self.config.dropout)
 
@@ -344,13 +353,25 @@ class QuantumGeometricAttention(nn.Module):
         Returns:
             Linear layer with complex weights
         """
-        # Create layer with correct dtype
+        # Create layer with base dtype first
         layer = nn.Linear(in_features, out_features)
         
-        # Convert weights and bias to complex dtype
-        layer.weight.data = layer.weight.data.to(dtype=self.config.dtype)
-        if layer.bias is not None:
-            layer.bias.data = layer.bias.data.to(dtype=self.config.dtype)
+        # Convert weights and bias to complex dtype if needed
+        if torch.is_complex(torch.empty(1, dtype=self.quantum_dtype)):
+            # Initialize complex weights with proper scaling
+            real_weight = nn.init.xavier_uniform_(torch.empty_like(layer.weight))
+            imag_weight = nn.init.xavier_uniform_(torch.empty_like(layer.weight))
+            layer.weight.data = torch.complex(real_weight, imag_weight).to(self.quantum_dtype)
+            
+            if layer.bias is not None:
+                real_bias = torch.zeros_like(layer.bias)
+                imag_bias = torch.zeros_like(layer.bias)
+                layer.bias.data = torch.complex(real_bias, imag_bias).to(self.quantum_dtype)
+        else:
+            # For real dtypes, just convert to the specified dtype
+            layer.weight.data = layer.weight.data.to(self.dtype)
+            if layer.bias is not None:
+                layer.bias.data = layer.bias.data.to(self.dtype)
         
         return layer
 
@@ -635,7 +656,9 @@ class QuantumGeometricAttention(nn.Module):
 
         # Ensure geometric tensor has correct dtype before projection
         if not torch.is_complex(geometric_tensor):
-            geometric_tensor = geometric_tensor.to(dtype=self.config.dtype)
+            geometric_tensor = geometric_tensor.to(dtype=self.quantum_dtype)
+        else:
+            geometric_tensor = geometric_tensor.to(dtype=self.quantum_dtype)
 
         # Get original dimensions
         batch_size = x.size(0)
@@ -644,6 +667,9 @@ class QuantumGeometricAttention(nn.Module):
 
         # Project back to hidden dimension
         output = self.manifold_proj_inv(geometric_tensor)
+
+        # Convert output to real and base dtype
+        output = output.real.to(dtype=self.dtype)
 
         # Reshape back to match input shape
         if x.dim() == 4:

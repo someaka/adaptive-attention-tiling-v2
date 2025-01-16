@@ -44,33 +44,33 @@ TEST_CONFIG = {**COMMON_CONFIG, **REGIME_CONFIG}
 
 logger.info(f"Running tests with {ACTIVE_REGIME} regime")
 
-def get_memory_usage():
-    """Get current memory usage."""
+def get_memory_usage() -> float:
+    """Get current memory usage in MB."""
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / 1024 / 1024  # Convert to MB
 
-def cleanup_memory():
+def cleanup_memory() -> None:
     """Clean up memory based on configuration."""
     if TEST_CONFIG["clear_memory"]:
         gc.collect()
 
 @pytest.fixture
-def hidden_dim():
+def hidden_dim() -> int:
     """Hidden dimension for tests."""
     return TEST_CONFIG["hidden_dim"]
 
 @pytest.fixture
-def num_heads():
+def num_heads() -> int:
     """Number of attention heads."""
     return TEST_CONFIG["num_heads"]
 
 @pytest.fixture
-def batch_size():
+def batch_size() -> int:
     """Batch size for tests."""
     return TEST_CONFIG["batch_size"]
 
 @pytest.fixture
-def attention_layer(hidden_dim, num_heads):
+def attention_layer(hidden_dim: int, num_heads: int) -> QuantumGeometricAttention:
     """Create quantum geometric attention layer."""
     logger.info(f"Initializing attention layer with hidden_dim={hidden_dim}, num_heads={num_heads}")
     config = QuantumGeometricConfig(
@@ -92,7 +92,7 @@ def attention_layer(hidden_dim, num_heads):
     return layer
 
 @pytest.fixture
-def neural_bridge(hidden_dim, num_heads):
+def neural_bridge(hidden_dim: int, num_heads: int) -> NeuralQuantumBridge:
     """Create neural quantum bridge."""
     return NeuralQuantumBridge(
         hidden_dim=hidden_dim,
@@ -106,7 +106,7 @@ def neural_bridge(hidden_dim, num_heads):
     )
 
 @pytest.fixture
-def test_input(batch_size, hidden_dim):
+def test_input(batch_size: int, hidden_dim: int) -> torch.Tensor:
     """Create test input tensor."""
     # Create input with batch and sequence dimensions
     x = torch.randn(batch_size, TEST_CONFIG["seq_len"], hidden_dim)
@@ -121,7 +121,7 @@ class TestEndToEnd:
         attention_layer: QuantumGeometricAttention,
         neural_bridge: NeuralQuantumBridge,
         test_input: torch.Tensor
-    ):
+    ) -> None:
         """Test flow from attention through quantum evolution and back."""
         logger.info("Starting attention quantum flow test")
         
@@ -197,7 +197,7 @@ class TestEndToEnd:
         self,
         neural_bridge: NeuralQuantumBridge,
         test_input: torch.Tensor
-    ):
+    ) -> None:
         """Test bridging between different scales."""
         try:
             # Ensure input is float32
@@ -232,7 +232,7 @@ class TestEndToEnd:
         self,
         neural_bridge: NeuralQuantumBridge,
         test_input: torch.Tensor
-    ):
+    ) -> None:
         """Test quantum coherence computation."""
         try:
             # Ensure input is float32
@@ -267,7 +267,7 @@ class TestEndToEnd:
         self,
         neural_bridge: NeuralQuantumBridge,
         test_input: torch.Tensor
-    ):
+    ) -> None:
         """Test geometric flow evolution."""
         try:
             # Ensure input is float32
@@ -301,7 +301,7 @@ class TestEndToEnd:
     def test_error_handling(
         self,
         neural_bridge: NeuralQuantumBridge
-    ):
+    ) -> None:
         """Test error handling in neural quantum bridge."""
         try:
             # Test invalid input dimensions
