@@ -322,17 +322,13 @@ class QuantumGeometricAttention(nn.Module):
 
     def _init_attention_components(self) -> None:
         """Initialize attention components."""
-        # Initialize projections
-        self.manifold_proj = nn.Linear(self.hidden_dim, self.manifold_dim)
-        self.manifold_proj_inv = nn.Linear(self.manifold_dim, self.hidden_dim)
-        
-        # Convert weights and biases to complex dtype
-        self.manifold_proj_inv.weight.data = self.manifold_proj_inv.weight.data.to(dtype=self.quantum_dtype)
-        self.manifold_proj_inv.bias.data = self.manifold_proj_inv.bias.data.to(dtype=self.quantum_dtype)
+        # Initialize projections using _create_complex_linear
+        self.manifold_proj = self._create_complex_linear(self.hidden_dim, self.manifold_dim)
+        self.manifold_proj_inv = self._create_complex_linear(self.manifold_dim, self.hidden_dim)
         
         # Initialize pattern projections
-        self.pattern_proj = nn.Linear(self.manifold_dim, self.manifold_dim)
-        self.pattern_proj_inv = nn.Linear(self.manifold_dim, self.manifold_dim)
+        self.pattern_proj = self._create_complex_linear(self.manifold_dim, self.manifold_dim)
+        self.pattern_proj_inv = self._create_complex_linear(self.manifold_dim, self.manifold_dim)
         
         # Initialize dropout
         self.dropout = nn.Dropout(self.config.dropout)
