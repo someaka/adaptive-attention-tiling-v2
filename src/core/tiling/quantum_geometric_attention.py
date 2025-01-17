@@ -451,8 +451,8 @@ class QuantumGeometricAttention(nn.Module):
                 if torch.isnan(x).any() or torch.isinf(x).any():
                     raise InvalidQuantumStateError("State contains NaN or Inf values")
                 
-                # Normalize per sequence element with high precision
-                norm = torch.sqrt(torch.sum(torch.abs(x) ** 2, dim=-1, keepdim=True))
+                # Normalize globally across all dimensions except batch
+                norm = torch.sqrt(torch.sum(torch.abs(x) ** 2, dim=tuple(range(1, len(x.shape))), keepdim=True))
                 if (norm == 0).any():
                     raise InvalidQuantumStateError("State has zero norm")
                 

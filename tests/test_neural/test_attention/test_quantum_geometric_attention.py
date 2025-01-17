@@ -308,29 +308,42 @@ class TestQuantumGeometricAttention:
     def test_sequence_length_handling(self, attention_layer, batch_size, hidden_dim):
         """Test handling of different sequence lengths."""
         # Test zero-length sequence
-        x_zero = complex_randn(batch_size, 0, hidden_dim)
+        x_zero = complex_randn(batch_size, attention_layer.num_heads, 0, hidden_dim)
         with pytest.raises(ValueError):
             attention_layer(x_zero)
         
         # Test single-token sequence
-        x_single = complex_randn(batch_size, 1, hidden_dim)
+        x_single = complex_randn(batch_size, attention_layer.num_heads, 1, hidden_dim)
         output_single = attention_layer(x_single)
         assert output_single.shape == x_single.shape, "Should handle single-token sequence"
         
         # Test long sequence
         long_seq_len = 1024
-        x_long = complex_randn(batch_size, long_seq_len, hidden_dim)
+        x_long = complex_randn(batch_size, attention_layer.num_heads, long_seq_len, hidden_dim)
         output_long = attention_layer(x_long)
         assert output_long.shape == x_long.shape, "Should handle long sequence"
         
         # Test varying sequence lengths in batch
         seq_lengths = [2, 4, 8, 16]
         max_len = max(seq_lengths)
-        x_varying = complex_randn(len(seq_lengths), max_len, hidden_dim)
-        mask_varying = torch.zeros(len(seq_lengths), max_len).bool()
+        x_varying = complex_randn(len(seq_lengths), attention_layer.num_heads, max_len, hidden_dim)
+        
+        # Create key padding mask [batch_size, seq_len]
+        key_padding_mask = torch.zeros(len(seq_lengths), max_len).bool()
         for i, length in enumerate(seq_lengths):
-            mask_varying[i, :length] = True
-        output_varying = attention_layer(x_varying, mask=mask_varying)
+            key_padding_mask[i, :length] = True
+            
+        # Create causal mask [seq_len, seq_len]
+        causal_mask = torch.triu(
+            torch.ones(max_len, max_len, dtype=torch.bool),
+            diagonal=1
+        ).logical_not()
+        
+        # Process with both masks
+        state = attention_layer.prepare_attention_state(x_varying)
+        state.set_key_padding_mask(key_padding_mask)
+        state.set_attention_mask(causal_mask)
+        output_varying = attention_layer(x_varying)
         assert output_varying.shape == x_varying.shape, "Should handle varying sequence lengths"
 
     def test_unified_metrics(
@@ -724,20 +737,20 @@ class TestQuantumGeometricAttention:
     ):
         """Test individual components in isolation."""
         # Create input tensor with correct shape [batch_size, num_heads, seq_len, hidden_dim]
-        x = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim, 
+        x = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim,
                        dtype=attention_layer.config.dtype, device=attention_layer.config.device)
-
+    
         # Test quantum state preparation separately
         state = attention_layer._prepare_quantum_state(x)
         assert state.amplitudes.shape == x.shape, "Shape preserved in quantum state"
-        
-        # Compute norm with proper type handling
-        state_norm = torch.sqrt(torch.sum(torch.abs(state.amplitudes) ** 2, dim=-1))
+    
+        # Compute norm with proper type handling - normalize globally across all dimensions except batch
+        state_norm = torch.sqrt(torch.sum(torch.abs(state.amplitudes) ** 2, dim=tuple(range(1, len(state.amplitudes.shape))), keepdim=True))
         assert torch.allclose(
             state_norm,
-            torch.ones(batch_size, attention_layer.num_heads, seq_length, dtype=state_norm.dtype),
+            torch.ones(batch_size, 1, 1, 1, dtype=state_norm.dtype),
             rtol=1e-5
-        ), "Quantum state should be normalized"
+        ), "Quantum state should be normalized globally per batch"
         
         # Test geometric projection separately
         projected = attention_layer.manifold_proj(x.reshape(-1, hidden_dim))
@@ -746,14 +759,14 @@ class TestQuantumGeometricAttention:
         
         # Test attention pattern computation
         head_dim = hidden_dim // attention_layer.num_heads
-        query = torch.randn(batch_size, attention_layer.num_heads, seq_length, head_dim, 
+        query = torch.randn(batch_size, attention_layer.num_heads, seq_length, head_dim,
                            dtype=attention_layer.config.dtype, device=attention_layer.config.device)
-        key = torch.randn(batch_size, attention_layer.num_heads, seq_length, head_dim, 
+        key = torch.randn(batch_size, attention_layer.num_heads, seq_length, head_dim,
                          dtype=attention_layer.config.dtype, device=attention_layer.config.device)
         patterns = attention_layer.compute_attention_patterns(query, key)
         assert torch.allclose(
             patterns.sum(dim=-1),
-            torch.ones(batch_size, attention_layer.num_heads, seq_length),
+            torch.ones(batch_size, attention_layer.num_heads, seq_length, dtype=patterns.dtype),
             rtol=1e-5
         ), "Attention patterns should be normalized"
 

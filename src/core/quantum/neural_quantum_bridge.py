@@ -188,8 +188,8 @@ class NeuralQuantumBridge(nn.Module):
         # Project to manifold dimension while preserving gradients
         x_manifold = x_flat.clone()
         
-        # Normalize to unit norm for quantum state preparation
-        x_norm = torch.linalg.vector_norm(x_manifold, dim=-1, keepdim=True)
+        # Normalize globally across all dimensions except batch
+        x_norm = torch.sqrt(torch.sum(torch.abs(x_manifold) ** 2, dim=tuple(range(1, len(x_manifold.shape))), keepdim=True))
         x_manifold = x_manifold / (x_norm + 1e-8)
         
         # Convert to complex128 for quantum operations

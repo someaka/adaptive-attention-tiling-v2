@@ -44,9 +44,19 @@ class AttentionState:
 
         # Initialize masks if not provided
         if self.key_padding_mask is None:
-            self.key_padding_mask = torch.ones(batch_size, seq_length, dtype=torch.bool, device=self.geometric_state.device)
+            # [batch_size, seq_length] - all True by default
+            self.key_padding_mask = torch.ones(
+                batch_size, seq_length,
+                dtype=torch.bool,
+                device=self.geometric_state.device
+            )
         if self.attention_mask is None:
-            self.attention_mask = torch.ones(batch_size, num_heads, seq_length, seq_length, dtype=torch.bool, device=self.geometric_state.device)
+            # [batch_size, num_heads, seq_length, seq_length] - all True by default
+            self.attention_mask = torch.ones(
+                batch_size, num_heads, seq_length, seq_length,
+                dtype=torch.bool,
+                device=self.geometric_state.device
+            )
 
     def validate_state(self, state: torch.Tensor) -> bool:
         """Validate tensor properties and normalization."""
@@ -123,26 +133,37 @@ class AttentionState:
         """Apply key padding and attention masks to attention scores.
         
         Args:
-            attention_scores: Attention scores tensor
+            attention_scores: Attention scores tensor [batch_size, num_heads, seq_len, seq_len]
             
         Returns:
             Masked attention scores
         """
+        # Get batch size and num_heads from attention scores shape
+        batch_size, num_heads = attention_scores.shape[:2]
+        
         # Apply key padding mask if it exists
         if self.key_padding_mask is not None:
-            # Expand mask to match attention scores shape
-            key_padding_mask = self.key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
-            key_padding_mask = key_padding_mask.expand(-1, attention_scores.size(1), attention_scores.size(2), -1)
+            # Expand key padding mask to match attention scores shape
+            key_padding_mask = self.key_padding_mask.unsqueeze(1).unsqueeze(1)  # [batch_size, 1, 1, seq_len]
+            key_padding_mask = key_padding_mask.expand(-1, num_heads, attention_scores.size(2), -1)  # [batch_size, num_heads, seq_len, seq_len]
             
-            # Create complex -inf value
-            neg_inf = torch.complex(torch.tensor(float('-inf')), torch.tensor(0.0))
+            # Create real -inf value since we only care about the real part for masking
+            neg_inf = float('-inf')
             attention_scores = torch.where(key_padding_mask, attention_scores, neg_inf)
 
         # Apply attention mask if it exists
         if self.attention_mask is not None:
-            # Create complex -inf value
-            neg_inf = torch.complex(torch.tensor(float('-inf')), torch.tensor(0.0))
-            attention_scores = torch.where(self.attention_mask, attention_scores, neg_inf)
+            # If attention mask is 2D [seq_len, seq_len], expand it
+            if self.attention_mask.dim() == 2:
+                mask = self.attention_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+                mask = mask.expand(batch_size, num_heads, -1, -1)  # [batch_size, num_heads, seq_len, seq_len]
+            else:
+                # If 4D [batch_size, num_heads, seq_len, seq_len], use as is
+                mask = self.attention_mask
+            
+            # Create real -inf value since we only care about the real part for masking
+            neg_inf = float('-inf')
+            attention_scores = torch.where(mask, attention_scores, neg_inf)
 
         return attention_scores
 
@@ -156,8 +177,25 @@ class AttentionState:
             raise ValueError("Key padding mask must be a boolean tensor")
         if mask.dim() != 2:
             raise ValueError("Key padding mask must be 2-dimensional [batch_size, seq_length]")
-        if mask.shape[1] != self.geometric_state.shape[2]:
+        
+        # Get dimensions from debug info if available
+        debug_info = self.state_manager.states.get("debug_info", {})
+        input_shape = debug_info.get("input_shape")
+        if input_shape:
+            batch_size = input_shape[0]
+            seq_length = input_shape[2] if len(input_shape) == 4 else input_shape[1]
+        else:
+            # Fallback to geometric state shape
+            if self.geometric_state.dim() == 4:
+                batch_size, _, seq_length, _ = self.geometric_state.shape
+            else:
+                combined_batch, seq_length, _ = self.geometric_state.shape
+                num_heads = debug_info.get("num_heads", 1)
+                batch_size = combined_batch // num_heads
+            
+        if mask.shape != (batch_size, seq_length):
             raise ValueError("Key padding mask sequence length must match geometric state")
+            
         self.key_padding_mask = mask
 
     def set_attention_mask(self, mask: torch.Tensor):
@@ -172,13 +210,28 @@ class AttentionState:
         if mask.dim() not in [2, 4]:
             raise ValueError("Attention mask must be 2D or 4D")
             
-        seq_length = self.geometric_state.shape[2]
+        # Get dimensions from debug info if available
+        debug_info = self.state_manager.states.get("debug_info", {})
+        input_shape = debug_info.get("input_shape")
+        if input_shape:
+            batch_size = input_shape[0]
+            num_heads = input_shape[1] if len(input_shape) == 4 else 1
+            seq_length = input_shape[2] if len(input_shape) == 4 else input_shape[1]
+        else:
+            # Fallback to geometric state shape
+            if self.geometric_state.dim() == 4:
+                batch_size, num_heads, seq_length, _ = self.geometric_state.shape
+            else:
+                combined_batch, seq_length, _ = self.geometric_state.shape
+                num_heads = debug_info.get("num_heads", 1)
+                batch_size = combined_batch // num_heads
+            
         if mask.dim() == 2:
             if mask.shape != (seq_length, seq_length):
-                raise ValueError("2D attention mask must have shape [seq_length, seq_length]")
-        else:
-            if mask.shape[2:] != (seq_length, seq_length):
-                raise ValueError("4D attention mask must have shape [..., seq_length, seq_length]")
+                raise ValueError(f"2D attention mask must have shape [{seq_length}, {seq_length}], got {mask.shape}")
+        else:  # 4D
+            if mask.shape != (batch_size, num_heads, seq_length, seq_length):
+                raise ValueError(f"4D attention mask must have shape [{batch_size}, {num_heads}, {seq_length}, {seq_length}], got {mask.shape}")
                 
         self.attention_mask = mask
 
