@@ -326,9 +326,9 @@ class QuantumGeometricAttention(nn.Module):
         self.manifold_proj = self._create_complex_linear(self.hidden_dim, self.manifold_dim)
         self.manifold_proj_inv = self._create_complex_linear(self.manifold_dim, self.hidden_dim)
         
-        # Initialize pattern projections
-        self.pattern_proj = self._create_complex_linear(self.manifold_dim, self.manifold_dim)
-        self.pattern_proj_inv = self._create_complex_linear(self.manifold_dim, self.manifold_dim)
+        # Initialize pattern projections with correct dimensions
+        self.pattern_proj = self._create_complex_linear(self.manifold_dim, self.head_dim)
+        self.pattern_proj_inv = self._create_complex_linear(self.head_dim, self.manifold_dim)
         
         # Initialize dropout
         self.dropout = nn.Dropout(self.config.dropout)
@@ -804,21 +804,29 @@ class QuantumGeometricAttention(nn.Module):
             debug_info = state.state_manager.states.get("debug_info", {})
             num_heads = debug_info.get("num_heads", 1)
             
-            # Project to query/key space - input is [batch_size * num_heads, seq_len, manifold_dim]
-            query = self.pattern_proj(state.geometric_state)
-            key = self.pattern_proj(state.geometric_state)
+            # Project to query/key space
+            # If geometric_state is 4D [batch_size, num_heads, seq_len, manifold_dim]
+            # we need to reshape it to 3D for projection
+            if state.geometric_state.dim() == 4:
+                batch_size, num_heads, seq_len, manifold_dim = state.geometric_state.shape
+                geometric_state_3d = state.geometric_state.reshape(batch_size * num_heads, seq_len, manifold_dim)
+            else:
+                geometric_state_3d = state.geometric_state
+                
+            query = self.pattern_proj(geometric_state_3d)  # [batch_size * num_heads, seq_len, head_dim]
+            key = self.pattern_proj(geometric_state_3d)    # [batch_size * num_heads, seq_len, head_dim]
 
             # Get dimensions
             batch_size = mask.size(0)
             seq_len = query.size(1)
-            manifold_dim = query.size(-1)
+            head_dim = query.size(-1)
 
-            # Reshape from [batch_size * num_heads, seq_len, manifold_dim] to [batch_size, num_heads, seq_len, manifold_dim]
-            query = query.view(batch_size, num_heads, seq_len, manifold_dim)
-            key = key.view(batch_size, num_heads, seq_len, manifold_dim)
+            # Reshape from [batch_size * num_heads, seq_len, head_dim] to [batch_size, num_heads, seq_len, head_dim]
+            query = query.view(batch_size, num_heads, seq_len, head_dim)
+            key = key.view(batch_size, num_heads, seq_len, head_dim)
 
             # Compute attention scores
-            attention_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(manifold_dim)  # [batch_size, num_heads, seq_len, seq_len]
+            attention_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)  # [batch_size, num_heads, seq_len, seq_len]
 
             # Apply masks using AttentionState's apply_masks method
             attention_scores = state.apply_masks(attention_scores)
@@ -1163,8 +1171,15 @@ class QuantumGeometricAttention(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Apply geometric attention flow with complex number handling."""
         try:
+            # Save original shape for later reshaping
+            original_shape = x.shape
+            batch_size, num_heads, seq_length, hidden_dim = original_shape
+            
+            # Reshape input to combine batch and head dimensions
+            x_reshaped = x.reshape(-1, seq_length, hidden_dim)
+            
             # Initialize state with minimal copies
-            state = self.prepare_attention_state(x, mask)
+            state = self.prepare_attention_state(x_reshaped, mask)
             metrics_dict: Dict[str, Any] = {} if return_metrics else {}
 
             # Pre-compute initial metric with validation
@@ -1173,31 +1188,41 @@ class QuantumGeometricAttention(nn.Module):
             except MetricError as e:
                 raise GeometricFlowError(f"Failed to compute initial metric: {str(e)}")
 
-            # Apply geometric flow
-            flow_output = self.flow(
-                state.geometric_state,
-                metric,
-                num_steps=num_steps,
-                dt=dt
-            )
+            # Configure flow parameters in the state
+            state.state_manager.states["flow_params"] = {
+                "num_steps": num_steps,
+                "dt": dt
+            }
 
-            if return_metrics:
-                metrics_dict.update(flow_output[1])
-                flow_output = flow_output[0]
+            # Apply geometric flow
+            flow_output = self.flow(state.geometric_state)
+            if isinstance(flow_output, tuple):
+                output, flow_metrics = flow_output
+                if return_metrics:
+                    metrics_dict.update(flow_metrics)
+                    metrics_dict.update({
+                        "flow_steps": num_steps,
+                        "flow_dt": dt
+                    })
+            else:
+                output = flow_output
 
             # Pad output back to original dimension if needed
-            if flow_output.shape[-1] < x.shape[-1]:
+            if output.shape[-1] < hidden_dim:
                 padding = torch.zeros(
-                    *flow_output.shape[:-1],
-                    x.shape[-1] - flow_output.shape[-1],
-                    dtype=flow_output.dtype,
-                    device=flow_output.device
+                    *output.shape[:-1],
+                    hidden_dim - output.shape[-1],
+                    dtype=output.dtype,
+                    device=output.device
                 )
-                flow_output = torch.cat([flow_output, padding], dim=-1)
+                output = torch.cat([output, padding], dim=-1)
+
+            # Reshape output back to original dimensions
+            output = output.reshape(original_shape)
 
             if return_metrics:
-                return flow_output, metrics_dict
-            return flow_output
+                return output, metrics_dict
+            return output
 
         except Exception as e:
             if isinstance(e, GeometricFlowError):
