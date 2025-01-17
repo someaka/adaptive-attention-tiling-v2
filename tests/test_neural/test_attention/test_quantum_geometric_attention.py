@@ -872,7 +872,7 @@ class TestQuantumGeometricAttention:
     ):
         """Test causal attention masking."""
         # Create input tensor with correct shape [batch_size, num_heads, seq_len, hidden_dim]
-        x = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim, 
+        x = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim,
                        dtype=attention_layer.config.dtype, device=attention_layer.config.device)
 
         # Create causal mask
@@ -897,7 +897,10 @@ class TestQuantumGeometricAttention:
         # Future tokens should have zero attention scores
         future_positions = ~causal_mask.unsqueeze(0).unsqueeze(0).expand_as(scores)
         masked_scores = scores[future_positions]
-        assert torch.all(masked_scores == float('-inf')), "Future positions should be masked"
+        
+        # For complex attention scores, check both real and imaginary parts are -inf
+        assert torch.all(masked_scores.real == float('-inf')), "Real part of masked positions should be -inf"
+        assert torch.all(masked_scores.imag == 0.0), "Imaginary part of masked positions should be 0"
 
     def test_mixed_mask_types(
         self,
@@ -925,9 +928,13 @@ class TestQuantumGeometricAttention:
         # Process with both masks
         state = attention_layer.prepare_attention_state(x)
         
-        # Reshape geometric_state to match input shape for masking
-        geometric_state = state.geometric_state.view(batch_size, attention_layer.num_heads, seq_length, -1)
-        state.geometric_state = geometric_state
+        # Update debug info with correct shape
+        state.state_manager.states["debug_info"] = {
+            "input_shape": tuple(x.shape),
+            "input_dtype": str(x.dtype),
+            "manifold_shape": tuple(x.shape[:-1] + (attention_layer.manifold_dim,)),
+            "num_heads": attention_layer.num_heads
+        }
         
         # Set masks
         state.set_key_padding_mask(key_padding_mask)
@@ -950,4 +957,5 @@ class TestQuantumGeometricAttention:
         # Future tokens should have -inf attention scores
         future_positions = ~causal_mask.unsqueeze(0).unsqueeze(0).expand_as(scores)
         masked_scores = scores[future_positions]
-        assert torch.all(masked_scores == float('-inf')), "Future positions should be masked"
+        assert torch.all(torch.isneginf(masked_scores.real)), "Real part of masked positions should be -inf"
+        assert torch.all(masked_scores.imag == 0.0), "Imaginary part of masked positions should be 0"

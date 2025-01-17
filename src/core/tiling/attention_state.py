@@ -120,32 +120,30 @@ class AttentionState:
         self.attention_patterns[key] = pattern
 
     def apply_masks(self, attention_scores: torch.Tensor) -> torch.Tensor:
-        """Apply attention masks to the attention scores.
+        """Apply key padding and attention masks to attention scores.
         
         Args:
-            attention_scores: Raw attention scores [batch_size, num_heads, seq_length, seq_length]
+            attention_scores: Attention scores tensor
             
         Returns:
-            Masked attention scores with the same shape
+            Masked attention scores
         """
-        # Apply key padding mask if provided
+        # Apply key padding mask if it exists
         if self.key_padding_mask is not None:
-            # Expand key_padding_mask to match attention scores shape
-            key_padding_mask = self.key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_length]
-            attention_scores = attention_scores.masked_fill(~key_padding_mask, float('-inf'))
-        
-        # Apply attention mask if provided
+            # Expand mask to match attention scores shape
+            key_padding_mask = self.key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
+            key_padding_mask = key_padding_mask.expand(-1, attention_scores.size(1), attention_scores.size(2), -1)
+            
+            # Create complex -inf value
+            neg_inf = torch.complex(torch.tensor(float('-inf')), torch.tensor(0.0))
+            attention_scores = torch.where(key_padding_mask, attention_scores, neg_inf)
+
+        # Apply attention mask if it exists
         if self.attention_mask is not None:
-            # Handle both global and head-specific attention masks
-            if self.attention_mask.dim() == 2:
-                # Global attention mask [seq_length, seq_length]
-                attention_mask = self.attention_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_length, seq_length]
-            else:
-                # Head-specific attention mask [batch_size, num_heads, seq_length, seq_length]
-                attention_mask = self.attention_mask
-                
-            attention_scores = attention_scores.masked_fill(~attention_mask, float('-inf'))
-        
+            # Create complex -inf value
+            neg_inf = torch.complex(torch.tensor(float('-inf')), torch.tensor(0.0))
+            attention_scores = torch.where(self.attention_mask, attention_scores, neg_inf)
+
         return attention_scores
 
     def set_key_padding_mask(self, mask: torch.Tensor):

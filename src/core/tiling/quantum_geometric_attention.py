@@ -812,21 +812,33 @@ class QuantumGeometricAttention(nn.Module):
                 geometric_state_3d = state.geometric_state.reshape(batch_size * num_heads, seq_len, manifold_dim)
             else:
                 geometric_state_3d = state.geometric_state
+                batch_size = geometric_state_3d.size(0) // num_heads
+                seq_len = geometric_state_3d.size(1)
                 
             query = self.pattern_proj(geometric_state_3d)  # [batch_size * num_heads, seq_len, head_dim]
             key = self.pattern_proj(geometric_state_3d)    # [batch_size * num_heads, seq_len, head_dim]
 
-            # Get dimensions
-            batch_size = mask.size(0)
-            seq_len = query.size(1)
+            # Get head dimension
             head_dim = query.size(-1)
 
             # Reshape from [batch_size * num_heads, seq_len, head_dim] to [batch_size, num_heads, seq_len, head_dim]
             query = query.view(batch_size, num_heads, seq_len, head_dim)
             key = key.view(batch_size, num_heads, seq_len, head_dim)
 
+            # Convert to complex dtype for attention scores
+            query = query.to(torch.complex128)
+            key = key.to(torch.complex128)
+
             # Compute attention scores
             attention_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)  # [batch_size, num_heads, seq_len, seq_len]
+
+            # If mask is 2D [seq_len, seq_len], expand it to 4D [1, 1, seq_len, seq_len]
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+                mask = mask.expand(batch_size, num_heads, -1, -1)  # [batch_size, num_heads, seq_len, seq_len]
+
+            # Store mask in state
+            state.attention_mask = mask
 
             # Apply masks using AttentionState's apply_masks method
             attention_scores = state.apply_masks(attention_scores)
