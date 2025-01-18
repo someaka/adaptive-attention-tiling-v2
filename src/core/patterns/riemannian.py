@@ -243,8 +243,9 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         # Combine identity and perturbation without in-place operations
         values = identity + perturbation
         
-        # Ensure proper dtype and gradient tracking
-        values = values.to(dtype=self.dtype).requires_grad_(True)
+        # Convert to proper dtype while maintaining gradient chain
+        if values.dtype != self.dtype:
+            values = values.to(dtype=self.dtype)
         
         # Add hook to track metric gradients
         if values.requires_grad:
@@ -259,16 +260,36 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
                 return grad
             values.register_hook(metric_hook)
         
-        # Validate metric properties
-        is_compatible = self.validate_metric_properties(
-            MetricTensor(values=values, dimension=self.manifold_dim)
-        )
+        # Add hook to track metric parameter gradients
+        if self.metric_factors.requires_grad:
+            def metric_param_hook(grad):
+                logger.debug(f"\n=== Metric Parameter Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            self.metric_factors.register_hook(metric_param_hook)
         
-        return MetricTensor(
-            values=values,
-            dimension=self.manifold_dim,
-            is_compatible=is_compatible
-        )
+        # Create metric tensor with gradient tracking
+        metric = MetricTensor(values=values, dimension=self.manifold_dim)
+        
+        # Add hook to track metric tensor gradients
+        if metric.values.requires_grad:
+            def metric_tensor_hook(grad):
+                logger.debug(f"\n=== Metric Tensor Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            metric.values.register_hook(metric_tensor_hook)
+        
+        return metric
         
     def compute_christoffel(self, points: Tensor) -> ChristoffelSymbols[Tensor]:
         """Compute Christoffel symbols using autograd with metric parameter gradients."""
@@ -345,9 +366,6 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
                     # Combine terms without in-place operations
                     christoffel_values[:, k, i, j] = 0.5 * (term1 + term2 - term3)
         
-        # Create new tensor with requires_grad=True
-        christoffel_values = christoffel_values.requires_grad_(True)
-        
         # Add hook to track Christoffel gradients
         if christoffel_values.requires_grad:
             def christoffel_hook(grad):
@@ -360,6 +378,19 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
                 logger.debug(f"Std: {grad.std().item()}")
                 return grad
             christoffel_values.register_hook(christoffel_hook)
+        
+        # Ensure metric parameter gradients are connected
+        if hasattr(self, 'metric_param') and self.metric_param is not None and self.metric_param.requires_grad:
+            def metric_param_hook(grad):
+                logger.debug(f"\n=== Metric Parameter Gradient Hook (from Christoffel) ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            self.metric_param.register_hook(metric_param_hook)
         
         return ChristoffelSymbols(
             values=christoffel_values,
@@ -374,9 +405,15 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         connection: Optional[ChristoffelSymbols[Tensor]] = None
     ) -> Tensor:
         """Parallel transport using numerical integration."""
-        # Ensure vector and path require gradients
-        vector = vector.detach().requires_grad_(True)
-        path = path.detach().requires_grad_(True)
+        # Ensure inputs require gradients without detaching
+        if not vector.requires_grad:
+            vector = vector.clone().requires_grad_(True)
+        if not path.requires_grad:
+            path = path.clone().requires_grad_(True)
+            
+        logger.debug(f"\n=== Starting Parallel Transport ===")
+        logger.debug(f"Vector shape: {vector.shape}, requires_grad: {vector.requires_grad}")
+        logger.debug(f"Path shape: {path.shape}, requires_grad: {path.requires_grad}")
         
         # Initialize result list to avoid in-place operations
         result = []
@@ -385,20 +422,44 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         # Get connection if not provided
         if connection is None:
             connection = self.compute_christoffel(path)
+            logger.debug(f"Connection values shape: {connection.values.shape}, requires_grad: {connection.values.requires_grad}")
             
         # Compute path tangent vectors
         tangents = path[1:] - path[:-1]
+        logger.debug(f"Tangents shape: {tangents.shape}, requires_grad: {tangents.requires_grad}")
         
         # Parallel transport equation
         for t in range(len(path) - 1):
-            # Transport step
+            current_vector = result[-1]  # Use directly without detach
+            logger.debug(f"\nStep {t}:")
+            logger.debug(f"Current vector requires_grad: {current_vector.requires_grad}")
+            
+            # Transport step with gradient tracking
             step = -torch.einsum(
                 '...ijk,...j,...k->...i',
                 connection.values[t],
-                result[-1].detach(),  # Detach to prevent in-place op issues
+                current_vector,
                 tangents[t]
             )
-            result.append(result[-1] + step)
+            
+            # Add gradient hook for step
+            if step.requires_grad:
+                def step_hook(grad):
+                    logger.debug(f"\n=== Transport Step {t} Gradient Hook ===")
+                    logger.debug(f"Shape: {grad.shape}")
+                    logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                    logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                    logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                    logger.debug(f"Mean: {grad.mean().item()}")
+                    logger.debug(f"Std: {grad.std().item()}")
+                    return grad
+                step.register_hook(step_hook)
+            
+            # Update with gradient tracking
+            next_vector = current_vector + step
+            logger.debug(f"Next vector requires_grad: {next_vector.requires_grad}")
+            
+            result.append(next_vector)
             
         # Stack results into a tensor
         return torch.stack(result)
@@ -697,7 +758,7 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         return current_point
 
 class PatternRiemannianStructure(BaseRiemannianStructure):
-    """Pattern-specific implementation of Riemannian geometry."""
+    """Pattern-specific Riemannian structure implementation."""
     
     def __init__(
         self,
@@ -706,28 +767,48 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
-        super().__init__(manifold_dim, pattern_dim, device, dtype)
+        """Initialize pattern Riemannian structure."""
+        super().__init__(manifold_dim, pattern_dim, device=device, dtype=dtype)
         self.pattern_dim = pattern_dim
-        self.metric_param = None  # Will be set by the fiber bundle
+        self.metric_param = None
         
     def set_metric_param(self, metric_param: nn.Parameter) -> None:
-        """Set the metric parameter from the fiber bundle."""
+        """Set metric parameter."""
         self.metric_param = metric_param
         
     def compute_metric(self, points: Tensor) -> MetricTensor[Tensor]:
-        """Compute metric tensor using the fiber bundle's metric parameter."""
-        if self.metric_param is None:
-            return super().compute_metric(points)
-            
+        """Compute metric tensor with pattern-specific structure."""
         batch_size = points.shape[0]
         
-        # Instead of expand, use repeat to maintain gradient chain
-        values = self.metric_param.repeat(batch_size, 1, 1)
+        # Use metric parameter directly if available
+        if self.metric_param is not None:
+            # Create a view and expand (not repeat) to maintain gradient chain
+            values = self.metric_param.view(1, self.manifold_dim, self.manifold_dim)
+            values = values.expand(batch_size, -1, -1)  # Use expand instead of repeat
+            
+            # Add hook to track metric gradients
+            if values.requires_grad:
+                def metric_hook(grad):
+                    logger.debug(f"\n=== Metric Gradient Hook ===")
+                    logger.debug(f"Shape: {grad.shape}")
+                    logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                    logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                    logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                    logger.debug(f"Mean: {grad.mean().item()}")
+                    logger.debug(f"Std: {grad.std().item()}")
+                    return grad
+                values.register_hook(metric_hook)
+        else:
+            # Fall back to base implementation
+            return super().compute_metric(points)
         
-        # Add hook to track metric gradients
-        if values.requires_grad:
-            def metric_hook(grad):
-                logger.debug(f"\n=== Metric Gradient Hook ===")
+        # Create metric tensor with gradient tracking
+        metric = MetricTensor(values=values, dimension=self.manifold_dim)
+        
+        # Add hook to track metric tensor gradients
+        if metric.values.requires_grad:
+            def metric_tensor_hook(grad):
+                logger.debug(f"\n=== Metric Tensor Gradient Hook ===")
                 logger.debug(f"Shape: {grad.shape}")
                 logger.debug(f"Gradient norm: {torch.norm(grad)}")
                 logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
@@ -735,18 +816,9 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
                 logger.debug(f"Mean: {grad.mean().item()}")
                 logger.debug(f"Std: {grad.std().item()}")
                 return grad
-            values.register_hook(metric_hook)
+            metric.values.register_hook(metric_tensor_hook)
         
-        # Validate metric properties
-        is_compatible = self.validate_metric_properties(
-            MetricTensor(values=values, dimension=self.manifold_dim)
-        )
-        
-        return MetricTensor(
-            values=values,
-            dimension=self.manifold_dim,
-            is_compatible=is_compatible
-        )
+        return metric
         
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Apply the Riemannian framework to input data."""
@@ -874,9 +946,6 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
                     # Combine terms without in-place operations
                     christoffel_values[:, k, i, j] = 0.5 * (term1 + term2 - term3)
         
-        # Create new tensor with requires_grad=True
-        christoffel_values = christoffel_values.requires_grad_(True)
-        
         # Add hook to track Christoffel gradients
         if christoffel_values.requires_grad:
             def christoffel_hook(grad):
@@ -889,6 +958,19 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
                 logger.debug(f"Std: {grad.std().item()}")
                 return grad
             christoffel_values.register_hook(christoffel_hook)
+        
+        # Ensure metric parameter gradients are connected
+        if hasattr(self, 'metric_param') and self.metric_param is not None and self.metric_param.requires_grad:
+            def metric_param_hook(grad):
+                logger.debug(f"\n=== Metric Parameter Gradient Hook (from Christoffel) ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            self.metric_param.register_hook(metric_param_hook)
         
         return ChristoffelSymbols(
             values=christoffel_values,

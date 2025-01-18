@@ -1335,10 +1335,22 @@ class TestGradientFlow:
 
     def test_parallel_transport_gradients(self, pattern_bundle):
         """Test that gradients flow through parallel transport."""
-        # Create test input with batch dimension
-        section = torch.randn(1, pattern_bundle.fiber_dim, requires_grad=True)  # Add batch dimension
-        path = torch.randn(10, pattern_bundle.base_dim)  # 10 points in base space
-    
+        # Create test input with consistent batch dimensions
+        batch_size = 4
+        dtype = pattern_bundle.metric.dtype
+        device = pattern_bundle.metric.device
+
+        # Create section with batch dimension and proper formatting
+        section = torch.randn(
+            batch_size, pattern_bundle.fiber_dim,
+            dtype=dtype, device=device,
+            requires_grad=True
+        )
+        
+        # Create path with same batch dimension
+        num_points = 10
+        path = torch.randn(num_points, pattern_bundle.base_dim, dtype=dtype, device=device)  # Remove batch from path
+        
         # Set up profiler
         with profiler.profile(use_cuda=False, record_shapes=True) as prof:
             with record_function("parallel_transport_test"):
@@ -1347,14 +1359,12 @@ class TestGradientFlow:
                 self.logger.debug(f"Initial section shape: {section.shape}, requires_grad: {section.requires_grad}")
                 if section.grad_fn:
                     self.logger.debug(f"Initial section grad_fn: {section.grad_fn}")
-                self.logger.debug(f"Path shape: {path.shape}, requires_grad: {path.requires_grad}")
-                if path.grad_fn:
-                    self.logger.debug(f"Path grad_fn: {path.grad_fn}")
-        
+                self.logger.debug(f"Path shape: {path.shape}")
+                
                 # Log bundle parameter states
                 self.logger.debug(f"Bundle metric shape: {pattern_bundle.metric.shape}, requires_grad: {pattern_bundle.metric.requires_grad}")
                 self.logger.debug(f"Bundle connection shape: {pattern_bundle.connection.shape}, requires_grad: {pattern_bundle.connection.requires_grad}")
-        
+                
                 # Add gradient hooks with more detailed tracking
                 def create_grad_hook(name):
                     def hook(grad):
@@ -1367,12 +1377,12 @@ class TestGradientFlow:
                         self.logger.debug(f"Std: {grad.std().item()}")
                         return grad
                     return hook
-        
+                
                 # Register hooks for all parameters
                 section.register_hook(create_grad_hook("Section"))
                 pattern_bundle.metric.register_hook(create_grad_hook("Metric"))
                 pattern_bundle.connection.register_hook(create_grad_hook("Connection"))
-        
+                
                 # Set up saved tensors hooks to track intermediate values
                 saved_tensors = []
                 def save_hook(tensor):
@@ -1380,16 +1390,17 @@ class TestGradientFlow:
                     return tensor
                 def load_hook(tensor):
                     return tensor
-        
+                
                 with torch.autograd.graph.saved_tensors_hooks(save_hook, load_hook):
-                    # Perform parallel transport
+                    # Perform parallel transport for entire batch at once
                     transported = pattern_bundle.parallel_transport(section, path)
+                    
                     self.logger.debug(f"\n=== Transported Result ===")
                     self.logger.debug(f"Transported shape: {transported.shape}, requires_grad: {transported.requires_grad}")
                     if transported.grad_fn:
                         self.logger.debug(f"Transported grad_fn type: {type(transported.grad_fn).__name__}")
                         self.logger.debug(f"Transported grad_fn next functions: {[(type(fn[0]).__name__, fn[1]) for fn in transported.grad_fn.next_functions]}")
-        
+                
                     # Create a dummy loss that depends on the transported section
                     loss = transported.sum()
                     self.logger.debug(f"\n=== Loss Information ===")
@@ -1397,7 +1408,7 @@ class TestGradientFlow:
                     if loss.grad_fn:
                         self.logger.debug(f"Loss grad_fn type: {type(loss.grad_fn).__name__}")
                         self.logger.debug(f"Loss grad_fn next functions: {[(type(fn[0]).__name__, fn[1]) for fn in loss.grad_fn.next_functions]}")
-        
+                
                     # Zero gradients before backward
                     if pattern_bundle.metric.grad is not None:
                         pattern_bundle.metric.grad.zero_()
@@ -1405,11 +1416,11 @@ class TestGradientFlow:
                         pattern_bundle.connection.grad.zero_()
                     if section.grad is not None:
                         section.grad.zero_()
-        
+                
                     # Compute gradients with anomaly detection
                     with detect_anomaly():
                         loss.backward()
-        
+                
         # Log profiler results
         self.logger.debug("\n=== Autograd Profiler Results ===")
         try:
@@ -1457,7 +1468,7 @@ class TestGradientFlow:
         assert section.grad is not None, "Section should have gradients"
         assert not torch.allclose(section.grad, torch.zeros_like(section)), \
             "Section gradients should be non-zero"
-    
+
         # Check that bundle parameters have gradients
         assert pattern_bundle.metric.grad is not None, "Metric parameter should have gradients"
         assert pattern_bundle.connection.grad is not None, "Connection parameter should have gradients"

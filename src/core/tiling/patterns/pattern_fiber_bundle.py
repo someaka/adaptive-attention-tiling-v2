@@ -1041,16 +1041,15 @@ class PatternFiberBundle(BaseFiberBundle):
         )
         
         # Initialize evolved tensor with gradient tracking
-        evolved = base_transport.clone()  # Clone to maintain gradient chain
-        evolved.zero_()  # Zero out values while keeping gradient chain
-        
+        evolved = torch.zeros_like(base_transport, requires_grad=True)  # Replace clone with zeros_like
+
         # First point is unchanged
-        evolved[0] = base_transport[0]
-        
+        evolved[0] = base_transport[0]  # Direct assignment maintains gradient chain
+
         # Evolve remaining points with gradient tracking
         evolved_rest = base_transport[1:] + transport_gradients * reaction.unsqueeze(-1)
         evolved_rest = evolved_rest * diffusion.unsqueeze(-1)
-        evolved[1:] = evolved_rest
+        evolved[1:] = evolved_rest  # Direct assignment maintains gradient chain
         
         # Compute stability with gradient tracking
         stability = pattern_formation.compute_stability(evolved)
@@ -1070,11 +1069,8 @@ class PatternFiberBundle(BaseFiberBundle):
             evolved_unstable_flat = evolved_unstable[:, -1].reshape(-1, evolved.size(-1))
             mask_expanded = unstable_mask.unsqueeze(-1).expand_as(evolved)
             
-            # Instead of using expand_as, repeat the tensor to match the shape
-            evolved_unstable_expanded = evolved_unstable_flat.repeat(1, evolved.size(1) // evolved_unstable_flat.size(1))
-            
-            # Use multiplication and addition to maintain gradient flow
-            evolved = evolved * (~mask_expanded) + evolved_unstable_expanded * mask_expanded
+            # Use direct tensor operations to maintain gradient flow
+            evolved = torch.where(mask_expanded, evolved_unstable_flat, evolved)
             
             # Add gradient hook for debugging
             if evolved.requires_grad:
@@ -1093,282 +1089,114 @@ class PatternFiberBundle(BaseFiberBundle):
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Parallel transport a section along a path with pattern evolution and stability control."""
-        logger.debug(f"Parallel transport input section shape: {section.shape}, path shape: {path.shape}")
-        if isinstance(section, Tensor):
-            logger.debug(f"Section requires_grad: {section.requires_grad}")
-        if isinstance(path, Tensor):
-            logger.debug(f"Path requires_grad: {path.requires_grad}")
-        
-        # Add detailed metric gradient tracking
-        logger.debug("\n=== Initial Metric State ===")
-        logger.debug(f"Metric shape: {self.metric.shape}, requires_grad: {self.metric.requires_grad}")
-        if self.metric.grad_fn:
-            logger.debug(f"Metric grad_fn: {self.metric.grad_fn}")
+        # Only log initial input states
+        logger.debug(f"=== Parallel Transport Start ===")
+        logger.debug(f"Section: shape={section.shape}, requires_grad={section.requires_grad}")
+        logger.debug(f"Path: shape={path.shape}")
         
         # Ensure section is a tensor and on the correct device
         result: Tensor = self._ensure_tensor_format(section)
         
-        try:
-            # Pre-format tensors efficiently
-            with self.with_tensor_state(result) as formatted_section, \
-                 self.with_tensor_state(path) as formatted_path:
-
+        # Ensure we have a properly formatted error fallback tensor
+        error_section = self._ensure_tensor_format(section)
+        if len(error_section.shape) == 1:
+            error_section = error_section.unsqueeze(0)
+        error_result = error_section.unsqueeze(0).expand(len(path), *error_section.shape)
+        
+        with self.with_tensor_state(result) as formatted_section, \
+             self.with_tensor_state(path) as formatted_path:
+            try:
                 # Handle batch dimension if present
                 original_batch_shape = None
-                if len(formatted_section.shape) == 3:  # [batch, seq, dim]
+                if len(formatted_section.shape) == 3:
                     original_batch_shape = formatted_section.shape[:-1]
                     formatted_section = formatted_section.reshape(-1, formatted_section.shape[-1])
-                elif len(formatted_section.shape) == 1:  # [dim]
+                elif len(formatted_section.shape) == 1:
                     formatted_section = formatted_section.unsqueeze(0)
 
-                # Get fiber metric using clone to maintain gradient chain
-                fiber_metric = self.metric[self.base_dim:, self.base_dim:].clone()
-                logger.debug(f"\n=== Fiber Metric Extraction ===")
-                logger.debug(f"Fiber metric shape: {fiber_metric.shape}, requires_grad: {fiber_metric.requires_grad}")
+                # Extract metrics without clone to maintain gradient chain
+                fiber_metric = self.metric[self.base_dim:, self.base_dim:]
+                base_metric = self.metric[:self.base_dim, :self.base_dim]
                 
-                # Register gradient hook for fiber metric
-                if fiber_metric.requires_grad:
-                    def fiber_metric_hook(grad):
-                        logger.debug(f"\n=== Fiber Metric Gradient Hook ===")
-                        logger.debug(f"Shape: {grad.shape}")
-                        logger.debug(f"Gradient norm: {torch.norm(grad)}")
-                        logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
-                        logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
-                        logger.debug(f"Mean: {grad.mean().item()}")
-                        logger.debug(f"Std: {grad.std().item()}")
-                        return grad
-                    fiber_metric.register_hook(fiber_metric_hook)
-                
-                # Store original metric norm for preservation
+                # Store original metric norm
                 metric_inner = torch.einsum('bi,ij,bj->b', formatted_section, fiber_metric, formatted_section)
                 original_norm = torch.sqrt(metric_inner + 1e-7)
                 
-                # Transport entire section
-                try:
-                    # Initialize base transport with initial condition
-                    base_transport = torch.zeros(
-                        len(formatted_path), formatted_section.shape[0], formatted_section.shape[1],
-                        device=formatted_section.device, dtype=formatted_section.dtype,
-                        requires_grad=True  # Ensure requires_grad is True
-                    )
-                    base_transport[0] = formatted_section.clone()  # Clone to maintain gradient chain
+                # Initialize transport tensor - avoid in-place ops on leaves
+                base_transport = torch.zeros(
+                    len(formatted_path), formatted_section.shape[0], formatted_section.shape[1],
+                    device=formatted_section.device, dtype=formatted_section.dtype,
+                    requires_grad=True
+                )
+                
+                # Set initial condition without in-place operation
+                base_transport = torch.cat([
+                    formatted_section.unsqueeze(0),
+                    base_transport[1:]
+                ])
 
-                    # Compute path tangent vectors
-                    path_tangent = formatted_path[1:] - formatted_path[:-1]
+                # Compute path tangents
+                path_tangent = formatted_path[1:] - formatted_path[:-1]
+                
+                # Normalize path tangents
+                metric_path = torch.einsum('bi,ij->bj', path_tangent, base_metric)
+                path_inner = torch.einsum('bi,bi->b', path_tangent, metric_path)
+                path_metric_norms = torch.sqrt(path_inner + 1e-7)
+                path_tangent = path_tangent / path_metric_norms.unsqueeze(-1)
+
+                # RK4 integration
+                dt = 1.0 / (len(formatted_path) - 1)
+                transported = [formatted_section]  # Store intermediate results in list
+                
+                for current_point in range(len(formatted_path) - 1):
+                    current = transported[-1]  # Get last transported point
+                    tangent = path_tangent[current_point]
+
+                    # RK4 steps
+                    k1 = self._transport_step(current, tangent, fiber_metric)
+                    k2 = self._transport_step(current + 0.5*dt*k1, tangent, fiber_metric)
+                    k3 = self._transport_step(current + 0.5*dt*k2, tangent, fiber_metric)
+                    k4 = self._transport_step(current + dt*k3, tangent, fiber_metric)
+
+                    # Compute next point
+                    rk4_step = (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+                    next_point = current + rk4_step
+
+                    # Normalize
+                    metric_next = torch.einsum('bi,ij,bj->b', next_point, fiber_metric, next_point)
+                    current_norm = torch.sqrt(metric_next + 1e-7)
+                    scale_factor = original_norm / (current_norm + 1e-7)
+                    next_point = next_point * scale_factor.unsqueeze(-1)
                     
-                    # Get base metric using clone to maintain gradient chain
-                    base_metric = self.metric[:self.base_dim, :self.base_dim].clone()
-                    
-                    # Register gradient hook for base metric
-                    if base_metric.requires_grad:
-                        def base_metric_hook(grad):
-                            logger.debug(f"\n=== Base Metric Gradient Hook ===")
-                            logger.debug(f"Shape: {grad.shape}")
-                            logger.debug(f"Gradient norm: {torch.norm(grad)}")
-                            logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
-                            logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
-                            logger.debug(f"Mean: {grad.mean().item()}")
-                            logger.debug(f"Std: {grad.std().item()}")
-                            return grad
-                        base_metric.register_hook(base_metric_hook)
-                    
-                    # Normalize path tangents
-                    metric_path = torch.einsum('bi,ij->bj', path_tangent, base_metric)
-                    path_inner = torch.einsum('bi,bi->b', path_tangent, metric_path)
-                    path_metric_norms = torch.sqrt(path_inner + 1e-7)
-                    path_tangent = path_tangent / path_metric_norms.unsqueeze(-1)
+                    transported.append(next_point)
 
-                    # Adaptive RK4 integration
-                    dt = 1.0 / (len(formatted_path) - 1)
-                    
-                    for current_point in range(len(formatted_path) - 1):
-                        current = base_transport[current_point]
-                        tangent = path_tangent[current_point]
+                # Stack results
+                result = torch.stack(transported)
 
-                        # RK4 step
-                        k1 = self._transport_step(current, tangent, fiber_metric)
-                        k2 = self._transport_step(current + 0.5*dt*k1, tangent, fiber_metric)
-                        k3 = self._transport_step(current + 0.5*dt*k2, tangent, fiber_metric)
-                        k4 = self._transport_step(current + dt*k3, tangent, fiber_metric)
+                # Restore original batch shape if needed
+                if original_batch_shape is not None:
+                    result = result.reshape(len(formatted_path), *original_batch_shape[1:], self.fiber_dim)
+                else:
+                    result = result.squeeze(1)
 
-                        # Compute next point
-                        rk4_step = (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
-                        next_point = current + rk4_step
+                logger.debug("=== Parallel Transport Complete ===")
+                return result
 
-                        # Normalize using metric
-                        metric_next = torch.einsum('bi,ij,bj->b', next_point, fiber_metric, next_point)
-                        current_norm = torch.sqrt(metric_next + 1e-7)
-                        # Use additive correction instead of multiplicative scaling
-                        norm_diff = original_norm - current_norm
-                        correction = next_point * (norm_diff / (current_norm + 1e-7)).unsqueeze(-1)
-                        next_point = next_point + correction
-
-                        # Add gradient hooks for normalization
-                        if next_point.requires_grad:
-                            next_point.register_hook(self.create_grad_hook("Normalized Point"))
-                        if correction.requires_grad:
-                            correction.register_hook(self.create_grad_hook("Normalization Correction"))
-
-                        # Store result
-                        base_transport[current_point + 1] = next_point.clone()  # Clone to maintain gradient chain
-
-                    # Compute transport gradients
-                    transport_gradients = torch.diff(base_transport, dim=0)
-
-                    # Evolve batch
-                    evolved = self._evolve_batch_efficient(
-                        base_transport,
-                        transport_gradients,
-                        self.geometric_flow.stability_threshold,
-                        self._EVOLUTION_TIME_STEPS,
-                        self.pattern_formation,
-                        self._DEFAULT_REACTION_COEFF,
-                        self._DEFAULT_DIFFUSION_COEFF
-                    )
-
-                    # Normalize evolved result
-                    metric_evolved = torch.einsum('bi,ij,bj->b', evolved, fiber_metric, evolved)
-                    current_norm = torch.sqrt(metric_evolved + 1e-7)
-                    # Use additive correction instead of multiplicative scaling
-                    norm_diff = original_norm - current_norm
-                    correction = evolved * (norm_diff / (current_norm + 1e-7)).unsqueeze(-1)
-                    evolved = evolved + correction
-
-                    # Add gradient hooks for final normalization
-                    if evolved.requires_grad:
-                        evolved.register_hook(self.create_grad_hook("Final Normalized Result"))
-                    if correction.requires_grad:
-                        correction.register_hook(self.create_grad_hook("Final Normalization Correction"))
-
-                    # Ensure evolved result matches expected size
-                    if evolved.shape[0] < len(formatted_path):
-                        evolved = F.pad(
-                            evolved,
-                            (0, 0, 0, 0, 0, len(formatted_path) - evolved.shape[0])
-                        )
-
-                    result = evolved
-
-                    # Restore original batch shape if needed
-                    if original_batch_shape is not None:
-                        result = result.reshape(len(formatted_path), *original_batch_shape[1:], self.fiber_dim)
-                    else:
-                        result = result.squeeze(1)
-
-                except Exception as e:
-                    # If transport fails, use identity transport
-                    base_transport = formatted_section.unsqueeze(0).expand(
-                        len(formatted_path),
-                        *formatted_section.shape
-                    )
-                    result = base_transport
-
-                    # Restore original batch shape if needed
-                    if original_batch_shape is not None:
-                        result = result.reshape(len(formatted_path), *original_batch_shape[1:], self.fiber_dim)
-                    else:
-                        result = result.squeeze(1)
-
-        except Exception as e:
-            # Return original section if transport fails
-            warnings.warn(f"Parallel transport failed: {str(e)}. Returning original section.")
-            
-            # Initialize result with correct shape
-            if len(section.shape) == 3:  # [batch, seq, dim]
-                result = section.unsqueeze(0).expand(len(path), -1, -1, -1)
-            elif len(section.shape) == 2:  # [batch, dim]
-                result = section.unsqueeze(0).expand(len(path), -1, -1)
-            else:  # [dim]
-                result = section.unsqueeze(0).expand(len(path), -1)
-            
-        return result
+            except Exception as e:
+                logger.error(f"Error in parallel transport: {str(e)}")
+                return error_result
+        
+        # This should never be reached, but ensures all code paths return a Tensor
+        return error_result
 
     def _transport_step(self, section: Tensor, tangent: Tensor, fiber_metric: Tensor) -> Tensor:
-        """Compute transport step with explicit gradient tracking.
+        """Compute transport step."""
+        # Compute connection form
+        tangent_base = tangent[:self.base_dim]
+        connection_form = torch.einsum('i,ijk->jk', tangent_base, self.connection)
         
-        Args:
-            section: Section to transport
-            tangent: Tangent vector
-            fiber_metric: Fiber metric tensor
-            
-        Returns:
-            Transport step
-        """
-        # Log input shapes and gradient requirements
-        logger.debug(f"\n=== Transport Step Inputs ===")
-        logger.debug(f"Section shape: {section.shape}, requires_grad: {section.requires_grad}")
-        if section.grad_fn:
-            logger.debug(f"Section grad_fn: {section.grad_fn}")
-        
-        logger.debug(f"Tangent shape: {tangent.shape}, requires_grad: {tangent.requires_grad}")
-        if tangent.grad_fn:
-            logger.debug(f"Tangent grad_fn: {tangent.grad_fn}")
-        
-        logger.debug(f"Fiber metric shape: {fiber_metric.shape}, requires_grad: {fiber_metric.requires_grad}")
-        if fiber_metric.grad_fn:
-            logger.debug(f"Fiber metric grad_fn: {fiber_metric.grad_fn}")
-        
-        # Compute connection form with explicit gradient tracking
-        connection_form = self.compute_connection(tangent)
-        logger.debug(f"\n=== Connection Form ===")
-        logger.debug(f"Shape: {connection_form.shape}, requires_grad: {connection_form.requires_grad}")
-        if connection_form.grad_fn:
-            logger.debug(f"Connection form grad_fn: {connection_form.grad_fn}")
-        
-        # Add hook to track connection form gradients
-        if connection_form.requires_grad:
-            def connection_hook(grad):
-                logger.debug(f"\n=== Connection Form Gradient Hook ===")
-                logger.debug(f"Shape: {grad.shape}")
-                logger.debug(f"Gradient norm: {torch.norm(grad)}")
-                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
-                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
-                logger.debug(f"Mean: {grad.mean().item()}")
-                logger.debug(f"Std: {grad.std().item()}")
-                return grad
-            connection_form.register_hook(connection_hook)
-        
-        # Compute connection form contraction with explicit gradient tracking
-        connection_contraction = torch.einsum('ijk,bk->bij', connection_form, section)
-        logger.debug(f"\n=== Connection Contraction ===")
-        logger.debug(f"Shape: {connection_contraction.shape}, requires_grad: {connection_contraction.requires_grad}")
-        if connection_contraction.grad_fn:
-            logger.debug(f"Connection contraction grad_fn: {connection_contraction.grad_fn}")
-        
-        # Add hook to track connection contraction gradients
-        if connection_contraction.requires_grad:
-            def contraction_hook(grad):
-                logger.debug(f"\n=== Connection Contraction Gradient Hook ===")
-                logger.debug(f"Shape: {grad.shape}")
-                logger.debug(f"Gradient norm: {torch.norm(grad)}")
-                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
-                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
-                logger.debug(f"Mean: {grad.mean().item()}")
-                logger.debug(f"Std: {grad.std().item()}")
-                return grad
-            connection_contraction.register_hook(contraction_hook)
-        
-        # Project using fiber metric with explicit gradient tracking
-        metric_contraction = torch.einsum('ij,bj->bi', fiber_metric, connection_contraction)
-        logger.debug(f"\n=== Metric Contraction ===")
-        logger.debug(f"Shape: {metric_contraction.shape}, requires_grad: {metric_contraction.requires_grad}")
-        if metric_contraction.grad_fn:
-            logger.debug(f"Metric contraction grad_fn: {metric_contraction.grad_fn}")
-        
-        # Add hook to track metric contraction gradients
-        if metric_contraction.requires_grad:
-            def metric_hook(grad):
-                logger.debug(f"\n=== Metric Contraction Gradient Hook ===")
-                logger.debug(f"Shape: {grad.shape}")
-                logger.debug(f"Gradient norm: {torch.norm(grad)}")
-                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
-                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
-                logger.debug(f"Mean: {grad.mean().item()}")
-                logger.debug(f"Std: {grad.std().item()}")
-                return grad
-            metric_contraction.register_hook(metric_hook)
-        
-        return metric_contraction
+        # Apply to section
+        return torch.einsum('jk,bj->bk', connection_form, section)
 
     #--------------------------------------------------------------------------
     # Stability and Analysis
@@ -1735,8 +1563,8 @@ class PatternFiberBundle(BaseFiberBundle):
         if connection_type == 'Levi-Civita':
             # Get metric and compute Christoffel symbols using existing implementation
             metric = self.compute_metric(tangent_vector)
-            # Clone metric values to maintain gradient chain
-            metric_values = metric.values.clone()
+            # Use metric values directly to maintain gradient chain
+            metric_values = metric.values
             logger.debug(f"\n=== Metric Computation ===")
             logger.debug(f"Metric shape: {metric_values.shape}, requires_grad: {metric_values.requires_grad}")
             if metric_values.grad_fn:
@@ -1755,13 +1583,13 @@ class PatternFiberBundle(BaseFiberBundle):
                     return grad
                 metric_values.register_hook(metric_hook)
             
-            # Create new metric tensor with cloned values
+            # Create new metric tensor with direct values
             metric = MetricTensor(values=metric_values, dimension=self.total_dim)
             
             # Compute Christoffel symbols with explicit gradient tracking
             christoffel = self.riemannian_framework.compute_christoffel(tangent_vector)
-            # Clone Christoffel values to maintain gradient chain
-            christoffel_values = christoffel.values.clone()
+            # Use Christoffel values directly to maintain gradient chain
+            christoffel_values = christoffel.values
             logger.debug(f"\n=== Christoffel Computation ===")
             logger.debug(f"Christoffel shape: {christoffel_values.shape}, requires_grad: {christoffel_values.requires_grad}")
             if christoffel_values.grad_fn:
@@ -1780,8 +1608,8 @@ class PatternFiberBundle(BaseFiberBundle):
                     return grad
                 christoffel_values.register_hook(christoffel_hook)
             
-            # Create connection form with explicit gradient tracking
-            connection_form = christoffel_values.clone()  # Clone to maintain gradient chain
+            # Use Christoffel values directly as connection form to maintain gradient chain
+            connection_form = christoffel_values
             logger.debug(f"\n=== Connection Form Creation ===")
             logger.debug(f"Connection form shape: {connection_form.shape}, requires_grad: {connection_form.requires_grad}")
             if connection_form.grad_fn:
@@ -1859,6 +1687,8 @@ class PatternFiberBundle(BaseFiberBundle):
         fiber_metric = self.metric[self.base_dim:, self.base_dim:].clone()
         logger.debug(f"\n=== Fiber Metric Extraction ===")
         logger.debug(f"Fiber metric shape: {fiber_metric.shape}, requires_grad: {fiber_metric.requires_grad}")
+        if fiber_metric.grad_fn:
+            logger.debug(f"Fiber metric grad_fn: {fiber_metric.grad_fn}")
 
         # Register gradient hook for fiber metric
         if fiber_metric.requires_grad:
@@ -1907,3 +1737,46 @@ class PatternFiberBundle(BaseFiberBundle):
             logger.debug(f"Std: {grad.std().item()}")
             return grad
         return hook
+
+    def track_gradient_flow(self, tensor: Tensor, name: str) -> None:
+        """Track gradient flow through a tensor by adding hooks and logging.
+        
+        Args:
+            tensor: Tensor to track gradients for
+            name: Name of the tensor for logging
+        """
+        if not tensor.requires_grad:
+            logger.debug(f"\n=== {name} ===")
+            logger.debug("No gradient tracking (requires_grad=False)")
+            return
+        
+        logger.debug(f"\n=== {name} ===")
+        logger.debug(f"Shape: {tensor.shape}")
+        logger.debug(f"requires_grad: {tensor.requires_grad}")
+        if tensor.grad_fn:
+            logger.debug(f"grad_fn: {tensor.grad_fn}")
+        
+        def hook(grad):
+            logger.debug(f"\n=== {name} Gradient ===")
+            logger.debug(f"Shape: {grad.shape}")
+            logger.debug(f"Norm: {torch.norm(grad)}")
+            logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+            logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+            logger.debug(f"Mean: {grad.mean().item()}")
+            logger.debug(f"Std: {grad.std().item()}")
+            return grad
+        
+        tensor.register_hook(hook)
+
+    def _add_gradient_hook(self, tensor: Tensor, name: str) -> None:
+        if tensor.requires_grad:
+            def hook(grad):
+                logger.debug(f"\n=== {name} Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            tensor.register_hook(hook)
