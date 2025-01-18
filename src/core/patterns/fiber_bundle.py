@@ -254,6 +254,9 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         result = torch.zeros_like(section).unsqueeze(0).expand(num_points, -1, -1)
         result[0] = section  # Initial condition
         
+        # Extract fiber metric for norm computations
+        fiber_metric = self.metric[self.base_dim:, self.base_dim:]
+        
         # Ensure path has correct base dimension
         if path.shape[-1] != self.base_dim:
             # If path has more dimensions, truncate
@@ -265,13 +268,14 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
                                    device=path.device, dtype=path.dtype)
                 path = torch.cat([path, padding], dim=-1)
         
-        # Compute path tangent vectors and normalize
+        # Compute path tangent vectors and normalize using base metric
         path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
-        path_lengths = torch.norm(path_tangent, dim=-1, keepdim=True)
-        path_tangent = path_tangent / (path_lengths + 1e-7)
+        base_metric = self.metric[:self.base_dim, :self.base_dim]
+        path_metric_norms = torch.sqrt(torch.einsum('...i,ij,...j->...', path_tangent, base_metric, path_tangent))
+        path_tangent = path_tangent / (path_metric_norms.unsqueeze(-1) + 1e-7)
         
-        # Store original norm for preservation
-        original_norm = torch.norm(section, dim=-1, keepdim=True)
+        # Store original metric norm for preservation
+        original_metric_norm = torch.sqrt(torch.einsum('...i,ij,...j->...', section, fiber_metric, section))
         
         # Adaptive RK4 integration
         t = 0.0
@@ -291,9 +295,9 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             # Compute next point
             next_point = current + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
             
-            # Normalize to preserve metric
-            current_norm = torch.norm(next_point, dim=-1, keepdim=True)
-            next_point = next_point * (original_norm / (current_norm + 1e-7))
+            # Normalize using metric to preserve metric compatibility
+            current_metric_norm = torch.sqrt(torch.einsum('...i,ij,...j->...', next_point, fiber_metric, next_point))
+            next_point = next_point * (original_metric_norm / (current_metric_norm + 1e-7)).unsqueeze(-1)
             
             # Update result
             result[current_point + 1] = next_point
@@ -313,23 +317,32 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         Returns:
             Transport step (shape: (fiber_dim,))
         """
-        # Compute connection form contraction
+        # Extract fiber metric
+        fiber_metric = self.metric[self.base_dim:, self.base_dim:]
+        
+        # Compute connection form contraction with metric lowering
         connection_form = torch.einsum('ijk,i->jk', self.connection, tangent)
         
         # Ensure section has correct shape for matrix multiplication
         section = section.reshape(-1, 1)
         
-        # Compute transport step
-        transport_step = -torch.matmul(connection_form, section).squeeze(-1)
+        # Compute transport step with metric compatibility
+        # First lower indices with metric
+        lowered_section = torch.matmul(fiber_metric, section)
         
-        # Project using metric to ensure metric compatibility
-        metric = self.metric[self.base_dim:, self.base_dim:]
-        transport_step = torch.matmul(metric, transport_step.unsqueeze(-1)).squeeze(-1)
+        # Then compute transport step
+        transport_step = -torch.matmul(connection_form, lowered_section).squeeze(-1)
         
-        # Preserve original norm exactly
-        original_norm = torch.norm(section)
-        current_norm = torch.norm(transport_step)
-        transport_step = transport_step * (original_norm / (current_norm + 1e-7))
+        # Raise indices back with inverse metric
+        # Use pseudo-inverse for numerical stability
+        fiber_metric_inv = torch.linalg.pinv(fiber_metric)
+        transport_step = torch.matmul(fiber_metric_inv, transport_step.unsqueeze(-1)).squeeze(-1)
+        
+        # Preserve metric norm exactly while maintaining gradients
+        metric_norm = torch.sqrt(torch.einsum('i,ij,j->', section.squeeze(-1), fiber_metric, section.squeeze(-1)))
+        current_metric_norm = torch.sqrt(torch.einsum('i,ij,j->', transport_step, fiber_metric, transport_step))
+        scale_factor = metric_norm / (current_metric_norm + 1e-7)
+        transport_step = transport_step * scale_factor
         
         return transport_step
 

@@ -16,6 +16,19 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Optional, Tuple, Dict, Any, cast, Callable
 from typing_extensions import Protocol, runtime_checkable
+import logging
+
+# Setup logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Create console handler if none exists
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
 
 from .riemannian_base import (
     RiemannianStructure,
@@ -73,6 +86,9 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         self.connection_coeffs = nn.Parameter(
             torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=self.dtype)
         )
+        
+        # Initialize metric parameter as None (will be set by subclasses if needed)
+        self.metric_param = None
         
         # Cache for intermediate computations
         self.cache: Dict[str, Any] = {}
@@ -219,10 +235,29 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         perturbation = torch.matmul(
             self.metric_factors.T,
             self.metric_factors
-        ).expand(batch_size, -1, -1)
+        )
         
-        # Ensure consistent dtype
-        values = (identity + perturbation).to(dtype=self.dtype)
+        # Ensure perturbation has proper batch dimension
+        perturbation = perturbation.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Combine identity and perturbation without in-place operations
+        values = identity + perturbation
+        
+        # Ensure proper dtype and gradient tracking
+        values = values.to(dtype=self.dtype).requires_grad_(True)
+        
+        # Add hook to track metric gradients
+        if values.requires_grad:
+            def metric_hook(grad):
+                logger.debug(f"\n=== Metric Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            values.register_hook(metric_hook)
         
         # Validate metric properties
         is_compatible = self.validate_metric_properties(
@@ -236,81 +271,98 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         )
         
     def compute_christoffel(self, points: Tensor) -> ChristoffelSymbols[Tensor]:
-        """Compute Christoffel symbols using autograd.
-        
-        Implements the formula:
-        Γ^k_ij = (1/2) g^kl (∂_i g_jl + ∂_j g_il - ∂_l g_ij)
-        
-        Args:
-            points: Points at which to compute symbols
-            
-        Returns:
-            Christoffel symbols at points
-        """
-        points = self._ensure_gradients(points)
-        batch_size = points.shape[0]
-        
-        # Get metric and inverse
+        """Compute Christoffel symbols using autograd with metric parameter gradients."""
+        # Get metric tensor with gradient tracking
         metric = self.compute_metric(points)
-        metric_inv = torch.linalg.inv(metric.values)
+        metric_values = metric.values  # Shape: [batch_size, dim, dim]
         
-        # Initialize Christoffel symbols
-        christoffel = torch.zeros(
-            batch_size,
-            self.manifold_dim,
-            self.manifold_dim,
-            self.manifold_dim,
-            device=self.device,
-            dtype=self.dtype
+        # Compute metric derivatives using autograd
+        batch_size = points.shape[0]
+        dim = self.manifold_dim
+        
+        # Initialize metric derivatives tensor
+        metric_derivatives = torch.zeros(
+            batch_size, dim, dim, dim,
+            device=points.device,
+            dtype=points.dtype
         )
         
-        # Compute metric derivatives
-        for k in range(self.manifold_dim):
-            grad_result = torch.autograd.grad(
-                metric.values[..., k].sum(),
-                points,
+        # For each coordinate, compute derivatives using autograd
+        for k in range(dim):
+            # Create graph for metric derivatives
+            metric_k = metric_values[..., k]
+            
+            # Compute gradients with respect to points
+            inputs = [points]
+            if hasattr(self, 'metric_param') and self.metric_param is not None:
+                inputs.append(self.metric_param)
+            
+            grads = torch.autograd.grad(
+                metric_k.sum(),
+                inputs,
                 create_graph=True,
                 allow_unused=True,
                 retain_graph=True
-            )[0]
+            )
             
-            # Handle None gradients by providing a zero tensor
-            if grad_result is None:
-                grad_result = torch.zeros(
-                    batch_size,
-                    self.manifold_dim,
-                    self.manifold_dim,
-                    device=self.device,
-                    dtype=self.dtype
-                )
-            else:
-                # Reshape gradient to match expected dimensions
-                grad_result = grad_result.reshape(batch_size, self.manifold_dim, self.manifold_dim)
-                
-            self.cache[f'metric_deriv_{k}'] = grad_result
+            # Handle point gradients
+            point_grad = grads[0]
+            if point_grad is not None:
+                point_grad = point_grad.reshape(batch_size, dim, dim)
+                metric_derivatives[..., k] = point_grad
             
-        # Construct Christoffel symbols
-        for i in range(self.manifold_dim):
-            for j in range(self.manifold_dim):
-                for k in range(self.manifold_dim):
-                    # Get relevant derivatives
-                    d_i = self.cache[f'metric_deriv_{i}']
-                    d_j = self.cache[f'metric_deriv_{j}']
-                    d_k = self.cache[f'metric_deriv_{k}']
+            # Handle metric parameter gradients if present
+            if len(grads) > 1 and grads[1] is not None:
+                metric_grad = grads[1]
+                # Reshape and accumulate metric gradients
+                metric_grad = metric_grad.reshape(batch_size, dim, dim)
+                metric_derivatives[..., k] = metric_derivatives[..., k] + metric_grad
+        
+        # Compute inverse metric with gradient tracking
+        metric_inverse = torch.inverse(metric_values)
+        
+        # Pre-allocate Christoffel symbols tensor
+        christoffel_values = torch.zeros(
+            batch_size, dim, dim, dim,
+            device=points.device,
+            dtype=points.dtype
+        )
+        
+        # Compute Christoffel symbols using the formula:
+        # Γᵏᵢⱼ = 1/2 gᵏˡ (∂ᵢgⱼˡ + ∂ⱼgᵢˡ - ∂ˡgᵢⱼ)
+        for i in range(dim):
+            for j in range(dim):
+                for k in range(dim):
+                    # First term: gᵏˡ ∂ᵢgⱼˡ
+                    term1 = torch.einsum('...l,...jl->...', metric_inverse[:, k, :], metric_derivatives[:, i, j, :])
                     
-                    # Compute components
-                    term1 = d_i[..., j, k]
-                    term2 = d_j[..., i, k]
-                    term3 = -d_k[..., i, j]
+                    # Second term: gᵏˡ ∂ⱼgᵢˡ
+                    term2 = torch.einsum('...l,...il->...', metric_inverse[:, k, :], metric_derivatives[:, j, i, :])
                     
-                    # Contract with inverse metric
-                    christoffel[..., k, i, j] = 0.5 * torch.sum(
-                        metric_inv[..., k, :] * (term1 + term2 + term3).unsqueeze(-1),
-                        dim=-1
-                    )
+                    # Third term: -gᵏˡ ∂ˡgᵢⱼ
+                    term3 = -torch.einsum('...l,...ij->...', metric_inverse[:, k, :], metric_derivatives[:, :, i, j])
                     
+                    # Combine terms without in-place operations
+                    christoffel_values[:, k, i, j] = 0.5 * (term1 + term2 - term3)
+        
+        # Create new tensor with requires_grad=True
+        christoffel_values = christoffel_values.requires_grad_(True)
+        
+        # Add hook to track Christoffel gradients
+        if christoffel_values.requires_grad:
+            def christoffel_hook(grad):
+                logger.debug(f"\n=== Christoffel Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            christoffel_values.register_hook(christoffel_hook)
+        
         return ChristoffelSymbols(
-            values=christoffel,
+            values=christoffel_values,
             metric=metric,
             is_symmetric=True  # Guaranteed by construction
         )
@@ -321,28 +373,14 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         path: Tensor,
         connection: Optional[ChristoffelSymbols[Tensor]] = None
     ) -> Tensor:
-        """Parallel transport using numerical integration.
+        """Parallel transport using numerical integration."""
+        # Ensure vector and path require gradients
+        vector = vector.detach().requires_grad_(True)
+        path = path.detach().requires_grad_(True)
         
-        Implements parallel transport equation:
-        ∇_γ̇ V = 0
-        
-        Args:
-            vector: Vector to transport
-            path: Path along which to transport
-            connection: Optional pre-computed connection
-            
-        Returns:
-            Parallel transported vector
-        """
-        # Initialize result tensor
-        num_points = path.shape[0]
-        result = torch.zeros(
-            num_points,
-            self.manifold_dim,
-            device=self.device,
-            dtype=self.dtype
-        )
-        result[0] = vector
+        # Initialize result list to avoid in-place operations
+        result = []
+        result.append(vector)  # Initial condition
         
         # Get connection if not provided
         if connection is None:
@@ -352,17 +390,18 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         tangents = path[1:] - path[:-1]
         
         # Parallel transport equation
-        for t in range(num_points - 1):
+        for t in range(len(path) - 1):
             # Transport step
             step = -torch.einsum(
                 '...ijk,...j,...k->...i',
                 connection.values[t],
-                result[t],
+                result[-1].detach(),  # Detach to prevent in-place op issues
                 tangents[t]
             )
-            result[t + 1] = result[t] + step
+            result.append(result[-1] + step)
             
-        return result
+        # Stack results into a tensor
+        return torch.stack(result)
         
     def compute_curvature(
         self,
@@ -457,51 +496,40 @@ class BaseRiemannianStructure(nn.Module, RiemannianStructure[Tensor], Validation
         steps: int = 100,
         step_size: float = 0.01
     ) -> Tuple[Tensor, Tensor]:
-        """Compute geodesic flow using numerical integration.
+        """Compute geodesic flow using numerical integration."""
+        # Ensure inputs require gradients
+        initial_point = initial_point.detach().requires_grad_(True)
+        initial_velocity = initial_velocity.detach().requires_grad_(True)
         
-        Implements the geodesic equation:
-        d²x^i/dt² + Γ^i_jk dx^j/dt dx^k/dt = 0
-        
-        Args:
-            initial_point: Starting point
-            initial_velocity: Initial velocity
-            steps: Number of integration steps
-            step_size: Integration step size
-            
-        Returns:
-            Tuple of (points along geodesic, velocities along geodesic)
-        """
-        # Initialize arrays for points and velocities
-        points = torch.zeros(
-            steps,
-            self.manifold_dim,
-            device=self.device,
-            dtype=self.dtype
-        )
-        velocities = torch.zeros_like(points)
-        
-        # Set initial conditions
-        points[0] = initial_point
-        velocities[0] = initial_velocity
+        # Initialize lists for points and velocities to avoid in-place operations
+        points = [initial_point]  # Initial point
+        velocities = [initial_velocity]  # Initial velocity
         
         # Integrate geodesic equation
         for t in range(steps - 1):
             # Get Christoffel symbols at current point
-            christoffel = self.compute_christoffel(points[t].unsqueeze(0))
+            christoffel = self.compute_christoffel(points[-1].unsqueeze(0))
             
             # Compute acceleration
             acceleration = -torch.einsum(
                 '...ijk,...j,...k->...i',
                 christoffel.values[0],
-                velocities[t],
-                velocities[t]
+                velocities[-1].detach(),  # Detach to prevent in-place op issues
+                velocities[-1]
             )
             
             # Update velocity and position
-            velocities[t + 1] = velocities[t] + step_size * acceleration
-            points[t + 1] = points[t] + step_size * velocities[t]
+            next_velocity = velocities[-1] + step_size * acceleration
+            next_point = points[-1] + step_size * velocities[-1]
             
-        return points, velocities
+            points.append(next_point)
+            velocities.append(next_velocity)
+            
+        # Stack results into tensors
+        points_tensor = torch.stack(points)
+        velocities_tensor = torch.stack(velocities)
+        
+        return points_tensor, velocities_tensor
         
     def lie_derivative_metric(
         self,
@@ -680,6 +708,45 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
     ):
         super().__init__(manifold_dim, pattern_dim, device, dtype)
         self.pattern_dim = pattern_dim
+        self.metric_param = None  # Will be set by the fiber bundle
+        
+    def set_metric_param(self, metric_param: nn.Parameter) -> None:
+        """Set the metric parameter from the fiber bundle."""
+        self.metric_param = metric_param
+        
+    def compute_metric(self, points: Tensor) -> MetricTensor[Tensor]:
+        """Compute metric tensor using the fiber bundle's metric parameter."""
+        if self.metric_param is None:
+            return super().compute_metric(points)
+            
+        batch_size = points.shape[0]
+        
+        # Instead of expand, use repeat to maintain gradient chain
+        values = self.metric_param.repeat(batch_size, 1, 1)
+        
+        # Add hook to track metric gradients
+        if values.requires_grad:
+            def metric_hook(grad):
+                logger.debug(f"\n=== Metric Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            values.register_hook(metric_hook)
+        
+        # Validate metric properties
+        is_compatible = self.validate_metric_properties(
+            MetricTensor(values=values, dimension=self.manifold_dim)
+        )
+        
+        return MetricTensor(
+            values=values,
+            dimension=self.manifold_dim,
+            is_compatible=is_compatible
+        )
         
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Apply the Riemannian framework to input data."""
@@ -724,6 +791,110 @@ class PatternRiemannianStructure(BaseRiemannianStructure):
         """
         # Simple projection that preserves the first manifold_dim components
         return total_space[..., :self.manifold_dim]
+        
+    def compute_christoffel(self, points: Tensor) -> ChristoffelSymbols[Tensor]:
+        """Compute Christoffel symbols using autograd with metric parameter gradients.
+        
+        Args:
+            points: Points at which to compute Christoffel symbols
+            
+        Returns:
+            ChristoffelSymbols object containing the computed symbols
+        """
+        # Get metric tensor with gradient tracking
+        metric = self.compute_metric(points)
+        metric_values = metric.values  # Shape: [batch_size, dim, dim]
+        
+        # Compute metric derivatives using autograd
+        batch_size = points.shape[0]
+        dim = self.manifold_dim
+        
+        # Initialize metric derivatives tensor
+        metric_derivatives = torch.zeros(
+            batch_size, dim, dim, dim,
+            device=points.device,
+            dtype=points.dtype
+        )
+        
+        # For each coordinate, compute derivatives using autograd
+        for k in range(dim):
+            # Create graph for metric derivatives
+            metric_k = metric_values[..., k]
+            
+            # Compute gradients with respect to points
+            inputs = [points]
+            if hasattr(self, 'metric_param') and self.metric_param is not None:
+                inputs.append(self.metric_param)
+            
+            grads = torch.autograd.grad(
+                metric_k.sum(),
+                inputs,
+                create_graph=True,
+                allow_unused=True,
+                retain_graph=True
+            )
+            
+            # Handle point gradients
+            point_grad = grads[0]
+            if point_grad is not None:
+                point_grad = point_grad.reshape(batch_size, dim, dim)
+                metric_derivatives[..., k] = point_grad
+            
+            # Handle metric parameter gradients if present
+            if len(grads) > 1 and grads[1] is not None:
+                metric_grad = grads[1]
+                # Reshape and accumulate metric gradients
+                metric_grad = metric_grad.reshape(batch_size, dim, dim)
+                metric_derivatives[..., k] = metric_derivatives[..., k] + metric_grad
+        
+        # Compute inverse metric with gradient tracking
+        metric_inverse = torch.inverse(metric_values)
+        
+        # Pre-allocate Christoffel symbols tensor
+        christoffel_values = torch.zeros(
+            batch_size, dim, dim, dim,
+            device=points.device,
+            dtype=points.dtype
+        )
+        
+        # Compute Christoffel symbols using the formula:
+        # Γᵏᵢⱼ = 1/2 gᵏˡ (∂ᵢgⱼˡ + ∂ⱼgᵢˡ - ∂ˡgᵢⱼ)
+        for i in range(dim):
+            for j in range(dim):
+                for k in range(dim):
+                    # First term: gᵏˡ ∂ᵢgⱼˡ
+                    term1 = torch.einsum('...l,...jl->...', metric_inverse[:, k, :], metric_derivatives[:, i, j, :])
+                    
+                    # Second term: gᵏˡ ∂ⱼgᵢˡ
+                    term2 = torch.einsum('...l,...il->...', metric_inverse[:, k, :], metric_derivatives[:, j, i, :])
+                    
+                    # Third term: -gᵏˡ ∂ˡgᵢⱼ
+                    term3 = -torch.einsum('...l,...ij->...', metric_inverse[:, k, :], metric_derivatives[:, :, i, j])
+                    
+                    # Combine terms without in-place operations
+                    christoffel_values[:, k, i, j] = 0.5 * (term1 + term2 - term3)
+        
+        # Create new tensor with requires_grad=True
+        christoffel_values = christoffel_values.requires_grad_(True)
+        
+        # Add hook to track Christoffel gradients
+        if christoffel_values.requires_grad:
+            def christoffel_hook(grad):
+                logger.debug(f"\n=== Christoffel Gradient Hook ===")
+                logger.debug(f"Shape: {grad.shape}")
+                logger.debug(f"Gradient norm: {torch.norm(grad)}")
+                logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                logger.debug(f"Mean: {grad.mean().item()}")
+                logger.debug(f"Std: {grad.std().item()}")
+                return grad
+            christoffel_values.register_hook(christoffel_hook)
+        
+        return ChristoffelSymbols(
+            values=christoffel_values,
+            metric=metric,
+            is_symmetric=True  # Guaranteed by construction
+        )
 
 @runtime_checkable
 class RiemannianFramework(Protocol):

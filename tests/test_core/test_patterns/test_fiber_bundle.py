@@ -10,11 +10,13 @@ The tests are organized to ensure both implementations correctly
 satisfy the FiberBundle protocol while maintaining their specific features.
 """
 
-from typing import Any
+from typing import Any, cast
 import numpy as np
 import math
 import pytest
 import torch
+from torch.autograd import profiler, detect_anomaly
+from torch.autograd.profiler import record_function
 import yaml
 import os
 import hypothesis
@@ -767,9 +769,8 @@ class TestPatternFiberBundle:
                 ), "Connection should maintain skew-symmetry for any base direction combination"
                 
                 # Verify fiber metric compatibility
-                # Convert Parameter to Tensor for indexing
-                metric_tensor = torch.Tensor(pattern_bundle.metric)  # Cast to Tensor
-                fiber_metric = metric_tensor[base_dim:, base_dim:]  # Now we can index
+                # Keep metric as Parameter to maintain gradient chain
+                fiber_metric = pattern_bundle.metric[base_dim:, base_dim:]  # Now we can index
                 
                 metric_compat = torch.matmul(connection, fiber_metric) + \
                               torch.matmul(fiber_metric, connection.transpose(-2, -1))
@@ -970,9 +971,8 @@ class TestConnectionFormHypothesis:
         
         # Get fiber metric - only for PatternFiberBundle
         if isinstance(bundle, PatternFiberBundle):
-            # Convert Parameter to Tensor for indexing
-            metric_tensor = torch.Tensor(bundle.metric)  # Cast to Tensor
-            fiber_metric = metric_tensor[base_dim:, base_dim:]  # Now we can index
+            # Keep metric as Parameter to maintain gradient chain
+            fiber_metric = bundle.metric[base_dim:, base_dim:]  # Now we can index
             
             # Test metric compatibility: ω_a^b g_bc + ω_a^c g_bc = 0
             metric_compat = torch.matmul(connection, fiber_metric) + \
@@ -1167,6 +1167,9 @@ class TestGeometricComponents:
         2. Symmetry properties
         3. Consistency with finite differences
         """
+        # Set up logging
+        logger = logging.getLogger('metric_derivatives_test')
+        
         # Get test dimensions
         base_dim = test_config["fiber_bundle"]["base_dim"]
         fiber_dim = test_config["fiber_bundle"]["fiber_dim"]
@@ -1181,8 +1184,8 @@ class TestGeometricComponents:
         metric_tensor = pattern_bundle.compute_metric(point.unsqueeze(0))
         metric = metric_tensor.values[0]
         
-        print("\nInitial metric:")
-        print(metric)
+        logger.debug("\nInitial metric:")
+        logger.debug(f"\n{metric}")
         
         # Verify initial metric is symmetric
         assert torch.allclose(
@@ -1225,13 +1228,13 @@ class TestGeometricComponents:
         
         # Verify symmetry in last two indices (metric symmetry)
         for i in range(total_dim):
-            print(f"\nDerivatives for i={i}:")
-            print("Original:")
-            print(metric_derivs[i])
-            print("Transposed:")
-            print(metric_derivs[i].transpose(-2, -1))
-            print("Difference:")
-            print(metric_derivs[i] - metric_derivs[i].transpose(-2, -1))
+            logger.debug(f"\nDerivatives for i={i}:")
+            logger.debug("Original:")
+            logger.debug(f"\n{metric_derivs[i]}")
+            logger.debug("Transposed:")
+            logger.debug(f"\n{metric_derivs[i].transpose(-2, -1)}")
+            logger.debug("Difference:")
+            logger.debug(f"\n{metric_derivs[i] - metric_derivs[i].transpose(-2, -1)}")
             
             # Account for regularization in the comparison
             reg_scale = 1e-5  # Same as in implementation
@@ -1268,6 +1271,11 @@ class TestGeometricComponents:
 class TestGradientFlow:
     """Test suite for gradient flow through fiber bundle parameters."""
 
+    @pytest.fixture(autouse=True)
+    def setup_logging(self):
+        """Set up logging for gradient flow tests."""
+        self.logger = logging.getLogger('gradient_flow_tests')
+
     def test_metric_parameter_gradients(self, pattern_bundle):
         """Test that gradients flow through the metric parameter."""
         # Create test input
@@ -1297,15 +1305,15 @@ class TestGradientFlow:
         
         # Get connection form
         connection_form = pattern_bundle.connection_form(tangent_vector)
-        print(f"\nConnection form shape: {connection_form.shape}")
-        print(f"Connection form requires_grad: {connection_form.requires_grad}")
+        self.logger.debug(f"Connection form shape: {connection_form.shape}")
+        self.logger.debug(f"Connection form requires_grad: {connection_form.requires_grad}")
         if connection_form.grad_fn:
-            print(f"Connection form grad_fn: {connection_form.grad_fn}")
+            self.logger.debug(f"Connection form grad_fn: {connection_form.grad_fn}")
         
         # Create a dummy loss that depends on the connection
         loss = connection_form.sum()
-        print(f"Loss value: {loss.item()}")
-        print(f"Loss grad_fn: {loss.grad_fn}")
+        self.logger.debug(f"Loss value: {loss.item()}")
+        self.logger.debug(f"Loss grad_fn: {loss.grad_fn}")
         
         # Zero gradients before backward
         if pattern_bundle.connection.grad is not None:
@@ -1314,11 +1322,11 @@ class TestGradientFlow:
         # Compute gradients
         loss.backward()
         
-        # Print gradient information
-        print(f"\nConnection parameter grad shape: {pattern_bundle.connection.grad.shape if pattern_bundle.connection.grad is not None else None}")
+        # Log gradient information
+        self.logger.debug(f"Connection parameter grad shape: {pattern_bundle.connection.grad.shape if pattern_bundle.connection.grad is not None else None}")
         if pattern_bundle.connection.grad is not None:
-            print(f"Connection parameter grad sum: {pattern_bundle.connection.grad.sum().item()}")
-            print(f"Connection parameter grad max: {pattern_bundle.connection.grad.abs().max().item()}")
+            self.logger.debug(f"Connection parameter grad sum: {pattern_bundle.connection.grad.sum().item()}")
+            self.logger.debug(f"Connection parameter grad max: {pattern_bundle.connection.grad.abs().max().item()}")
         
         # Check that connection parameter has gradients
         assert pattern_bundle.connection.grad is not None, "Connection parameter should have gradients"
@@ -1327,48 +1335,129 @@ class TestGradientFlow:
 
     def test_parallel_transport_gradients(self, pattern_bundle):
         """Test that gradients flow through parallel transport."""
-        # Create test input
-        section = torch.randn(pattern_bundle.fiber_dim, requires_grad=True)
+        # Create test input with batch dimension
+        section = torch.randn(1, pattern_bundle.fiber_dim, requires_grad=True)  # Add batch dimension
         path = torch.randn(10, pattern_bundle.base_dim)  # 10 points in base space
+    
+        # Set up profiler
+        with profiler.profile(use_cuda=False, record_shapes=True) as prof:
+            with record_function("parallel_transport_test"):
+                # Log initial states and shapes
+                self.logger.debug("\n=== Initial States ===")
+                self.logger.debug(f"Initial section shape: {section.shape}, requires_grad: {section.requires_grad}")
+                if section.grad_fn:
+                    self.logger.debug(f"Initial section grad_fn: {section.grad_fn}")
+                self.logger.debug(f"Path shape: {path.shape}, requires_grad: {path.requires_grad}")
+                if path.grad_fn:
+                    self.logger.debug(f"Path grad_fn: {path.grad_fn}")
         
-        # Print initial states
-        print(f"\nInitial section requires_grad: {section.requires_grad}")
-        print(f"Initial metric requires_grad: {pattern_bundle.metric.requires_grad}")
+                # Log bundle parameter states
+                self.logger.debug(f"Bundle metric shape: {pattern_bundle.metric.shape}, requires_grad: {pattern_bundle.metric.requires_grad}")
+                self.logger.debug(f"Bundle connection shape: {pattern_bundle.connection.shape}, requires_grad: {pattern_bundle.connection.requires_grad}")
         
-        # Perform parallel transport
-        transported = pattern_bundle.parallel_transport(section, path)
-        print(f"\nTransported shape: {transported.shape}")
-        print(f"Transported requires_grad: {transported.requires_grad}")
-        if transported.grad_fn:
-            print(f"Transported grad_fn: {transported.grad_fn}")
+                # Add gradient hooks with more detailed tracking
+                def create_grad_hook(name):
+                    def hook(grad):
+                        self.logger.debug(f"\n=== {name} Gradient Hook ===")
+                        self.logger.debug(f"Shape: {grad.shape}")
+                        self.logger.debug(f"Norm: {torch.norm(grad)}")
+                        self.logger.debug(f"Has NaN: {torch.isnan(grad).any()}")
+                        self.logger.debug(f"Has Inf: {torch.isinf(grad).any()}")
+                        self.logger.debug(f"Mean: {grad.mean().item()}")
+                        self.logger.debug(f"Std: {grad.std().item()}")
+                        return grad
+                    return hook
         
-        # Create a dummy loss that depends on the transported section
-        loss = transported.sum()
-        print(f"Loss value: {loss.item()}")
-        print(f"Loss grad_fn: {loss.grad_fn}")
+                # Register hooks for all parameters
+                section.register_hook(create_grad_hook("Section"))
+                pattern_bundle.metric.register_hook(create_grad_hook("Metric"))
+                pattern_bundle.connection.register_hook(create_grad_hook("Connection"))
         
-        # Zero gradients before backward
-        if pattern_bundle.metric.grad is not None:
-            pattern_bundle.metric.grad.zero_()
+                # Set up saved tensors hooks to track intermediate values
+                saved_tensors = []
+                def save_hook(tensor):
+                    saved_tensors.append(tensor)
+                    return tensor
+                def load_hook(tensor):
+                    return tensor
+        
+                with torch.autograd.graph.saved_tensors_hooks(save_hook, load_hook):
+                    # Perform parallel transport
+                    transported = pattern_bundle.parallel_transport(section, path)
+                    self.logger.debug(f"\n=== Transported Result ===")
+                    self.logger.debug(f"Transported shape: {transported.shape}, requires_grad: {transported.requires_grad}")
+                    if transported.grad_fn:
+                        self.logger.debug(f"Transported grad_fn type: {type(transported.grad_fn).__name__}")
+                        self.logger.debug(f"Transported grad_fn next functions: {[(type(fn[0]).__name__, fn[1]) for fn in transported.grad_fn.next_functions]}")
+        
+                    # Create a dummy loss that depends on the transported section
+                    loss = transported.sum()
+                    self.logger.debug(f"\n=== Loss Information ===")
+                    self.logger.debug(f"Loss value: {loss.item()}")
+                    if loss.grad_fn:
+                        self.logger.debug(f"Loss grad_fn type: {type(loss.grad_fn).__name__}")
+                        self.logger.debug(f"Loss grad_fn next functions: {[(type(fn[0]).__name__, fn[1]) for fn in loss.grad_fn.next_functions]}")
+        
+                    # Zero gradients before backward
+                    if pattern_bundle.metric.grad is not None:
+                        pattern_bundle.metric.grad.zero_()
+                    if pattern_bundle.connection.grad is not None:
+                        pattern_bundle.connection.grad.zero_()
+                    if section.grad is not None:
+                        section.grad.zero_()
+        
+                    # Compute gradients with anomaly detection
+                    with detect_anomaly():
+                        loss.backward()
+        
+        # Log profiler results
+        self.logger.debug("\n=== Autograd Profiler Results ===")
+        try:
+            if isinstance(prof, profiler.profile):
+                table = prof.key_averages().table(sort_by="cpu_time_total", row_limit=10)
+                self.logger.debug(table)
+            else:
+                self.logger.debug("Profiler not available")
+        except Exception as e:
+            self.logger.debug(f"Could not get profiler results: {e}")
+        
+        # Log saved tensors information
+        self.logger.debug("\n=== Saved Tensors Information ===")
+        for i, tensor in enumerate(saved_tensors):
+            self.logger.debug(f"Tensor {i}:")
+            self.logger.debug(f"  Shape: {tensor.shape}")
+            self.logger.debug(f"  Requires grad: {tensor.requires_grad}")
+            if tensor.grad_fn:
+                self.logger.debug(f"  Grad fn: {type(tensor.grad_fn).__name__}")
+        
+        # Log final gradients with more detail
+        self.logger.debug("\n=== Final Gradients ===")
         if section.grad is not None:
-            section.grad.zero_()
+            self.logger.debug(f"Section grad:")
+            self.logger.debug(f"  Shape: {section.grad.shape}")
+            self.logger.debug(f"  Norm: {torch.norm(section.grad)}")
+            self.logger.debug(f"  Mean: {section.grad.mean()}")
+            self.logger.debug(f"  Std: {section.grad.std()}")
         
-        # Compute gradients
-        loss.backward()
-        
-        # Print gradient information
-        print(f"\nSection grad shape: {section.grad.shape if section.grad is not None else None}")
-        print(f"Metric grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
-        if section.grad is not None:
-            print(f"Section grad sum: {section.grad.sum().item()}")
         if pattern_bundle.metric.grad is not None:
-            print(f"Metric grad sum: {pattern_bundle.metric.grad.sum().item()}")
+            self.logger.debug(f"Metric grad:")
+            self.logger.debug(f"  Shape: {pattern_bundle.metric.grad.shape}")
+            self.logger.debug(f"  Norm: {torch.norm(pattern_bundle.metric.grad)}")
+            self.logger.debug(f"  Mean: {pattern_bundle.metric.grad.mean()}")
+            self.logger.debug(f"  Std: {pattern_bundle.metric.grad.std()}")
+        
+        if pattern_bundle.connection.grad is not None:
+            self.logger.debug(f"Connection grad:")
+            self.logger.debug(f"  Shape: {pattern_bundle.connection.grad.shape}")
+            self.logger.debug(f"  Norm: {torch.norm(pattern_bundle.connection.grad)}")
+            self.logger.debug(f"  Mean: {pattern_bundle.connection.grad.mean()}")
+            self.logger.debug(f"  Std: {pattern_bundle.connection.grad.std()}")
         
         # Check that section has gradients
         assert section.grad is not None, "Section should have gradients"
         assert not torch.allclose(section.grad, torch.zeros_like(section)), \
             "Section gradients should be non-zero"
-        
+    
         # Check that bundle parameters have gradients
         assert pattern_bundle.metric.grad is not None, "Metric parameter should have gradients"
         assert pattern_bundle.connection.grad is not None, "Connection parameter should have gradients"
@@ -1383,10 +1472,10 @@ class TestGradientFlow:
         metric_tensor = pattern_bundle.compute_metric(points)
         metric_values = metric_tensor.values
         
-        print(f"\nMetric values shape: {metric_values.shape}")
-        print(f"Metric values requires_grad: {metric_values.requires_grad}")
+        self.logger.debug(f"Metric values shape: {metric_values.shape}")
+        self.logger.debug(f"Metric values requires_grad: {metric_values.requires_grad}")
         if metric_values.grad_fn:
-            print(f"Metric values grad_fn: {metric_values.grad_fn}")
+            self.logger.debug(f"Metric values grad_fn: {metric_values.grad_fn}")
         
         # Verify metric is symmetric
         assert torch.allclose(
@@ -1397,8 +1486,8 @@ class TestGradientFlow:
         
         # Create a dummy loss that depends on the metric
         loss = metric_values.sum()
-        print(f"Loss value: {loss.item()}")
-        print(f"Loss grad_fn: {loss.grad_fn}")
+        self.logger.debug(f"Loss value: {loss.item()}")
+        self.logger.debug(f"Loss grad_fn: {loss.grad_fn}")
         
         # Zero gradients before backward
         if pattern_bundle.metric.grad is not None:
@@ -1407,14 +1496,14 @@ class TestGradientFlow:
         # Compute gradients
         loss.backward()
         
-        # Print gradient information
-        print(f"\nMetric parameter grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
+        # Log gradient information
+        self.logger.debug(f"Metric parameter grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
         if pattern_bundle.metric.grad is not None:
-            print(f"Metric parameter grad sum: {pattern_bundle.metric.grad.sum().item()}")
-            print(f"Metric parameter grad max: {pattern_bundle.metric.grad.abs().max().item()}")
+            self.logger.debug(f"Metric parameter grad sum: {pattern_bundle.metric.grad.sum().item()}")
+            self.logger.debug(f"Metric parameter grad max: {pattern_bundle.metric.grad.abs().max().item()}")
             # Check symmetry difference
             grad_diff = pattern_bundle.metric.grad - pattern_bundle.metric.grad.transpose(-2, -1)
-            print(f"Gradient symmetry difference max: {grad_diff.abs().max().item()}")
+            self.logger.debug(f"Gradient symmetry difference max: {grad_diff.abs().max().item()}")
         
         # Check that metric parameter gradients are symmetric
         assert torch.allclose(
@@ -1431,35 +1520,35 @@ class TestGradientFlow:
         section = torch.randn(pattern_bundle.fiber_dim, requires_grad=True)
         path = torch.randn(10, pattern_bundle.base_dim)
         
-        print("\nInitial states:")
-        print(f"Points requires_grad: {points.requires_grad}")
-        print(f"Section requires_grad: {section.requires_grad}")
-        print(f"Metric requires_grad: {pattern_bundle.metric.requires_grad}")
-        print(f"Connection requires_grad: {pattern_bundle.connection.requires_grad}")
+        self.logger.debug("Initial states:")
+        self.logger.debug(f"Points requires_grad: {points.requires_grad}")
+        self.logger.debug(f"Section requires_grad: {section.requires_grad}")
+        self.logger.debug(f"Metric requires_grad: {pattern_bundle.metric.requires_grad}")
+        self.logger.debug(f"Connection requires_grad: {pattern_bundle.connection.requires_grad}")
         
         # Get metric tensor
         metric_tensor = pattern_bundle.compute_metric(points)
         metric_values = metric_tensor.values
-        print(f"\nMetric values requires_grad: {metric_values.requires_grad}")
+        self.logger.debug(f"Metric values requires_grad: {metric_values.requires_grad}")
         if metric_values.grad_fn:
-            print(f"Metric values grad_fn: {metric_values.grad_fn}")
+            self.logger.debug(f"Metric values grad_fn: {metric_values.grad_fn}")
         
         # Get connection form
         connection_form = pattern_bundle.connection_form(points)
-        print(f"Connection form requires_grad: {connection_form.requires_grad}")
+        self.logger.debug(f"Connection form requires_grad: {connection_form.requires_grad}")
         if connection_form.grad_fn:
-            print(f"Connection form grad_fn: {connection_form.grad_fn}")
+            self.logger.debug(f"Connection form grad_fn: {connection_form.grad_fn}")
         
         # Perform parallel transport
         transported = pattern_bundle.parallel_transport(section, path)
-        print(f"Transported requires_grad: {transported.requires_grad}")
+        self.logger.debug(f"Transported requires_grad: {transported.requires_grad}")
         if transported.grad_fn:
-            print(f"Transported grad_fn: {transported.grad_fn}")
+            self.logger.debug(f"Transported grad_fn: {transported.grad_fn}")
         
         # Create a combined loss
         loss = metric_values.sum() + connection_form.sum() + transported.sum()
-        print(f"\nLoss value: {loss.item()}")
-        print(f"Loss grad_fn: {loss.grad_fn}")
+        self.logger.debug(f"Loss value: {loss.item()}")
+        self.logger.debug(f"Loss grad_fn: {loss.grad_fn}")
         
         # Zero gradients before backward
         if points.grad is not None:
@@ -1474,21 +1563,21 @@ class TestGradientFlow:
         # Compute gradients
         loss.backward()
         
-        # Print gradient information
-        print("\nGradient information:")
-        print(f"Points grad shape: {points.grad.shape if points.grad is not None else None}")
-        print(f"Section grad shape: {section.grad.shape if section.grad is not None else None}")
-        print(f"Metric grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
-        print(f"Connection grad shape: {pattern_bundle.connection.grad.shape if pattern_bundle.connection.grad is not None else None}")
+        # Log gradient information
+        self.logger.debug("Gradient information:")
+        self.logger.debug(f"Points grad shape: {points.grad.shape if points.grad is not None else None}")
+        self.logger.debug(f"Section grad shape: {section.grad.shape if section.grad is not None else None}")
+        self.logger.debug(f"Metric grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
+        self.logger.debug(f"Connection grad shape: {pattern_bundle.connection.grad.shape if pattern_bundle.connection.grad is not None else None}")
         
         if points.grad is not None:
-            print(f"Points grad sum: {points.grad.sum().item()}")
+            self.logger.debug(f"Points grad sum: {points.grad.sum().item()}")
         if section.grad is not None:
-            print(f"Section grad sum: {section.grad.sum().item()}")
+            self.logger.debug(f"Section grad sum: {section.grad.sum().item()}")
         if pattern_bundle.metric.grad is not None:
-            print(f"Metric grad sum: {pattern_bundle.metric.grad.sum().item()}")
+            self.logger.debug(f"Metric grad sum: {pattern_bundle.metric.grad.sum().item()}")
         if pattern_bundle.connection.grad is not None:
-            print(f"Connection grad sum: {pattern_bundle.connection.grad.sum().item()}")
+            self.logger.debug(f"Connection grad sum: {pattern_bundle.connection.grad.sum().item()}")
         
         # Check all gradients exist and are non-zero
         assert points.grad is not None, "Points should have gradients"

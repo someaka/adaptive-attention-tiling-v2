@@ -239,3 +239,32 @@ def test_lie_derivative(riemannian_structure, test_points):
     # Test dimension
     assert lie_deriv.dimension == 3
     assert lie_deriv.values.shape == (1, 3, 3)
+
+def test_gradient_flow(riemannian_structure, test_points):
+    """Test gradient flow through metric and Christoffel symbols."""
+    # Compute metric with gradient tracking
+    metric = riemannian_structure.compute_metric(test_points)
+    assert metric.values.requires_grad, "Metric should require gradients"
+    
+    # Create a dummy loss based on metric values
+    loss = metric.values.sum()
+    loss.backward()
+    
+    # Check metric factors have gradients
+    assert riemannian_structure.metric_factors.grad is not None, "Metric factors should have gradients"
+    assert not torch.isnan(riemannian_structure.metric_factors.grad).any(), "Metric factor gradients should not be NaN"
+    
+    # Reset gradients
+    riemannian_structure.zero_grad()
+    
+    # Compute Christoffel symbols with gradient tracking
+    christoffel = riemannian_structure.compute_christoffel(test_points)
+    assert christoffel.values.requires_grad, "Christoffel symbols should require gradients"
+    
+    # Create a dummy loss based on Christoffel values
+    loss = christoffel.values.sum()
+    loss.backward()
+    
+    # Check metric factors have gradients
+    assert riemannian_structure.metric_factors.grad is not None, "Metric factors should have gradients from Christoffel"
+    assert not torch.isnan(riemannian_structure.metric_factors.grad).any(), "Metric factor gradients should not be NaN"
