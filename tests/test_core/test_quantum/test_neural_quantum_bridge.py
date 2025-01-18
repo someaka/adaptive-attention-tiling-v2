@@ -170,3 +170,33 @@ class TestNeuralQuantumBridge:
                 state,
                 invalid_state  # Mismatched dimensions
             ) 
+    
+    def test_scale_normalization_gradients(self, bridge, test_state):
+        """Test gradient flow through scale normalization."""
+        # Enable gradient tracking
+        x = test_state.clone().requires_grad_(True)
+        
+        # Track scale normalization gradients
+        scale_grads = []
+        def hook_fn(grad):
+            scale_grads.append(grad.clone())
+            return grad
+            
+        # Forward pass
+        output = bridge(x)
+        output.register_hook(hook_fn)
+        
+        # Compute loss that depends on scale
+        loss = (output.abs().mean() - 1.0) ** 2  # Loss sensitive to scaling
+        loss.backward()
+        
+        # Check gradient properties
+        assert len(scale_grads) > 0, "Scale normalization should have gradients"
+        assert not torch.isnan(scale_grads[0]).any(), "Scale gradients should not be NaN"
+        assert not torch.isinf(scale_grads[0]).any(), "Scale gradients should not be Inf"
+        assert torch.norm(scale_grads[0]) > 1e-8, "Scale gradients should not vanish"
+        assert torch.norm(scale_grads[0]) < 100, "Scale gradients should not explode"
+        
+        # Check that pattern bundle metric receives gradients
+        assert bridge.pattern_bundle.metric.grad is not None, "Pattern bundle metric should have gradients"
+        assert torch.norm(bridge.pattern_bundle.metric.grad) > 1e-8, "Pattern bundle metric gradients should not vanish" 

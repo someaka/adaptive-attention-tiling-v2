@@ -365,21 +365,28 @@ class NeuralQuantumBridge(nn.Module):
                 else:
                     raise ValueError(f"Attention pattern shape {attention_pattern.shape} does not match state dimension {state_dim}")
         
-        # Construct Hamiltonian from attention pattern
-        # H = -i log(A) where A is the attention pattern
-        # Add small identity to ensure attention pattern is invertible
+        # Construct Hamiltonian from attention pattern and pattern bundle metric
         attention_regularized = attention_pattern + torch.eye(
             state_dim,
             device=attention_pattern.device,
             dtype=working_dtype  # Use working dtype
         ).unsqueeze(0) * 1e-6
         
-        # Compute matrix logarithm
+        # Use pattern bundle metric to modify Hamiltonian
+        metric = self.pattern_bundle.metric.to(working_dtype)
+        # Extract just the base metric part since we're working with the base space
+        base_metric = metric[:state_dim, :state_dim]
+        base_metric_expanded = base_metric.unsqueeze(0).expand(batch_size * seq_len, -1, -1)
+        
+        # H = -i log(M A M) where M is the base metric and A is the attention pattern
+        metric_attention = torch.matmul(base_metric_expanded, torch.matmul(attention_regularized, base_metric_expanded))
+        
+        # Compute matrix logarithm with metric-modified attention
         try:
-            hamiltonian = -1j * torch.matrix_exp(attention_regularized)
+            hamiltonian = -1j * torch.matrix_exp(metric_attention)
         except RuntimeError:
             # If matrix exponential fails, use simpler Hamiltonian
-            hamiltonian = -1j * (attention_regularized - torch.eye(
+            hamiltonian = -1j * (metric_attention - torch.eye(
                 state_dim,
                 device=attention_pattern.device,
                 dtype=working_dtype  # Use working dtype
@@ -807,13 +814,19 @@ class NeuralQuantumBridge(nn.Module):
             x_imag = x.imag.to(torch.float64)  # Convert to float64
         else:
             x_real = x.to(torch.float64)  # Convert to float64
-            # Initialize imaginary part with small random values to ensure gradient flow
-            x_imag = torch.randn_like(x, dtype=torch.float64, requires_grad=True) * 0.01
+            # Use deterministic noise based on input tensor
+            generator = torch.Generator(device=x.device).manual_seed(42)
+            x_imag = torch.randn(x.shape, dtype=torch.float64, device=x.device, requires_grad=True, generator=generator) * 0.01
             
         # Apply separate layer normalization to real and imaginary parts
-        # Clone to ensure gradient flow and add small noise to prevent vanishing gradients
-        x_real = self.layer_norm_real(x_real.clone() + torch.randn_like(x_real) * 1e-6)
-        x_imag = self.layer_norm_imag(x_imag.clone() + torch.randn_like(x_imag) * 1e-6)
+        # Use deterministic noise based on input tensor
+        noise_seed = int(x.abs().sum().item() * 1e6) % (2**32 - 1)
+        generator = torch.Generator(device=x.device).manual_seed(noise_seed)
+        noise_real = torch.randn(x_real.shape, dtype=x_real.dtype, device=x_real.device, generator=generator) * 1e-6
+        noise_imag = torch.randn(x_imag.shape, dtype=x_imag.dtype, device=x_imag.device, generator=generator) * 1e-6
+        
+        x_real = self.layer_norm_real(x_real.clone() + noise_real)
+        x_imag = self.layer_norm_imag(x_imag.clone() + noise_imag)
         
         # Recombine into complex tensor
         x = torch.complex(x_real, x_imag)
@@ -834,13 +847,18 @@ class NeuralQuantumBridge(nn.Module):
             output_imag = output.imag.to(torch.float64)  # Convert to float64
         else:
             output_real = output.to(torch.float64)  # Convert to float64
-            # Initialize imaginary part with small random values
-            output_imag = torch.randn_like(output, dtype=torch.float64, requires_grad=True) * 0.01
+            # Use deterministic noise based on input tensor
+            generator = torch.Generator(device=output.device).manual_seed(42)
+            output_imag = torch.randn(output.shape, dtype=torch.float64, device=output.device, requires_grad=True, generator=generator) * 0.01
             
         # Apply separate manifold normalization to real and imaginary parts
-        # Clone and add small noise to prevent vanishing gradients
-        output_real = self.manifold_norm_real(output_real.clone() + torch.randn_like(output_real) * 1e-6)
-        output_imag = self.manifold_norm_imag(output_imag.clone() + torch.randn_like(output_imag) * 1e-6)
+        # Use same noise seed for consistency
+        generator = torch.Generator(device=output.device).manual_seed(noise_seed)
+        noise_real = torch.randn(output_real.shape, dtype=output_real.dtype, device=output_real.device, generator=generator) * 1e-6
+        noise_imag = torch.randn(output_imag.shape, dtype=output_imag.dtype, device=output_imag.device, generator=generator) * 1e-6
+        
+        output_real = self.manifold_norm_real(output_real.clone() + noise_real)
+        output_imag = self.manifold_norm_imag(output_imag.clone() + noise_imag)
         
         # Recombine into complex tensor
         output = torch.complex(output_real, output_imag)
@@ -848,7 +866,9 @@ class NeuralQuantumBridge(nn.Module):
         # Restore original norm while preserving gradients
         current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
         scale = original_norm / (current_norm + 1e-8)
-        output = output * scale.detach()  # Detach scale to prevent gradient explosion
+        # Use gradient stabilization instead of detaching
+        scale = torch.clamp(scale, min=0.1, max=10.0)  # Limit scale factor range
+        output = output * scale  # Remove detach to preserve gradient flow
         
         if not return_intermediates:
             return output
