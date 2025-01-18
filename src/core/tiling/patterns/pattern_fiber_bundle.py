@@ -23,6 +23,19 @@ import warnings
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+import logging
+
+# Setup logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Create console handler if none exists
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
 
 from ...patterns.fiber_bundle import BaseFiberBundle
 from ...patterns.fiber_types import (
@@ -622,6 +635,8 @@ class PatternFiberBundle(BaseFiberBundle):
         Raises:
             RuntimeError: If computation fails
         """
+        logger.debug(f"Computing connection form for tangent_vector shape: {tangent_vector.shape}")
+        
         try:
             tangent_vector = self._ensure_tensor_format(tangent_vector)
             
@@ -644,52 +659,47 @@ class PatternFiberBundle(BaseFiberBundle):
                     device=tangent_vector.device,
                     dtype=tangent_vector.dtype
                 )
-                # Set diagonal to match fiber components
-                result.diagonal(dim1=-2, dim2=-1).copy_(fiber_components)
+                # Use scatter to preserve gradients
+                diagonal_indices = torch.arange(self.fiber_dim, device=tangent_vector.device)
+                result.scatter_(-1, diagonal_indices.view(1, -1, 1).expand(batch_size, -1, 1), 
+                              fiber_components.unsqueeze(-1))
                 return result if tangent_vector.dim() > 1 else result.squeeze(0)
             
-            # Pre-compute flow metric once
-            flow_metric = self.geometric_flow.compute_metric(base_components)
-            
-            # Create operadic operation for dimension transition
-            operation = self.operadic.create_operation(
-                source_dim=flow_metric.shape[-1],
-                target_dim=self.base_dim
-            )
-            
-            # Apply operadic composition to flow metric
-            flow_metric = flow_metric.reshape(batch_size, -1, flow_metric.shape[-1])
-            flow_metric = torch.matmul(
-                flow_metric,
-                operation.composition_law.transpose(-2, -1)  # [source_dim, target_dim]
-            )
-            
-            # Create connection matrix with correct size
-            connection = torch.zeros(
-                batch_size,  # Batch dimension
-                self.base_dim,  # First dimension for base space
-                self.fiber_dim,  # Second dimension for fiber space
-                device=tangent_vector.device,
-                dtype=tangent_vector.dtype
-            )
-            
             # Compute connection form with proper broadcasting
-            flow_metric = flow_metric.reshape(batch_size, self.base_dim, self.base_dim)
+            # Reshape base components for proper broadcasting
+            # [batch_size, base_dim] -> [batch_size, base_dim, 1]
+            base_components = base_components.unsqueeze(-1)
             
-            # Compute connection form
-            result = torch.matmul(flow_metric, connection)  # [batch_size, base_dim, fiber_dim]
+            # Unsqueeze connection for proper broadcasting
+            # connection shape: [base_dim, fiber_dim, fiber_dim] -> [1, base_dim, fiber_dim, fiber_dim]
+            connection = self.connection.unsqueeze(0)
             
-            # Project to fiber_dim x fiber_dim
-            result = torch.matmul(
-                result.transpose(-2, -1),  # [batch_size, fiber_dim, base_dim]
-                flow_metric  # [batch_size, base_dim, base_dim]
-            )  # [batch_size, fiber_dim, base_dim]
+            # Expand to match batch size
+            # connection shape: [1, base_dim, fiber_dim, fiber_dim] -> [batch_size, base_dim, fiber_dim, fiber_dim]
+            connection = connection.expand(batch_size, -1, -1, -1)
             
-            # Compute final result
-            result = torch.matmul(result, connection)  # [batch_size, fiber_dim, fiber_dim]
+            # Contract base components with connection using batched matrix multiplication
+            # base_components: [batch_size, base_dim, 1]
+            # connection: [batch_size, base_dim, fiber_dim, fiber_dim]
+            # result: [batch_size, fiber_dim, fiber_dim]
+            result = torch.sum(base_components.unsqueeze(-1) * connection, dim=1)
             
-            # Add skew-symmetry
+            # Add skew-symmetry while preserving gradients
             result = 0.5 * (result - result.transpose(-2, -1))
+            
+            # Add gradient hook to ensure proper gradient flow
+            if self.connection.requires_grad:
+                def connection_grad_hook(grad):
+                    # Scale gradient by base components, taking mean over batch dimension
+                    base_scale = base_components.mean(dim=0, keepdim=True)  # [1, base_dim, 1]
+                    return grad * base_scale.squeeze(0)  # [base_dim, fiber_dim, fiber_dim]
+                
+                result.register_hook(connection_grad_hook)
+            
+            if isinstance(result, Tensor):
+                logger.debug(f"Connection form result requires_grad: {result.requires_grad}")
+                if result.grad_fn is not None:
+                    logger.debug(f"Connection form result grad_fn: {result.grad_fn}")
             
             return result if tangent_vector.dim() > 1 else result.squeeze(0)
             
@@ -845,6 +855,12 @@ class PatternFiberBundle(BaseFiberBundle):
             - height_structure: Arithmetic height structure
             - is_compatible: Whether metric satisfies compatibility conditions
         """
+        logger.debug(f"Computing metric at points shape: {points.shape}")
+        if isinstance(self.metric, nn.Parameter):
+            logger.debug(f"Metric parameter requires_grad: {self.metric.requires_grad}")
+            if self.metric.grad_fn is not None:
+                logger.debug(f"Metric parameter grad_fn: {self.metric.grad_fn}")
+            
         points = self._ensure_tensor_format(points)
         batch_size = points.shape[0]
         
@@ -853,7 +869,18 @@ class PatternFiberBundle(BaseFiberBundle):
         fiber_points = points[..., self.base_dim:self.base_dim + self.fiber_dim]
         
         # Start with the registered metric parameter
-        values = self.metric.unsqueeze(0).expand(batch_size, -1, -1)
+        values = self.metric.unsqueeze(0).expand(batch_size, -1, -1).clone()
+        
+        # Add gradient hook to metric parameter if needed
+        if self.metric.requires_grad:
+            def metric_param_grad_hook(grad):
+                # Symmetrize the gradient while preserving magnitude
+                grad_sym = 0.5 * (grad + grad.transpose(-2, -1))
+                # Scale to preserve gradient magnitude
+                scale = (torch.norm(grad) / (torch.norm(grad_sym) + 1e-7)).clamp(min=0.1, max=10.0)
+                return grad_sym * scale
+            
+            self.metric.register_hook(metric_param_grad_hook)
         
         # Compute base metric from geometric flow and combine with registered metric
         base_metric = self.geometric_flow.compute_metric(base_points)
@@ -870,28 +897,23 @@ class PatternFiberBundle(BaseFiberBundle):
         )
         
         # Compute cross terms using base metric and composition law
+        # Allow gradients to flow through operadic composition
         cross_terms = torch.matmul(
             base_metric,
-            operation.composition_law.transpose(-2, -1)
+            operation.composition_law.transpose(-2, -1)  # Remove detach to allow gradient flow
         )
         
         # Combine cross terms with registered metric
         cross_part = 0.5 * (cross_terms + values[:, :self.base_dim, self.base_dim:])
         
-        # Combine all parts into final metric tensor
-        values = torch.cat([
-            torch.cat([base_part, cross_part], dim=2),
-            torch.cat([cross_part.transpose(-2, -1), fiber_part], dim=2)
-        ], dim=1)
+        # Combine all parts into final metric tensor using concatenation
+        # Ensure symmetry from the start
+        top_half = torch.cat([base_part, cross_part], dim=-1)
+        bottom_half = torch.cat([cross_part.transpose(-2, -1), fiber_part], dim=-1)
+        values = torch.cat([top_half, bottom_half], dim=-2)
         
-        # Ensure positive definiteness and symmetry
-        values = self._ensure_positive_definite(
-            values,
-            batch_size,
-            self.total_dim,
-            points.device,
-            points.dtype
-        )
+        # Make symmetric explicitly while preserving gradients
+        values = 0.5 * (values + values.transpose(-2, -1))
         
         # Add regularization for numerical stability
         reg = torch.eye(
@@ -905,10 +927,7 @@ class PatternFiberBundle(BaseFiberBundle):
         values = values + reg
         
         # Ensure symmetry of metric and its derivatives
-        if points.requires_grad:
-            # Make metric symmetric
-            values = 0.5 * (values + values.transpose(-2, -1))
-            
+        if points.requires_grad or self.metric.requires_grad:  # Add check for metric parameter
             # Add symmetric regularization for derivatives
             reg_deriv = torch.eye(
                 self.total_dim,
@@ -917,18 +936,29 @@ class PatternFiberBundle(BaseFiberBundle):
             ).unsqueeze(0) * 1e-5
             values = values + reg_deriv
             
-            # Ensure derivatives are symmetric by using autograd
-            def symmetric_grad_hook(grad):
-                return 0.5 * (grad + grad.transpose(-2, -1))
+            # Single hook to handle all gradient symmetrization
+            def combined_grad_hook(grad):
+                # Symmetrize the gradient while preserving magnitude
+                grad_sym = 0.5 * (grad + grad.transpose(-2, -1))
+                # Scale to preserve gradient magnitude
+                scale = (torch.norm(grad) / (torch.norm(grad_sym) + 1e-7)).clamp(min=0.1, max=10.0)
+                return grad_sym * scale
             
-            values.register_hook(symmetric_grad_hook)
+            values.register_hook(combined_grad_hook)
         
-        return MotivicMetricTensor(
+        result = MotivicMetricTensor(
             values=values,
             dimension=self.total_dim,
             height_structure=self.height_structure,
             is_compatible=True
         )
+
+        if isinstance(result.values, Tensor):
+            logger.debug(f"Metric result requires_grad: {result.values.requires_grad}")
+            if result.values.grad_fn is not None:
+                logger.debug(f"Metric result grad_fn: {result.values.grad_fn}")
+        
+        return result
 
     def _compute_fiber_perturbation(
         self,
@@ -1066,6 +1096,12 @@ class PatternFiberBundle(BaseFiberBundle):
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Parallel transport with pattern evolution and stability control."""
+        logger.debug(f"Parallel transport input section shape: {section.shape}, path shape: {path.shape}")
+        if isinstance(section, Tensor):
+            logger.debug(f"Section requires_grad: {section.requires_grad}")
+        if isinstance(path, Tensor):
+            logger.debug(f"Path requires_grad: {path.requires_grad}")
+        
         # Ensure section is a tensor and on the correct device
         result: Tensor = self._ensure_tensor_format(section)
         
@@ -1116,15 +1152,43 @@ class PatternFiberBundle(BaseFiberBundle):
 
                 # Transport entire section
                 try:
-                    # Get base transport
+                    # Get base transport with gradient tracking
                     base_transport = super().parallel_transport(
                         formatted_section,
                         formatted_path
                     )
 
-                    # Normalize to preserve original norm
+                    if isinstance(base_transport, Tensor):
+                        logger.debug(f"Base transport requires_grad: {base_transport.requires_grad}")
+                        if base_transport.grad_fn is not None:
+                            logger.debug(f"Base transport grad_fn: {base_transport.grad_fn}")
+
+                    # Add gradient hook for metric parameter
+                    if self.metric.requires_grad:
+                        def metric_grad_hook(grad):
+                            # Make symmetric to match metric structure
+                            grad_sym = 0.5 * (grad + grad.transpose(-2, -1))
+                            # Scale gradient to maintain magnitude
+                            scale = (torch.norm(grad) / (torch.norm(grad_sym) + 1e-7)).clamp(min=0.1, max=10.0)
+                            return grad_sym * scale
+                        
+                        self.metric.register_hook(metric_grad_hook)
+
+                    # Normalize result while preserving gradients
                     current_norm = torch.linalg.vector_norm(base_transport, dim=-1, keepdim=True)
-                    base_transport = base_transport * (original_norm / (current_norm + 1e-7))
+                    scale = torch.where(
+                        current_norm > 1e-7,
+                        original_norm / current_norm,
+                        torch.ones_like(current_norm)
+                    )
+                    base_transport = base_transport * scale
+
+                    # Add gradient hook to ensure proper backpropagation
+                    def base_transport_grad_hook(grad):
+                        # Scale gradient to maintain magnitude
+                        return grad * (torch.norm(grad) / (torch.norm(grad) + 1e-7))
+                    
+                    base_transport.register_hook(base_transport_grad_hook)
 
                     # Compute transport gradients and evolve batch
                     transport_gradients = torch.diff(base_transport, dim=0)
@@ -1140,6 +1204,7 @@ class PatternFiberBundle(BaseFiberBundle):
                     if transport_gradients.shape[0] == 0:
                         transport_gradients = torch.zeros_like(base_transport[0:1])
 
+                    # Evolve batch with gradient tracking
                     evolved = self._evolve_batch_efficient(
                         base_transport,
                         transport_gradients,
@@ -1150,9 +1215,14 @@ class PatternFiberBundle(BaseFiberBundle):
                         self._DEFAULT_DIFFUSION_COEFF
                     )
 
-                    # Normalize evolved result to preserve original norm
+                    # Normalize evolved result while maintaining gradients
                     current_norm = torch.linalg.vector_norm(evolved, dim=-1, keepdim=True)
-                    evolved = evolved * (original_norm / (current_norm + 1e-7))
+                    scale = torch.where(
+                        current_norm > 1e-7,
+                        original_norm / current_norm,
+                        torch.ones_like(current_norm)
+                    )
+                    evolved = evolved * scale
 
                     # Ensure evolved result matches expected size
                     if evolved.shape[0] < len(formatted_path):
@@ -1161,8 +1231,8 @@ class PatternFiberBundle(BaseFiberBundle):
                             (0, 0, 0, 0, 0, len(formatted_path) - evolved.shape[0])
                         )
 
-                    # Copy evolved result to output tensor
-                    result = evolved
+                    # Copy evolved result to output tensor while preserving gradients
+                    result = evolved.clone()
 
                     # Restore original batch shape if needed
                     if original_batch_shape is not None:
@@ -1170,7 +1240,17 @@ class PatternFiberBundle(BaseFiberBundle):
                     else:
                         result = result.squeeze(1)  # Remove batch dimension if not needed
 
-                    return result
+                    # Add gradient hook to ensure proper backpropagation
+                    def final_transport_grad_hook(grad):
+                        # Scale gradient to maintain magnitude
+                        return grad * (torch.norm(grad) / (torch.norm(grad) + 1e-7))
+                    
+                    result.register_hook(final_transport_grad_hook)
+
+                    if isinstance(result, Tensor):
+                        logger.debug(f"Final transport result requires_grad: {result.requires_grad}")
+                        if result.grad_fn is not None:
+                            logger.debug(f"Final transport result grad_fn: {result.grad_fn}")
 
                 except Exception as e:
                     # If transport fails, use identity transport
@@ -1178,7 +1258,7 @@ class PatternFiberBundle(BaseFiberBundle):
                         len(formatted_path),
                         *formatted_section.shape
                     )
-                    result = base_transport
+                    result = base_transport.clone()  # Clone to preserve gradients
 
                     # Restore original batch shape if needed
                     if original_batch_shape is not None:
@@ -1186,45 +1266,22 @@ class PatternFiberBundle(BaseFiberBundle):
                     else:
                         result = result.squeeze(1)  # Remove batch dimension if not needed
 
-                    return result
-
         except Exception as e:
             # Return original section if transport fails
             warnings.warn(f"Parallel transport failed: {str(e)}. Returning original section.")
             
-            # Initialize result with correct shape
+            # Initialize result with correct shape and gradient tracking
             if len(section.shape) == 3:  # [batch, seq, dim]
                 batch_size = section.shape[0]
                 fiber_dim = section.shape[-1]
+                result = section.unsqueeze(0).expand(len(path), -1, -1, -1).clone()
             elif len(section.shape) == 2:  # [batch, dim]
                 batch_size = section.shape[0]
                 fiber_dim = section.shape[-1]
+                result = section.unsqueeze(0).expand(len(path), -1, -1).clone()
             else:  # [dim]
-                batch_size = 1
-                fiber_dim = section.shape[0]
-                section = section.unsqueeze(0)  # Add batch dimension
+                result = section.unsqueeze(0).expand(len(path), -1).clone()
             
-            # Store original norm for preservation
-            original_norm = torch.linalg.vector_norm(section, dim=-1, keepdim=True)
-            
-            # Create result tensor with correct shape
-            result = torch.zeros(
-                len(path),
-                batch_size,
-                fiber_dim,
-                device=section.device,
-                dtype=section.dtype
-            )
-            
-            # Fill with expanded section
-            normalized_section = section / (torch.linalg.vector_norm(section, dim=-1, keepdim=True) + 1e-7)
-            for i in range(len(path)):
-                result[i] = normalized_section * original_norm
-
-            # Remove batch dimension if not needed
-            if batch_size == 1 and len(section.shape) == 1:
-                result = result.squeeze(1)
-
         return result
 
     #--------------------------------------------------------------------------

@@ -1263,3 +1263,245 @@ class TestGeometricComponents:
         # 3. Verify that derivatives are continuous (values should be bounded)
         assert torch.all(torch.abs(metric_derivs) < 10.0), \
             "Metric derivatives should be bounded"
+
+
+class TestGradientFlow:
+    """Test suite for gradient flow through fiber bundle parameters."""
+
+    def test_metric_parameter_gradients(self, pattern_bundle):
+        """Test that gradients flow through the metric parameter."""
+        # Create test input
+        batch_size = 4
+        points = torch.randn(batch_size, pattern_bundle.total_dim, requires_grad=True)
+        
+        # Get metric tensor
+        metric_tensor = pattern_bundle.compute_metric(points)
+        metric_values = metric_tensor.values
+        
+        # Create a dummy loss that depends on the metric
+        loss = metric_values.sum()
+        
+        # Compute gradients
+        loss.backward()
+        
+        # Check that metric parameter has gradients
+        assert pattern_bundle.metric.grad is not None, "Metric parameter should have gradients"
+        assert not torch.allclose(pattern_bundle.metric.grad, torch.zeros_like(pattern_bundle.metric)), \
+            "Metric parameter gradients should be non-zero"
+
+    def test_connection_parameter_gradients(self, pattern_bundle):
+        """Test that gradients flow through the connection parameter."""
+        # Create test input
+        batch_size = 4
+        tangent_vector = torch.randn(batch_size, pattern_bundle.total_dim, requires_grad=True)
+        
+        # Get connection form
+        connection_form = pattern_bundle.connection_form(tangent_vector)
+        print(f"\nConnection form shape: {connection_form.shape}")
+        print(f"Connection form requires_grad: {connection_form.requires_grad}")
+        if connection_form.grad_fn:
+            print(f"Connection form grad_fn: {connection_form.grad_fn}")
+        
+        # Create a dummy loss that depends on the connection
+        loss = connection_form.sum()
+        print(f"Loss value: {loss.item()}")
+        print(f"Loss grad_fn: {loss.grad_fn}")
+        
+        # Zero gradients before backward
+        if pattern_bundle.connection.grad is not None:
+            pattern_bundle.connection.grad.zero_()
+        
+        # Compute gradients
+        loss.backward()
+        
+        # Print gradient information
+        print(f"\nConnection parameter grad shape: {pattern_bundle.connection.grad.shape if pattern_bundle.connection.grad is not None else None}")
+        if pattern_bundle.connection.grad is not None:
+            print(f"Connection parameter grad sum: {pattern_bundle.connection.grad.sum().item()}")
+            print(f"Connection parameter grad max: {pattern_bundle.connection.grad.abs().max().item()}")
+        
+        # Check that connection parameter has gradients
+        assert pattern_bundle.connection.grad is not None, "Connection parameter should have gradients"
+        assert not torch.allclose(pattern_bundle.connection.grad, torch.zeros_like(pattern_bundle.connection)), \
+            "Connection parameter gradients should be non-zero"
+
+    def test_parallel_transport_gradients(self, pattern_bundle):
+        """Test that gradients flow through parallel transport."""
+        # Create test input
+        section = torch.randn(pattern_bundle.fiber_dim, requires_grad=True)
+        path = torch.randn(10, pattern_bundle.base_dim)  # 10 points in base space
+        
+        # Print initial states
+        print(f"\nInitial section requires_grad: {section.requires_grad}")
+        print(f"Initial metric requires_grad: {pattern_bundle.metric.requires_grad}")
+        
+        # Perform parallel transport
+        transported = pattern_bundle.parallel_transport(section, path)
+        print(f"\nTransported shape: {transported.shape}")
+        print(f"Transported requires_grad: {transported.requires_grad}")
+        if transported.grad_fn:
+            print(f"Transported grad_fn: {transported.grad_fn}")
+        
+        # Create a dummy loss that depends on the transported section
+        loss = transported.sum()
+        print(f"Loss value: {loss.item()}")
+        print(f"Loss grad_fn: {loss.grad_fn}")
+        
+        # Zero gradients before backward
+        if pattern_bundle.metric.grad is not None:
+            pattern_bundle.metric.grad.zero_()
+        if section.grad is not None:
+            section.grad.zero_()
+        
+        # Compute gradients
+        loss.backward()
+        
+        # Print gradient information
+        print(f"\nSection grad shape: {section.grad.shape if section.grad is not None else None}")
+        print(f"Metric grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
+        if section.grad is not None:
+            print(f"Section grad sum: {section.grad.sum().item()}")
+        if pattern_bundle.metric.grad is not None:
+            print(f"Metric grad sum: {pattern_bundle.metric.grad.sum().item()}")
+        
+        # Check that section has gradients
+        assert section.grad is not None, "Section should have gradients"
+        assert not torch.allclose(section.grad, torch.zeros_like(section)), \
+            "Section gradients should be non-zero"
+        
+        # Check that bundle parameters have gradients
+        assert pattern_bundle.metric.grad is not None, "Metric parameter should have gradients"
+        assert pattern_bundle.connection.grad is not None, "Connection parameter should have gradients"
+
+    def test_metric_symmetry_gradients(self, pattern_bundle):
+        """Test that metric gradients maintain symmetry."""
+        # Create test input
+        batch_size = 4
+        points = torch.randn(batch_size, pattern_bundle.total_dim, requires_grad=True)
+        
+        # Get metric tensor
+        metric_tensor = pattern_bundle.compute_metric(points)
+        metric_values = metric_tensor.values
+        
+        print(f"\nMetric values shape: {metric_values.shape}")
+        print(f"Metric values requires_grad: {metric_values.requires_grad}")
+        if metric_values.grad_fn:
+            print(f"Metric values grad_fn: {metric_values.grad_fn}")
+        
+        # Verify metric is symmetric
+        assert torch.allclose(
+            metric_values,
+            metric_values.transpose(-2, -1),
+            rtol=1e-5
+        ), "Metric should be symmetric"
+        
+        # Create a dummy loss that depends on the metric
+        loss = metric_values.sum()
+        print(f"Loss value: {loss.item()}")
+        print(f"Loss grad_fn: {loss.grad_fn}")
+        
+        # Zero gradients before backward
+        if pattern_bundle.metric.grad is not None:
+            pattern_bundle.metric.grad.zero_()
+        
+        # Compute gradients
+        loss.backward()
+        
+        # Print gradient information
+        print(f"\nMetric parameter grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
+        if pattern_bundle.metric.grad is not None:
+            print(f"Metric parameter grad sum: {pattern_bundle.metric.grad.sum().item()}")
+            print(f"Metric parameter grad max: {pattern_bundle.metric.grad.abs().max().item()}")
+            # Check symmetry difference
+            grad_diff = pattern_bundle.metric.grad - pattern_bundle.metric.grad.transpose(-2, -1)
+            print(f"Gradient symmetry difference max: {grad_diff.abs().max().item()}")
+        
+        # Check that metric parameter gradients are symmetric
+        assert torch.allclose(
+            pattern_bundle.metric.grad,
+            pattern_bundle.metric.grad.transpose(-2, -1),
+            rtol=1e-5
+        ), "Metric parameter gradients should be symmetric"
+
+    def test_end_to_end_gradient_flow(self, pattern_bundle):
+        """Test end-to-end gradient flow through the entire bundle."""
+        # Create test input
+        batch_size = 4
+        points = torch.randn(batch_size, pattern_bundle.total_dim, requires_grad=True)
+        section = torch.randn(pattern_bundle.fiber_dim, requires_grad=True)
+        path = torch.randn(10, pattern_bundle.base_dim)
+        
+        print("\nInitial states:")
+        print(f"Points requires_grad: {points.requires_grad}")
+        print(f"Section requires_grad: {section.requires_grad}")
+        print(f"Metric requires_grad: {pattern_bundle.metric.requires_grad}")
+        print(f"Connection requires_grad: {pattern_bundle.connection.requires_grad}")
+        
+        # Get metric tensor
+        metric_tensor = pattern_bundle.compute_metric(points)
+        metric_values = metric_tensor.values
+        print(f"\nMetric values requires_grad: {metric_values.requires_grad}")
+        if metric_values.grad_fn:
+            print(f"Metric values grad_fn: {metric_values.grad_fn}")
+        
+        # Get connection form
+        connection_form = pattern_bundle.connection_form(points)
+        print(f"Connection form requires_grad: {connection_form.requires_grad}")
+        if connection_form.grad_fn:
+            print(f"Connection form grad_fn: {connection_form.grad_fn}")
+        
+        # Perform parallel transport
+        transported = pattern_bundle.parallel_transport(section, path)
+        print(f"Transported requires_grad: {transported.requires_grad}")
+        if transported.grad_fn:
+            print(f"Transported grad_fn: {transported.grad_fn}")
+        
+        # Create a combined loss
+        loss = metric_values.sum() + connection_form.sum() + transported.sum()
+        print(f"\nLoss value: {loss.item()}")
+        print(f"Loss grad_fn: {loss.grad_fn}")
+        
+        # Zero gradients before backward
+        if points.grad is not None:
+            points.grad.zero_()
+        if section.grad is not None:
+            section.grad.zero_()
+        if pattern_bundle.metric.grad is not None:
+            pattern_bundle.metric.grad.zero_()
+        if pattern_bundle.connection.grad is not None:
+            pattern_bundle.connection.grad.zero_()
+        
+        # Compute gradients
+        loss.backward()
+        
+        # Print gradient information
+        print("\nGradient information:")
+        print(f"Points grad shape: {points.grad.shape if points.grad is not None else None}")
+        print(f"Section grad shape: {section.grad.shape if section.grad is not None else None}")
+        print(f"Metric grad shape: {pattern_bundle.metric.grad.shape if pattern_bundle.metric.grad is not None else None}")
+        print(f"Connection grad shape: {pattern_bundle.connection.grad.shape if pattern_bundle.connection.grad is not None else None}")
+        
+        if points.grad is not None:
+            print(f"Points grad sum: {points.grad.sum().item()}")
+        if section.grad is not None:
+            print(f"Section grad sum: {section.grad.sum().item()}")
+        if pattern_bundle.metric.grad is not None:
+            print(f"Metric grad sum: {pattern_bundle.metric.grad.sum().item()}")
+        if pattern_bundle.connection.grad is not None:
+            print(f"Connection grad sum: {pattern_bundle.connection.grad.sum().item()}")
+        
+        # Check all gradients exist and are non-zero
+        assert points.grad is not None, "Points should have gradients"
+        assert section.grad is not None, "Section should have gradients"
+        assert pattern_bundle.metric.grad is not None, "Metric parameter should have gradients"
+        assert pattern_bundle.connection.grad is not None, "Connection parameter should have gradients"
+        
+        # Check gradients are non-zero
+        assert not torch.allclose(points.grad, torch.zeros_like(points)), \
+            "Points gradients should be non-zero"
+        assert not torch.allclose(section.grad, torch.zeros_like(section)), \
+            "Section gradients should be non-zero"
+        assert not torch.allclose(pattern_bundle.metric.grad, torch.zeros_like(pattern_bundle.metric)), \
+            "Metric parameter gradients should be non-zero"
+        assert not torch.allclose(pattern_bundle.connection.grad, torch.zeros_like(pattern_bundle.connection)), \
+            "Connection parameter gradients should be non-zero"

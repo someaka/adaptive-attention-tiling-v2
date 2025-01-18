@@ -30,6 +30,7 @@ import numpy as np
 import pytest
 import torch
 import torch.linalg
+import logging
 
 from src.core.tiling.quantum_geometric_attention import (
     AttentionState,
@@ -530,39 +531,93 @@ class TestQuantumGeometricAttention:
         seq_length: int,
         hidden_dim: int,
     ):
-        """Test multi-head attention integration."""
+        """Test multi-head attention integration and gradient flow."""
+        logger = logging.getLogger(__name__)
+        logger.info("Starting multi-head integration test")
+        
         # Create input tensor with correct shape [batch_size, num_heads, seq_len, hidden_dim]
-        x = torch.randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim, 
-                       dtype=attention_layer.config.dtype, device=attention_layer.config.device)
+        x = complex_randn(batch_size, attention_layer.num_heads, seq_length, hidden_dim)
+        logger.info(f"Input tensor shape: {x.shape}, dtype: {x.dtype}")
         
         # Create attention mask
         mask = torch.ones(batch_size, seq_length).bool()
+        logger.info(f"Attention mask shape: {mask.shape}")
         
-        # Forward pass
+        # Track quantum bridge state before forward pass
+        bridge = attention_layer.quantum_bridge
+        logger.info("Initial quantum bridge state:")
+        logger.info(f"Pattern bundle metric shape: {bridge.pattern_bundle.metric.shape}")
+        logger.info(f"Pattern bundle metric requires_grad: {bridge.pattern_bundle.metric.requires_grad}")
+        logger.info(f"Pattern bundle metric device: {bridge.pattern_bundle.metric.device}")
+        
+        # Forward pass with instrumentation
+        logger.info("Performing forward pass")
+        
+        def track_pattern_bundle(grad):
+            logger.info("Pattern bundle metric gradient:")
+            logger.info(f"Gradient shape: {grad.shape}")
+            logger.info(f"Gradient stats - Mean: {grad.abs().mean():.2e}, Max: {grad.abs().max():.2e}")
+            logger.info(f"Has NaN: {torch.isnan(grad).any()}, Has Inf: {torch.isinf(grad).any()}")
+            return grad
+            
+        # Register gradient hook on pattern bundle metric
+        if bridge.pattern_bundle.metric.requires_grad:
+            bridge.pattern_bundle.metric.register_hook(track_pattern_bundle)
+        
         output = attention_layer(x, mask=mask)
         
         # Test output shape and properties
+        logger.info(f"Output tensor shape: {output.shape}, dtype: {output.dtype}")
         assert output.shape == x.shape, "Output shape should match input shape"
         assert output.dtype == attention_layer.config.dtype, "Output dtype should match config"
         assert not torch.isnan(output).any(), "Output should not contain NaN values"
         assert not torch.isinf(output).any(), "Output should not contain Inf values"
         
-        # Test gradient flow
-        output.sum().backward()
+        # Compute loss and backward pass
+        logger.info("Computing loss and performing backward pass")
+        loss = output.abs().mean()
+        
+        # Track gradient computation
+        logger.info("Pre-backward pattern bundle state:")
+        logger.info(f"Pattern bundle metric grad: {bridge.pattern_bundle.metric.grad}")
+        
+        loss.backward()
+        
+        # Track gradient computation
+        logger.info("Post-backward pattern bundle state:")
+        logger.info(f"Pattern bundle metric grad: {bridge.pattern_bundle.metric.grad}")
         
         # Track gradient flow through key components
-        print("\nGradient Flow Check:")
+        logger.info("Analyzing gradient flow through components:")
+        
+        def log_grad_stats(name: str, param: torch.Tensor) -> None:
+            """Helper to log gradient statistics for a parameter."""
+            if param.grad is not None:
+                grad_mean = param.grad.abs().mean().item()
+                grad_std = param.grad.abs().std().item()
+                grad_max = param.grad.abs().max().item()
+                grad_min = param.grad.abs().min().item()
+                has_nan = torch.isnan(param.grad).any().item()
+                has_inf = torch.isinf(param.grad).any().item()
+                logger.info(
+                    f"{name}:\n"
+                    f"  Shape: {param.shape}\n"
+                    f"  Grad stats - Mean: {grad_mean:.2e}, Std: {grad_std:.2e}\n"
+                    f"  Grad range - Min: {grad_min:.2e}, Max: {grad_max:.2e}\n"
+                    f"  Has NaN: {has_nan}, Has Inf: {has_inf}"
+                )
+            else:
+                logger.warning(f"{name} has no gradients")
+
+        # Log parameter gradients
         for name, param in attention_layer.named_parameters():
             if param.requires_grad:
-                print(f"{name}:")
-                print(f"  Shape: {param.shape}")
-                print(f"  Has grad: {param.grad is not None}")
-                if param.grad is not None:
-                    print(f"  Grad stats - Mean: {param.grad.abs().mean():.2e}, Max: {param.grad.abs().max():.2e}")
-                    print(f"  Grad has NaN: {torch.isnan(param.grad).any()}")
-                    print(f"  Grad has Inf: {torch.isinf(param.grad).any()}")
+                log_grad_stats(name, param)
+                assert param.grad is not None, f"Parameter {name} should have gradients"
+                assert not torch.isnan(param.grad).any(), f"Parameter {name} has NaN gradients"
+                assert not torch.isinf(param.grad).any(), f"Parameter {name} has Inf gradients"
 
-        # Check specific components
+        # Check specific components and their gradient flow
         components_to_check = [
             ('manifold_proj', attention_layer.manifold_proj),
             ('manifold_proj_inv', attention_layer.manifold_proj_inv),
@@ -571,23 +626,27 @@ class TestQuantumGeometricAttention:
             ('riemannian', attention_layer.riemannian),
         ]
 
-        print("\nComponent Gradient Check:")
+        logger.info("Analyzing gradient flow through major components:")
         for name, component in components_to_check:
             if hasattr(component, 'parameters'):
-                has_any_grad = any(p.grad is not None for p in component.parameters())
-                print(f"{name}:")
-                print(f"  Has any gradients: {has_any_grad}")
+                has_params = False
                 for param_name, param in component.named_parameters():
-                    print(f"  {param_name}:")
-                    print(f"    Requires grad: {param.requires_grad}")
-                    if param.grad is not None:
-                        print(f"    Grad stats - Mean: {param.grad.abs().mean():.2e}, Max: {param.grad.abs().max():.2e}")
+                    has_params = True
+                    log_grad_stats(f"{name}.{param_name}", param)
+                if not has_params:
+                    logger.info(f"{name} has no parameters")
 
-        # Now check each parameter
-        for name, param in attention_layer.named_parameters():
-            assert param.grad is not None, f"Parameter {name} should have gradients"
-            assert not torch.isnan(param.grad).any(), f"Parameter {name} has NaN gradients"
-            assert not torch.isinf(param.grad).any(), f"Parameter {name} has Inf gradients"
+        # Verify end-to-end gradient flow
+        total_grad_norm = torch.norm(torch.stack([
+            torch.norm(p.grad) 
+            for p in attention_layer.parameters() 
+            if p.grad is not None
+        ]))
+        logger.info(f"Total gradient norm: {total_grad_norm:.2e}")
+        assert total_grad_norm > 1e-8, "Total gradient norm should be significant"
+        assert total_grad_norm < 1e3, "Total gradient norm should not explode"
+        
+        logger.info("Multi-head integration test completed successfully")
 
     def test_geometric_phases(
         self, attention_layer, batch_size, seq_length, hidden_dim

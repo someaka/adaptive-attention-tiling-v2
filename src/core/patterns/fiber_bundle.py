@@ -250,7 +250,8 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             batch_size = 1
             section = section.unsqueeze(0)
             
-        result = torch.zeros(num_points, batch_size, self.fiber_dim, device=path.device, dtype=path.dtype)
+        # Initialize result tensor to preserve gradients
+        result = torch.zeros_like(section).unsqueeze(0).expand(num_points, -1, -1)
         result[0] = section  # Initial condition
         
         # Ensure path has correct base dimension
