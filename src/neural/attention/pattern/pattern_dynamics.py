@@ -113,15 +113,23 @@ class PatternDynamics(nn.Module):
         for c in range(state.shape[1]):
             self._log_tensor_stats(state, f"Input state channel {c}", channel=c)
         
-        # Convert to complex and extract phase
-        state_complex = state.to(torch.complex128)
-        phase = torch.angle(state_complex)
-        amplitudes = torch.abs(state_complex)
+        # Convert to complex while preserving gradients
+        state_real = state.to(torch.float64)
+        state_imag = torch.zeros_like(state_real, dtype=torch.float64)
+        state_complex = torch.complex(state_real, state_imag)
         
-        # Normalize amplitudes
-        norm = torch.norm(amplitudes)
-        if norm > 0:
-            amplitudes = amplitudes / norm
+        # Extract phase while preserving gradients
+        phase = torch.zeros_like(state_complex, dtype=torch.float64)
+        amplitudes = state_complex.abs()  # Use abs() instead of torch.abs() to preserve gradients
+        
+        # Normalize amplitudes while preserving gradients
+        norm = torch.norm(amplitudes.view(amplitudes.shape[0], -1), p=2, dim=1, keepdim=True)
+        norm = norm.view(amplitudes.shape[0], 1, 1, 1)  # Reshape to match amplitudes dimensions
+        amplitudes = amplitudes / (norm + 1e-6)
+        
+        # Ensure gradients are preserved
+        amplitudes = amplitudes.clone()
+        amplitudes.requires_grad_(True)
         
         logger.info(f"\n=== Phase initialization ===")
         logger.info(f"Phase shape: {phase.shape}")

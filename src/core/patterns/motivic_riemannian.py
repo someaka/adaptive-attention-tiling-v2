@@ -182,15 +182,13 @@ class MotivicRiemannianStructure(
             num_primes=num_primes
         )
         
-        # Initialize metric as identity plus low-rank perturbation
-        self.metric_factors = nn.Parameter(
-            torch.randn(manifold_dim, manifold_dim, device=self.device, dtype=self.dtype) * 0.01
-        )
+        # Initialize metric factors with proper gradient tracking for multi-head case
+        metric_factors = torch.randn(manifold_dim, manifold_dim, device=self.device, dtype=self.dtype) * 0.01
+        self.metric_factors = nn.Parameter(metric_factors, requires_grad=True)
         
-        # Initialize connection coefficients
-        self.connection_coeffs = nn.Parameter(
-            torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=self.dtype)
-        )
+        # Initialize connection coefficients with proper gradient tracking
+        connection_coeffs = torch.zeros(manifold_dim, manifold_dim, manifold_dim, device=self.device, dtype=self.dtype)
+        self.connection_coeffs = nn.Parameter(connection_coeffs, requires_grad=True)
         
         # Cache for intermediate computations
         self.cache: Dict[str, Any] = {}
@@ -312,27 +310,47 @@ class MotivicRiemannianStructure(
         Returns:
             Metric tensor with height structure
         """
-        batch_size = points.shape[0]
+        # Get batch dimensions while preserving head structure
+        batch_dims = points.shape[:-1]
         
-        # Compute base metric
+        # Compute base metric with correct dtype
         identity = torch.eye(
             self.manifold_dim,
-            device=self.device,
-            dtype=self.dtype
-        ).expand(batch_size, -1, -1)
+            dtype=self.dtype,
+            device=self.device
+        ).expand(*batch_dims, -1, -1)
         
-        # Add learned perturbation
+        # Add learned perturbation with gradient tracking
         perturbation = torch.matmul(
-            self.metric_factors.T,
-            self.metric_factors
-        ).expand(batch_size, -1, -1)
+            self.metric_factors.T.detach().requires_grad_(),
+            self.metric_factors.detach().requires_grad_()
+        )
         
+        # Ensure perturbation has proper batch dimensions
+        perturbation = perturbation.expand(*batch_dims, -1, -1)
+        
+        # Combine identity and perturbation while preserving gradients
         values = identity + perturbation
         
+        # Convert to proper dtype while maintaining gradient chain
+        if values.dtype != self.dtype:
+            values = values.to(dtype=self.dtype)
+            
+        # Add hooks for gradient tracking
+        if values.requires_grad:
+            def metric_hook(grad):
+                if self.metric_factors.grad is None:
+                    self.metric_factors.grad = torch.zeros_like(self.metric_factors)
+                self.metric_factors.grad += grad.sum(dim=tuple(range(len(batch_dims))))
+                return grad
+            values.register_hook(metric_hook)
+        
+        # Create metric tensor with height structure
         return MotivicMetricTensor(
             values=values,
             dimension=self.manifold_dim,
-            height_structure=self.height_structure
+            height_structure=self.height_structure,
+            is_compatible=True
         )
         
     def compute_christoffel(self, points: Tensor) -> MotivicChristoffelSymbols:

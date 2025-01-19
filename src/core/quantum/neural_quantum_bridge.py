@@ -265,36 +265,38 @@ class NeuralQuantumBridge(nn.Module):
                 seq_len = classical_flat.shape[2]
             hidden_dim = self.hidden_dim
         
-        # Ensure classical_flat has the right shape [*, hidden_dim]
-        if len(classical_flat.shape) > 2:
-            classical_flat = classical_flat.reshape(-1, classical_flat.shape[-1])
-        
-        # Extract real component and convert to original dtype
-        output = classical_flat.real.to(self.dtype)
+        # Keep complex values
+        output = classical_flat
         
         # Normalize output to preserve relative magnitudes
         norms = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
         output = output / (norms + 1e-8)
         
-        # If original norm is stored in quantum state, restore it
-        if hasattr(state, 'original_norm') and state.original_norm is not None:
-            output = output * state.original_norm
+        # Project back to neural space if needed
+        # Convert weights and bias to complex
+        weight = torch.complex(
+            self.inverse_projection.weight.to(torch.float64),
+            torch.zeros_like(self.inverse_projection.weight, dtype=torch.float64)
+        )
+        bias = torch.complex(
+            self.inverse_projection.bias.to(torch.float64),
+            torch.zeros_like(self.inverse_projection.bias, dtype=torch.float64)
+        )
+        output = F.linear(output, weight, bias)
         
-        # Reshape back to original shape if provided
+        # Reshape to match original dimensions
         if original_shape is not None:
             output = output.reshape(original_shape)
         else:
-            # Reshape based on layout dimensions
-            if num_heads > 1:
-                output = output.reshape(batch_size, num_heads, seq_len, hidden_dim)
-            elif seq_len > 1:
-                output = output.reshape(batch_size, seq_len, hidden_dim)
-            else:
-                output = output.reshape(batch_size, hidden_dim)
+            output = output.reshape(batch_size, num_heads, seq_len, hidden_dim)
         
-        # Ensure final output has unit norm
-        output_norms = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-        output = output / (output_norms + 1e-8)
+        # Extract real component and convert to bridge's dtype
+        output = output.real.to(self.dtype)
+        
+        # If original norm is stored in quantum state, restore it after projection
+        if hasattr(state, 'original_norm') and state.original_norm is not None:
+            current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+            output = output * (state.original_norm.to(self.dtype) / (current_norm + 1e-8))
         
         return output
 
@@ -305,82 +307,114 @@ class NeuralQuantumBridge(nn.Module):
         time: float = 1.0
     ) -> QuantumState:
         """Evolve quantum state using attention pattern.
-        
+    
         Args:
             state: Input quantum state
             attention_pattern: Optional attention pattern tensor
             time: Evolution time
-            
+    
         Returns:
             Evolved quantum state
         """
         if state is None:
             raise ValueError("Quantum state cannot be None")
-            
+    
         # Get state dimensions
         batch_size = state.amplitudes.shape[0]
-        seq_len = state.amplitudes.shape[1] if len(state.amplitudes.shape) > 2 else 1
+        num_heads = state.amplitudes.shape[1] if len(state.amplitudes.shape) > 3 else 1
+        seq_len = state.amplitudes.shape[-2] if len(state.amplitudes.shape) > 2 else 1
         state_dim = state.amplitudes.shape[-1]
-        
+    
         # Ensure consistent dtype throughout evolution
         target_dtype = state.amplitudes.dtype
-        working_dtype = torch.complex64  # Use complex64 for internal computations
-        
-        # Reshape amplitudes to [batch_size * seq_len, state_dim]
+        working_dtype = torch.complex128  # Use complex128 for internal computations
+    
+        # Reshape amplitudes to [batch_size * num_heads * seq_len, state_dim]
         amplitudes_reshaped = state.amplitudes.reshape(-1, state_dim)
-        
+    
         # Create or use provided attention pattern
         if attention_pattern is None:
             attention_pattern = torch.eye(
                 state_dim,
                 device=state.amplitudes.device,
-                dtype=working_dtype  # Use working dtype
-            ).unsqueeze(0).expand(batch_size * seq_len, -1, -1)
+                dtype=working_dtype
+            ).unsqueeze(0).expand(batch_size * num_heads * seq_len, -1, -1)
         else:
             # Convert attention pattern to working dtype
             attention_pattern = attention_pattern.to(working_dtype)
-            
-            # Ensure attention pattern has correct shape
-            if attention_pattern.shape[-2:] != (state_dim, state_dim):
-                # Try to reshape attention pattern if possible
-                if attention_pattern.shape[-1] < state_dim:
-                    # Pad attention pattern
-                    padded_attention = torch.zeros(
-                        batch_size * seq_len,
-                        state_dim,
-                        state_dim,
-                        device=attention_pattern.device,
-                        dtype=working_dtype  # Use working dtype
-                    )
-                    padded_attention[:, :attention_pattern.shape[1], :attention_pattern.shape[2]] = attention_pattern
-                    padded_attention = padded_attention + torch.eye(
-                        state_dim,
-                        device=attention_pattern.device,
-                        dtype=working_dtype  # Use working dtype
-                    ).unsqueeze(0) * 1e-6
-                    attention_pattern = padded_attention
-                elif attention_pattern.shape[-1] > state_dim:
-                    # Truncate attention pattern
-                    attention_pattern = attention_pattern[:, :state_dim, :state_dim]
-                else:
-                    raise ValueError(f"Attention pattern shape {attention_pattern.shape} does not match state dimension {state_dim}")
-        
+    
+            # Reshape attention pattern to match state dimensions
+            if len(attention_pattern.shape) == 4:  # [batch, heads, seq, seq]
+                # Reshape to [batch * heads * seq, seq, seq]
+                attention_pattern = attention_pattern.reshape(-1, attention_pattern.shape[-2], attention_pattern.shape[-1])
+            elif len(attention_pattern.shape) == 3:  # [batch, seq, seq]
+                # For single-head attention, expand to match batch_size * num_heads * seq_len
+                attention_pattern = attention_pattern.unsqueeze(1)  # [batch, 1, seq, seq]
+                attention_pattern = attention_pattern.expand(-1, num_heads, -1, -1)  # [batch, heads, seq, seq]
+                attention_pattern = attention_pattern.reshape(-1, attention_pattern.shape[-2], attention_pattern.shape[-1])
+    
+            # Pad or truncate attention pattern if needed
+            if attention_pattern.shape[-1] != state_dim:
+                padded_attention = torch.zeros(
+                    attention_pattern.shape[0],
+                    state_dim,
+                    state_dim,
+                    device=attention_pattern.device,
+                    dtype=working_dtype
+                )
+                min_size = min(attention_pattern.shape[-1], state_dim)
+                padded_attention[..., :min_size, :min_size] = attention_pattern[..., :min_size, :min_size]
+                padded_attention = padded_attention + torch.eye(
+                    state_dim,
+                    device=attention_pattern.device,
+                    dtype=working_dtype
+                ).unsqueeze(0) * 1e-6
+                attention_pattern = padded_attention
+    
         # Construct Hamiltonian from attention pattern and pattern bundle metric
         attention_regularized = attention_pattern + torch.eye(
             state_dim,
             device=attention_pattern.device,
-            dtype=working_dtype  # Use working dtype
+            dtype=working_dtype
         ).unsqueeze(0) * 1e-6
-        
-        # Use pattern bundle metric to modify Hamiltonian
+    
+        # Use pattern bundle metric and connection to modify Hamiltonian
         metric = self.pattern_bundle.metric.to(working_dtype)
-        # Extract just the base metric part since we're working with the base space
+        connection = self.pattern_bundle.connection.to(working_dtype)
+    
+        # Extract base metric and connection parts
         base_metric = metric[:state_dim, :state_dim]
-        base_metric_expanded = base_metric.unsqueeze(0).expand(batch_size * seq_len, -1, -1)
-        
-        # H = -i log(M A M) where M is the base metric and A is the attention pattern
+        base_connection = connection[:state_dim, :state_dim, :state_dim]
+    
+        # Expand base metric and connection for batch processing
+        base_metric_expanded = base_metric.unsqueeze(0).expand(batch_size * num_heads * seq_len, -1, -1)
+        base_connection_expanded = base_connection.unsqueeze(0).expand(batch_size * num_heads, -1, -1, -1)
+    
+        # Compute metric-modified attention with connection
         metric_attention = torch.matmul(base_metric_expanded, torch.matmul(attention_regularized, base_metric_expanded))
+    
+        # Reshape amplitudes to match connection dimensions while preserving batch and head structure
+        amplitudes_for_connection = amplitudes_reshaped.view(batch_size * num_heads, seq_len, state_dim)
         
+        # Expand base connection for each sequence position
+        base_connection_expanded = base_connection_expanded.unsqueeze(1).expand(-1, seq_len, -1, -1, -1)
+        
+        # Compute connection term for each sequence position
+        connection_term = torch.einsum('bhijk,bhk->bhij',
+                                     base_connection_expanded,  # [batch*heads, seq_len, state_dim, state_dim, state_dim]
+                                     amplitudes_for_connection)  # [batch*heads, seq_len, state_dim]
+        
+        # Reshape connection term to match metric attention dimensions
+        connection_term = connection_term.reshape(batch_size * num_heads * seq_len, state_dim, state_dim)
+        
+        # Ensure gradients flow through connection term
+        connection_term = connection_term.clone()  # Clone to ensure gradient flow
+        connection_term.requires_grad_(True)  # Enable gradients
+        
+        # Add connection term to metric attention
+        metric_attention = metric_attention.reshape(batch_size * num_heads * seq_len, state_dim, state_dim)
+        metric_attention = metric_attention + connection_term
+    
         # Compute matrix logarithm with metric-modified attention
         try:
             hamiltonian = -1j * torch.matrix_exp(metric_attention)
@@ -389,27 +423,29 @@ class NeuralQuantumBridge(nn.Module):
             hamiltonian = -1j * (metric_attention - torch.eye(
                 state_dim,
                 device=attention_pattern.device,
-                dtype=working_dtype  # Use working dtype
+                dtype=working_dtype
             ).unsqueeze(0))
-        
+    
         # Compute evolution operator U = exp(-iHt)
         U = torch.matrix_exp(-time * hamiltonian)
-        
+    
         # Convert amplitudes to working dtype for evolution
         amplitudes_float = amplitudes_reshaped.to(working_dtype)
-        
+    
         # Evolve state
-        evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze()
-        
+        evolved_amplitudes = torch.matmul(U, amplitudes_float.unsqueeze(-1)).squeeze(-1)
+    
         # Convert back to target dtype
         evolved_amplitudes = evolved_amplitudes.to(target_dtype)
-        
+    
         # Reshape back to original dimensions
-        if len(state.amplitudes.shape) > 2:
+        if len(state.amplitudes.shape) > 3:
+            evolved_amplitudes = evolved_amplitudes.reshape(batch_size, num_heads, seq_len, state_dim)
+        elif len(state.amplitudes.shape) > 2:
             evolved_amplitudes = evolved_amplitudes.reshape(batch_size, seq_len, state_dim)
         else:
             evolved_amplitudes = evolved_amplitudes.reshape(batch_size, state_dim)
-        
+    
         # Create new quantum state
         evolved_state = QuantumState(
             amplitudes=evolved_amplitudes,
@@ -417,7 +453,7 @@ class NeuralQuantumBridge(nn.Module):
             phase=state.phase,
             layout=state.layout  # Preserve the original layout
         )
-        
+    
         return evolved_state
 
     def construct_pattern_bundle(
@@ -798,99 +834,29 @@ class NeuralQuantumBridge(nn.Module):
         except Exception as e:
             raise RuntimeError(f"Failed to evolve motivic structure: {str(e)}")
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        return_intermediates: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
-        """Forward pass through neural quantum bridge."""
-        # Store original shape and norm
-        original_shape = x.shape
-        original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the bridge.
         
-        # Split complex tensor into real and imaginary parts
-        if torch.is_complex(x):
-            x_real = x.real.to(torch.float64)  # Convert to float64
-            x_imag = x.imag.to(torch.float64)  # Convert to float64
-        else:
-            x_real = x.to(torch.float64)  # Convert to float64
-            # Use deterministic noise based on input tensor
-            generator = torch.Generator(device=x.device).manual_seed(42)
-            x_imag = torch.randn(x.shape, dtype=torch.float64, device=x.device, requires_grad=True, generator=generator) * 0.01
+        Args:
+            x: Input tensor [batch_size, num_heads, seq_len, hidden_dim]
             
-        # Apply separate layer normalization to real and imaginary parts
-        # Use deterministic noise based on input tensor
-        noise_seed = int(x.abs().sum().item() * 1e6) % (2**32 - 1)
-        generator = torch.Generator(device=x.device).manual_seed(noise_seed)
-        noise_real = torch.randn(x_real.shape, dtype=x_real.dtype, device=x_real.device, generator=generator) * 1e-6
-        noise_imag = torch.randn(x_imag.shape, dtype=x_imag.dtype, device=x_imag.device, generator=generator) * 1e-6
-        
-        x_real = self.layer_norm_real(x_real.clone() + noise_real)
-        x_imag = self.layer_norm_imag(x_imag.clone() + noise_imag)
-        
-        # Recombine into complex tensor
-        x = torch.complex(x_real, x_imag)
-        
+        Returns:
+            Output tensor with same shape as input
+        """
         # Convert to quantum state
         quantum_result = self.neural_to_quantum(x)
         quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
         
-        # Apply quantum evolution
-        evolved_state = self.evolve_quantum_state_with_attention(quantum_state)
+        # Store original shape for later
+        original_shape = x.shape
         
         # Convert back to neural representation
-        output = self.quantum_to_neural(evolved_state, original_shape)
+        output = self.quantum_to_neural(quantum_state)
         
-        # Split output into real and imaginary parts for manifold normalization
-        if torch.is_complex(output):
-            output_real = output.real.to(torch.float64)  # Convert to float64
-            output_imag = output.imag.to(torch.float64)  # Convert to float64
-        else:
-            output_real = output.to(torch.float64)  # Convert to float64
-            # Use deterministic noise based on input tensor
-            generator = torch.Generator(device=output.device).manual_seed(42)
-            output_imag = torch.randn(output.shape, dtype=torch.float64, device=output.device, requires_grad=True, generator=generator) * 0.01
-            
-        # Apply separate manifold normalization to real and imaginary parts
-        # Use same noise seed for consistency
-        generator = torch.Generator(device=output.device).manual_seed(noise_seed)
-        noise_real = torch.randn(output_real.shape, dtype=output_real.dtype, device=output_real.device, generator=generator) * 1e-6
-        noise_imag = torch.randn(output_imag.shape, dtype=output_imag.dtype, device=output_imag.device, generator=generator) * 1e-6
+        # Ensure output has the right shape
+        output = output.reshape(original_shape)
         
-        output_real = self.manifold_norm_real(output_real.clone() + noise_real)
-        output_imag = self.manifold_norm_imag(output_imag.clone() + noise_imag)
-        
-        # Recombine into complex tensor
-        output = torch.complex(output_real, output_imag)
-        
-        # Restore original norm while preserving gradients
-        current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-        scale = original_norm / (current_norm + 1e-8)
-        # Use gradient stabilization instead of detaching
-        scale = torch.clamp(scale, min=0.1, max=10.0)  # Limit scale factor range
-        output = output * scale  # Remove detach to preserve gradient flow
-        
-        if not return_intermediates:
-            return output
-            
-        # Collect intermediate results
-        intermediates = {
-            "quantum_state": evolved_state,
-            "original_norm": original_norm,
-            "output_norm": current_norm,
-            "layer_norm_stats": {
-                "input_mean_real": torch.mean(x_real, dim=-1),
-                "input_std_real": torch.std(x_real, dim=-1),
-                "input_mean_imag": torch.mean(x_imag, dim=-1),
-                "input_std_imag": torch.std(x_imag, dim=-1),
-                "output_mean_real": torch.mean(output_real, dim=-1),
-                "output_std_real": torch.std(output_real, dim=-1),
-                "output_mean_imag": torch.mean(output_imag, dim=-1),
-                "output_std_imag": torch.std(output_imag, dim=-1)
-            }
-        }
-        
-        return output, intermediates
+        return output
 
     def bridge_scales(
         self,

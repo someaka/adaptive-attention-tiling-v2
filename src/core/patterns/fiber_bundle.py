@@ -57,14 +57,14 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         self.metric = nn.Parameter(
             torch.eye(self.total_dim, device=self.device, dtype=self.dtype),
             requires_grad=True
-        )
+        ).requires_grad_(True)
 
         # Initialize connection form
         # Shape: (base_dim, fiber_dim, fiber_dim)
         self.connection = nn.Parameter(
             torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim, device=self.device, dtype=self.dtype),
             requires_grad=True
-        )
+        ).requires_grad_(True)
 
         # Initialize Riemannian framework
         self.riemannian_framework = PatternRiemannianStructure(

@@ -389,16 +389,21 @@ class PatternFiberBundle(BaseFiberBundle):
         self.add_module('wave', self.wave)
         self.add_module('transition', self.transition)
 
-        # Initialize metric and connection as parameters with requires_grad=True
+        # Initialize metric and connection with proper gradient tracking
         metric = torch.eye(self.total_dim, dtype=self.dtype, device=self.device)
         connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim, dtype=self.dtype, device=self.device)
         
         # Register parameters to ensure they're included in gradient computation
-        self.register_parameter('metric', nn.Parameter(metric))
-        self.register_parameter('connection', nn.Parameter(connection))
+        self.register_parameter('metric', nn.Parameter(metric, requires_grad=True))
+        self.register_parameter('connection', nn.Parameter(connection, requires_grad=True))
         
-        # Set the metric parameter in the Riemannian framework
-        self.riemannian_framework.set_metric_param(self.metric)
+        # Initialize metric factors with proper gradient tracking
+        metric_factors = torch.randn(self.total_dim, self.total_dim, device=self.device, dtype=self.dtype) * 0.01
+        self.register_parameter('metric_factors', nn.Parameter(metric_factors, requires_grad=True))
+        
+        # Set the metric parameter in the Riemannian framework and ensure gradient tracking
+        self.riemannian_framework.set_metric_param(nn.Parameter(self.metric.data.clone(), requires_grad=True))
+        self.riemannian_framework.metric_factors = self.metric_factors
 
     def _initialize_basis_matrices(self) -> None:
         """Initialize Lie algebra basis matrices for SO(3)."""
@@ -1115,10 +1120,10 @@ class PatternFiberBundle(BaseFiberBundle):
                     formatted_section = formatted_section.unsqueeze(0)
 
                 # Extract metrics without clone to maintain gradient chain
-                fiber_metric = self.metric[self.base_dim:, self.base_dim:]
-                base_metric = self.metric[:self.base_dim, :self.base_dim]
+                fiber_metric = self.metric[self.base_dim:, self.base_dim:].clone()  # Clone to maintain gradient chain
+                base_metric = self.metric[:self.base_dim, :self.base_dim].clone()  # Clone to maintain gradient chain
                 
-                # Store original metric norm
+                # Store original metric norm with gradient tracking
                 metric_inner = torch.einsum('bi,ij,bj->b', formatted_section, fiber_metric, formatted_section)
                 original_norm = torch.sqrt(metric_inner + 1e-7)
                 
@@ -1191,11 +1196,12 @@ class PatternFiberBundle(BaseFiberBundle):
 
     def _transport_step(self, section: Tensor, tangent: Tensor, fiber_metric: Tensor) -> Tensor:
         """Compute transport step."""
-        # Compute connection form
+        # Compute connection form with gradient tracking
         tangent_base = tangent[:self.base_dim]
-        connection_form = torch.einsum('i,ijk->jk', tangent_base, self.connection)
+        connection = self.connection.clone()  # Clone to maintain gradient chain
+        connection_form = torch.einsum('i,ijk->jk', tangent_base, connection)
         
-        # Apply to section
+        # Apply to section with gradient tracking
         return torch.einsum('jk,bj->bk', connection_form, section)
 
     #--------------------------------------------------------------------------
@@ -1394,8 +1400,8 @@ class PatternFiberBundle(BaseFiberBundle):
                 target_dim=group_element.shape[-1]
             )
             fiber_coords = torch.einsum('bi,ij->bj', 
-                                      fiber_coords.reshape(-1, fiber_coords.shape[-1]),
-                                      operation.composition_law)
+                                          fiber_coords.reshape(-1, fiber_coords.shape[-1]),
+                                          operation.composition_law)
             fiber_coords = fiber_coords.reshape(-1, group_element.shape[-1])
         
         # Apply group action to fiber coordinates

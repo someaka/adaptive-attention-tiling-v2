@@ -202,4 +202,92 @@ def test_error_handling(setup_bridge):
     with pytest.raises(ValueError):
         pattern = torch.full((2, 8), float('inf'), dtype=torch.float64)
         bridge.neural_to_quantum(pattern)
+
+def test_multi_head_attention_evolution(setup_bridge):
+    """Test quantum evolution with multi-head attention patterns.
+    
+    This test verifies:
+    1. Multi-head quantum state evolution
+    2. Head dimension preservation
+    3. Quantum properties per head
+    """
+    bridge, dynamics, _ = setup_bridge
+    
+    # Create multi-head input
+    batch_size = 2
+    num_heads = 4
+    seq_len = 8
+    hidden_dim = bridge.hidden_dim
+    
+    # Create pattern with head dimension
+    pattern = torch.randn(batch_size, num_heads, seq_len, hidden_dim, dtype=torch.float64)
+    pattern = F.normalize(pattern, p=2, dim=-1)
+    
+    # Create multi-head attention pattern
+    attention = torch.randn(batch_size, num_heads, seq_len, seq_len, dtype=torch.complex128)
+    attention = attention / torch.norm(attention, dim=(-2, -1), keepdim=True)
+    
+    # Convert to quantum state preserving head dimension
+    quantum_state = dynamics._to_quantum_state(pattern)
+    
+    # Evolve with attention
+    evolved_state = bridge.evolve_quantum_state_with_attention(
+        quantum_state,
+        attention_pattern=attention,
+        time=1.0
+    )
+    
+    # Verify evolution properties per head
+    assert isinstance(evolved_state, QuantumState)
+    assert evolved_state.amplitudes.dtype == torch.complex128
+    assert evolved_state.amplitudes.shape[:2] == (batch_size, num_heads), "Should preserve head dimension"
+    
+    # Check normalization per head
+    norms = evolved_state.norm()
+    assert norms.shape == (batch_size, num_heads), "Should have norm per head"
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-6)
+
+def test_pattern_bundle_gradient_flow(setup_bridge):
+    """Test gradient flow through pattern bundle during quantum evolution.
+    
+    This test verifies:
+    1. Pattern bundle parameter gradients
+    2. Multi-head gradient preservation
+    3. Connection form gradient flow
+    """
+    bridge, dynamics, _ = setup_bridge
+    
+    # Enable gradients for pattern bundle
+    bridge.pattern_bundle.requires_grad_(True)
+    
+    # Create multi-head input
+    batch_size = 2
+    num_heads = 4
+    seq_len = 8
+    hidden_dim = bridge.hidden_dim
+    
+    # Create input with gradients
+    pattern = torch.randn(batch_size, num_heads, seq_len, hidden_dim, dtype=torch.float64, requires_grad=True)
+    pattern_norm = torch.norm(pattern, p=2, dim=-1, keepdim=True)
+    pattern = pattern / (pattern_norm + 1e-6)  # Manual normalization that preserves gradients
+    
+    # Forward pass through quantum evolution
+    quantum_state = dynamics._to_quantum_state(pattern)
+    evolved_state = bridge.evolve_quantum_state_with_attention(
+        quantum_state,
+        time=1.0
+    )
+    
+    # Compute loss using evolved state
+    loss = evolved_state.amplitudes.abs().mean()
+    loss.backward()
+    
+    # Verify pattern bundle gradients
+    assert pattern.grad is not None, "Input should have gradients"
+    assert torch.all(torch.isfinite(pattern.grad)), "Gradients should be finite"
+    
+    # Verify pattern bundle parameter gradients
+    for param in bridge.pattern_bundle.parameters():
+        assert param.grad is not None, "Pattern bundle parameters should have gradients"
+        assert torch.all(torch.isfinite(param.grad)), "Pattern bundle gradients should be finite"
   

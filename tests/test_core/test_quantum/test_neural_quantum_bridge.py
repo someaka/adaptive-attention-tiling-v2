@@ -3,6 +3,7 @@
 import pytest
 import torch
 import numpy as np
+import torch.nn.functional as F
 
 from src.core.quantum.neural_quantum_bridge import NeuralQuantumBridge
 from src.core.quantum.types import QuantumState
@@ -199,4 +200,135 @@ class TestNeuralQuantumBridge:
         
         # Check that pattern bundle metric receives gradients
         assert bridge.pattern_bundle.metric.grad is not None, "Pattern bundle metric should have gradients"
-        assert torch.norm(bridge.pattern_bundle.metric.grad) > 1e-8, "Pattern bundle metric gradients should not vanish" 
+        assert torch.norm(bridge.pattern_bundle.metric.grad) > 1e-8, "Pattern bundle metric gradients should not vanish"
+
+    def test_multi_head_gradient_flow(self, bridge):
+        """Test gradient flow with multi-head inputs.
+        
+        This test verifies:
+        1. Multi-head quantum state preparation and validation
+        2. Independent processing of different attention heads
+        3. Gradient flow through quantum operations
+        4. Type consistency throughout computation chain
+        """
+        # Create multi-head input with proper type matching bridge's dtype
+        batch_size = 2
+        num_heads = 4
+        seq_len = 8
+        hidden_dim = bridge.hidden_dim
+        
+        # Input shape: [batch_size, num_heads, seq_len, hidden_dim]
+        x = torch.randn(batch_size, num_heads, seq_len, hidden_dim, dtype=bridge.dtype, requires_grad=True)
+        
+        # Store original norm for later comparison
+        original_norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
+        
+        # Forward pass through bridge
+        output = bridge(x)
+        
+        # Verify output maintains multi-head structure and type
+        assert output.shape == x.shape, "Output shape should match input"
+        assert output.dtype == bridge.dtype, "Bridge output should match input dtype (neural space)"
+        
+        # Test head independence by perturbing one head
+        perturbed_x = x.clone()
+        head_idx = 1
+        perturbed_x[:, head_idx] += 0.1  # Perturb second head
+        perturbed_output = bridge(perturbed_x)
+        
+        # Only the perturbed head should change significantly
+        output_diff = (perturbed_output - output).abs().mean(dim=(0, 2, 3))  # Average across batch, seq, hidden
+        assert output_diff[head_idx] > output_diff.mean(), "Perturbed head should change more than others"
+        unperturbed_diff = output_diff[torch.arange(num_heads) != head_idx]
+        assert torch.all(unperturbed_diff < output_diff[head_idx]), "Unperturbed heads should change less"
+        
+        # Convert to quantum state and validate
+        quantum_state = bridge.neural_to_quantum(x, return_validation=True)
+        assert isinstance(quantum_state, tuple), "Expected (state, validation) tuple"
+        state, validation = quantum_state
+        
+        # Verify state validation passed
+        assert validation.is_valid, f"Quantum state validation failed: {validation.error_type}"
+        assert validation.data["metrics"]["fidelity"] > 0.99, f"Low quantum state fidelity: {validation.data['metrics']['fidelity']}"
+        
+        # Verify state properties
+        assert state.layout["type"] == "attention", "Wrong state layout type"
+        assert state.layout["batch_size"] == batch_size
+        assert state.layout["num_heads"] == num_heads
+        assert state.layout["seq_length"] == seq_len
+        assert state.layout["dim"] == hidden_dim
+        
+        # Get amplitudes and verify normalization per head
+        amplitudes = state.amplitudes
+        reshaped_amplitudes = amplitudes.reshape(batch_size, num_heads, seq_len, -1)
+        norms = torch.norm(reshaped_amplitudes, dim=-1)  # Norm per head/sequence element
+        assert torch.allclose(norms, torch.ones_like(norms), rtol=1e-5), "Amplitudes not normalized per head"
+        
+        # Compute loss that depends on head structure
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Verify input gradients
+        assert x.grad is not None, "Input should have gradients"
+        assert x.grad.shape == (batch_size, num_heads, seq_len, hidden_dim)
+        
+        # Verify gradient independence between heads
+        grad_per_head = x.grad.abs().mean(dim=(0, 2, 3))  # Average across batch, seq, hidden
+        grad_std = grad_per_head.std()
+        assert grad_std > 1e-6, "Gradients should vary between heads"
+        
+        # Convert back to neural representation with original shape
+        neural_output = bridge.quantum_to_neural(state)
+        neural_output = neural_output.reshape(batch_size, num_heads, seq_len, hidden_dim)
+        
+        # Verify neural output maintains structure
+        assert neural_output.shape == x.shape, "Neural output shape mismatch"
+        assert neural_output.dtype == bridge.dtype, "Neural output dtype mismatch"
+        
+        # Verify norm preservation
+        output_norm = torch.linalg.vector_norm(neural_output, dim=-1, keepdim=True)
+        assert torch.allclose(output_norm, original_norm, rtol=1e-4), "Output norm should match input norm"
+
+    def test_connection_parameter_gradients(self, bridge):
+        """Test gradient flow through pattern bundle connection parameter.
+        
+        This test verifies:
+        1. Connection parameter gradient computation
+        2. Gradient flow through quantum evolution
+        3. Gradient magnitude and stability
+        """
+        # Enable gradients for pattern bundle connection
+        bridge.pattern_bundle.connection.requires_grad_(True)
+        
+        # Create input with batch and head dimensions
+        batch_size = 2
+        num_heads = 4
+        hidden_dim = bridge.hidden_dim
+        
+        x = torch.randn(batch_size, num_heads, hidden_dim, requires_grad=True)
+        
+        # Track initial connection parameter
+        initial_connection = bridge.pattern_bundle.connection.clone()
+        
+        # Forward pass through bridge
+        output = bridge(x)
+        
+        # Convert complex output to real by taking magnitude
+        if torch.is_complex(output):
+            output = torch.abs(output)
+            
+        # Compute loss using real values
+        loss = output.abs().mean()
+        loss.backward()
+        
+        # Verify connection parameter gradients
+        assert bridge.pattern_bundle.connection.grad is not None, "Connection should have gradients"
+        assert not torch.allclose(
+            bridge.pattern_bundle.connection.grad,
+            torch.zeros_like(bridge.pattern_bundle.connection.grad)
+        ), "Connection gradients should be non-zero"
+        
+        # Verify gradient properties
+        grad = bridge.pattern_bundle.connection.grad
+        assert torch.all(torch.isfinite(grad)), "Connection gradients should be finite"
+        assert grad.shape == bridge.pattern_bundle.connection.shape, "Gradient shape mismatch" 
