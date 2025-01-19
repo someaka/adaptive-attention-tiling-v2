@@ -351,6 +351,28 @@ class PatternFiberBundle(BaseFiberBundle):
             num_primes=self._config.num_primes
         )
         
+        # Initialize connection parameter with requires_grad=True
+        self.connection = nn.Parameter(
+            torch.zeros(
+                self.base_dim,
+                self.fiber_dim,
+                self.fiber_dim,
+                device=self.device,
+                dtype=self.dtype
+            ),
+            requires_grad=True
+        )
+        
+        # Initialize metric parameter with requires_grad=True
+        self.metric = nn.Parameter(
+            torch.eye(
+                self.total_dim,
+                device=self.device,
+                dtype=self.dtype
+            ),
+            requires_grad=True
+        )
+        
         # Initialize symplectic structure
         self.symplectic = SymplecticStructure(
             dim=self.fiber_dim,
@@ -389,14 +411,6 @@ class PatternFiberBundle(BaseFiberBundle):
         self.add_module('wave', self.wave)
         self.add_module('transition', self.transition)
 
-        # Initialize metric and connection with proper gradient tracking
-        metric = torch.eye(self.total_dim, dtype=self.dtype, device=self.device)
-        connection = torch.zeros(self.base_dim, self.fiber_dim, self.fiber_dim, dtype=self.dtype, device=self.device)
-        
-        # Register parameters to ensure they're included in gradient computation
-        self.register_parameter('metric', nn.Parameter(metric, requires_grad=True))
-        self.register_parameter('connection', nn.Parameter(connection, requires_grad=True))
-        
         # Initialize metric factors with proper gradient tracking
         metric_factors = torch.randn(self.total_dim, self.total_dim, device=self.device, dtype=self.dtype) * 0.01
         self.register_parameter('metric_factors', nn.Parameter(metric_factors, requires_grad=True))

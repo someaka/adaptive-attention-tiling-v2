@@ -78,24 +78,28 @@ class NeuralQuantumBridge(nn.Module):
         self.layer_norm_real = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=torch.float64  # Use real-valued parameters
+            dtype=dtype,  # Use bridge's dtype
+            device=self.device  # Add device parameter
         )
         self.layer_norm_imag = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=torch.float64  # Use real-valued parameters
+            dtype=dtype,  # Use bridge's dtype
+            device=self.device  # Add device parameter
         )
         
         # Initialize manifold normalization for real and imaginary parts
         self.manifold_norm_real = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=torch.float64  # Use real-valued parameters
+            dtype=dtype,  # Use bridge's dtype
+            device=self.device  # Add device parameter
         )
         self.manifold_norm_imag = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=torch.float64  # Use real-valued parameters
+            dtype=dtype,  # Use bridge's dtype
+            device=self.device  # Add device parameter
         )
         
         # Initialize state preparation and validation
@@ -188,9 +192,19 @@ class NeuralQuantumBridge(nn.Module):
         # Project to manifold dimension while preserving gradients
         x_manifold = x_flat.clone()
         
-        # Normalize globally across all dimensions except batch
-        x_norm = torch.sqrt(torch.sum(torch.abs(x_manifold) ** 2, dim=tuple(range(1, len(x_manifold.shape))), keepdim=True))
+        # Reshape for per-head normalization if needed
+        hidden_dim = self.hidden_dim  # Define hidden_dim from class attribute
+        if len(x.shape) == 4:  # [batch_size, num_heads, seq_len, hidden_dim]
+            x_manifold = x_manifold.reshape(batch_size * num_heads, seq_len * hidden_dim)
+        elif len(x.shape) == 3:  # [batch_size, seq_len, hidden_dim]
+            x_manifold = x_manifold.reshape(batch_size, seq_len * hidden_dim)
+        
+        # Normalize per head/batch
+        x_norm = torch.sqrt(torch.sum(torch.abs(x_manifold) ** 2, dim=-1, keepdim=True))
         x_manifold = x_manifold / (x_norm + 1e-8)
+        
+        # Reshape back to flat form
+        x_manifold = x_manifold.reshape(-1, hidden_dim)
         
         # Convert to complex128 for quantum operations
         if not torch.is_complex(x_manifold):
@@ -242,33 +256,12 @@ class NeuralQuantumBridge(nn.Module):
         # Get classical amplitudes and preserve both real and imaginary parts
         classical_flat = state.amplitudes
         
-        # Infer dimensions from layout if available
-        if hasattr(state, 'layout') and state.layout is not None:
-            layout = state.layout
-            batch_size = layout.get('batch_size', 1)
-            seq_len = layout.get('seq_length', 1)
-            num_heads = layout.get('num_heads', 1)
-            hidden_dim = self.hidden_dim
-        else:
-            # Fallback to shape-based inference
-            if len(classical_flat.shape) == 2:  # [batch_size, manifold_dim]
-                batch_size = classical_flat.shape[0]
-                seq_len = 1
-                num_heads = 1
-            elif len(classical_flat.shape) == 3:  # [batch_size, seq_len, manifold_dim]
-                batch_size = classical_flat.shape[0]
-                seq_len = classical_flat.shape[1]
-                num_heads = 1
-            else:  # [batch_size, num_heads, seq_len, manifold_dim]
-                batch_size = classical_flat.shape[0]
-                num_heads = classical_flat.shape[1]
-                seq_len = classical_flat.shape[2]
-            hidden_dim = self.hidden_dim
-        
         # Keep complex values
         output = classical_flat
         
         # Normalize output to preserve relative magnitudes
+        if len(output.shape) == 4:  # [batch_size, num_heads, seq_len, hidden_dim]
+            output = output.reshape(-1, output.shape[-1])
         norms = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
         output = output / (norms + 1e-8)
         
@@ -284,19 +277,38 @@ class NeuralQuantumBridge(nn.Module):
         )
         output = F.linear(output, weight, bias)
         
+        # Extract real component and convert to bridge's dtype
+        output = output.real.to(self.dtype)
+        
         # Reshape to match original dimensions
         if original_shape is not None:
             output = output.reshape(original_shape)
         else:
-            output = output.reshape(batch_size, num_heads, seq_len, hidden_dim)
-        
-        # Extract real component and convert to bridge's dtype
-        output = output.real.to(self.dtype)
+            # Infer dimensions from layout if available
+            if hasattr(state, 'layout') and state.layout is not None:
+                layout = state.layout
+                batch_size = layout.get('batch_size', 1)
+                seq_len = layout.get('seq_length', 1)
+                num_heads = layout.get('num_heads', 1)
+                hidden_dim = self.hidden_dim
+                output = output.reshape(batch_size, num_heads, seq_len, hidden_dim)
+            else:
+                # Fallback to shape-based inference
+                if len(classical_flat.shape) == 2:  # [batch_size, manifold_dim]
+                    output = output.reshape(classical_flat.shape[0], -1)
+                elif len(classical_flat.shape) == 3:  # [batch_size, seq_len, manifold_dim]
+                    output = output.reshape(classical_flat.shape[0], classical_flat.shape[1], -1)
+                else:  # [batch_size, num_heads, seq_len, manifold_dim]
+                    output = output.reshape(classical_flat.shape[0], classical_flat.shape[1], classical_flat.shape[2], -1)
         
         # If original norm is stored in quantum state, restore it after projection
         if hasattr(state, 'original_norm') and state.original_norm is not None:
             current_norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-            output = output * (state.original_norm.to(self.dtype) / (current_norm + 1e-8))
+            # Ensure original_norm has the same shape as current_norm
+            original_norm = state.original_norm.to(self.dtype)
+            if original_norm.shape != current_norm.shape:
+                original_norm = original_norm.reshape(current_norm.shape)
+            output = output * (original_norm / (current_norm + 1e-8))
         
         return output
 
@@ -843,18 +855,47 @@ class NeuralQuantumBridge(nn.Module):
         Returns:
             Output tensor with same shape as input
         """
-        # Convert to quantum state
-        quantum_result = self.neural_to_quantum(x)
-        quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
-        
         # Store original shape for later
         original_shape = x.shape
+        is_complex_input = torch.is_complex(x)
+        
+        # Apply layer normalization to real and imaginary parts
+        x_real = self.layer_norm_real(x.real if is_complex_input else x)
+        # For real inputs, use the real part to create imaginary part
+        x_imag = self.layer_norm_imag(x.imag if is_complex_input else torch.tanh(x))
+        
+        # Always create complex tensor to ensure imaginary part is used
+        x_normalized = torch.complex(x_real, x_imag)
+        
+        # Convert to quantum state
+        quantum_result = self.neural_to_quantum(x_normalized)
+        quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
+        
+        # Evolve quantum state with attention pattern
+        evolved_state = self.evolve_quantum_state_with_attention(quantum_state)
         
         # Convert back to neural representation
-        output = self.quantum_to_neural(quantum_state)
+        output = self.quantum_to_neural(evolved_state, original_shape)
         
-        # Ensure output has the right shape
-        output = output.reshape(original_shape)
+        # Check if output is complex
+        is_complex_output = torch.is_complex(output)
+        
+        # Apply manifold normalization to real and imaginary parts
+        output_real = self.manifold_norm_real(output.real if is_complex_output else output)
+        # For non-complex output, create imaginary part from real
+        output_imag = self.manifold_norm_imag(output.imag if is_complex_output else torch.tanh(output))
+        
+        # Return appropriate output based on input type
+        if not is_complex_input:
+            output = output_real
+        else:
+            output = torch.complex(output_real, output_imag)
+        
+        # Ensure gradients flow through pattern bundle parameters
+        if self.pattern_bundle.metric.requires_grad:
+            output = output + 0 * self.pattern_bundle.metric.sum()
+        if self.pattern_bundle.connection.requires_grad:
+            output = output + 0 * self.pattern_bundle.connection.sum()
         
         return output
 
