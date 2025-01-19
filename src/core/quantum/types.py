@@ -32,25 +32,6 @@ class QuantumState:
         elif self.phase.dtype != torch.complex128:
             self.phase = self.phase.to(torch.complex128)
 
-        # Store original norm before normalization
-        if len(self.amplitudes.shape) == 1:
-            # Single state vector
-            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
-        else:
-            # Global normalization across all dimensions except batch
-            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
-                                      dim=tuple(range(1, len(self.amplitudes.shape))), 
-                                      keepdim=True))
-        
-        # Store original norm if not provided
-        if self.original_norm is None:
-            self.original_norm = norm.to(torch.float64)
-        else:
-            self.original_norm = self.original_norm.to(torch.float64)
-            
-        # Global normalization
-        self.amplitudes = self.amplitudes / norm.clamp(min=1e-8)
-
         # Initialize layout if not provided
         if self.layout is None:
             # Infer layout from tensor shape
@@ -77,6 +58,32 @@ class QuantumState:
             else:
                 raise ValueError(f"Unsupported tensor shape: {shape}")
 
+        # Store original norm before normalization
+        if len(self.amplitudes.shape) == 1:
+            # Single state vector
+            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2))
+        else:
+            # For multi-head attention states (batch_size, num_heads, seq_len, dim)
+            if self.layout is not None and self.layout["type"] == "attention":
+                # Reshape to [batch_size * num_heads * seq_len, dim]
+                flat_amplitudes = self.amplitudes.reshape(-1, self.amplitudes.shape[-1])
+                # Compute norm per state vector
+                norm = torch.sqrt(torch.sum(torch.abs(flat_amplitudes) ** 2, dim=-1, keepdim=True))
+                # Reshape back to original shape
+                norm = norm.reshape(*self.amplitudes.shape[:-1], 1)
+            else:
+                # For other cases, normalize each state vector independently
+                norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=-1, keepdim=True))
+        
+        # Store original norm if not provided
+        if self.original_norm is None:
+            self.original_norm = norm.to(torch.float64)
+        else:
+            self.original_norm = self.original_norm.to(torch.float64)
+            
+        # Normalize
+        self.amplitudes = self.amplitudes / norm.clamp(min=1e-8)
+
     @property
     def shape(self) -> Tuple[int, ...]:
         """Return shape of state amplitudes."""
@@ -91,7 +98,13 @@ class QuantumState:
         """Compute the norm of the quantum state."""
         if len(self.amplitudes.shape) == 1:
             return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2)).to(torch.float64)
-        # For multi-dimensional tensors, compute norm across all dimensions except batch
+        
+        # For multi-head attention states (batch_size, num_heads, seq_len, dim)
+        if self.layout is not None and self.layout["type"] == "attention":
+            # Compute norm across sequence and hidden dimensions only
+            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=(-2, -1))).to(torch.float64)
+            
+        # For other multi-dimensional tensors, compute norm across all dimensions except batch
         return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, dim=tuple(range(1, len(self.amplitudes.shape))))).to(torch.float64)
 
     def density_matrix(self) -> torch.Tensor:

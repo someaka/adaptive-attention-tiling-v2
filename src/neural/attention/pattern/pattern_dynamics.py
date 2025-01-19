@@ -117,19 +117,32 @@ class PatternDynamics(nn.Module):
         state_real = state.to(torch.float64)
         state_imag = torch.zeros_like(state_real, dtype=torch.float64)
         state_complex = torch.complex(state_real, state_imag)
+        state_complex.requires_grad_(True)  # Enable gradients for complex tensor
+        state_complex.retain_grad()  # Retain gradients for complex tensor
         
         # Extract phase while preserving gradients
         phase = torch.zeros_like(state_complex, dtype=torch.float64)
         amplitudes = state_complex.abs()  # Use abs() instead of torch.abs() to preserve gradients
         
         # Normalize amplitudes while preserving gradients
-        norm = torch.norm(amplitudes.view(amplitudes.shape[0], -1), p=2, dim=1, keepdim=True)
-        norm = norm.view(amplitudes.shape[0], 1, 1, 1)  # Reshape to match amplitudes dimensions
-        amplitudes = amplitudes / (norm + 1e-6)
+        # For multi-head inputs, normalize each head separately
+        if len(amplitudes.shape) == 4:  # [batch, heads, seq, hidden]
+            norm = torch.norm(amplitudes.view(amplitudes.shape[0], amplitudes.shape[1], -1), p=2, dim=2, keepdim=True)
+            norm = norm.view(amplitudes.shape[0], amplitudes.shape[1], 1, 1)  # Reshape to match amplitudes dimensions
+        else:
+            norm = torch.norm(amplitudes.view(amplitudes.shape[0], -1), p=2, dim=1, keepdim=True)
+            norm = norm.view(amplitudes.shape[0], 1, 1, 1)  # Reshape to match amplitudes dimensions
+        
+        # Add epsilon without detaching to maintain gradient flow
+        norm = norm + 1e-6
+        
+        # Normalize while preserving gradients
+        amplitudes = amplitudes / norm
         
         # Ensure gradients are preserved
         amplitudes = amplitudes.clone()
         amplitudes.requires_grad_(True)
+        amplitudes.retain_grad()  # Retain gradients for non-leaf tensor
         
         logger.info(f"\n=== Phase initialization ===")
         logger.info(f"Phase shape: {phase.shape}")
@@ -138,10 +151,20 @@ class PatternDynamics(nn.Module):
         basis_size = state.shape[-1]
         basis_labels = [f"basis_{i}" for i in range(basis_size)]
         
+        # Create layout information
+        layout = {
+            'type': 'attention',
+            'batch_size': state.shape[0],
+            'num_heads': state.shape[1] if len(state.shape) == 4 else 1,
+            'seq_length': state.shape[-2],
+            'dim': state.shape[-1]
+        }
+        
         quantum_state = QuantumState(
             amplitudes=amplitudes,
             basis_labels=basis_labels,
-            phase=phase
+            phase=phase,
+            layout=layout
         )
         
         logger.info("\n=== Final quantum state ===")
