@@ -267,9 +267,15 @@ class StatePreparationValidator:
             norm = torch.sqrt(torch.sum(torch.abs(prepared.amplitudes) ** 2))
             target_norm = torch.tensor(1.0, dtype=norm.dtype, device=norm.device)
         else:
-            # For batched states, compute norm globally across all dimensions except batch
-            norm = torch.sqrt(torch.sum(torch.abs(prepared.amplitudes) ** 2, 
-                                      dim=tuple(range(1, len(prepared.amplitudes.shape)))))
+            # For attention states, compute norm per head
+            if prepared.layout is not None and prepared.layout["type"] == "attention":
+                # Sum over sequence and hidden dimensions
+                norm = torch.sqrt(torch.sum(torch.abs(prepared.amplitudes) ** 2, 
+                                          dim=(-2, -1)))
+            else:
+                # For other batched states, compute norm globally across all dimensions except batch
+                norm = torch.sqrt(torch.sum(torch.abs(prepared.amplitudes) ** 2, 
+                                          dim=tuple(range(1, len(prepared.amplitudes.shape)))))
             target_norm = torch.ones_like(norm)
 
         if not torch.allclose(norm, target_norm, rtol=self.tolerance, atol=self.tolerance):

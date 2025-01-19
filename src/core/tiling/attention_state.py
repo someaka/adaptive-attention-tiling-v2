@@ -89,16 +89,16 @@ class AttentionState:
         if key not in self.state_manager.states:
             self.state_manager.initialize_state(key)
 
-        # Update state in manager
-        self.state_manager.update_state(key, state)
-
-        # Let QuantumState handle normalization and store original norm
+        # Create QuantumState to handle normalization
         quantum_state = QuantumState(
             amplitudes=state.to(torch.complex128),
             basis_labels=[str(i) for i in range(state.shape[-1])],
             phase=torch.zeros(1, dtype=torch.complex128, device=state.device),
             original_norm=None  # Let QuantumState compute and store this
         )
+
+        # Update state in manager with normalized amplitudes
+        self.state_manager.update_state(key, quantum_state.amplitudes)
 
         return quantum_state
 
@@ -263,10 +263,13 @@ class AttentionState:
         # Create causal mask if requested
         attention_mask = None
         if causal:
-            attention_mask = torch.triu(
+            # Create base causal mask [seq_length, seq_length]
+            causal_mask = torch.triu(
                 torch.ones(seq_length, seq_length, dtype=torch.bool, device=device),
                 diagonal=1
             ).logical_not()
+            # Expand to [batch_size, num_heads, seq_length, seq_length]
+            attention_mask = causal_mask.expand(batch_size, num_heads, seq_length, seq_length)
         
         return cls(
             state_manager=state_manager,

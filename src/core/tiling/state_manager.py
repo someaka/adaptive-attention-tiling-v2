@@ -60,7 +60,13 @@ class StateManager:
             # For multi-dimensional states
             if self.config.type == StateType.PURE:
                 state = torch.randn(*shape, device=self.device, dtype=self.config.dtype)
-                state = state / torch.norm(state, dim=-1, keepdim=True)
+                # For multi-head attention states (batch_size, num_heads, seq_length, hidden_dim)
+                if len(shape) == 4:
+                    # Normalize over sequence and hidden dimensions
+                    state = state / torch.sqrt(torch.sum(torch.abs(state) ** 2, dim=(-2, -1), keepdim=True)).clamp(min=1e-8)
+                else:
+                    # For other multi-dimensional states, normalize over last dimension
+                    state = state / torch.norm(state, dim=-1, keepdim=True).clamp(min=1e-8)
             elif self.config.type == StateType.MIXED:
                 raise ValueError("Mixed states not supported for multi-dimensional tensors")
             else:  # ENTANGLED
@@ -71,13 +77,13 @@ class StateManager:
 
             if self.config.type == StateType.PURE:
                 state = torch.randn(dim, device=self.device, dtype=self.config.dtype)
-                state = state / torch.norm(state)
+                state = state / torch.norm(state).clamp(min=1e-8)
             elif self.config.type == StateType.MIXED:
                 state = torch.eye(dim, device=self.device, dtype=self.config.dtype)
-                state = state / torch.trace(state)
+                state = state / torch.trace(state).clamp(min=1e-8)
             else:  # ENTANGLED
                 state = torch.randn(dim, dim, device=self.device, dtype=self.config.dtype)
-                state = state / torch.norm(state)
+                state = state / torch.norm(state).clamp(min=1e-8)
 
         self.states[key] = state
         return state
@@ -101,12 +107,18 @@ class StateManager:
         state = self.states[key]
         new_state = state + learning_rate * update
 
-        # Normalize globally across all dimensions except batch
+        # Normalize based on state shape
         if self.config.type == StateType.PURE:
-            # Global normalization across all dimensions except batch
-            new_state = new_state / torch.sqrt(torch.sum(torch.abs(new_state) ** 2, 
-                                                       dim=tuple(range(1, len(new_state.shape))), 
-                                                       keepdim=True)).clamp(min=1e-8)
+            if len(new_state.shape) == 4:  # Multi-head attention state
+                # Normalize per head by summing over sequence and hidden dimensions
+                new_state = new_state / torch.sqrt(torch.sum(torch.abs(new_state) ** 2, 
+                                                           dim=(-2, -1), 
+                                                           keepdim=True)).clamp(min=1e-8)
+            else:
+                # Global normalization across all dimensions except batch
+                new_state = new_state / torch.sqrt(torch.sum(torch.abs(new_state) ** 2, 
+                                                           dim=tuple(range(1, len(new_state.shape))), 
+                                                           keepdim=True)).clamp(min=1e-8)
         elif self.config.type == StateType.MIXED:
             new_state = 0.5 * (new_state + new_state.T)
             new_state = new_state / torch.trace(new_state)

@@ -114,22 +114,22 @@ def test_complex_state_handling(
     assert updated.phase is not None
     assert updated.phase.dtype == torch.complex128
     
-    # Verify global normalization
+    # Verify per-head normalization
     norms = torch.sqrt(torch.sum(torch.abs(updated.amplitudes) ** 2, 
-                                dim=tuple(range(1, len(updated.amplitudes.shape)))))
+                                dim=(-2, -1)))  # Sum over sequence and hidden dims
     assert torch.allclose(norms, torch.ones_like(norms), rtol=1e-5)
     
-    # Verify original norm is stored and has correct shape
+    # Verify original norm is stored and has correct shape for multi-head
     assert updated.original_norm is not None
-    assert updated.original_norm.shape == (batch_size, 1, 1, 1)
+    assert updated.original_norm.shape == (batch_size, num_heads, 1, 1)
     
     # Test phase invariance of the quantum state
     phase_new = torch.exp(1j * torch.rand(1))
     phase_shifted_amplitudes = updated.amplitudes * phase_new
     
-    # The new state should still be normalized
+    # The new state should still be normalized per head
     phase_shifted_norms = torch.sqrt(torch.sum(torch.abs(phase_shifted_amplitudes) ** 2, 
-                                             dim=tuple(range(1, len(phase_shifted_amplitudes.shape)))))
+                                             dim=(-2, -1)))  # Sum over sequence and hidden dims
     assert torch.allclose(phase_shifted_norms, torch.ones_like(phase_shifted_norms), rtol=1e-5)
     
     # Test density matrix computation
@@ -141,7 +141,7 @@ def test_complex_state_handling(
     # 1. Hermiticity
     assert torch.allclose(rho, rho.transpose(-1, -2).conj(), rtol=1e-5)
     
-    # 2. Trace = 1 for each state in batch
+    # 2. Trace = 1 for each state in batch and head
     traces = torch.diagonal(rho, dim1=-2, dim2=-1).sum(-1)
     assert torch.allclose(traces.real, torch.ones_like(traces.real), rtol=1e-5)
     assert torch.allclose(traces.imag, torch.zeros_like(traces.imag), rtol=1e-5)
@@ -200,10 +200,10 @@ def test_quantum_state_updates(
     assert updated_state.amplitudes.shape == (batch_size, num_heads, seq_length, hidden_dim)
     assert updated_state.amplitudes.dtype == torch.complex128
     
-    # Verify original norm is stored (one per batch)
+    # Verify original norm is stored (one per batch and head)
     assert hasattr(updated_state, 'original_norm')
     assert updated_state.original_norm is not None
-    assert updated_state.original_norm.shape == (batch_size, 1, 1, 1)
+    assert updated_state.original_norm.shape == (batch_size, num_heads, 1, 1)
 
 def test_metric_updates(attention_state: AttentionState):
     """Test metric updates."""
@@ -244,16 +244,12 @@ def test_state_manager_integration(attention_state: AttentionState):
     assert quantum_state.phase is not None
     assert quantum_state.phase.dtype == torch.complex128
 
-    # Verify global normalization (across all dims except batch)
+    # Verify per-head normalization
     norms = torch.sqrt(torch.sum(torch.abs(quantum_state.amplitudes) ** 2, 
-                                dim=tuple(range(1, len(quantum_state.amplitudes.shape)))))
+                                dim=(-2, -1)))  # Sum over sequence and hidden dims
     assert torch.allclose(norms, torch.ones_like(norms), rtol=1e-5)
 
-    # Verify original norm is stored correctly
-    assert quantum_state.original_norm is not None
-    assert quantum_state.original_norm.shape == (batch_size, 1, 1, 1)
-    
-    # Now test state update with complex values
+    # Test complex state update
     update_state = torch.complex(
         torch.randn(batch_size, num_heads, seq_length, hidden_dim),
         torch.randn(batch_size, num_heads, seq_length, hidden_dim)
@@ -268,9 +264,9 @@ def test_state_manager_integration(attention_state: AttentionState):
     # Verify the update resulted in a valid quantum state
     stored_state = attention_state.state_manager.states["test"]
     
-    # Verify normalization is maintained
+    # Verify per-head normalization is maintained
     norms = torch.sqrt(torch.sum(torch.abs(stored_state) ** 2, 
-                                dim=tuple(range(1, len(stored_state.shape)))))
+                                dim=(-2, -1)))  # Sum over sequence and hidden dims
     assert torch.allclose(norms, torch.ones_like(norms), rtol=1e-5)
 
     # Verify quantum state is complex
@@ -281,7 +277,7 @@ def test_state_manager_integration(attention_state: AttentionState):
     phase = torch.exp(1j * torch.rand(1))
     phase_shifted = quantum_state.amplitudes * phase
     phase_shifted_norms = torch.sqrt(torch.sum(torch.abs(phase_shifted) ** 2, 
-                                             dim=tuple(range(1, len(phase_shifted.shape)))))
+                                             dim=(-2, -1)))  # Sum over sequence and hidden dims
     assert torch.allclose(phase_shifted_norms, torch.ones_like(phase_shifted_norms), rtol=1e-5)
 
 def test_error_handling(
@@ -359,42 +355,43 @@ def test_invalid_state_manager_config():
 def test_quantum_properties(attention_state: AttentionState):
     """Test quantum properties of states."""
     # Test that quantum state updates preserve quantum properties
+    batch_size, num_heads, seq_length, hidden_dim = attention_state.geometric_state.shape
     state = torch.randn_like(attention_state.geometric_state)
     quantum_state = attention_state.update_quantum_state("test", state)
 
-    # 1. Check global normalization (across all dims except batch)
+    # 1. Check per-head normalization
     norms = torch.sqrt(torch.sum(torch.abs(quantum_state.amplitudes) ** 2, 
-                               dim=tuple(range(1, len(quantum_state.amplitudes.shape)))))
+                               dim=(-2, -1)))  # Sum over sequence and hidden dims
     assert torch.allclose(norms, torch.ones_like(norms), rtol=1e-5)
 
-    # 2. Check density matrix properties for a subset of states
-    # Take first element of each batch for memory efficiency
-    batch_size = quantum_state.amplitudes.shape[0]
-    sample_states = quantum_state.amplitudes[:, 0, 0]  # Shape: [batch_size, hidden_dim]
+    # 2. Check density matrix properties for each head
+    # Take first sequence element of each batch and head for memory efficiency
+    sample_states = quantum_state.amplitudes[:, :, 0]  # Shape: [batch_size, num_heads, hidden_dim]
     
-    # Normalize sample states
+    # Normalize sample states per head
     sample_norms = torch.sqrt(torch.sum(torch.abs(sample_states) ** 2, dim=-1, keepdim=True))
     sample_states = sample_states / sample_norms.clamp(min=1e-8)
     
     # Compute density matrices for samples
-    density_matrices = torch.bmm(
-        sample_states.unsqueeze(-1),
-        sample_states.conj().unsqueeze(-2)
-    )
+    density_matrices = torch.einsum('bhd,bhe->bhde', 
+                                  sample_states, 
+                                  sample_states.conj())
 
     # Check hermiticity
-    assert torch.allclose(density_matrices, density_matrices.transpose(-2, -1).conj(), rtol=1e-5)
+    assert torch.allclose(density_matrices, 
+                         density_matrices.transpose(-2, -1).conj(), 
+                         rtol=1e-5)
 
-    # Check trace = 1
+    # Check trace = 1 for each batch and head
     traces = torch.diagonal(density_matrices, dim1=-2, dim2=-1).sum(-1)
     assert torch.allclose(traces, torch.ones_like(traces), rtol=1e-5)
 
-    # 3. Check phase invariance
+    # 3. Check phase invariance per head
     phase = torch.exp(1j * torch.rand(1))
     phase_shifted = quantum_state.amplitudes * phase
     phase_shifted_norms = torch.sqrt(torch.sum(torch.abs(phase_shifted) ** 2,
-                                             dim=tuple(range(1, len(phase_shifted.shape)))))
-    assert torch.allclose(phase_shifted_norms, torch.ones_like(phase_shifted_norms), rtol=1e-5) 
+                                             dim=(-2, -1)))  # Sum over sequence and hidden dims
+    assert torch.allclose(phase_shifted_norms, torch.ones_like(phase_shifted_norms), rtol=1e-5)
 
 def test_mask_handling(
     attention_state: AttentionState,
@@ -459,10 +456,11 @@ def test_causal_initialization(
 
     # Verify causal mask was created
     assert state.attention_mask is not None
-    assert state.attention_mask.shape == (seq_length, seq_length)
+    assert state.attention_mask.shape == (batch_size, num_heads, seq_length, seq_length)
     
     # Verify it's a proper causal mask
     causal = torch.triu(torch.ones(seq_length, seq_length, dtype=torch.bool), diagonal=1).logical_not()
+    causal = causal.expand(batch_size, num_heads, seq_length, seq_length)
     assert torch.equal(state.attention_mask, causal)
 
 def test_invalid_masks():

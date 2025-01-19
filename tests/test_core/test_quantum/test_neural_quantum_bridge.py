@@ -256,12 +256,13 @@ class TestNeuralQuantumBridge:
         assert state.layout["batch_size"] == batch_size
         assert state.layout["num_heads"] == num_heads
         assert state.layout["seq_length"] == seq_len
-        assert state.layout["dim"] == hidden_dim
+        assert state.layout["dim"] == hidden_dim//2, "Quantum state dimension should be half of hidden_dim since real/imag parts are split"
         
         # Get amplitudes and verify normalization per head
         amplitudes = state.amplitudes
         reshaped_amplitudes = amplitudes.reshape(batch_size, num_heads, seq_len, -1)
-        norms = torch.norm(reshaped_amplitudes, dim=-1)  # Norm per head/sequence element
+        # Compute norm per head by summing over sequence and hidden dimensions
+        norms = torch.sqrt(torch.sum(torch.abs(reshaped_amplitudes) ** 2, dim=(-2, -1)))  # [batch_size, num_heads]
         assert torch.allclose(norms, torch.ones_like(norms), rtol=1e-5), "Amplitudes not normalized per head"
         
         # Compute loss that depends on head structure

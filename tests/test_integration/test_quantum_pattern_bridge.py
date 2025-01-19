@@ -270,6 +270,7 @@ def test_pattern_bundle_gradient_flow(setup_bridge):
     pattern = torch.randn(batch_size, num_heads, seq_len, hidden_dim, dtype=torch.float64, requires_grad=True)
     pattern_norm = torch.norm(pattern, p=2, dim=-1, keepdim=True)
     pattern = pattern / (pattern_norm + 1e-6)  # Manual normalization that preserves gradients
+    pattern.retain_grad()  # Ensure gradients are retained for non-leaf tensor
     
     # Forward pass through quantum evolution
     quantum_state = dynamics._to_quantum_state(pattern)

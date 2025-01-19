@@ -113,36 +113,22 @@ class PatternDynamics(nn.Module):
         for c in range(state.shape[1]):
             self._log_tensor_stats(state, f"Input state channel {c}", channel=c)
         
+        # Ensure input has gradients
+        if not state.requires_grad:
+            state = state.detach().clone().requires_grad_(True)
+        
         # Convert to complex while preserving gradients
         state_real = state.to(torch.float64)
         state_imag = torch.zeros_like(state_real, dtype=torch.float64)
         state_complex = torch.complex(state_real, state_imag)
-        state_complex.requires_grad_(True)  # Enable gradients for complex tensor
-        state_complex.retain_grad()  # Retain gradients for complex tensor
         
         # Extract phase while preserving gradients
         phase = torch.zeros_like(state_complex, dtype=torch.float64)
         amplitudes = state_complex.abs()  # Use abs() instead of torch.abs() to preserve gradients
         
-        # Normalize amplitudes while preserving gradients
-        # For multi-head inputs, normalize each head separately
-        if len(amplitudes.shape) == 4:  # [batch, heads, seq, hidden]
-            norm = torch.norm(amplitudes.view(amplitudes.shape[0], amplitudes.shape[1], -1), p=2, dim=2, keepdim=True)
-            norm = norm.view(amplitudes.shape[0], amplitudes.shape[1], 1, 1)  # Reshape to match amplitudes dimensions
-        else:
-            norm = torch.norm(amplitudes.view(amplitudes.shape[0], -1), p=2, dim=1, keepdim=True)
-            norm = norm.view(amplitudes.shape[0], 1, 1, 1)  # Reshape to match amplitudes dimensions
-        
-        # Add epsilon without detaching to maintain gradient flow
-        norm = norm + 1e-6
-        
-        # Normalize while preserving gradients
-        amplitudes = amplitudes / norm
-        
         # Ensure gradients are preserved
         amplitudes = amplitudes.clone()
         amplitudes.requires_grad_(True)
-        amplitudes.retain_grad()  # Retain gradients for non-leaf tensor
         
         logger.info(f"\n=== Phase initialization ===")
         logger.info(f"Phase shape: {phase.shape}")

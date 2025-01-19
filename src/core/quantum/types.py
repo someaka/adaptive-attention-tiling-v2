@@ -59,10 +59,17 @@ class QuantumState:
                 raise ValueError(f"Unsupported tensor shape: {shape}")
 
         # Store original norm before normalization
-        # For all cases, normalize globally across all dimensions except batch
-        norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
-                                  dim=tuple(range(1, len(self.amplitudes.shape))), 
-                                  keepdim=True))
+        if self.layout is not None and self.layout["type"] == "attention":
+            # For attention states, compute norm per head
+            # Sum over sequence and hidden dimensions (last two dims)
+            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
+                                     dim=tuple(range(2, len(self.amplitudes.shape))), 
+                                     keepdim=True))
+        else:
+            # For all other cases, normalize globally across all dimensions except batch
+            norm = torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
+                                     dim=tuple(range(1, len(self.amplitudes.shape))), 
+                                     keepdim=True))
         
         # Store original norm if not provided
         if self.original_norm is None:
@@ -70,7 +77,7 @@ class QuantumState:
         else:
             self.original_norm = self.original_norm.to(torch.float64)
             
-        # Normalize globally across all dimensions except batch
+        # Normalize with clamping for numerical stability
         self.amplitudes = self.amplitudes / norm.clamp(min=1e-8)
 
     @property
@@ -84,10 +91,25 @@ class QuantumState:
         return self.amplitudes
 
     def norm(self) -> torch.Tensor:
-        """Compute the norm of the quantum state."""
-        # For all cases, compute norm globally across all dimensions except batch
-        return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
-                                  dim=tuple(range(1, len(self.amplitudes.shape))))).to(torch.float64)
+        """Compute the norm of the quantum state.
+        
+        For multi-head attention states, computes norm per head.
+        For other states, computes norm globally across all dimensions except batch.
+        
+        Returns:
+            torch.Tensor: Norm of the quantum state with shape:
+                - (batch_size,) for standard states
+                - (batch_size, num_heads) for attention states
+        """
+        if self.layout is not None and self.layout["type"] == "attention":
+            # For attention states, compute norm per head
+            # Sum over sequence and hidden dimensions (last two dims)
+            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
+                                     dim=tuple(range(2, len(self.amplitudes.shape))))).to(torch.float64)
+        else:
+            # For all other cases, compute norm globally across all dimensions except batch
+            return torch.sqrt(torch.sum(torch.abs(self.amplitudes) ** 2, 
+                                     dim=tuple(range(1, len(self.amplitudes.shape))))).to(torch.float64)
 
     def density_matrix(self) -> torch.Tensor:
         """Compute the density matrix representation of the state.
