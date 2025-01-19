@@ -92,21 +92,12 @@ class AttentionState:
         # Update state in manager
         self.state_manager.update_state(key, state)
 
-        # Store original norms before normalization
-        # Global normalization across all dimensions except batch
-        original_norms = torch.sqrt(torch.sum(torch.abs(state) ** 2, 
-                                            dim=tuple(range(1, len(state.shape))), 
-                                            keepdim=True))  # (batch, 1, 1, 1)
-        
-        # Global normalization across all dimensions except batch
-        normalized_state = state / original_norms.clamp(min=1e-8)
-
-        # Convert input state to quantum state
+        # Let QuantumState handle normalization and store original norm
         quantum_state = QuantumState(
-            amplitudes=normalized_state.to(torch.complex128),
+            amplitudes=state.to(torch.complex128),
             basis_labels=[str(i) for i in range(state.shape[-1])],
             phase=torch.zeros(1, dtype=torch.complex128, device=state.device),
-            original_norm=original_norms.to(torch.float64)
+            original_norm=None  # Let QuantumState compute and store this
         )
 
         return quantum_state
