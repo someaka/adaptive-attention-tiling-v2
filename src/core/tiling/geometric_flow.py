@@ -382,6 +382,10 @@ class GeometricFlow(RiemannianFlow):
     
     def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
         """Compute the Riemannian metric tensor at the given points."""
+        # Add batch dimension if not present
+        if len(points.shape) == 1:
+            points = points.unsqueeze(0)
+            
         # Project to manifold dimension if needed
         if points.size(-1) > self.manifold_dim:
             # Initialize projection matrix if not exists
@@ -402,14 +406,17 @@ class GeometricFlow(RiemannianFlow):
         
         # Get raw metric from network
         metric = self.metric_net(points)
-        metric = metric.view(points.shape[0], self.manifold_dim, self.manifold_dim)
+        
+        # Reshape to proper metric tensor shape [batch_size, manifold_dim, manifold_dim]
+        batch_size = points.shape[0]
+        metric = metric.reshape(batch_size, self.manifold_dim, self.manifold_dim)
         
         # Ensure symmetry
         metric = 0.5 * (metric + metric.transpose(-2, -1))
         
         # Add positive definite regularization
         eye = torch.eye(self.manifold_dim, dtype=metric.dtype, device=metric.device)
-        eye = eye.expand(points.shape[0], -1, -1)
+        eye = eye.expand(batch_size, -1, -1)
         
         # Project onto positive definite cone
         eigenvals = torch.linalg.eigvalsh(metric)

@@ -268,7 +268,7 @@ class NonlinearStabilityValidator:
         """Compute Lyapunov function."""
         # Use energy as Lyapunov function
         _, metrics = flow.forward(state)
-        energy = metrics.get("energy", 0.0)
+        energy = metrics.get("energy", torch.tensor(0.0, device=state.device, dtype=state.dtype))
         
         # For complex state, use squared magnitude
         if state.is_complex():
@@ -276,10 +276,20 @@ class NonlinearStabilityValidator:
         else:
             reg_term = torch.sum(state ** 2)
         
-        # Add regularization for stability (use float32 for intermediate calculations)
-        reg_energy = float(energy) + 1e-6 * float(reg_term)
+        # Add regularization for stability using tensor operations
+        reg_energy = energy + 1e-6 * reg_term
         
-        return reg_energy
+        # Safely convert to float with clamping to avoid overflow
+        max_val = torch.finfo(reg_energy.dtype).max / 2
+        if torch.is_complex(reg_energy):
+            # Clamp real and imaginary parts separately
+            real_part = torch.clamp(reg_energy.real, min=-max_val, max=max_val)
+            imag_part = torch.clamp(reg_energy.imag, min=-max_val, max=max_val)
+            reg_energy = torch.abs(torch.complex(real_part, imag_part))
+        else:
+            reg_energy = torch.clamp(reg_energy, min=-max_val, max=max_val)
+        
+        return reg_energy.item()
 
     def _estimate_basin(
         self, flow: GeometricFlow, state: torch.Tensor
