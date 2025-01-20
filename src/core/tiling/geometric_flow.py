@@ -467,9 +467,14 @@ class GeometricFlow(RiemannianFlow):
             time_steps = 1
             x = x.unsqueeze(0) if len(x.shape) == 4 else x
             
-        # Store spatial dimensions if present
+        # Store sequence and spatial dimensions if present
         spatial_dims = None
-        if len(x.shape) > 2:  # If we have spatial dimensions
+        seq_len = None
+        if len(x.shape) == 3:  # If we have sequence dimension [batch, seq_len, hidden]
+            seq_len = x.shape[1]
+            batch_size = x.size(0)
+            x = x.reshape(batch_size * seq_len, -1)  # Flatten sequence dimension
+        elif len(x.shape) > 2:  # If we have spatial dimensions
             spatial_dims = x.shape[1:]  # Store spatial dimensions
             batch_size = x.size(0)
             x = x.reshape(batch_size, -1)  # Flatten spatial dimensions
@@ -523,7 +528,9 @@ class GeometricFlow(RiemannianFlow):
         if has_time_dim:
             output = output.reshape(*orig_shape)
         else:
-            if spatial_dims is not None:  # If we had spatial dimensions
+            if seq_len is not None:  # If we had sequence dimension
+                output = output.reshape(batch_size, seq_len, -1)
+            elif spatial_dims is not None:  # If we had spatial dimensions
                 if len(orig_shape) == 4:  # For tiling patterns
                     output = output.reshape(orig_shape)
                 else:

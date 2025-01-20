@@ -131,6 +131,11 @@ class TestEndToEnd:
         4. End-to-end flow through the attention layer
         """
         try:
+            # Ensure input has correct shape [batch_size, seq_len, hidden_dim]
+            batch_size = test_input.shape[0]
+            seq_len = test_input.shape[1]
+            hidden_dim = test_input.shape[2]
+            
             # 1. Test neural bridge forward pass
             bridge_output = neural_bridge(test_input)
             assert bridge_output.shape == test_input.shape, "Bridge output shape mismatch"
@@ -139,7 +144,9 @@ class TestEndToEnd:
             assert torch.all(torch.norm(bridge_output, dim=-1) > 0), "Bridge output has zero norm"
             
             # 2. Test quantum state conversion and properties
-            quantum_state = neural_bridge.neural_to_quantum(test_input)
+            # Reshape input to [batch_size * seq_len, hidden_dim] for quantum conversion
+            flat_input = test_input.reshape(-1, hidden_dim)
+            quantum_state = neural_bridge.neural_to_quantum(flat_input)
             if isinstance(quantum_state, tuple):
                 quantum_state, validation = quantum_state
                 assert validation.is_valid, "Quantum state validation failed"
@@ -149,7 +156,7 @@ class TestEndToEnd:
             # Quantum states should be normalized
             assert torch.allclose(
                 quantum_state.norm(),
-                torch.ones(test_input.shape[0], dtype=torch.float64),
+                torch.ones(batch_size * seq_len, dtype=torch.float64),
                 atol=1e-6
             ), "Quantum state normalization error"
             
@@ -177,7 +184,7 @@ class TestEndToEnd:
             assert "quantum" in attention_patterns, "Missing quantum attention patterns"
             
             quantum_patterns = attention_patterns["quantum"]
-            assert quantum_patterns.shape[-2:] == (test_input.shape[1], test_input.shape[1]), \
+            assert quantum_patterns.shape[-2:] == (seq_len, seq_len), \
                 "Invalid attention pattern shape"
             assert torch.isfinite(quantum_patterns).all(), "Attention pattern contains invalid values"
             # Attention patterns should sum to 1 after softmax
@@ -189,15 +196,17 @@ class TestEndToEnd:
             
             # 6. Validate quantum properties are preserved
             neural_out = neural_bridge.quantum_to_neural(evolved_state)
+            # Reshape back to match original input shape
+            neural_out = neural_out.reshape(batch_size, seq_len, hidden_dim)
             assert neural_out.shape == test_input.shape, "Neural output shape mismatch"
             assert torch.isfinite(neural_out).all(), "Neural output contains invalid values"
             # Neural output should have non-zero norm
             assert torch.all(torch.norm(neural_out, dim=-1) > 0), "Neural output has zero norm"
             
             # 7. Test coherence between input and output states
-            coherence = neural_bridge.compute_coherence(test_input, neural_out)
+            coherence = neural_bridge.compute_coherence(test_input.reshape(-1, hidden_dim), neural_out.reshape(-1, hidden_dim))
             assert torch.all(coherence >= 0) and torch.all(coherence <= 1), "Invalid coherence values"
-            assert coherence.shape == (test_input.shape[0],), "Incorrect coherence shape"
+            assert coherence.shape == (batch_size * seq_len,), "Incorrect coherence shape"
             # Coherence should be non-zero (states shouldn't be orthogonal)
             assert torch.all(coherence > 0), "Zero coherence detected"
             
@@ -212,7 +221,7 @@ class TestEndToEnd:
                 assert torch.isfinite(entropy).all(), "Invalid quantum entropy values"
                 assert torch.all(entropy >= 0), "Negative quantum entropy detected"
                 # Entropy should be bounded by ln(dim) for a quantum system
-                max_entropy = np.log(test_input.shape[-1])
+                max_entropy = np.log(hidden_dim)
                 assert torch.all(entropy <= max_entropy + 1e-6), "Entropy exceeds theoretical maximum"
             
         finally:
