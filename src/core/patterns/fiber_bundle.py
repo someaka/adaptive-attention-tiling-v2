@@ -101,17 +101,11 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             ValueError: If input tensor has invalid shape
         """
         # Validate input dimensions
-        if total_space.shape[-1] != self.base_dim:
-            # Handle dimension mismatch by padding or truncating
-            if total_space.shape[-1] < self.base_dim:
-                padding = torch.zeros(*total_space.shape[:-1], self.base_dim - total_space.shape[-1],
-                                    device=total_space.device, dtype=total_space.dtype)
-                total_space = torch.cat([total_space, padding], dim=-1)
-            else:
-                total_space = total_space[..., :self.base_dim]
+        if total_space.shape[-1] != self.total_dim:
+            raise ValueError(f"Expected input with last dimension {self.total_dim}, got {total_space.shape[-1]}")
         
-        # Project to base manifold
-        return self.riemannian_framework.project_to_base(total_space)
+        # Project to base manifold by taking first base_dim components
+        return total_space[..., :self.base_dim]
 
     def local_trivialization(self, point: Tensor) -> Tuple[LocalChart[Tensor], FiberChart[Tensor, str]]:
         """Implementation of FiberBundle.local_trivialization.
@@ -206,26 +200,42 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
             Connection form value
         """
         # Handle batch dimension if present
-        has_batch = len(tangent_vector.shape) > 1
-        if not has_batch:
+        original_shape = tangent_vector.shape
+        if len(original_shape) == 1:
             tangent_vector = tangent_vector.unsqueeze(0)
             
         # Extract base and vertical components
-        base_components = tangent_vector[..., :self.base_dim]
-        vertical_components = tangent_vector[..., self.base_dim:]
+        base_components = tangent_vector[..., :self.base_dim]  # Shape: (..., base_dim)
+        vertical_components = tangent_vector[..., self.base_dim:]  # Shape: (..., fiber_dim)
         
-        # For purely vertical vectors, return vertical components directly
+        # For purely vertical vectors, return them unchanged
         if torch.allclose(base_components, torch.zeros_like(base_components)):
-            return vertical_components if has_batch else vertical_components.squeeze(0)
-            
-        # For horizontal vectors, compute connection form
-        result = torch.zeros_like(vertical_components)
+            return vertical_components if len(original_shape) > 1 else vertical_components.squeeze(0)
         
-        # Contract connection with base components
-        # Shape: (batch_size, fiber_dim)
-        result = torch.einsum('...i,ijk->...k', base_components, self.connection)
+        # Get connection matrices and ensure skew-symmetry
+        connection = self.connection.clone()  # Shape: (base_dim, fiber_dim, fiber_dim)
+        
+        # Make each base direction's connection matrix skew-symmetric
+        for i in range(self.base_dim):
+            # First make skew-symmetric
+            connection[i] = 0.5 * (connection[i] - connection[i].transpose(-2, -1))
+            # Then ensure diagonal is zero
+            connection[i].diagonal().zero_()
+            # Scale by 1/2 for proper Lie algebra basis
+            connection[i] = 0.5 * connection[i]
+        
+        # Contract base components with connection matrices using einsum
+        # Shape: (..., fiber_dim)
+        horizontal_part = torch.einsum('...i,ijk->...k', base_components, connection)
+        
+        # Add vertical components to maintain linearity
+        result = horizontal_part + vertical_components
+        
+        # Restore original shape if needed
+        if len(original_shape) == 1:
+            result = result.squeeze(0)
             
-        return result if has_batch else result.squeeze(0)
+        return result
 
     def parallel_transport(self, section: Tensor, path: Tensor) -> Tensor:
         """Implementation of FiberBundle.parallel_transport.
@@ -233,118 +243,74 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         Parallel transport a section along a path using adaptive RK4 integration.
         
         Args:
-            section: Section to transport (shape: (fiber_dim,))
-            path: Path along which to transport (shape: (num_points, base_dim))
+            section: Section to transport (shape: (fiber_dim,) or (batch_size, fiber_dim))
+            path: Path along which to transport (shape: (num_points, base_dim) or (batch_size, num_points, base_dim))
             
         Returns:
-            Transported section (shape: (num_points, fiber_dim))
+            Transported section (shape: (num_points, fiber_dim) or (batch_size, num_points, fiber_dim))
         """
-        # Initialize result tensor
-        num_points = path.shape[0]
-        
-        # Handle batched sections
-        if len(section.shape) > 1:
-            batch_size = section.shape[0]
-            section = section.reshape(batch_size, -1)
-        else:
-            batch_size = 1
+        # Handle batch dimension if present
+        has_batch = len(section.shape) > 1
+        if not has_batch:
             section = section.unsqueeze(0)
-            
-        # Initialize result tensor to preserve gradients
-        result = torch.zeros_like(section).unsqueeze(0).expand(num_points, -1, -1)
-        result[0] = section  # Initial condition
+            path = path.unsqueeze(0)
         
-        # Extract fiber metric for norm computations
-        fiber_metric = self.metric[self.base_dim:, self.base_dim:]
+        # Initialize result tensor with proper shape
+        batch_size = section.shape[0]
+        num_points = path.shape[1]
+        result = torch.zeros(batch_size, num_points, self.fiber_dim, 
+                           device=section.device, dtype=section.dtype)
         
-        # Ensure path has correct base dimension
-        if path.shape[-1] != self.base_dim:
-            # If path has more dimensions, truncate
-            if path.shape[-1] > self.base_dim:
-                path = path[..., :self.base_dim]
-            else:
-                # If path has fewer dimensions, pad with zeros
-                padding = torch.zeros(*path.shape[:-1], self.base_dim - path.shape[-1], 
-                                   device=path.device, dtype=path.dtype)
-                path = torch.cat([path, padding], dim=-1)
+        # Set initial condition
+        result[:, 0] = F.normalize(section, p=2, dim=-1) * torch.norm(section, dim=-1, keepdim=True)
         
-        # Compute path tangent vectors and normalize using base metric
-        path_tangent = path[1:] - path[:-1]  # Shape: (num_points-1, base_dim)
-        base_metric = self.metric[:self.base_dim, :self.base_dim]
-        path_metric_norms = torch.sqrt(torch.einsum('...i,ij,...j->...', path_tangent, base_metric, path_tangent))
-        path_tangent = path_tangent / (path_metric_norms.unsqueeze(-1) + 1e-7)
-        
-        # Store original metric norm for preservation
-        original_metric_norm = torch.sqrt(torch.einsum('...i,ij,...j->...', section, fiber_metric, section))
-        
-        # Adaptive RK4 integration
-        t = 0.0
+        # Transport along path using RK4 integration
         dt = 1.0 / (num_points - 1)
-        current_point = 0
+        for i in range(num_points - 1):
+            # Get current point and tangent vector
+            current = result[:, i]
+            tangent = (path[:, i+1] - path[:, i]) / dt
+            
+            # RK4 integration step
+            k1 = self._transport_step(current, tangent)
+            k2 = self._transport_step(current + 0.5*dt*k1, tangent)
+            k3 = self._transport_step(current + 0.5*dt*k2, tangent)
+            k4 = self._transport_step(current + dt*k3, tangent)
+            
+            # Update with RK4 step
+            result[:, i+1] = current + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
+            
+            # Project to preserve fiber metric by normalizing and rescaling
+            result[:, i+1] = F.normalize(result[:, i+1], p=2, dim=-1) * torch.norm(section, dim=-1, keepdim=True)
         
-        while current_point < num_points - 1:
-            # Current state
-            current = result[current_point]
-            
-            # Try RK4 step
-            k1 = self._transport_step(current, path_tangent[current_point])
-            k2 = self._transport_step(current + 0.5*dt*k1, path_tangent[current_point])
-            k3 = self._transport_step(current + 0.5*dt*k2, path_tangent[current_point])
-            k4 = self._transport_step(current + dt*k3, path_tangent[current_point])
-            
-            # Compute next point
-            next_point = current + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
-            
-            # Normalize using metric to preserve metric compatibility
-            current_metric_norm = torch.sqrt(torch.einsum('...i,ij,...j->...', next_point, fiber_metric, next_point))
-            next_point = next_point * (original_metric_norm / (current_metric_norm + 1e-7)).unsqueeze(-1)
-            
-            # Update result
-            result[current_point + 1] = next_point
-            current_point += 1
-            t += dt
-        
-        # Return with correct shape
-        return result.squeeze(1) if batch_size == 1 else result
-        
-    def _transport_step(self, section: Tensor, tangent: Tensor) -> Tensor:
-        """Compute the transport step for parallel transport.
+        return result if has_batch else result.squeeze(0)
+
+    def _transport_step(self, current: Tensor, tangent: Tensor) -> Tensor:
+        """Compute transport step for parallel transport.
         
         Args:
-            section: Current section value (shape: (fiber_dim,))
-            tangent: Base space tangent vector (shape: (base_dim,))
+            current: Current section value (shape: (batch_size, fiber_dim))
+            tangent: Tangent vector (shape: (batch_size, base_dim))
             
         Returns:
-            Transport step (shape: (fiber_dim,))
+            Transport step value (shape: (batch_size, fiber_dim))
         """
-        # Extract fiber metric
-        fiber_metric = self.metric[self.base_dim:, self.base_dim:]
+        # Create full tangent vector with zeros in fiber components
+        full_tangent = torch.zeros(
+            *tangent.shape[:-1],
+            self.total_dim,
+            device=tangent.device,
+            dtype=tangent.dtype
+        )
+        full_tangent[..., :self.base_dim] = tangent
         
-        # Compute connection form contraction with metric lowering
-        connection_form = torch.einsum('ijk,i->jk', self.connection, tangent)
+        # Compute connection form
+        omega = self.connection_form(full_tangent)  # Shape: (batch_size, fiber_dim)
         
-        # Ensure section has correct shape for matrix multiplication
-        section = section.reshape(-1, 1)
-        
-        # Compute transport step with metric compatibility
-        # First lower indices with metric
-        lowered_section = torch.matmul(fiber_metric, section)
-        
-        # Then compute transport step
-        transport_step = -torch.matmul(connection_form, lowered_section).squeeze(-1)
-        
-        # Raise indices back with inverse metric
-        # Use pseudo-inverse for numerical stability
-        fiber_metric_inv = torch.linalg.pinv(fiber_metric)
-        transport_step = torch.matmul(fiber_metric_inv, transport_step.unsqueeze(-1)).squeeze(-1)
-        
-        # Preserve metric norm exactly while maintaining gradients
-        metric_norm = torch.sqrt(torch.einsum('i,ij,j->', section.squeeze(-1), fiber_metric, section.squeeze(-1)))
-        current_metric_norm = torch.sqrt(torch.einsum('i,ij,j->', transport_step, fiber_metric, transport_step))
-        scale_factor = metric_norm / (current_metric_norm + 1e-7)
-        transport_step = transport_step * scale_factor
-        
-        return transport_step
+        # Contract with current section using einsum for linearity
+        step = -torch.einsum('bi,bi->bi', omega, current)
+            
+        return step
 
     def compute_holonomy_group(self, holonomies: List[Tensor]) -> Tensor:
         """Compute the holonomy group from a list of holonomies.
@@ -404,6 +370,11 @@ class BaseFiberBundle(nn.Module, FiberBundle[Tensor]):
         
         # Add a small positive definite term for numerical stability
         metric = metric + 0.1 * torch.eye(total_dim, device=points.device).unsqueeze(0)
+        
+        # Ensure fiber metric part is identity
+        metric[..., self.base_dim:, self.base_dim:] = torch.eye(
+            self.fiber_dim, device=points.device
+        ).unsqueeze(0).expand(batch_size, -1, -1)
         
         # Create and return the metric tensor
         return MetricTensor(

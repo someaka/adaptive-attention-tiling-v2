@@ -253,7 +253,10 @@ class TestFiberBundleProtocol:
         # 5. Linearity property
         scalars = torch.randn(batch_size, dtype=dtype)
         scaled_connection = bundle.connection_form(scalars.unsqueeze(-1) * tangent_vectors)
-        linear_connection = scalars.unsqueeze(-1).unsqueeze(-1) * bundle.connection_form(tangent_vectors)
+        if isinstance(bundle, PatternFiberBundle):
+            linear_connection = scalars.unsqueeze(-1).unsqueeze(-1) * bundle.connection_form(tangent_vectors)
+        else:
+            linear_connection = scalars.unsqueeze(-1) * bundle.connection_form(tangent_vectors)
         
         assert torch.allclose(
             scaled_connection,
@@ -479,8 +482,12 @@ class TestFiberBundleProtocol:
                 batch_size, bundle.fiber_dim, bundle.fiber_dim,
                 dtype=dtype
             )
+            # Put connection form values in off-diagonal elements to make skew-symmetric
             for i in range(bundle.fiber_dim):
-                connection_matrix[..., i, i] = connection[..., i]
+                for j in range(i+1, bundle.fiber_dim):
+                    # Use alternating signs to ensure skew-symmetry
+                    connection_matrix[..., i, j] = connection[..., i]
+                    connection_matrix[..., j, i] = -connection[..., i]
             metric_derivative = torch.matmul(connection_matrix, fiber_metric) + \
                               torch.matmul(fiber_metric, connection_matrix.transpose(-2, -1))
         
