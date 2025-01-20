@@ -133,8 +133,12 @@ class PatternDynamics(nn.Module):
         
         # Convert to complex while preserving gradients and sign information
         state_abs = torch.abs(state).to(torch.float64)
-        state_sign = torch.sign(state).to(torch.float64)
-        state_phase = torch.where(state_sign < 0, torch.tensor(np.pi, dtype=torch.float64), torch.tensor(0.0, dtype=torch.float64))
+        # Handle complex sign by using the angle for phase directly
+        state_phase = torch.angle(state).to(torch.float64) if torch.is_complex(state) else torch.where(
+            state < 0,
+            torch.tensor(np.pi, dtype=torch.float64),
+            torch.tensor(0.0, dtype=torch.float64)
+        )
         state_real = state_abs * torch.cos(state_phase)
         state_imag = state_abs * torch.sin(state_phase)
         state_complex = torch.complex(state_real, state_imag)

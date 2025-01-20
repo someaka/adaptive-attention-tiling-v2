@@ -280,13 +280,9 @@ class NeuralQuantumBridge(nn.Module):
         real_part = classical_flat.real
         imag_part = classical_flat.imag
         
-        # Reconstruct sign from phase
-        phase = torch.angle(classical_flat)
-        sign = torch.where(torch.abs(phase) > np.pi/2, torch.tensor(-1.0, dtype=real_part.dtype), torch.tensor(1.0, dtype=real_part.dtype))
-        
-        # Get magnitude and apply sign
-        output = torch.abs(real_part) * sign
-        output = output.to(self.dtype)
+        # Reconstruct complex output
+        output = torch.complex(real_part, imag_part)
+        output = output.to(torch.complex128)  # Ensure consistent dtype
         
         # Reshape to match original dimensions
         if original_shape is not None:
