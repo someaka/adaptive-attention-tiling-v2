@@ -261,6 +261,43 @@ class QuantumState:
             purity = torch.trace(torch.matmul(rho, rho)).real
             return bool(abs(purity - 1.0) < tolerance)
 
+    def entropy(self) -> torch.Tensor:
+        """Compute the von Neumann entropy of the quantum state.
+        
+        The von Neumann entropy is defined as S(ρ) = -Tr(ρ ln ρ), where ρ is the density matrix.
+        For pure states, the entropy is 0. For mixed states, it is positive.
+        
+        Returns:
+            torch.Tensor: The von Neumann entropy. Shape matches batch dimensions of state.
+        """
+        # Get density matrix
+        rho = self.density_matrix()
+        
+        # Handle arbitrary batch dimensions
+        if len(rho.shape) > 2:  # Batched case
+            # Reshape to combine all batch dimensions
+            batch_shape = rho.shape[:-2]
+            hilbert_dim = rho.shape[-1]
+            rho_flat = rho.reshape(-1, hilbert_dim, hilbert_dim)
+            
+            # Compute eigenvalues for each density matrix in batch
+            eigenvalues = torch.linalg.eigvalsh(rho_flat).real  # Use eigvalsh since ρ is Hermitian
+            
+            # Compute entropy: -Tr(ρ ln ρ) = -∑ λᵢ ln λᵢ
+            # Handle numerical issues: 0 * ln(0) = 0
+            entropy = -torch.sum(
+                eigenvalues * torch.log(eigenvalues + 1e-10).where(eigenvalues > 1e-10, torch.zeros_like(eigenvalues)),
+                dim=-1
+            )
+            
+            # Restore batch dimensions
+            return entropy.reshape(batch_shape)
+        else:  # Single state case
+            eigenvalues = torch.linalg.eigvalsh(rho).real
+            return -torch.sum(
+                eigenvalues * torch.log(eigenvalues + 1e-10).where(eigenvalues > 1e-10, torch.zeros_like(eigenvalues))
+            )
+
     def state_vector(self) -> torch.Tensor:
         """Get the state vector representation.
         

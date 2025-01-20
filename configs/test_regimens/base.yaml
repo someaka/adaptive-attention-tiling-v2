@@ -107,3 +107,22 @@ quantum:
     convergence_threshold: 1e-6
     stability_threshold: 1e-5
     entanglement_threshold: 0.9
+
+quantum_bridge:
+  hidden_dim: 64  # From geometric.hidden_dim
+  manifold_dim: 3  # From quantum.manifold_dim
+  batch_size: 16   # From debug.yaml
+  num_heads: 8     # From geometric.num_heads
+  seq_len: 32      # New parameter
+  dtype: "float64" # From quantum.dtype
+
+quantum_bridge_tests:
+  test_tolerances:
+    norm: 1.0e-6
+    cosine_similarity: 0.99
+    manifold: 1.0e-5
+    entropy: 1.0e-5
+    scale: 1.0e-5
+  evolution_time: 1.0
+  source_scale: 1.0
+  target_scale: 2.0

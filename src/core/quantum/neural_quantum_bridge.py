@@ -132,10 +132,10 @@ class NeuralQuantumBridge(nn.Module):
             dtype=dtype
         )
         
-        # Initialize inverse projection
+        # Initialize inverse projection with double input dimension for real and imaginary parts
         self.inverse_projection = nn.Linear(
-            hidden_dim,  # Input is hidden_dim from quantum state
-            hidden_dim,  # Output is also hidden_dim to match neural representation
+            2 * hidden_dim,  # Input is 2 * hidden_dim for concatenated real and imaginary parts
+            hidden_dim,  # Output is hidden_dim to match neural representation
             device=self.device,
             dtype=self.dtype
         )
@@ -167,6 +167,10 @@ class NeuralQuantumBridge(nn.Module):
         # Check for non-finite values
         if not torch.all(torch.isfinite(x)):
             raise ValueError("Input tensor contains non-finite values")
+            
+        # Check for zero-norm patterns
+        if torch.all(x == 0):
+            raise ValueError("Input tensor has zero norm")
         
         # Store original shape and norm
         original_shape = x.shape
@@ -197,43 +201,43 @@ class NeuralQuantumBridge(nn.Module):
         x_manifold.requires_grad_(True)  # Enable gradients
         
         # Get hidden dimension from class attribute
-        hidden_dim = self.hidden_dim
+        hidden_dim = self.hidden_dim // 2  # Half dimension for real/imag split
             
         x_manifold.retain_grad()  # Retain gradients for intermediate values
         
-        # Convert to complex128 for quantum operations
-        if not torch.is_complex(x_manifold):
-            # Split input into real and imaginary parts
-            x_real = x_manifold[:, :hidden_dim//2].to(torch.float64)
-            x_imag = x_manifold[:, hidden_dim//2:].to(torch.float64)
+        # Convert to complex while preserving sign information
+        if torch.is_complex(x_manifold):
+            # If input is already complex, use it directly
+            x_complex = x_manifold
+            x_phase = torch.angle(x_complex)
+        else:
+            # For real input, convert to complex while preserving sign
+            x_abs = torch.abs(x_manifold)
+            x_sign = torch.sign(x_manifold)
+            x_phase = torch.where(x_sign < 0, torch.tensor(np.pi, dtype=torch.float64), torch.tensor(0.0, dtype=torch.float64))
+            x_real = x_abs * torch.cos(x_phase)
+            x_imag = x_abs * torch.sin(x_phase)
             x_complex = torch.complex(x_real, x_imag)
-            x_complex.retain_grad()  # Retain gradients for complex tensor
-        else:
-            x_complex = x_manifold.to(torch.complex128)
-            x_complex.retain_grad()  # Retain gradients for complex tensor
-            
-        # Normalize the complex tensor per head
-        if len(x.shape) == 4:  # Multi-head attention state
-            x_complex = x_complex.reshape(batch_size, num_heads, seq_len, -1)
-            norm = torch.sqrt(torch.sum(torch.abs(x_complex) ** 2, dim=(-2, -1), keepdim=True)).clamp(min=1e-8)
-            x_complex = x_complex / norm
-        else:
-            # Global normalization for other cases
-            norm = torch.sqrt(torch.sum(torch.abs(x_complex) ** 2, dim=-1, keepdim=True)).clamp(min=1e-8)
-            x_complex = x_complex / norm
+        
+        # Reshape to [batch_size, num_heads, seq_len, hidden_dim] for per-head normalization
+        x_complex = x_complex.reshape(batch_size, num_heads, seq_len, -1)
+        
+        # Normalize per head
+        norms = torch.sqrt(torch.sum(torch.abs(x_complex) ** 2, dim=(-2, -1), keepdim=True))
+        x_complex = x_complex / (norms + 1e-8)
         
         # Create quantum state with proper initialization and gradient tracking
         state = QuantumState(
-            amplitudes=x_complex,  # No need to call requires_grad_ since input already has it
-            basis_labels=[str(i) for i in range(hidden_dim//2)],  # Half the dimension since we split into real/imag
-            phase=torch.zeros(1, dtype=torch.complex128, device=self.device),
+            amplitudes=x_complex,
+            basis_labels=[str(i) for i in range(hidden_dim)],
+            phase=x_phase,
             original_norm=original_norm,
             layout={
                 "type": "batch" if num_heads == 1 and seq_len == 1 else "sequence" if num_heads == 1 else "attention",
                 "batch_size": batch_size,
                 "num_heads": num_heads,
                 "seq_length": seq_len,
-                "dim": hidden_dim//2  # Half the dimension since we split into real/imag
+                "dim": hidden_dim
             }
         )
         
@@ -248,6 +252,7 @@ class NeuralQuantumBridge(nn.Module):
                 prepared=state
             )
             return (state, validation)
+        
         return state
 
     def quantum_to_neural(
@@ -259,7 +264,7 @@ class NeuralQuantumBridge(nn.Module):
         
         Args:
             state: Quantum state to convert
-            original_shape: Original shape of input tensor (optional)
+            original_shape: Optional shape of input tensor
             
         Returns:
             Neural representation tensor
@@ -271,17 +276,24 @@ class NeuralQuantumBridge(nn.Module):
         if len(classical_flat.shape) == 4:  # [batch_size, num_heads, seq_len, hidden_dim]
             classical_flat = classical_flat.reshape(-1, classical_flat.shape[-1])
         
-        # Project back to neural space using complex weights
-        # Note: classical_flat has half the hidden dimension since we split real/imag
-        weight = self.inverse_projection.weight[:, :classical_flat.shape[-1]].to(torch.complex128)
-        bias = self.inverse_projection.bias.to(torch.complex128)
-        output = F.linear(classical_flat, weight, bias)
+        # Extract real and imaginary parts
+        real_part = classical_flat.real
+        imag_part = classical_flat.imag
         
-        # Extract real component and convert to bridge's dtype
-        output = output.real.to(self.dtype)
+        # Reconstruct sign from phase
+        phase = torch.angle(classical_flat)
+        sign = torch.where(torch.abs(phase) > np.pi/2, torch.tensor(-1.0, dtype=real_part.dtype), torch.tensor(1.0, dtype=real_part.dtype))
+        
+        # Get magnitude and apply sign
+        output = torch.abs(real_part) * sign
+        output = output.to(self.dtype)
         
         # Reshape to match original dimensions
         if original_shape is not None:
+            # Ensure output has the same size as original_shape
+            if output.numel() != np.prod(original_shape):
+                # If sizes don't match, we need to project back to original dimension
+                output = F.linear(output, self.inverse_projection.weight[:, :output.shape[-1]], self.inverse_projection.bias)
             output = output.reshape(original_shape)
         else:
             # Infer dimensions from layout if available
@@ -291,6 +303,10 @@ class NeuralQuantumBridge(nn.Module):
                 seq_len = layout.get('seq_length', 1)
                 num_heads = layout.get('num_heads', 1)
                 hidden_dim = self.hidden_dim
+                
+                # Project back to original dimension if needed
+                if output.shape[-1] != hidden_dim:
+                    output = F.linear(output, self.inverse_projection.weight[:, :output.shape[-1]], self.inverse_projection.bias)
                 
                 if layout.get('type') == 'batch':
                     output = output.reshape(batch_size, hidden_dim)
@@ -380,6 +396,7 @@ class NeuralQuantumBridge(nn.Module):
     
         # Create or use provided attention pattern
         if attention_pattern is None:
+            # Create identity attention pattern efficiently
             attention_pattern = torch.eye(
                 state_dim,
                 device=state.amplitudes.device,
@@ -433,25 +450,30 @@ class NeuralQuantumBridge(nn.Module):
             # Pad or truncate attention pattern if needed
             if attention_pattern.shape[-1] != state_dim:
                 padded_attention = torch.zeros(
-                    attention_pattern.shape[0],
+                    batch_size * num_heads,
                     seq_len,
                     state_dim,
                     state_dim,
                     device=attention_pattern.device,
                     dtype=working_dtype
                 )
-                min_size = min(attention_pattern.shape[-1], state_dim)
-                padded_attention[..., :min_size, :min_size] = attention_pattern[..., :min_size, :min_size]
-                padded_attention = padded_attention + torch.eye(
-                    state_dim,
-                    device=attention_pattern.device,
-                    dtype=working_dtype
-                ).unsqueeze(0).unsqueeze(0) * 1e-6
+                min_size = min(seq_len, state_dim)
+                # For sequence-to-sequence attention, expand to state_dim x state_dim
+                # First create a block diagonal matrix
+                for i in range(seq_len):
+                    for j in range(seq_len):
+                        # Extract the attention weight for this position and broadcast
+                        weight = attention_pattern[:, i, j].unsqueeze(-1).unsqueeze(-1)
+                        # Create a diagonal matrix for this position
+                        diag_matrix = torch.eye(min_size, device=attention_pattern.device, dtype=working_dtype)
+                        # Multiply with broadcasted weight
+                        diag_matrix = diag_matrix * weight
+                        padded_attention[:, i, :min_size, :min_size] = diag_matrix
                 attention_pattern = padded_attention
         
         # Add head-specific perturbations to metric and connection
         head_indices = torch.arange(num_heads, device=state.amplitudes.device).repeat_interleave(batch_size)
-        head_scale = (1.0 + 0.25 * head_indices).reshape(-1, 1, 1)  # Increased scale factor per head from 0.1 to 0.25
+        head_scale = (1.0 + 0.1 * head_indices).reshape(-1, 1, 1)  # Reduced scale factor from 0.25 to 0.1
         
         # Scale attention pattern per head
         attention_pattern = attention_pattern * head_scale.unsqueeze(-1)  # Scale each head's attention pattern differently
@@ -473,7 +495,7 @@ class NeuralQuantumBridge(nn.Module):
 
         # Add head-specific perturbations to metric and connection
         head_indices = torch.arange(num_heads, device=state.amplitudes.device).repeat_interleave(batch_size)
-        head_scale = (1.0 + 0.25 * head_indices).reshape(-1, 1, 1)  # Increased scale factor per head from 0.1 to 0.25
+        head_scale = (1.0 + 0.1 * head_indices).reshape(-1, 1, 1)  # Reduced scale factor from 0.25 to 0.1
         
         # Expand base metric and connection for batch processing with head-specific scaling
         base_metric = base_metric.reshape(1, 1, state_dim, state_dim)  # [1, 1, state_dim, state_dim]
@@ -942,57 +964,36 @@ class NeuralQuantumBridge(nn.Module):
         """
         # Store original shape for later
         original_shape = x.shape
-        is_complex_input = torch.is_complex(x)
         
         # Reshape to [batch_size * num_heads, seq_len, hidden_dim] for independent head processing
         x_reshaped = x.reshape(-1, x.shape[-2], x.shape[-1])
         
         # Apply layer normalization to real and imaginary parts
-        x_real = self.layer_norm_real(x_reshaped.real if is_complex_input else x_reshaped)
-        # For real inputs, use the real part to create imaginary part
-        x_imag = self.layer_norm_imag(x_reshaped.imag if is_complex_input else torch.tanh(x_reshaped))
-        
-        # Always create complex tensor to ensure imaginary part is used
-        x_normalized = torch.complex(x_real, x_imag)
-        
-        # Reshape back to original shape
-        x_normalized = x_normalized.reshape(original_shape)
+        if torch.is_complex(x_reshaped):
+            x_real = self.layer_norm_real(x_reshaped.real)
+            x_imag = self.layer_norm_imag(x_reshaped.imag)
+            x_normalized = torch.complex(x_real, x_imag)
+        else:
+            # For real inputs, use the real part to create imaginary part
+            x_real = self.layer_norm_real(x_reshaped)
+            x_imag = self.layer_norm_imag(torch.tanh(x_reshaped))  # Create imaginary part from real
+            x_normalized = torch.complex(x_real, x_imag)
         
         # Convert to quantum state
         quantum_result = self.neural_to_quantum(x_normalized)
-        quantum_state = quantum_result[0] if isinstance(quantum_result, tuple) else quantum_result
+        if isinstance(quantum_result, tuple):
+            quantum_state = quantum_result[0]
+        else:
+            quantum_state = quantum_result
         
-        # Evolve quantum state with attention pattern
+        # Evolve quantum state
         evolved_state = self.evolve_quantum_state_with_attention(quantum_state)
         
         # Convert back to neural representation
-        output = self.quantum_to_neural(evolved_state, original_shape)
+        output = self.quantum_to_neural(evolved_state)
         
-        # Check if output is complex
-        is_complex_output = torch.is_complex(output)
-        
-        # Reshape for independent head processing
-        output_reshaped = output.reshape(-1, output.shape[-2], output.shape[-1])
-        
-        # Apply manifold normalization to real and imaginary parts
-        output_real = self.manifold_norm_real(output_reshaped.real if is_complex_output else output_reshaped)
-        # For non-complex output, create imaginary part from real
-        output_imag = self.manifold_norm_imag(output_reshaped.imag if is_complex_output else torch.tanh(output_reshaped))
-        
-        # Return appropriate output based on input type
-        if not is_complex_input:
-            output = output_real
-        else:
-            output = torch.complex(output_real, output_imag)
-            
         # Reshape back to original shape
         output = output.reshape(original_shape)
-        
-        # Ensure gradients flow through pattern bundle parameters
-        if self.pattern_bundle.metric.requires_grad:
-            output = output + 0 * self.pattern_bundle.metric.sum()
-        if self.pattern_bundle.connection.requires_grad:
-            output = output + 0 * self.pattern_bundle.connection.sum()
         
         return output
 
@@ -1025,8 +1026,9 @@ class NeuralQuantumBridge(nn.Module):
             raise ValueError("State tensor contains non-finite values")
 
         try:
-            # Store original norm for scale preservation
+            # Store original norm and sign for scale preservation
             original_norm = torch.linalg.vector_norm(state, dim=-1, keepdim=True)
+            original_sign = torch.sgn(state) if torch.is_complex(state) else torch.sign(state)
             scale_factor = target_scale / source_scale
 
             # Convert to quantum state with validation
@@ -1075,10 +1077,26 @@ class NeuralQuantumBridge(nn.Module):
             except Exception as e:
                 raise RuntimeError(f"Neural state conversion failed: {str(e)}")
 
-            # Interpolate between initial and evolved states
+            # Interpolate between initial and evolved states while preserving phase
             try:
                 alpha = 0.7  # Bias towards initial state to preserve structure
-                neural_state = alpha * state + (1 - alpha) * neural_state
+                
+                # For complex inputs, preserve full phase information
+                if torch.is_complex(state):
+                    # Get phase from original state
+                    original_phase = torch.angle(state)
+                    # Get magnitude from interpolation
+                    neural_state_abs = torch.abs(neural_state)
+                    state_abs = torch.abs(state)
+                    interpolated_abs = alpha * state_abs + (1 - alpha) * neural_state_abs
+                    # Reconstruct with original phase
+                    neural_state = interpolated_abs * torch.exp(1j * original_phase)
+                else:
+                    # For real inputs, preserve sign as before
+                    neural_state_abs = torch.abs(neural_state)
+                    state_abs = torch.abs(state)
+                    interpolated_abs = alpha * state_abs + (1 - alpha) * neural_state_abs
+                    neural_state = interpolated_abs * original_sign
 
                 # Apply scale factor to preserve normalization
                 current_norm = torch.linalg.vector_norm(neural_state, dim=-1, keepdim=True)

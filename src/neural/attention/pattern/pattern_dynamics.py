@@ -110,21 +110,38 @@ class PatternDynamics(nn.Module):
         logger.info("\n=== _to_quantum_state conversion steps ===")
         self._log_tensor_stats(state, "Input state")
         
-        for c in range(state.shape[1]):
-            self._log_tensor_stats(state, f"Input state channel {c}", channel=c)
-        
         # Ensure input has gradients
         if not state.requires_grad:
             state = state.detach().clone().requires_grad_(True)
         
-        # Convert to complex while preserving gradients
-        state_real = state.to(torch.float64)
-        state_imag = torch.zeros_like(state_real, dtype=torch.float64)
+        # Determine shape information
+        batch_size = state.shape[0]
+        if len(state.shape) == 4:  # [batch_size, num_heads, seq_len, hidden_dim]
+            num_heads = state.shape[1]
+            seq_len = state.shape[2]
+            hidden_dim = state.shape[3]
+        elif len(state.shape) == 3:  # [batch_size, seq_len, hidden_dim]
+            num_heads = 1
+            seq_len = state.shape[1]
+            hidden_dim = state.shape[2]
+            state = state.unsqueeze(1)  # Add head dimension
+        else:  # [batch_size, hidden_dim]
+            num_heads = 1
+            seq_len = 1
+            hidden_dim = state.shape[1]
+            state = state.unsqueeze(1).unsqueeze(1)  # Add head and sequence dimensions
+        
+        # Convert to complex while preserving gradients and sign information
+        state_abs = torch.abs(state).to(torch.float64)
+        state_sign = torch.sign(state).to(torch.float64)
+        state_phase = torch.where(state_sign < 0, torch.tensor(np.pi, dtype=torch.float64), torch.tensor(0.0, dtype=torch.float64))
+        state_real = state_abs * torch.cos(state_phase)
+        state_imag = state_abs * torch.sin(state_phase)
         state_complex = torch.complex(state_real, state_imag)
         
         # Extract phase while preserving gradients
-        phase = torch.zeros_like(state_complex, dtype=torch.float64)
-        amplitudes = state_complex.abs()  # Use abs() instead of torch.abs() to preserve gradients
+        phase = state_phase.clone()
+        amplitudes = state_abs.clone()  # Use abs() instead of torch.abs() to preserve gradients
         
         # Ensure gradients are preserved
         amplitudes = amplitudes.clone()
@@ -134,20 +151,20 @@ class PatternDynamics(nn.Module):
         logger.info(f"Phase shape: {phase.shape}")
         logger.info(f"Phase dtype: {phase.dtype}")
         
-        basis_size = state.shape[-1]
+        basis_size = hidden_dim
         basis_labels = [f"basis_{i}" for i in range(basis_size)]
         
         # Create layout information
         layout = {
-            'type': 'attention',
-            'batch_size': state.shape[0],
-            'num_heads': state.shape[1] if len(state.shape) == 4 else 1,
-            'seq_length': state.shape[-2],
-            'dim': state.shape[-1]
+            'type': 'attention' if num_heads > 1 or seq_len > 1 else 'batch',
+            'batch_size': batch_size,
+            'num_heads': num_heads,
+            'seq_length': seq_len,
+            'dim': hidden_dim
         }
         
         quantum_state = QuantumState(
-            amplitudes=amplitudes,
+            amplitudes=state_complex,  # Use complex state that includes sign information
             basis_labels=basis_labels,
             phase=phase,
             layout=layout
@@ -155,8 +172,6 @@ class PatternDynamics(nn.Module):
         
         logger.info("\n=== Final quantum state ===")
         self._log_tensor_stats(quantum_state.amplitudes, "Quantum state amplitudes")
-        for c in range(quantum_state.amplitudes.shape[1]):
-            self._log_tensor_stats(quantum_state.amplitudes, f"Quantum state channel {c}", channel=c)
         
         return quantum_state
         
