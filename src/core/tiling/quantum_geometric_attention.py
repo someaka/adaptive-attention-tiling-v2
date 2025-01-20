@@ -279,7 +279,8 @@ class QuantumGeometricAttention(nn.Module):
             integration_steps=10,
             dt=0.1,
             stability_threshold=1e-6,
-            dtype=self.config.dtype
+            dtype=self.config.dtype,
+            use_quantum_features=True if self.config.dtype.is_complex else False
         )
         
         # Use metric from geometric structures
@@ -595,15 +596,28 @@ class QuantumGeometricAttention(nn.Module):
             
         Returns:
             Updated attention state
+            
+        Raises:
+            GeometricFlowError: If geometric flow computation fails
         """
         try:
             # Apply geometric flow to the state
             geometric_state = state.geometric_state
-            if not torch.is_complex(geometric_state):
-                geometric_state = geometric_state.to(self.config.dtype)
-
+            
+            # Convert to real dtype for flow computation
+            if torch.is_complex(geometric_state):
+                geometric_state = geometric_state.real
+            geometric_state = geometric_state.to(dtype=torch.float32)
+            
             # Apply flow with gradient tracking
             updated_state = self.flow(geometric_state)
+            
+            # Convert back to complex dtype if needed
+            if self.config.dtype.is_complex:
+                updated_state = torch.complex(
+                    updated_state,
+                    torch.zeros_like(updated_state)
+                ).to(self.config.dtype)
             
             # Update state with gradient tracking
             state.geometric_state = updated_state
@@ -734,8 +748,8 @@ class QuantumGeometricAttention(nn.Module):
             # Reshape input to combine batch and heads
             x_flat = x.reshape(batch_size * num_heads, seq_len, self.hidden_dim)
             
-            # Use quantum bridge for state preparation and manifold projection with intermediates
-            x_manifold, intermediates = self.quantum_bridge(x_flat, return_intermediates=True)
+            # Use quantum bridge for state preparation and manifold projection
+            x_manifold = self.quantum_bridge(x_flat)
             
             # Project to manifold dimension if needed
             if x_manifold.shape[-1] != self.manifold_dim:
@@ -752,7 +766,12 @@ class QuantumGeometricAttention(nn.Module):
                 dtype=x_manifold.dtype,
                 device=x_manifold.device
             )
-            self.state_manager.states["quantum"] = intermediates["quantum_state"]  # Store quantum state from intermediates
+            
+            # Convert input to quantum state for storage
+            quantum_state = self.quantum_bridge.neural_to_quantum(x_flat)
+            if isinstance(quantum_state, tuple):
+                quantum_state = quantum_state[0]  # Extract state if validation is returned
+            self.state_manager.states["quantum"] = quantum_state
 
             # Update states
             self.state_manager.states["input"].copy_(x)

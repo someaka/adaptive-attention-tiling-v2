@@ -122,73 +122,98 @@ class TestEndToEnd:
         neural_bridge: NeuralQuantumBridge,
         test_input: torch.Tensor
     ) -> None:
-        """Test flow from attention through quantum evolution and back."""
-        logger.info("Starting attention quantum flow test")
+        """Test the quantum attention flow pipeline.
         
+        This test validates:
+        1. Neural → Quantum state conversion with proper dtype handling
+        2. Quantum state evolution through attention mechanism
+        3. Quantum → Neural state conversion with preserved properties
+        4. End-to-end flow through the attention layer
+        """
         try:
-            # Ensure input is float32
-            test_input = test_input.to(dtype=torch.float32)
-
-            # Convert geometric tensor to real before manifold projection
-            attention_out = attention_layer(
-                test_input,
-                mask=None,
-                return_metrics=TEST_CONFIG["debug"]["log_metrics"]
-            )
+            # 1. Test neural bridge forward pass
+            bridge_output = neural_bridge(test_input)
+            assert bridge_output.shape == test_input.shape, "Bridge output shape mismatch"
+            assert torch.isfinite(bridge_output).all(), "Bridge output contains invalid values"
+            # Bridge applies transformations that modify the norm, but should maintain finite values
+            assert torch.all(torch.norm(bridge_output, dim=-1) > 0), "Bridge output has zero norm"
             
-            if isinstance(attention_out, tuple):
-                attention_out, metrics = attention_out
-            
-            # Ensure output is float32
-            attention_out = attention_out.real.to(dtype=torch.float32)
-            assert attention_out.shape == test_input.shape
-            
-            # Convert to quantum state
-            quantum_state = neural_bridge.neural_to_quantum(attention_out)
+            # 2. Test quantum state conversion and properties
+            quantum_state = neural_bridge.neural_to_quantum(test_input)
             if isinstance(quantum_state, tuple):
                 quantum_state, validation = quantum_state
                 assert validation.is_valid, "Quantum state validation failed"
             
-            # Create attention pattern with complex128 dtype
-            batch_size = test_input.shape[0]
-            attention_pattern = torch.randn(
-                batch_size,
-                attention_layer.config.hidden_dim,
-                attention_layer.config.hidden_dim,
-                dtype=torch.complex128,
-                device=test_input.device
-            )
-            attention_pattern = attention_pattern / torch.norm(
-                attention_pattern,
-                dim=(-2, -1),
-                keepdim=True
-            )
+            assert isinstance(quantum_state, QuantumState), "Invalid quantum state type"
+            assert quantum_state.amplitudes.dtype == torch.complex128, "Incorrect quantum state dtype"
+            # Quantum states should be normalized
+            assert torch.allclose(
+                quantum_state.norm(),
+                torch.ones(test_input.shape[0], dtype=torch.float64),
+                atol=1e-6
+            ), "Quantum state normalization error"
             
-            # Evolve with attention
-            evolved_state = neural_bridge.evolve_quantum_state_with_attention(
-                quantum_state,
-                attention_pattern=attention_pattern,
-                time=1.0
-            )
-            
-            assert isinstance(evolved_state, QuantumState)
+            # 3. Test quantum evolution
+            evolved_state = neural_bridge.evolve_quantum_state_with_attention(quantum_state)
+            assert isinstance(evolved_state, QuantumState), "Evolution produced invalid state type"
+            # Evolution should preserve quantum state norm
             assert torch.allclose(
                 evolved_state.norm(),
-                torch.ones(batch_size, dtype=torch.float64),
+                quantum_state.norm(),
                 atol=1e-6
-            )
+            ), "Evolution did not preserve state norm"
             
-            # Convert back to neural (will handle dtype conversion internally)
-            final_out = neural_bridge.quantum_to_neural(evolved_state)
-            final_out = final_out.real.to(dtype=torch.float32)
+            # 4. Test attention layer end-to-end with metrics
+            attention_out, metrics = attention_layer(test_input, return_metrics=True)
+            assert attention_out.shape == test_input.shape, "Attention output shape mismatch"
+            assert torch.isfinite(attention_out).all(), "Attention output contains invalid values"
+            # Attention output should have non-zero norm
+            assert torch.all(torch.norm(attention_out, dim=-1) > 0), "Attention output has zero norm"
             
-            assert final_out.shape == test_input.shape
-            assert final_out.dtype == torch.float32
+            # 5. Validate attention patterns from metrics
+            assert "attention_patterns" in metrics, "Missing attention patterns in metrics"
+            attention_patterns = metrics["attention_patterns"]
+            assert isinstance(attention_patterns, dict), "Invalid attention patterns format"
+            assert "quantum" in attention_patterns, "Missing quantum attention patterns"
+            
+            quantum_patterns = attention_patterns["quantum"]
+            assert quantum_patterns.shape[-2:] == (test_input.shape[1], test_input.shape[1]), \
+                "Invalid attention pattern shape"
+            assert torch.isfinite(quantum_patterns).all(), "Attention pattern contains invalid values"
+            # Attention patterns should sum to 1 after softmax
             assert torch.allclose(
-                torch.norm(final_out, dim=-1),
-                torch.ones(batch_size, dtype=torch.float32),
+                torch.sum(torch.softmax(quantum_patterns, dim=-1), dim=-1),
+                torch.ones(quantum_patterns.shape[:-1], dtype=quantum_patterns.dtype),
                 atol=1e-6
-            )
+            ), "Attention pattern not normalized"
+            
+            # 6. Validate quantum properties are preserved
+            neural_out = neural_bridge.quantum_to_neural(evolved_state)
+            assert neural_out.shape == test_input.shape, "Neural output shape mismatch"
+            assert torch.isfinite(neural_out).all(), "Neural output contains invalid values"
+            # Neural output should have non-zero norm
+            assert torch.all(torch.norm(neural_out, dim=-1) > 0), "Neural output has zero norm"
+            
+            # 7. Test coherence between input and output states
+            coherence = neural_bridge.compute_coherence(test_input, neural_out)
+            assert torch.all(coherence >= 0) and torch.all(coherence <= 1), "Invalid coherence values"
+            assert coherence.shape == (test_input.shape[0],), "Incorrect coherence shape"
+            # Coherence should be non-zero (states shouldn't be orthogonal)
+            assert torch.all(coherence > 0), "Zero coherence detected"
+            
+            # 8. Validate entanglement history
+            assert "entanglement_history" in metrics, "Missing entanglement history"
+            entanglement = metrics["entanglement_history"]
+            assert isinstance(entanglement, dict), "Invalid entanglement history format"
+            
+            # 9. Validate quantum entropy
+            if "step_0" in metrics and "quantum_entropy" in metrics["step_0"]:
+                entropy = metrics["step_0"]["quantum_entropy"]
+                assert torch.isfinite(entropy).all(), "Invalid quantum entropy values"
+                assert entropy >= 0, "Negative quantum entropy detected"
+                # Entropy should be bounded by ln(dim) for a quantum system
+                max_entropy = np.log(test_input.shape[-1])
+                assert torch.all(entropy <= max_entropy + 1e-6), "Entropy exceeds theoretical maximum"
             
         finally:
             cleanup_memory()

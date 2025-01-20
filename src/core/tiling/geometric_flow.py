@@ -30,6 +30,17 @@ class FlowParams:
     stress_energy_weight: float = 0.1
     use_quantum_features: bool = False
 
+class ComplexReLU(nn.Module):
+    """ReLU activation for complex numbers."""
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if torch.is_complex(x):
+            return torch.complex(
+                F.relu(x.real),
+                F.relu(x.imag)
+            )
+        return F.relu(x)
+
 class GeometricFlow(RiemannianFlow):
     """Pattern-specific implementation of geometric flow.
     
@@ -85,14 +96,14 @@ class GeometricFlow(RiemannianFlow):
         layer_dtype = self.quantum_dtype if use_quantum_features else dtype
         self.flow_layers = nn.ModuleList([
             nn.Linear(manifold_dim, hidden_dim, dtype=layer_dtype),
-            ComplexTanh() if use_quantum_features else nn.ReLU(),
+            ComplexReLU(),
             nn.Linear(hidden_dim, manifold_dim, dtype=layer_dtype)
         ])
         
         # Initialize metric network with proper dtype
         self.metric_net = nn.Sequential(
             nn.Linear(manifold_dim, hidden_dim, dtype=layer_dtype),
-            ComplexTanh() if use_quantum_features else nn.ReLU(),
+            ComplexReLU(),
             nn.Linear(hidden_dim, manifold_dim * manifold_dim, dtype=layer_dtype)
         )
         
@@ -100,29 +111,24 @@ class GeometricFlow(RiemannianFlow):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 if use_quantum_features:
-                    # Initialize complex weights with real and imaginary parts
-                    weight_shape = m.weight.shape
-                    weight_real = torch.empty(weight_shape, dtype=torch.float32)
-                    weight_imag = torch.empty(weight_shape, dtype=torch.float32)
+                    # Initialize complex weights
+                    real_weight = nn.init.xavier_uniform_(torch.empty_like(m.weight.real))
+                    imag_weight = torch.zeros_like(m.weight.real)
+                    m.weight.data = torch.complex(real_weight, imag_weight).to(dtype=layer_dtype)
                     
-                    # Use Xavier initialization for both real and imaginary parts
-                    nn.init.xavier_uniform_(weight_real)
-                    nn.init.xavier_uniform_(weight_imag)
-                    
-                    # Combine into complex weight
-                    m.weight.data = torch.complex(weight_real, weight_imag).to(self.quantum_dtype)
-                    
-                    # Initialize bias if present
                     if m.bias is not None:
-                        bias_shape = m.bias.shape
-                        bias_real = torch.zeros(bias_shape, dtype=torch.float32)
-                        bias_imag = torch.zeros(bias_shape, dtype=torch.float32)
-                        m.bias.data = torch.complex(bias_real, bias_imag).to(self.quantum_dtype)
+                        real_bias = nn.init.zeros_(torch.empty_like(m.bias.real))
+                        imag_bias = torch.zeros_like(m.bias.real)
+                        m.bias.data = torch.complex(real_bias, imag_bias).to(dtype=layer_dtype)
                 else:
                     # Standard initialization for real weights
                     nn.init.xavier_uniform_(m.weight)
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
+                    # Ensure correct dtype
+                    m.weight.data = m.weight.data.to(dtype=layer_dtype)
+                    if m.bias is not None:
+                        m.bias.data = m.bias.data.to(dtype=layer_dtype)
     
     def _init_quantum_features(self):
         """Initialize weights for quantum features."""
@@ -485,9 +491,11 @@ class GeometricFlow(RiemannianFlow):
         is_complex_dtype = torch.is_complex(x)
         
         # Convert to working dtype while preserving complex values
-        if is_complex_dtype:
-            x = x.to(dtype=self.quantum_dtype if self.use_quantum_features else torch.complex64)
+        if self.use_quantum_features:
+            x = x.to(dtype=self.quantum_dtype)
         else:
+            if torch.is_complex(x):
+                x = x.real
             x = x.to(dtype=self.dtype)
         
         # Check if we have time dimension
@@ -628,12 +636,4 @@ class GeometricFlow(RiemannianFlow):
         stability = 1.0 / (condition_number + self.params.stability_threshold)
         
         return stability
-
-class ComplexTanh(nn.Module):
-    """Complex-valued tanh activation function."""
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if torch.is_complex(input):
-            return torch.tanh(input.real) + 1j * torch.tanh(input.imag)
-        return torch.tanh(input)
 
