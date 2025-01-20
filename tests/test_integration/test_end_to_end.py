@@ -210,7 +210,7 @@ class TestEndToEnd:
             if "step_0" in metrics and "quantum_entropy" in metrics["step_0"]:
                 entropy = metrics["step_0"]["quantum_entropy"]
                 assert torch.isfinite(entropy).all(), "Invalid quantum entropy values"
-                assert entropy >= 0, "Negative quantum entropy detected"
+                assert torch.all(entropy >= 0), "Negative quantum entropy detected"
                 # Entropy should be bounded by ln(dim) for a quantum system
                 max_entropy = np.log(test_input.shape[-1])
                 assert torch.all(entropy <= max_entropy + 1e-6), "Entropy exceeds theoretical maximum"

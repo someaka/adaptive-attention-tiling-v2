@@ -696,6 +696,28 @@ class QuantumGeometricAttention(nn.Module):
 
         # Return metrics if requested
         if return_metrics:
+            # Compute quantum attention patterns from state evolution
+            quantum_state_result = self.quantum_bridge.neural_to_quantum(x)
+            if isinstance(quantum_state_result, tuple):
+                quantum_state, _ = quantum_state_result
+            else:
+                quantum_state = quantum_state_result
+                
+            evolved_state = self.quantum_bridge.evolve_quantum_state_with_attention(quantum_state)
+            
+            # Extract attention patterns from evolved state amplitudes
+            # Shape: [batch_size, num_heads, seq_len, seq_len]
+            quantum_attention_patterns = torch.einsum(
+                'bhid,bhjd->bhij',
+                evolved_state.amplitudes,
+                evolved_state.amplitudes.conj()
+            ).real
+            
+            # Update state's attention patterns
+            state.attention_patterns = {
+                "quantum": quantum_attention_patterns
+            }
+
             # Compute step-wise metrics
             step_metrics = {
                 "quantum_entropy": self.compute_quantum_metrics(output)["von_neumann_entropy"],
