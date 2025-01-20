@@ -473,7 +473,7 @@ class TestGeometricFlow:
         assert torch.all(torch.isfinite(mean_curvature))
         
         # Verify mean curvature flow properties
-        flow_vector = flow_layer.compute_flow(test_input, mean_curvature)
+        flow_vector = flow_layer.compute_flow(metric)  # Pass metric tensor directly
         assert torch.all(torch.isfinite(flow_vector))
 
     def test_ricci_flow(self, flow_layer, test_input):
@@ -526,8 +526,7 @@ class TestFlowStability:
     def test_flow_magnitude(self, flow_system, points):
         """Test flow vector magnitudes stay reasonable."""
         metric = flow_system.compute_metric(points)
-        ricci = flow_system.compute_ricci_tensor(metric, points)
-        flow_vector = flow_system.compute_flow(points, ricci)
+        flow_vector = flow_system.compute_flow(metric)  # Pass metric tensor directly
         assert torch.all(torch.abs(flow_vector) < 1e2)
 
     def test_volume_preservation(self, flow_system, points):
@@ -579,6 +578,5 @@ class TestFlowStability:
     def test_ricci_flow_stability(self, flow_system, points):
         """Test Ricci flow stability."""
         metric = flow_system.compute_metric(points)
-        ricci = flow_system.compute_ricci_tensor(metric, points)
-        flow_vector = flow_system.compute_flow(points, ricci)
+        flow_vector = flow_system.compute_flow(metric)  # Pass metric tensor directly
         assert torch.all(torch.isfinite(flow_vector))

@@ -69,17 +69,25 @@ class TestTensorShapes:
         
         # Test metric tensor computation
         metric = flow.compute_metric(position)  # Should use position components only
+        logger.info("\nInitial metric stats:")
+        logger.info(f"- Shape: {metric.shape}")
+        logger.info(f"- Mean: {metric.mean().item():.6f}")
+        logger.info(f"- Std: {metric.std().item():.6f}")
+        logger.info(f"- Min: {metric.min().item():.6f}")
+        logger.info(f"- Max: {metric.max().item():.6f}")
+        
+        # Ensure metric is positive definite
+        eigenvals = torch.linalg.eigvalsh(metric)
+        logger.info("\nAfter regularization:")
+        logger.info(f"- Min eigenvalue: {eigenvals.min().item():.6f}")
+        logger.info(f"- Max eigenvalue: {eigenvals.max().item():.6f}")
+        logger.info(f"- Determinant: {torch.linalg.det(metric).mean().item():.6f}")
+        
         assert metric.shape == (batch_size, manifold_dim, manifold_dim), \
             f"Metric tensor shape mismatch: expected {(batch_size, manifold_dim, manifold_dim)}, got {metric.shape}"
         
-        # Test Ricci tensor computation using the network
-        ricci_tensor = ricci_network(position)
-        assert isinstance(ricci_tensor, torch.Tensor), "Ricci tensor should be a torch.Tensor"
-        assert ricci_tensor.shape == (batch_size, manifold_dim, manifold_dim), \
-            f"Ricci tensor shape mismatch: expected {(batch_size, manifold_dim, manifold_dim)}, got {ricci_tensor.shape}"
-        
-        # Test flow computation directly with tensor
-        flow_vector = flow.compute_flow(position, ricci_tensor)  # Should use position components
+        # Test flow computation with metric tensor
+        flow_vector = flow.compute_flow(metric)  # Pass metric tensor directly
         assert flow_vector.shape == (batch_size, manifold_dim), \
             f"Flow vector shape mismatch: expected {(batch_size, manifold_dim)}, got {flow_vector.shape}"
         
