@@ -382,6 +382,24 @@ class GeometricFlow(RiemannianFlow):
     
     def compute_metric(self, points: torch.Tensor) -> torch.Tensor:
         """Compute the Riemannian metric tensor at the given points."""
+        # Project to manifold dimension if needed
+        if points.size(-1) > self.manifold_dim:
+            # Initialize projection matrix if not exists
+            if not hasattr(self, 'metric_projection'):
+                in_dim = points.size(-1)
+                if torch.is_complex(points):
+                    real_proj = torch.randn(in_dim, self.manifold_dim) * 0.02
+                    imag_proj = torch.randn(in_dim, self.manifold_dim) * 0.02
+                    proj = torch.complex(real_proj, imag_proj)
+                    self.metric_projection = nn.Parameter(proj.to(dtype=points.dtype))
+                else:
+                    self.metric_projection = nn.Parameter(
+                        torch.randn(in_dim, self.manifold_dim).to(dtype=points.dtype) * 0.02
+                    )
+            
+            # Apply projection
+            points = points @ self.metric_projection
+        
         # Get raw metric from network
         metric = self.metric_net(points)
         metric = metric.view(points.shape[0], self.manifold_dim, self.manifold_dim)
@@ -440,14 +458,21 @@ class GeometricFlow(RiemannianFlow):
             x = x.to(dtype=self.dtype)
         
         # Check if we have time dimension
-        has_time_dim = len(x.shape) > 2
+        has_time_dim = len(x.shape) > 4  # For tiling patterns
         if has_time_dim:
             time_steps = x.size(1)
             # Flatten time dimension into batch
             x = x.reshape(-1, *x.shape[2:])
         else:
             time_steps = 1
-            x = x.unsqueeze(0)
+            x = x.unsqueeze(0) if len(x.shape) == 4 else x
+            
+        # Store spatial dimensions if present
+        spatial_dims = None
+        if len(x.shape) > 2:  # If we have spatial dimensions
+            spatial_dims = x.shape[1:]  # Store spatial dimensions
+            batch_size = x.size(0)
+            x = x.reshape(batch_size, -1)  # Flatten spatial dimensions
             
         # Handle dimensionality by projecting to manifold space instead of truncating
         if x.size(-1) > self.manifold_dim:
@@ -470,9 +495,19 @@ class GeometricFlow(RiemannianFlow):
             
         # Compute metrics
         metrics = {}
-        metric = self.compute_metric(x)
-        metrics['energy'] = self._compute_energy(metric)
-        metrics['stability'] = self._compute_stability(metric)
+        if len(x.shape) == 3:  # [time_steps, batch_size, dim]
+            # Compute metric for each time step
+            metrics_list = []
+            for t in range(x.shape[0]):
+                metric_t = self.compute_metric(x[t])  # [batch_size, manifold_dim, manifold_dim]
+                metrics_list.append(metric_t)
+            metric = torch.stack(metrics_list)  # [time_steps, batch_size, manifold_dim, manifold_dim]
+            metrics['energy'] = self._compute_energy(metric[-1])  # Use last time step
+            metrics['stability'] = self._compute_stability(metric[-1])
+        else:
+            metric = self.compute_metric(x)
+            metrics['energy'] = self._compute_energy(metric)
+            metrics['stability'] = self._compute_stability(metric)
         
         # Apply flow layers
         output = x
@@ -488,7 +523,13 @@ class GeometricFlow(RiemannianFlow):
         if has_time_dim:
             output = output.reshape(*orig_shape)
         else:
-            output = output.squeeze(0)
+            if spatial_dims is not None:  # If we had spatial dimensions
+                if len(orig_shape) == 4:  # For tiling patterns
+                    output = output.reshape(orig_shape)
+                else:
+                    output = output.reshape(batch_size, *spatial_dims)
+            else:
+                output = output.squeeze(0)
             
         # Convert back to original dtype while preserving complex values
         if torch.is_complex(output) and not is_complex_dtype:

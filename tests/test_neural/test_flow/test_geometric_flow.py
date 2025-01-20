@@ -315,38 +315,36 @@ class TestGeometricFlow:
             raise
 
     def test_flow_convergence(self, flow_layer, test_input):
-        """Test that flow converges to stable points."""
-        # Compute initial metric with stability term
+        """Test flow convergence to stable points."""
+        # Initialize parameters
+        max_steps = 100
+        window_size = 5
+        convergence_threshold = 0.1
+        timestep = 0.01
+        damping = 0.1
+        min_eigenval = 1e-6
+        
+        # Initialize metric and eye tensor
         metric = flow_layer.compute_metric(test_input)
         eye = torch.eye(
             flow_layer.manifold_dim,
             device=metric.device,
             dtype=metric.dtype
         ).unsqueeze(0).expand(metric.shape[0], -1, -1)
-        metric = metric + 0.1 * eye  # Add stability term
         
-        # Initialize tracking variables
+        # Track Ricci norms and previous metric
         ricci_norms = []
         prev_metric = None
-        damping = 0.1  # Reduced damping factor for smoother evolution
-        min_eigenval = 0.01
         
-        # Evolution parameters
-        timestep = 0.005  # Smaller timestep for better stability
-        max_iterations = 200  # More iterations to ensure convergence
-        convergence_threshold = 0.1  # Relaxed convergence threshold
-        window_size = 10  # Window for checking convergence
-        
-        # Evolve the flow
-        for i in range(max_iterations):
-            # Compute Ricci tensor and its norm
-            ricci = flow_layer.compute_ricci_tensor(metric)
-            ricci_norm = torch.norm(ricci, dim=(-2, -1))
-            current_norm = ricci_norm.mean().item()
-            ricci_norms.append(current_norm)
+        # Evolution loop
+        for step in range(max_steps):
+            # Compute Ricci tensor and norm
+            ricci = flow_layer.compute_ricci_tensor(metric, test_input)
+            ricci_norm = torch.norm(ricci, dim=(-2, -1)).mean().item()
+            ricci_norms.append(ricci_norm)
             
-            # Check for early convergence
-            if i > window_size:
+            # Check convergence using moving average
+            if step >= window_size:
                 window_avg = sum(ricci_norms[-window_size:]) / window_size
                 if window_avg < convergence_threshold:
                     break
@@ -377,7 +375,7 @@ class TestGeometricFlow:
             metric = metric / (torch.norm(metric, dim=(-2, -1), keepdim=True) + 1e-8)
         
         # Verify convergence properties
-        final_ricci = flow_layer.compute_ricci_tensor(metric)
+        final_ricci = flow_layer.compute_ricci_tensor(metric, test_input)
         final_norm = torch.norm(final_ricci, dim=(-2, -1)).mean().item()
         
         # Check convergence using moving averages

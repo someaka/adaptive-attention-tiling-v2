@@ -639,8 +639,8 @@ class TilingFlowValidator:
                 metrics = []
                 try:
                     for t in range(time_steps):
-                        # Reshape to [batch_size, space_dim, height * width]
-                        x_t = x[t].reshape(batch_size, space_dim, -1)
+                        # Reshape to [batch_size, space_dim * height * width]
+                        x_t = x[t].reshape(batch_size, -1)
                         # Compute metric for this time step
                         metric_t = self.flow.compute_metric(x_t)
                         metrics.append(metric_t)

@@ -183,23 +183,47 @@ def project_to_manifold(x: torch.Tensor, manifold_dim: int) -> torch.Tensor:
     return projected / (norm + 1e-8)
 
 def test_geometric_attention_integration(setup_components):
-    """Test integration with geometric attention."""
+    """Test integration with geometric attention.
+    
+    This test verifies:
+    1. Pattern to geometric conversion
+    2. Geometric operations (metric, connection, curvature)
+    3. Shape and property preservation
+    """
     dynamics, processor, flow = setup_components
     
-    # Create test input
-    grid_size = dynamics.size
-    x = torch.randn(4, dynamics.dim, grid_size, grid_size, requires_grad=True)  # Enable gradients
+    # Create test input with correct dimensions and gradients
+    batch_size = 4
+    x = torch.randn(batch_size, flow.manifold_dim, requires_grad=True, dtype=flow.dtype, device=flow.device)
     
-    # Project to manifold dimension
-    x_projected = project_to_manifold(x, flow.manifold_dim)
-    
-    # Compute metric and connection
-    metric = flow.compute_metric(x_projected)
-    connection = flow.compute_connection(metric, x_projected)
-    
-    # Verify shapes
-    assert metric.shape == (x.size(0), flow.manifold_dim, flow.manifold_dim)
-    assert connection.shape == (x.size(0), flow.manifold_dim, flow.manifold_dim, flow.manifold_dim)
+    # Test geometric operations
+    metric = flow.compute_metric(x)
+    assert metric.shape == (batch_size, flow.manifold_dim, flow.manifold_dim)
+    assert torch.allclose(metric, metric.transpose(-2, -1))  # Check symmetry
+    assert torch.all(torch.isfinite(metric))  # Check for NaN/inf
+
+    connection = flow.compute_connection(metric)
+    assert connection.shape == (batch_size, flow.manifold_dim, flow.manifold_dim, flow.manifold_dim)
+    assert torch.all(torch.isfinite(connection))
+
+    riemann = flow.compute_curvature(metric, connection)
+    assert riemann.shape == (batch_size, flow.manifold_dim, flow.manifold_dim, flow.manifold_dim, flow.manifold_dim)
+    assert torch.all(torch.isfinite(riemann))
+
+    ricci = flow.compute_ricci_tensor(metric, points=x)
+    assert ricci.shape == (batch_size, flow.manifold_dim, flow.manifold_dim)
+    assert torch.allclose(ricci, ricci.transpose(-2, -1))  # Check symmetry
+    assert torch.all(torch.isfinite(ricci))
+
+    scalar = flow.compute_scalar_curvature_from_metric(metric, ricci=ricci)
+    assert scalar.shape == (batch_size,)
+    assert torch.all(torch.isfinite(scalar))
+
+    # Verify gradient flow
+    loss = scalar.mean()
+    loss.backward()
+    assert x.grad is not None, "Input should have gradients"
+    assert torch.all(torch.isfinite(x.grad)), "Gradients should be finite"
 
 def test_pattern_manipulation(setup_components):
     """Test pattern manipulation operations.

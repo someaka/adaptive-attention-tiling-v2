@@ -627,27 +627,28 @@ def test_pattern_flow_stability(setup_test_parameters, pattern_validator, test_c
     """Test pattern stability under flow."""
     params = setup_test_parameters
 
-    # Create minimal pattern with very small dimensions
-    reduced_size = 2  # Minimal size
-
-    # Create minimal pattern with flattened shape
+    # Create minimal pattern
     pattern = torch.randn(
-        1,  # Single batch
-        reduced_size * reduced_size,  # Flattened spatial dimensions
+        1,  # Time steps
+        1,  # Batch size
+        2,  # Manifold dimension
         dtype=torch.float32
-    ) * float(params['tolerance'])
-
+    ) * float(params['tolerance'])  # Shape: [time_steps, batch_size, manifold_dim]
+    
     # Convert to target dtype
     if params['dtype'] in [torch.complex64, torch.complex128]:
         pattern_imag = torch.randn_like(pattern) * float(params['tolerance'])
         pattern = torch.complex(pattern, pattern_imag).to(dtype=params['dtype'])
     else:
         pattern = pattern.to(dtype=params['dtype'])
+        
+    # Transpose to match validator's expected shape [batch_size, time_steps, dim]
+    pattern = pattern.transpose(0, 1)
 
     # Create minimal geometric flow
     pattern_flow = GeometricFlow(
         hidden_dim=2,
-        manifold_dim=reduced_size * reduced_size,  # Total flattened spatial dimensions
+        manifold_dim=2,
         motive_rank=1,
         num_charts=1,
         integration_steps=1,  # Minimal steps
@@ -700,12 +701,11 @@ def test_pattern_flow_energy(setup_test_parameters, flow_validator):
     
     # Create minimal pattern
     pattern = torch.randn(
-        1,  # Single batch
-        2,  # Minimal dimension
-        2,  # Minimal size
-        2,  # Minimal size
+        1,  # Time steps
+        1,  # Batch size
+        2,  # Manifold dimension
         dtype=torch.float32
-    ) * float(params['tolerance'])
+    ) * float(params['tolerance'])  # Shape: [time_steps, batch_size, manifold_dim]
     
     # Convert to target dtype
     if params['dtype'] in [torch.complex64, torch.complex128]:

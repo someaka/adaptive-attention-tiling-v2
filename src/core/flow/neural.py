@@ -193,8 +193,8 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Custom orthogonal initialization for complex numbers
         if self.dtype.is_complex:
             # Initialize real and imaginary parts separately
-            real_weight = torch.empty(hidden_dim, hidden_dim, dtype=torch.float64)
-            imag_weight = torch.empty(hidden_dim, hidden_dim, dtype=torch.float64)
+            real_weight = torch.empty(hidden_dim, manifold_dim * manifold_dim, dtype=torch.float64)
+            imag_weight = torch.empty(hidden_dim, manifold_dim * manifold_dim, dtype=torch.float64)
             
             # Use Xavier initialization for both parts
             nn.init.xavier_uniform_(real_weight)
@@ -207,10 +207,10 @@ class NeuralGeometricFlow(PatternFormationFlow):
             complex_weight = torch.complex(real_weight, imag_weight)
             
             # Make approximately unitary using QR decomposition
-            q, r = torch.linalg.qr(complex_weight)
+            q, r = torch.linalg.qr(complex_weight)  # No need to transpose here
             d = torch.diag(r, 0)
             ph = torch.sgn(d)  # Use sgn instead of sign for complex numbers
-            q *= ph.unsqueeze(-1)
+            q = q * ph.unsqueeze(-1)  # Broadcast phase along the last dimension
             
             # Set the weight
             with torch.no_grad():
@@ -401,11 +401,11 @@ class NeuralGeometricFlow(PatternFormationFlow):
             nn.Linear(self.hidden_dim * 2, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
         )
         
-        # Initialize connection network to approximate zero
+        # Initialize connection network with small random values
         with torch.no_grad():
             final_layer = self.connection_net[-1]
-            final_layer.weight.data.zero_()
-            final_layer.bias.data.zero_()
+            nn.init.xavier_uniform_(final_layer.weight, gain=0.01)  # Use small gain for stability
+            nn.init.zeros_(final_layer.bias)  # Keep bias at zero initially
         
         # Stability network with proper dimensioning
         stability_input_dim = self.manifold_dim + self.manifold_dim * self.manifold_dim + 1
@@ -575,15 +575,15 @@ class NeuralGeometricFlow(PatternFormationFlow):
         print(f"- Determinant: {torch.linalg.det(metric).min().item():.6f}")
         
         # Project onto positive definite cone if still needed
-        eigenvals, eigenvectors = torch.linalg.eigh(metric)
-        min_eigenval = torch.min(eigenvals, dim=-1)[0]
+        eigenvalues, eigenvectors = torch.linalg.eigh(metric)
+        min_eigenval = torch.min(eigenvalues, dim=-1)[0]
         needs_projection = min_eigenval < self.stability_threshold
         
         if torch.any(needs_projection):
             print(f"\nNeeds projection: {needs_projection.sum().item()} metrics")
-            eigenvals = torch.clamp(eigenvals, min=self.stability_threshold)
+            eigenvals = torch.clamp(eigenvalues, min=self.stability_threshold)
             metric = torch.matmul(
-                torch.matmul(eigenvectors, torch.diag_embed(eigenvals)),
+                torch.matmul(eigenvectors, torch.diag_embed(eigenvalues)),
                 eigenvectors.transpose(-2, -1)
             )
             
@@ -1076,11 +1076,11 @@ class NeuralGeometricFlow(PatternFormationFlow):
             nn.Linear(self.hidden_dim * 2, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
         )
         
-        # Initialize connection network to approximate zero
+        # Initialize connection network with small random values
         with torch.no_grad():
             final_layer = self.connection_net[-1]
-            final_layer.weight.data.zero_()
-            final_layer.bias.data.zero_()
+            nn.init.xavier_uniform_(final_layer.weight, gain=0.01)  # Use small gain for stability
+            nn.init.zeros_(final_layer.bias)  # Keep bias at zero initially
         
         # Stability network with proper dimensioning
         stability_input_dim = self.manifold_dim + self.manifold_dim * self.manifold_dim + 1
