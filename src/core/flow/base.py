@@ -137,33 +137,49 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         metric: Tensor,
         connection: Optional[Tensor] = None
     ) -> Tensor:
-        """Compute curvature tensor.
+        """Compute Riemann curvature tensor.
+        
+        The Riemann curvature tensor R^i_{jkl} is computed using the connection coefficients
+        (Christoffel symbols) Γ^i_{jk}. Since we don't have derivatives, we only compute:
+        
+        R^i_{jkl} = Γ^i_{mk} Γ^m_{jl} - Γ^i_{ml} Γ^m_{jk}
         
         Args:
-            metric: Metric tensor
-            connection: Optional connection coefficients
+            metric: Metric tensor of shape (batch_size, n, n)
+            connection: Optional connection form of shape (batch_size, n, n, n)
             
         Returns:
-            Curvature tensor
+            Riemann curvature tensor R^i_{jkl} of shape (batch_size, n, n, n, n)
         """
         batch_size = metric.shape[0]
+        dim = metric.shape[1]  # Use actual dimension from metric tensor
         
         if connection is None:
             connection = self.compute_connection(metric)
             
-        # Prepare input: [connection_flat, metric_flat]
-        connection_flat = connection.reshape(batch_size, -1)
-        metric_flat = metric.reshape(batch_size, -1)
-        input_tensor = torch.cat([connection_flat, metric_flat], dim=-1)
-        
-        # Compute curvature components
-        curvature_flat = self.curvature_net(input_tensor)
-        curvature = curvature_flat.view(
-            batch_size, self.manifold_dim, self.manifold_dim
+        # Initialize curvature tensor R^i_{jkl}
+        curvature = torch.zeros(
+            batch_size,
+            dim,  # i index (contravariant)
+            dim,  # j index (covariant)
+            dim,  # k index (covariant)
+            dim,  # l index (covariant)
+            device=metric.device,
+            dtype=metric.dtype
         )
         
-        # Ensure antisymmetry
-        curvature = 0.5 * (curvature - curvature.transpose(-2, -1))
+        # Compute first term: Γ^i_{mk} Γ^m_{jl}
+        # For each i,j,k,l we sum over m:
+        # connection[..., i, m, k] * connection[..., m, j, l]
+        term1 = torch.einsum('...imk,...mjl->...ijkl', connection, connection)
+        
+        # Compute second term: -Γ^i_{ml} Γ^m_{jk}
+        # For each i,j,k,l we sum over m:
+        # connection[..., i, m, l] * connection[..., m, j, k]
+        term2 = torch.einsum('...iml,...mjk->...ijkl', connection, connection)
+        
+        # Combine terms: R^i_{jkl} = term1 - term2
+        curvature = term1 - term2
         
         return curvature
 
@@ -176,25 +192,26 @@ class BaseGeometricFlow(nn.Module, GeometricFlowProtocol[Tensor]):
         """Compute Ricci tensor.
         
         Args:
-            metric: Metric tensor
+            metric: Metric tensor of shape (batch_size, n, n)
             points: Optional points tensor
-            connection: Optional connection form
+            connection: Optional connection form of shape (batch_size, n, n, n)
             
         Returns:
-            Ricci tensor
+            Ricci tensor of shape (batch_size, n, n)
         """
         if connection is None:
             connection = self.compute_connection(metric, points)
             
-        # Compute curvature
-        curvature = self.compute_curvature(metric, connection)
+        # Compute Riemann curvature tensor (5D: batch, i, j, k, l)
+        riemann = self.compute_curvature(metric, connection)
         
-        # Contract to get Ricci tensor using proper indices
-        ricci = torch.einsum('...ijk->...ij', curvature)
+        # Contract to get Ricci tensor
+        # Ric_{jl} = R^i_{jil}
+        # Contract i indices
+        ricci = torch.einsum('...ijil->...jl', riemann)
         
-        # Ensure proper shape
-        if ricci.dim() < 3:
-            ricci = ricci.unsqueeze(-1).expand(-1, -1, self.manifold_dim)
+        # Ensure symmetry
+        ricci = 0.5 * (ricci + ricci.transpose(-2, -1))
         
         return ricci
 

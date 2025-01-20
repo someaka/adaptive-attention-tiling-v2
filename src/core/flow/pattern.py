@@ -261,27 +261,34 @@ class PatternFormationFlow(BaseGeometricFlow):
     def compute_ricci_tensor(
         self,
         metric: Tensor,
-        points: Optional[Tensor] = None,
-        connection: Optional[Tensor] = None
+        connection: Optional[Tensor] = None,
+        points: Optional[Tensor] = None
     ) -> Tensor:
-        """Compute Ricci tensor with pattern dynamics."""
+        """Compute Ricci tensor with pattern-specific corrections.
+        
+        Args:
+            metric: Metric tensor
+            connection: Optional connection coefficients
+            points: Optional points tensor
+            
+        Returns:
+            Ricci tensor
+        """
         # Get base Ricci tensor
         ricci = super().compute_ricci_tensor(metric, points, connection)
         
+        # Add pattern-specific corrections
         if points is not None:
-            # Add diffusion terms
-            batch_size = points.shape[0]
-            diffusion = self.diffusion_net(
-                torch.cat([
-                    points,
-                    points.roll(1, dims=-1),
-                    points.roll(-1, dims=-1)
-                ], dim=-1)
-            )
-            diffusion = diffusion.view(
-                batch_size, self.manifold_dim, self.manifold_dim
-            )
+            # Project points to manifold dimension
+            points_proj = points.view(points.shape[0], -1)[:, :self.manifold_dim]
+            
+            # Add diffusion term
+            diffusion = self.compute_diffusion(points_proj)
             ricci = ricci + self.diffusion_strength * diffusion
+            
+            # Add reaction term
+            reaction = self.compute_reaction(points_proj)
+            ricci = ricci + self.reaction_strength * reaction
         
         return ricci
 

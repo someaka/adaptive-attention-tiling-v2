@@ -37,7 +37,7 @@ def setup_components(test_config):
         dt=0.01,  # Small time step for stability
         num_modes=8,  # Number of stability modes
         hidden_dim=hidden_dim,
-        quantum_enabled=False  # Disable quantum features for basic tests
+        quantum_enabled=True  # Enable quantum features
     )
     processor = PatternProcessor(
         manifold_dim=manifold_dim,  # Use same manifold_dim as flow
@@ -45,7 +45,16 @@ def setup_components(test_config):
     )
     flow = NeuralGeometricFlow(
         manifold_dim=manifold_dim,
-        hidden_dim=hidden_dim
+        hidden_dim=hidden_dim,
+        dt=0.01,
+        stability_threshold=1e-10,  # Tighter threshold for stability
+        fisher_rao_weight=1.0,
+        quantum_weight=1.0,
+        num_heads=num_heads,
+        dropout=0.1,
+        dtype=torch.complex128,  # Use complex128 for quantum features
+        quantum_correction_strength=0.1,
+        phase_tracking_enabled=True
     )
     
     return dynamics, processor, flow

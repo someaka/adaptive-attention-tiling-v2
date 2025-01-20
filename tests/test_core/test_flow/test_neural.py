@@ -304,16 +304,25 @@ class TestNeuralGeometricFlow:
         # Create test points with correct dimensions and requires_grad=True
         points = torch.randn(batch_size, neural_flow.manifold_dim, device=device, requires_grad=True)
         
-        # Compute connection coefficients
-        connection = neural_flow.compute_connection(points)
+        # Test geometric operations
+        metric = neural_flow.compute_metric(points)
+        assert metric.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
+        assert torch.allclose(metric, metric.transpose(-2, -1))  # Check symmetry
+        assert torch.all(torch.isfinite(metric))  # Check for NaN/inf
+
+        connection = neural_flow.compute_connection(metric)
         assert connection.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, neural_flow.manifold_dim)
-        
-        # Compute Ricci tensor
-        ricci = neural_flow.compute_ricci(points)
+        assert torch.all(torch.isfinite(connection))
+
+        riemann = neural_flow.compute_curvature(metric, connection)
+        assert riemann.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim, neural_flow.manifold_dim, neural_flow.manifold_dim)
+        assert torch.all(torch.isfinite(riemann))
+
+        ricci = neural_flow.compute_ricci_tensor(metric, points=points)
         assert ricci.shape == (batch_size, neural_flow.manifold_dim, neural_flow.manifold_dim)
-        assert torch.allclose(ricci, ricci.transpose(-1, -2))  # Verify symmetry
-        
-        # Compute scalar curvature
-        scalar = neural_flow.compute_scalar_curvature(points)
+        assert torch.allclose(ricci, ricci.transpose(-2, -1))  # Check symmetry
+        assert torch.all(torch.isfinite(ricci))
+
+        scalar = neural_flow.compute_scalar_curvature_from_metric(metric, ricci=ricci)
         assert scalar.shape == (batch_size,)
-        assert torch.all(torch.isfinite(scalar))  # Verify finite values
+        assert torch.all(torch.isfinite(scalar))
