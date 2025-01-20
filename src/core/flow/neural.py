@@ -343,77 +343,105 @@ class NeuralGeometricFlow(PatternFormationFlow):
 
     def _init_fisher_rao_networks(self):
         """Initialize networks for Fisher-Rao metric computation."""
-        activation = ComplexReLU() if self.dtype.is_complex else nn.ReLU()
+        # Metric network: manifold_dim -> hidden_dim -> manifold_dim^2
+        self.metric_net = nn.Sequential(
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim * self.manifold_dim, dtype=self.dtype)
+        )
         
+        # Fisher network for computing Fisher-Rao metric
         self.fisher_net = nn.Sequential(
-            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.hidden_dim, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
-            activation,
-            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
         )
         
-    def _init_quantum_networks(self):
-        """Initialize networks for quantum corrections."""
-        manifold_squared = self.manifold_dim * self.manifold_dim
-        activation = ComplexReLU() if self.dtype.is_complex else nn.ReLU()
-        
-        # Projection networks with proper dimensioning
+        # Expectation projection network
         self.expectation_projection = nn.Sequential(
-            nn.Linear(manifold_squared, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
-            activation
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
         )
         
+        # Metric projection network
         self.metric_projection = nn.Sequential(
-            nn.Linear(manifold_squared, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
-            activation
+            nn.Linear(self.manifold_dim * self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
         )
         
-        # Correction network with residual connection and proper dimensioning
+        # Curvature network
+        self.curvature_net = nn.Sequential(
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
+        )
+
+        # Stability network
+        stability_input_dim = self.manifold_dim + self.manifold_dim * self.manifold_dim + 1
+        self.stability_net = nn.Sequential(
+            nn.Linear(stability_input_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype)
+        )
+        
+        # Initialize weights with proper data type
+        for net in [self.metric_net, self.fisher_net, self.expectation_projection, self.metric_projection, self.curvature_net, self.stability_net]:
+            for layer in net.modules():
+                if isinstance(layer, nn.Linear):
+                    layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                    layer.bias.data = layer.bias.data.to(dtype=self.dtype)
+                    nn.init.orthogonal_(layer.weight)
+                    nn.init.zeros_(layer.bias)
+
+    def _init_quantum_networks(self):
+        """Initialize networks for quantum state processing."""
+        # Quantum correction network
         self.quantum_correction_net = nn.Sequential(
-            nn.Linear(self.manifold_dim, self.manifold_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.manifold_dim, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
-            activation,
-            nn.Linear(self.manifold_dim, self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.manifold_dim * self.manifold_dim, dtype=self.dtype)
         )
         
+        # Initialize weights with proper data type
+        for layer in self.quantum_correction_net.modules():
+            if isinstance(layer, nn.Linear):
+                layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                layer.bias.data = layer.bias.data.to(dtype=self.dtype)
+                nn.init.orthogonal_(layer.weight)
+                nn.init.zeros_(layer.bias)
+
     def _init_connection_networks(self):
         """Initialize networks for connection computation."""
-        input_dim = self.manifold_dim
-        if hasattr(self, 'point_dim'):
-            input_dim = self.point_dim
-            
-        activation = ComplexReLU() if self.dtype.is_complex else nn.ReLU()
-        
-        # Connection projection with proper dimensioning
+        # Connection projection layer
         self.connection_projection = nn.Sequential(
-            nn.Linear(input_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.hidden_dim, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
-            activation
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
+            nn.Tanh()
         )
         
-        # Connection network with proper dimensioning - output all components
+        # Connection network: hidden_dim -> hidden_dim -> manifold_dim^3
         self.connection_net = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim * 2, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.hidden_dim * 2, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
-            activation,
+            nn.LayerNorm(self.hidden_dim * 2, elementwise_affine=True, dtype=self.dtype),
+            nn.Tanh(),
             nn.Linear(self.hidden_dim * 2, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
         )
         
-        # Initialize connection network with small random values
-        with torch.no_grad():
-            final_layer = self.connection_net[-1]
-            nn.init.xavier_uniform_(final_layer.weight, gain=0.01)  # Use small gain for stability
-            nn.init.zeros_(final_layer.bias)  # Keep bias at zero initially
-        
-        # Stability network with proper dimensioning
-        stability_input_dim = self.manifold_dim + self.manifold_dim * self.manifold_dim + 1
-        self.stability_net = nn.Sequential(
-            nn.Linear(stability_input_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
-            activation,
-            nn.Linear(self.hidden_dim, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
-        )
+        # Initialize weights with proper data type
+        for layer in self.connection_projection.modules():
+            if isinstance(layer, nn.Linear):
+                layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                layer.bias.data = layer.bias.data.to(dtype=self.dtype)
+                nn.init.orthogonal_(layer.weight)
+                nn.init.zeros_(layer.bias)
+                
+        for layer in self.connection_net.modules():
+            if isinstance(layer, nn.Linear):
+                layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                layer.bias.data = layer.bias.data.to(dtype=self.dtype)
+                nn.init.orthogonal_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
     def _to_real(self, tensor: torch.Tensor) -> torch.Tensor:
         """Convert complex tensor to real tensor by taking real part."""
@@ -807,9 +835,24 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Ensure proper symmetry in lower indices (required for Levi-Civita connection)
         connection = 0.5 * (connection + connection.transpose(-2, -1))
         
-        # Add stability term to prevent degeneracy
+        # Compute stability term using stability network
+        # Flatten metric for stability network input
+        metric_flat = metric.reshape(batch_size, -1)
+        
+        # Create stability features by concatenating points, metric, and constant term
+        stability_features = torch.cat([
+            points_proj,
+            metric_flat,
+            torch.ones(batch_size, 1, device=points.device, dtype=points.dtype)
+        ], dim=-1)
+        
+        # Get stability term from network
+        stability_term = self.stability_net(stability_features)
+        stability_term = stability_term.view(batch_size, self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        
+        # Add both learned stability term and constant stability term
         eye = torch.eye(self.manifold_dim, device=points.device, dtype=points.dtype)
-        connection = connection + self.stability_threshold * eye.unsqueeze(0).unsqueeze(-1)
+        connection = connection + stability_term + self.stability_threshold * eye.unsqueeze(0).unsqueeze(-1)
         
         return self._to_tensor_type(connection, ConnectionTensor)
 
@@ -1052,13 +1095,22 @@ class NeuralGeometricFlow(PatternFormationFlow):
             nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
             activation,
             nn.Linear(self.hidden_dim, self.hidden_dim * 2, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.hidden_dim * 2),
+            nn.LayerNorm(self.hidden_dim * 2, elementwise_affine=True, dtype=self.dtype),
             activation,
             nn.Linear(self.hidden_dim * 2, self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
         )
         
         # Initialize final layer to approximate identity
         with torch.no_grad():
+            for module in self.metric_net.modules():
+                if isinstance(module, nn.Linear):
+                    module.weight.data = module.weight.data.to(dtype=self.dtype)
+                    module.bias.data = module.bias.data.to(dtype=self.dtype)
+                elif isinstance(module, nn.LayerNorm):
+                    if module.elementwise_affine:
+                        module.weight.data = module.weight.data.to(dtype=self.dtype)
+                        module.bias.data = module.bias.data.to(dtype=self.dtype)
+            
             final_layer = self.metric_net[-1]
             final_layer.weight.data.zero_()
             final_layer.bias.data.zero_()
@@ -1071,24 +1123,49 @@ class NeuralGeometricFlow(PatternFormationFlow):
         # Connection network with proper dimensioning - output all components
         self.connection_net = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim * 2, dtype=self.dtype, device=self.device),
-            nn.LayerNorm(self.hidden_dim * 2, dtype=torch.float64 if self.dtype.is_complex else self.dtype),
+            nn.LayerNorm(self.hidden_dim * 2, elementwise_affine=True, dtype=self.dtype),
             activation,
             nn.Linear(self.hidden_dim * 2, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
         )
         
         # Initialize connection network with small random values
         with torch.no_grad():
+            for module in self.connection_net.modules():
+                if isinstance(module, nn.Linear):
+                    module.weight.data = module.weight.data.to(dtype=self.dtype)
+                    module.bias.data = module.bias.data.to(dtype=self.dtype)
+                elif isinstance(module, nn.LayerNorm):
+                    if module.elementwise_affine:
+                        module.weight.data = module.weight.data.to(dtype=self.dtype)
+                        module.bias.data = module.bias.data.to(dtype=self.dtype)
+            
             final_layer = self.connection_net[-1]
             nn.init.xavier_uniform_(final_layer.weight, gain=0.01)  # Use small gain for stability
             nn.init.zeros_(final_layer.bias)  # Keep bias at zero initially
         
-        # Stability network with proper dimensioning
-        stability_input_dim = self.manifold_dim + self.manifold_dim * self.manifold_dim + 1
-        self.stability_net = nn.Sequential(
-            nn.Linear(stability_input_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
+        # Control network with proper dimensioning
+        self.control_net = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
             activation,
-            nn.Linear(self.hidden_dim, self.manifold_dim * self.manifold_dim * self.manifold_dim, dtype=self.dtype, device=self.device)
+            nn.Linear(self.hidden_dim, self.hidden_dim, dtype=self.dtype, device=self.device),
+            activation,
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype, device=self.device)
         )
+        
+        # Initialize control network
+        with torch.no_grad():
+            for module in self.control_net.modules():
+                if isinstance(module, nn.Linear):
+                    module.weight.data = module.weight.data.to(dtype=self.dtype)
+                    module.bias.data = module.bias.data.to(dtype=self.dtype)
+                elif isinstance(module, nn.LayerNorm):
+                    if module.elementwise_affine:
+                        module.weight.data = module.weight.data.to(dtype=self.dtype)
+                        module.bias.data = module.bias.data.to(dtype=self.dtype)
+            
+            final_layer = self.control_net[-1]
+            nn.init.xavier_uniform_(final_layer.weight, gain=0.01)
+            nn.init.zeros_(final_layer.bias)
 
     def compute_metric_tensor(self, x: torch.Tensor) -> torch.Tensor:
         """Compute metric tensor from input.
@@ -1470,10 +1547,10 @@ class NeuralGeometricFlow(PatternFormationFlow):
     ) -> Union[torch.Tensor, CurvatureTensor]:
         """Compute Riemann curvature tensor.
         
-        The Riemann curvature tensor R^i_{jkl} is computed using the connection coefficients
-        (Christoffel symbols) Γ^i_{jk}. Since we don't have derivatives, we only compute:
-        
-        R^i_{jkl} = Γ^i_{mk} Γ^m_{jl} - Γ^i_{ml} Γ^m_{jk}
+        The Riemann curvature tensor R^i_{jkl} is computed using both:
+        1. The neural curvature network for learning curvature features
+        2. The standard geometric formula using connection coefficients:
+           R^i_{jkl} = Γ^i_{mk} Γ^m_{jl} - Γ^i_{ml} Γ^m_{jk}
         
         Args:
             metric: Metric tensor of shape (batch_size, n, n)
@@ -1498,18 +1575,29 @@ class NeuralGeometricFlow(PatternFormationFlow):
             dtype=metric.dtype
         )
         
-        # Compute first term: Γ^i_{mk} Γ^m_{jl}
-        # For each i,j,k,l we sum over m:
-        # connection[..., i, m, k] * connection[..., m, j, l]
+        # Compute geometric curvature terms
+        # First term: Γ^i_{mk} Γ^m_{jl}
         term1 = torch.einsum('...imk,...mjl->...ijkl', connection, connection)
         
-        # Compute second term: -Γ^i_{ml} Γ^m_{jk}
-        # For each i,j,k,l we sum over m:
-        # connection[..., i, m, l] * connection[..., m, j, k]
+        # Second term: -Γ^i_{ml} Γ^m_{jk}
         term2 = torch.einsum('...iml,...mjk->...ijkl', connection, connection)
         
-        # Combine terms: R^i_{jkl} = term1 - term2
-        curvature = term1 - term2
+        # Geometric curvature: R^i_{jkl} = term1 - term2
+        geometric_curvature = term1 - term2
+        
+        # Compute neural curvature contribution
+        # Flatten metric for input to curvature network
+        metric_flat = metric.reshape(batch_size, -1)
+        
+        # Get curvature features from network
+        curvature_features = self.curvature_net(metric_flat[:, :self.manifold_dim])
+        
+        # Reshape features to match curvature tensor dimensions
+        neural_curvature = curvature_features.view(batch_size, self.manifold_dim, 1, 1, 1).expand(-1, -1, self.manifold_dim, self.manifold_dim, self.manifold_dim)
+        
+        # Combine geometric and neural curvature
+        # The neural contribution acts as a learned correction to the geometric curvature
+        curvature = geometric_curvature + neural_curvature
         
         return self._to_tensor_type(curvature, CurvatureTensor)
 
@@ -1638,17 +1726,3 @@ class NeuralGeometricFlow(PatternFormationFlow):
             location=points[0] if points is not None else None,
             curvature=self.compute_curvature(metric[0:1])[0]
         )
-
-    def compute_ricci(self, points: torch.Tensor) -> torch.Tensor:
-        """Compute Ricci tensor.
-        
-        This method computes the full Ricci tensor, not just the scalar.
-        """
-        # First compute the metric
-        metric = self.compute_metric(points)
-        
-        # Compute connection
-        connection = self.compute_connection(metric, points)
-        
-        # Then compute the Ricci tensor using the parent class method
-        return self.compute_ricci_tensor(metric, connection)

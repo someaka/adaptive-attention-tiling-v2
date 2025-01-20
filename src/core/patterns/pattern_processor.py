@@ -65,7 +65,8 @@ class PatternProcessor(nn.Module):
         motive_rank: int = 4,
         num_primes: int = 8,
         num_heads: int = 4,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        dtype: torch.dtype = torch.float64  # Default to float64 for stability
     ):
         """Initialize pattern processor.
         
@@ -76,6 +77,7 @@ class PatternProcessor(nn.Module):
             num_primes: Number of prime factors
             num_heads: Number of attention heads
             dropout: Dropout probability
+            dtype: Data type for tensors
         """
         super().__init__()
         
@@ -83,6 +85,7 @@ class PatternProcessor(nn.Module):
         self.hidden_dim = hidden_dim
         self.motive_rank = motive_rank
         self.num_primes = num_primes
+        self.dtype = dtype
         
         # Initialize pattern bundle with matching dimensions
         self.pattern_bundle = PatternFiberBundle(
@@ -182,41 +185,44 @@ class PatternProcessor(nn.Module):
         """Initialize neural networks for pattern processing."""
         # Pattern network: manifold_dim -> hidden_dim -> hidden_dim
         self.pattern_net = nn.Sequential(
-            nn.Linear(self.manifold_dim, self.hidden_dim),
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
             nn.Tanh(),
-            nn.Linear(self.hidden_dim, self.hidden_dim)
+            nn.Linear(self.hidden_dim, self.hidden_dim, dtype=self.dtype)
         )
         
         # Flow network: hidden_dim -> hidden_dim -> manifold_dim
         self.flow_net = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim, dtype=self.dtype),
             nn.Tanh(),
-            nn.Linear(self.hidden_dim, self.manifold_dim)
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
         )
         
         # Quantum network: manifold_dim -> hidden_dim -> manifold_dim
         self.quantum_net = nn.Sequential(
-            nn.Linear(self.manifold_dim, self.hidden_dim),
+            nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype),
             nn.Tanh(),
-            nn.Linear(self.hidden_dim, self.manifold_dim)
+            nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
         )
         
         # Projection layers for dimension matching
-        self.input_proj = nn.Linear(self.manifold_dim, self.hidden_dim)
-        self.output_proj = nn.Linear(self.hidden_dim, self.manifold_dim)
+        self.input_proj = nn.Linear(self.manifold_dim, self.hidden_dim, dtype=self.dtype)
+        self.output_proj = nn.Linear(self.hidden_dim, self.manifold_dim, dtype=self.dtype)
         
         # Initialize weights
         for module in [self.pattern_net, self.flow_net, self.quantum_net]:
-            for layer in module:
+            for layer in module.modules():
                 if isinstance(layer, nn.Linear):
+                    layer.weight.data = layer.weight.data.to(dtype=self.dtype)
+                    layer.bias.data = layer.bias.data.to(dtype=self.dtype)
                     nn.init.orthogonal_(layer.weight)
                     nn.init.zeros_(layer.bias)
         
         # Initialize projection layers
-        nn.init.orthogonal_(self.input_proj.weight)
-        nn.init.zeros_(self.input_proj.bias)
-        nn.init.orthogonal_(self.output_proj.weight)
-        nn.init.zeros_(self.output_proj.bias)
+        for proj in [self.input_proj, self.output_proj]:
+            proj.weight.data = proj.weight.data.to(dtype=self.dtype)
+            proj.bias.data = proj.bias.data.to(dtype=self.dtype)
+            nn.init.orthogonal_(proj.weight)
+            nn.init.zeros_(proj.bias)
         
     def _project_dimensions(self, x: torch.Tensor, target_dim: int) -> torch.Tensor:
         """Project tensor to target dimension.

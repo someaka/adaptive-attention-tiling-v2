@@ -36,7 +36,7 @@ fiber_bundle_tests:
 geometric_tests:
   dimensions: 2  # Smaller dimension for debugging
   num_heads: 4  # Fewer heads for debugging
-  hidden_dim: 32  # Smaller hidden dimension
+  hidden_dim: 9  # Match manifold_dim * manifold_dim
   batch_size: 4  # Small batch size for debugging
 
 parallel_transport:

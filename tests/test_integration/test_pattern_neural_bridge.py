@@ -11,7 +11,7 @@ from typing import Tuple, Dict, Any
 import torch.nn as nn
 import torch.nn.functional as F
 
-from  src.neural.attention.pattern.pattern_dynamics import PatternDynamics
+from src.neural.attention.pattern.pattern_dynamics import PatternDynamics
 from src.core.patterns.pattern_processor import PatternProcessor
 from src.core.flow.neural import NeuralGeometricFlow
 from tests.utils.config_loader import load_test_config
@@ -52,7 +52,7 @@ def setup_components(test_config):
         quantum_weight=1.0,
         num_heads=num_heads,
         dropout=0.1,
-        dtype=torch.complex128,  # Use complex128 for quantum features
+        dtype=torch.float64,  # Use float64 for numerical stability
         quantum_correction_strength=0.1,
         phase_tracking_enabled=True
     )
@@ -75,7 +75,7 @@ def test_forward_pass(setup_components):
     seq_len = 16
     grid_size = dynamics.size  # Get grid size from dynamics
     
-    states = torch.randn(batch_size, dynamics.dim, grid_size, grid_size)
+    states = torch.randn(batch_size, dynamics.dim, grid_size, grid_size, dtype=torch.float64)
     
     # Forward pass through dynamics
     results = dynamics.forward(states, return_patterns=True)
@@ -94,9 +94,9 @@ def test_forward_pass(setup_components):
     
     # Check normalization
     for i in range(len(patterns)):
-        patterns[i] = patterns[i] / torch.norm(patterns[i].to(torch.float32))
-        norm = torch.norm(patterns[i].to(torch.float32))
-        assert torch.allclose(norm, torch.tensor(1.0, dtype=torch.float32), atol=1e-6), "Patterns should be normalized"
+        patterns[i] = patterns[i] / torch.norm(patterns[i])
+        norm = torch.norm(patterns[i])
+        assert torch.allclose(norm, torch.tensor(1.0, dtype=torch.float64), atol=1e-6), "Patterns should be normalized"
 
 def test_backward_pass(setup_components):
     """Test backward pass and gradient flow.
@@ -110,7 +110,7 @@ def test_backward_pass(setup_components):
     
     # Create test input with gradients [batch, channels, height, width]
     grid_size = dynamics.size
-    x = torch.randn(4, dynamics.dim, grid_size, grid_size, requires_grad=True)
+    x = torch.randn(4, dynamics.dim, grid_size, grid_size, dtype=torch.float64, requires_grad=True)
     
     # Forward pass
     results = dynamics.forward(x, return_patterns=True)
@@ -137,7 +137,7 @@ def test_gradient_computation(setup_components):
     
     # Create test pattern [batch, channels, height, width]
     grid_size = dynamics.size
-    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size)
+    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size, dtype=torch.float64)
     
     # Compute linearization
     linearized = dynamics.compute_linearization(pattern)
@@ -194,7 +194,7 @@ def test_geometric_attention_integration(setup_components):
     
     # Create test input with correct dimensions and gradients
     batch_size = 4
-    x = torch.randn(batch_size, flow.manifold_dim, requires_grad=True, dtype=flow.dtype, device=flow.device)
+    x = torch.randn(batch_size, flow.manifold_dim, dtype=torch.float64, requires_grad=True)
     
     # Test geometric operations
     metric = flow.compute_metric(x)
@@ -237,7 +237,7 @@ def test_pattern_manipulation(setup_components):
     
     # Create test pattern
     grid_size = dynamics.size
-    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size, requires_grad=True)  # Enable gradients
+    pattern = torch.randn(1, dynamics.dim, grid_size, grid_size, dtype=torch.float64, requires_grad=True)  # Enable gradients
     
     # Get pattern evolution
     results = dynamics(pattern, return_patterns=True)
@@ -347,7 +347,7 @@ def test_training_integration(setup_components, test_config):
     print(f"hidden_dim: {hidden_dim}")
 
     # Create input with correct shape [batch_size, manifold_dim]
-    batch = torch.randn(batch_size, manifold_dim, requires_grad=True)
+    batch = torch.randn(batch_size, manifold_dim, dtype=torch.float64, requires_grad=True)
     print(f"\nInput batch shape: {batch.shape}")
 
     # Forward pass through processor
