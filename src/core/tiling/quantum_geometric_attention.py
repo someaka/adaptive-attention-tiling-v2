@@ -590,13 +590,13 @@ class QuantumGeometricAttention(nn.Module):
 
     def _geometric_update(self, state: AttentionState) -> AttentionState:
         """Apply geometric flow to update the state.
-        
+    
         Args:
             state: Current attention state
-            
+    
         Returns:
             Updated attention state
-            
+    
         Raises:
             GeometricFlowError: If geometric flow computation fails
         """
@@ -610,7 +610,10 @@ class QuantumGeometricAttention(nn.Module):
             geometric_state = geometric_state.to(dtype=torch.float32)
             
             # Apply flow with gradient tracking
-            updated_state = self.flow(geometric_state)
+            flow_result = self.flow(geometric_state)
+            
+            # Extract tensor from flow result if it's a tuple
+            updated_state = flow_result[0] if isinstance(flow_result, tuple) else flow_result
             
             # Convert back to complex dtype if needed
             if self.config.dtype.is_complex:
@@ -1456,6 +1459,9 @@ class QuantumGeometricAttention(nn.Module):
             if torch.isinf(x).any():
                 raise ValueError("Input tensor contains Inf values")
 
+            # Store original requires_grad
+            requires_grad = x.requires_grad
+
             # Ensure input is 3D with proper shape
             if x.dim() == 2:
                 batch_size = 1
@@ -1472,14 +1478,24 @@ class QuantumGeometricAttention(nn.Module):
                     f"Input shape: {tuple(x.shape)}"
                 )
 
-            # Reshape for projection
+            # Reshape for projection while preserving gradients
             x_flat = x.reshape(-1, self.hidden_dim)
-            
+
+            # Ensure input has correct dtype before projection while preserving gradients
+            if x_flat.dtype != self.quantum_dtype:
+                x_flat = x_flat.to(dtype=self.quantum_dtype)
+                if requires_grad:
+                    x_flat.requires_grad_(True)
+
             # Project to manifold space
             manifold_features = self.manifold_proj(x_flat)
-            
-            # Reshape back to 3D
-            quantum_features = manifold_features.view(batch_size, seq_len, self.manifold_dim)
+
+            # Reshape back to 3D while preserving gradients
+            quantum_features = manifold_features.reshape(batch_size, seq_len, self.manifold_dim)
+
+            # Ensure output has gradients if input did
+            if requires_grad and not quantum_features.requires_grad:
+                quantum_features.requires_grad_(True)
 
             return quantum_features
 
@@ -2043,8 +2059,8 @@ class QuantumGeometricAttention(nn.Module):
             # Check basic tensor properties
             if not torch.is_tensor(metric):
                 raise MetricError(f"{name} metric must be a tensor")
-            if metric.dim() != 3:
-                raise MetricError(f"{name} metric must be 3D tensor, got {metric.dim()}D")
+            if metric.dim() not in [3, 4]:  # Allow both 3D and 4D tensors
+                raise MetricError(f"{name} metric must be 3D or 4D tensor, got {metric.dim()}D")
             if metric.size(-1) != metric.size(-2):
                 raise MetricError(f"{name} metric must be square matrix")
 

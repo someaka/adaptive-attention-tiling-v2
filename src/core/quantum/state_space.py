@@ -104,12 +104,23 @@ class HilbertSpace:
         # Convert to complex128
         amplitudes = self._ensure_complex128(amplitudes)
         
-        # Normalize
-        norm = self._compute_norm(amplitudes)
-        output_state = (amplitudes / norm).to(torch.complex128)
+        # Store original norm before normalization
+        if len(amplitudes.shape) == 4:  # [batch_size, num_heads, seq_len, dim]
+            # For attention states, normalize globally per batch across all other dimensions
+            norm = torch.sqrt(torch.sum(torch.abs(amplitudes) ** 2, 
+                                     dim=tuple(range(1, len(amplitudes.shape))), 
+                                     keepdim=True))
+        else:
+            # For all other cases, normalize globally per batch across all other dimensions
+            norm = torch.sqrt(torch.sum(torch.abs(amplitudes) ** 2, 
+                                     dim=tuple(range(1, len(amplitudes.shape))), 
+                                     keepdim=True))
         
         # Store original norm
         original_norm = norm.clone()
+        
+        # Normalize with clamping for numerical stability
+        output_state = amplitudes / norm.clamp(min=1e-8)
         
         # Determine layout based on tensor shape
         shape = output_state.shape

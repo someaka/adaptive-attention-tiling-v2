@@ -112,8 +112,8 @@ class GeometricFlow(RiemannianFlow):
             if isinstance(m, nn.Linear):
                 if use_quantum_features:
                     # Initialize complex weights with correct base dtype and unitary structure
-                    real_weight = torch.empty(m.weight.shape, dtype=dtype)
-                    imag_weight = torch.empty(m.weight.shape, dtype=dtype)
+                    real_weight = torch.empty(m.weight.shape, dtype=torch.float64)  # Use float64 for complex128
+                    imag_weight = torch.empty(m.weight.shape, dtype=torch.float64)
                     
                     # Initialize real part with Xavier uniform
                     nn.init.xavier_uniform_(real_weight)
@@ -130,8 +130,8 @@ class GeometricFlow(RiemannianFlow):
                     
                     if m.bias is not None:
                         # Initialize bias with small complex values
-                        real_bias = torch.empty(m.bias.shape, dtype=dtype)
-                        imag_bias = torch.empty(m.bias.shape, dtype=dtype)
+                        real_bias = torch.empty(m.bias.shape, dtype=torch.float64)
+                        imag_bias = torch.empty(m.bias.shape, dtype=torch.float64)
                         nn.init.uniform_(real_bias, -0.1, 0.1)
                         nn.init.uniform_(imag_bias, -0.01, 0.01)  # Smaller imaginary part
                         m.bias.data = torch.complex(real_bias, imag_bias).to(dtype=layer_dtype)

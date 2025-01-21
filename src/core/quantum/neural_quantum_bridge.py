@@ -78,28 +78,28 @@ class NeuralQuantumBridge(nn.Module):
         self.layer_norm_real = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=dtype,  # Use bridge's dtype
-            device=self.device  # Add device parameter
+            dtype=torch.float64,  # Use float64 for real part
+            device=self.device
         )
         self.layer_norm_imag = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=dtype,  # Use bridge's dtype
-            device=self.device  # Add device parameter
+            dtype=torch.float64,  # Use float64 for imaginary part
+            device=self.device
         )
         
         # Initialize manifold normalization for real and imaginary parts
         self.manifold_norm_real = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=dtype,  # Use bridge's dtype
-            device=self.device  # Add device parameter
+            dtype=torch.float64,  # Use float64 for real part
+            device=self.device
         )
         self.manifold_norm_imag = nn.LayerNorm(
             hidden_dim,
             elementwise_affine=True,
-            dtype=dtype,  # Use bridge's dtype
-            device=self.device  # Add device parameter
+            dtype=torch.float64,  # Use float64 for imaginary part
+            device=self.device
         )
         
         # Initialize state preparation and validation
@@ -966,13 +966,49 @@ class NeuralQuantumBridge(nn.Module):
         
         # Apply layer normalization to real and imaginary parts
         if torch.is_complex(x_reshaped):
-            x_real = self.layer_norm_real(x_reshaped.real)
-            x_imag = self.layer_norm_imag(x_reshaped.imag)
+            # Convert complex weights to real for layer norm
+            real_weight = self.layer_norm_real.weight.real.to(dtype=torch.float64)
+            real_bias = self.layer_norm_real.bias.real.to(dtype=torch.float64)
+            imag_weight = self.layer_norm_imag.weight.real.to(dtype=torch.float64)
+            imag_bias = self.layer_norm_imag.bias.real.to(dtype=torch.float64)
+            
+            # Apply layer norm with real weights
+            x_real = F.layer_norm(
+                x_reshaped.real.to(dtype=torch.float64),
+                self.layer_norm_real.normalized_shape,
+                weight=real_weight,
+                bias=real_bias,
+                eps=self.layer_norm_real.eps
+            )
+            x_imag = F.layer_norm(
+                x_reshaped.imag.to(dtype=torch.float64),
+                self.layer_norm_imag.normalized_shape,
+                weight=imag_weight,
+                bias=imag_bias,
+                eps=self.layer_norm_imag.eps
+            )
             x_normalized = torch.complex(x_real, x_imag)
         else:
             # For real inputs, use the real part to create imaginary part
-            x_real = self.layer_norm_real(x_reshaped)
-            x_imag = self.layer_norm_imag(torch.tanh(x_reshaped))  # Create imaginary part from real
+            real_weight = self.layer_norm_real.weight.real.to(dtype=torch.float64)
+            real_bias = self.layer_norm_real.bias.real.to(dtype=torch.float64)
+            imag_weight = self.layer_norm_imag.weight.real.to(dtype=torch.float64)
+            imag_bias = self.layer_norm_imag.bias.real.to(dtype=torch.float64)
+            
+            x_real = F.layer_norm(
+                x_reshaped.to(dtype=torch.float64),
+                self.layer_norm_real.normalized_shape,
+                weight=real_weight,
+                bias=real_bias,
+                eps=self.layer_norm_real.eps
+            )
+            x_imag = F.layer_norm(
+                torch.tanh(x_reshaped).to(dtype=torch.float64),
+                self.layer_norm_imag.normalized_shape,
+                weight=imag_weight,
+                bias=imag_bias,
+                eps=self.layer_norm_imag.eps
+            )
             x_normalized = torch.complex(x_real, x_imag)
         
         # Convert to quantum state
